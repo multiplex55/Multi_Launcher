@@ -1,0 +1,14 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Action {
+    pub label: String,
+    pub desc: String,
+    pub action: String, // Path to folder or exe
+}
+
+pub fn load_actions(path: &str) -> anyhow::Result<Vec<Action>> {
+    let content = std::fs::read_to_string(path)?;
+    let actions: Vec<Action> = serde_json::from_str(&content)?;
+    Ok(actions)
+}

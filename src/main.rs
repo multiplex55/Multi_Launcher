@@ -1,73 +1,36 @@
+mod actions;
 mod gui;
-mod utils;
-mod window_manager;
+mod hotkey;
+mod launcher;
 
-use gui::AppSettings;
-use log::info;
-use std::env;
-use std::fs::File;
-use std::io::Write; // Fix for write_all error
-use std::sync::{Arc, Mutex};
+use crate::actions::load_actions;
+use crate::gui::LauncherApp;
+use crate::hotkey::HotkeyTrigger;
 
-fn main() {
-    // Ensure logging is initialized
-    ensure_logging_initialized();
+use eframe::egui;
 
-    // Backtrace for Debug
-    env::set_var("RUST_BACKTRACE", "1");
+fn main() -> anyhow::Result<()> {
+    let actions = load_actions("actions.json")?;
+    let trigger = HotkeyTrigger::new();
+    trigger.start_listener();
 
-    info!("Starting Multi Manager application...");
+    loop {
+        if trigger.take() {
+            let native_options = eframe::NativeOptions {
+                viewport: egui::ViewportBuilder::default()
+                    .with_inner_size([400.0, 220.0])
+                    .with_min_inner_size([320.0, 160.0])
+                    .with_always_on_top(),
+                ..Default::default()
+            };
 
-    let settings_file = "settings.json";
-
-    let app = gui::App::new(settings_file);
-
-    // // Initialize the application states
-    // let app = gui::App {
-    //     app_title_name: "Multi Manager".to_string(),
-    //     hotkey_promise: Arc::new(Mutex::new(None)), // Initialize the promise
-    //     settings: Arc::new(Mutex::new(AppSettings::default())),
-    // };
-
-    // Launch GUI and set the taskbar icon after creating the window
-    gui::run_gui(app);
-}
-
-fn ensure_logging_initialized() {
-    // Attempt to initialize logging configuration
-    if let Err(err) = log4rs::init_file("log4rs.yaml", Default::default()) {
-        eprintln!("Failed to initialize log4rs: {}", err);
-
-        // Create a default log4rs.yaml file
-        let default_config = r#"
-appenders:
-  file:
-    kind: file
-    path: "multi_launcher.log"
-    append: false # Overwrite the logfile on each program run
-    encoder:
-      pattern: "{d} - {l} - {m}{n}"
-
-root:
-  level: info
-  appenders:
-    - file
-"#;
-
-        if let Err(e) = File::create("log4rs.yaml")
-            .and_then(|mut file| file.write_all(default_config.as_bytes()))
-        {
-            eprintln!("Failed to create default log4rs.yaml: {}", e);
-            std::process::exit(1); // Exit if we cannot create the default configuration
-        }
-
-        // Retry initializing log4rs with the newly created configuration file
-        if let Err(e) = log4rs::init_file("log4rs.yaml", Default::default()) {
-            eprintln!(
-                "Failed to reinitialize log4rs with default configuration: {}",
-                e
+            let actions_for_window = actions.clone();
+            let _ = eframe::run_native(
+                "Multi_LNCHR",
+                native_options,
+                Box::new(move |_cc| Box::new(LauncherApp::new(actions_for_window))),
             );
-            std::process::exit(1); // Exit if retry fails
         }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
