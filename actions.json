@@ -1,18 +1,8 @@
 [
     {
-        "label": "fdoc",
-        "desc": "Folder My Documents",
-        "action": "C:\\Users\\jay\\Documents"
-    },
-    {
         "label": "chrome",
         "desc": "Launch Chrome",
         "action": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
     },
-    {
-        "label": "obsidian",
-        "desc": "Folder Obsidian",
-        "action": "C:\\Users\\jay\\Obsidian"
-    }
 ]
 
