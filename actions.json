@@ -3,6 +3,6 @@
         "label": "chrome",
         "desc": "Launch Chrome",
         "action": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-    },
+    }
 ]
 
