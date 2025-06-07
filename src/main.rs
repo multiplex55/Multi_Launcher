@@ -51,14 +51,6 @@ fn main() -> anyhow::Result<()> {
                 let _ = handle.join();
                 running = None;
             } else {
-                let native_options = eframe::NativeOptions {
-                    viewport: egui::ViewportBuilder::default()
-                        .with_inner_size([400.0, 220.0])
-                        .with_min_inner_size([320.0, 160.0])
-                        .with_always_on_top(),
-                    ..Default::default()
-                };
-
                 let actions_for_window = actions.clone();
                 let mut plugins = PluginManager::new();
                 plugins.register(Box::new(WebSearchPlugin));
@@ -78,6 +70,14 @@ fn main() -> anyhow::Result<()> {
                 let flag_clone = close_flag.clone();
 
                 let handle = thread::spawn(move || {
+                    let native_options = eframe::NativeOptions {
+                        viewport: egui::ViewportBuilder::default()
+                            .with_inner_size([400.0, 220.0])
+                            .with_min_inner_size([320.0, 160.0])
+                            .with_always_on_top(),
+                        ..Default::default()
+                    };
+
                     let _ = eframe::run_native(
                         "Multi_LNCHR",
                         native_options,
