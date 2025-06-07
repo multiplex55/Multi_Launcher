@@ -2125,6 +2125,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
+ "winit",
 ]
 
 [[package]]
