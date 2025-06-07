@@ -14,12 +14,12 @@ impl HotkeyTrigger {
         }
     }
 
-    pub fn start_listener(&self) {
+    pub fn start_listener(&self, hotkey: Key) {
         let open = self.open.clone();
         thread::spawn(move || {
             listen(move |event| {
                 if let EventType::KeyPress(key) = event.event_type {
-                    if key == Key::CapsLock {
+                    if key == hotkey {
                         if let Ok(mut flag) = open.lock() {
                             *flag = true;
                         }

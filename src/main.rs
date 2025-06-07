@@ -1,18 +1,21 @@
 mod actions;
 mod gui;
 mod hotkey;
+mod settings;
 mod launcher;
 
 use crate::actions::load_actions;
 use crate::gui::LauncherApp;
 use crate::hotkey::HotkeyTrigger;
+use crate::settings::Settings;
 
 use eframe::egui;
 
 fn main() -> anyhow::Result<()> {
     let actions = load_actions("actions.json")?;
+    let settings = Settings::load("settings.json")?;
     let trigger = HotkeyTrigger::new();
-    trigger.start_listener();
+    trigger.start_listener(settings.hotkey_key);
 
     loop {
         if trigger.take() {

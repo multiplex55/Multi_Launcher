@@ -2017,6 +2017,7 @@ dependencies = [
  "anyhow",
  "eframe",
  "fuzzy-matcher",
+ "lazy_static",
  "open",
  "rdev",
  "serde",

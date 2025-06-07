@@ -11,3 +11,4 @@ fuzzy-matcher = "0.3"
 rdev = "0.5"                   # Global hotkeys (Windows)
 open = "5.0"                   # Open files/folders/apps cross-platform
 anyhow = "1.0"
+lazy_static = "1.4"
