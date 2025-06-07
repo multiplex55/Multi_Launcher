@@ -18,7 +18,7 @@ impl Settings {
         let data = fs::read_to_string(path)?;
         let raw: RawSettings = serde_json::from_str(&data)?;
         let key = parse_key(&raw.hotkey_key)
-            .ok_or_else(|| anyhow!(format!("Unknown key: {}", raw.hotkey_key)))?;
+            .ok_or_else(|| anyhow!("Unknown key: {}", raw.hotkey_key))?;
         Ok(Self { hotkey_key: key })
     }
 }
