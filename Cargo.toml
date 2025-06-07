@@ -12,3 +12,7 @@ rdev = "0.5"                   # Global hotkeys (Windows)
 open = "5.0"                   # Open files/folders/apps cross-platform
 anyhow = "1.0"
 lazy_static = "1.4"
+walkdir = "2.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+meval = "0.2"

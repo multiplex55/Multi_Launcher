@@ -1,19 +1,35 @@
-# Multi_Launcher
+# Multi Launcher
 
-This tool lets you launch predefined actions with a global hotkey.
+Multi Launcher is a lightweight application launcher built with Rust and `eframe`.
+It supports configurable hotkeys, basic plugin architecture and file indexing to quickly open applications or files.
 
-## Configuration
+## Building
 
-`settings.json` specifies the hotkey to open the launcher:
+Requirements:
+- Rust toolchain
+- On Linux you may need X11 development libraries (`libxcb` and friends).
+
+```
+cargo build --release
+```
+
+## Settings
+
+Create a `settings.json` next to the binary to customise the launcher. Example:
 
 ```json
 {
-  "hotkey_key": "CapsLock"
+  "hotkey": "CapsLock",
+  "index_paths": ["/usr/share/applications"]
 }
 ```
 
-`hotkey_key` accepts any key variant defined by the [`rdev`](https://docs.rs/rdev) crate. Examples include `F1`, `F12`, `CapsLock`, `KeyA`, `LeftArrow`, etc. The value is case insensitive. If an unknown key name is used, the application returns an error on startup.
+The `hotkey` accepts any key variant defined by the [`rdev`](https://docs.rs/rdev) crate such as `F1`, `F12`, `CapsLock`, `KeyA` or `LeftArrow`. Names are case insensitive. If an unknown key is specified, the application returns an error on startup.
 
-## Running
+## Plugins
 
-Provide `actions.json` with your actions and run `cargo run`.
+Built-in plugins provide Google web search (`g query`) and an inline calculator (using the `=` prefix). Additional plugins can be added by extending the `Plugin` trait.
+
+## Packaging
+
+The project can be compiled for Windows, macOS and Linux using `cargo build --release`. Afterwards bundle the binary for distribution (e.g. using `cargo bundle` on macOS or `cargo wix` on Windows).

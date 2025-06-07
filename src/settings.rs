@@ -1,25 +1,35 @@
 use anyhow::{anyhow, Result};
 use rdev::Key;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
 
-#[derive(Deserialize)]
-struct RawSettings {
-    hotkey_key: String,
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Settings {
+    pub hotkey: Option<String>,
+    pub index_paths: Option<Vec<String>>,
 }
 
-pub struct Settings {
-    pub hotkey_key: Key,
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            hotkey: Some("CapsLock".into()),
+            index_paths: None,
+        }
+    }
 }
 
 impl Settings {
     pub fn load(path: &str) -> Result<Self> {
-        let data = fs::read_to_string(path)?;
-        let raw: RawSettings = serde_json::from_str(&data)?;
-        let key = parse_key(&raw.hotkey_key)
-            .ok_or_else(|| anyhow!("Unknown key: {}", raw.hotkey_key))?;
-        Ok(Self { hotkey_key: key })
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        if content.is_empty() {
+            return Ok(Self::default());
+        }
+        Ok(serde_json::from_str(&content)?)
+    }
+
+    pub fn hotkey_key(&self) -> Result<Key> {
+        let name = self.hotkey.as_deref().unwrap_or("CapsLock");
+        parse_key(name).ok_or_else(|| anyhow!("Unknown key: {}", name))
     }
 }
 
@@ -51,4 +61,3 @@ lazy_static::lazy_static! {
 pub fn parse_key(name: &str) -> Option<Key> {
     KEY_MAP.get(&name.to_lowercase()).copied()
 }
-
