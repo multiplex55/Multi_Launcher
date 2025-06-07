@@ -76,6 +76,20 @@ fn main() -> anyhow::Result<()> {
                             .with_inner_size([400.0, 220.0])
                             .with_min_inner_size([320.0, 160.0])
                             .with_always_on_top(),
+                        event_loop_builder: Some(Box::new(|builder| {
+                            #[cfg(target_os = "windows")]
+                            {
+                                use winit::platform::windows::EventLoopBuilderExtWindows;
+                                builder.with_any_thread(true);
+                            }
+                            #[cfg(target_os = "linux")]
+                            {
+                                use winit::platform::wayland::EventLoopBuilderExtWayland;
+                                use winit::platform::x11::EventLoopBuilderExtX11;
+                                winit::platform::x11::EventLoopBuilderExtX11::with_any_thread(builder, true);
+                                winit::platform::wayland::EventLoopBuilderExtWayland::with_any_thread(builder, true);
+                            }
+                        })),
                         ..Default::default()
                     };
 
