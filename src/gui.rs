@@ -6,6 +6,7 @@ use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::indexer;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher, Config, EventKind};
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use eframe::egui;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -32,6 +33,7 @@ pub struct LauncherApp {
     rx: Receiver<WatchEvent>,
     plugin_dirs: Option<Vec<String>>,
     index_paths: Option<Vec<String>>,
+    close_requested: Arc<AtomicBool>,
 }
 
 impl LauncherApp {
@@ -41,6 +43,7 @@ impl LauncherApp {
         actions_path: String,
         plugin_dirs: Option<Vec<String>>,
         index_paths: Option<Vec<String>>,
+        close_requested: Arc<AtomicBool>,
     ) -> Self {
         let (tx, rx) = channel();
         let mut watchers = Vec::new();
@@ -111,6 +114,7 @@ impl LauncherApp {
             rx,
             plugin_dirs,
             index_paths,
+            close_requested,
         }
     }
 
@@ -141,6 +145,21 @@ impl LauncherApp {
 impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use egui::*;
+
+        if self.close_requested.load(Ordering::SeqCst) {
+            _frame.close();
+            return;
+        }
+
+        TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            menu::bar(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Close Application").clicked() {
+                        std::process::exit(0);
+                    }
+                });
+            });
+        });
 
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
