@@ -1,4 +1,6 @@
 use rdev::{listen, EventType, Key};
+#[cfg(feature = "unstable_grab")]
+use rdev::{grab, Event};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -112,6 +114,40 @@ impl HotkeyTrigger {
         let open = self.open.clone();
         let watch = self.key;
         thread::spawn(move || {
+            #[cfg(feature = "unstable_grab")]
+            {
+                if watch == Key::CapsLock {
+                    let mut shift_pressed = false;
+                    let callback = move |event: Event| -> Option<Event> {
+                        match event.event_type {
+                            EventType::KeyPress(k) => {
+                                if k == Key::ShiftLeft || k == Key::ShiftRight {
+                                    shift_pressed = true;
+                                } else if k == watch {
+                                    if !shift_pressed {
+                                        if let Ok(mut flag) = open.lock() {
+                                            *flag = true;
+                                        }
+                                        return None;
+                                    }
+                                }
+                            }
+                            EventType::KeyRelease(k) => {
+                                if k == Key::ShiftLeft || k == Key::ShiftRight {
+                                    shift_pressed = false;
+                                }
+                            }
+                            _ => {}
+                        }
+                        Some(event)
+                    };
+                    if let Err(e) = grab(callback) {
+                        eprintln!("Failed to grab events: {:?}", e);
+                    }
+                    return;
+                }
+            }
+
             listen(move |event| {
                 if let EventType::KeyPress(k) = event.event_type {
                     if k == watch {
