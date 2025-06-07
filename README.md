@@ -26,6 +26,12 @@ Create a `settings.json` next to the binary to customise the launcher. Example:
 }
 ```
 
+The `hotkey` value accepts a base key with optional modifiers separated by `+`.
+Examples include `"Ctrl+Shift+Space"` or `"Alt+F1"`. Supported modifiers are
+`Ctrl`, `Shift` and `Alt`. Valid keys cover alphanumeric characters, function
+keys (`F1`-`F12`) and common keys like `Space`, `Tab`, `Return`, `Escape`,
+`Delete`, arrow keys and `CapsLock`.
+
 ## Plugins
 
 Built-in plugins provide Google web search (`g query`) and an inline calculator
