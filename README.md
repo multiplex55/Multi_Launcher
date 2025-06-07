@@ -43,6 +43,13 @@ pub extern "C" fn create_plugin() -> Box<dyn Plugin> {
 Place the resulting library file in one of the directories listed under
 `plugin_dirs` in `settings.json`.
 
+## Editing Commands
+
+The launcher stores its custom actions in `actions.json`. While running the
+application you can manage this list using the **Edit Commands** dialog. Open
+the launcher with the configured hotkey and press the *Edit Commands* button to
+add or remove entries. Changes are saved back to `actions.json` immediately.
+
 ## Packaging
 
 The project can be compiled for Windows, macOS and Linux using `cargo build

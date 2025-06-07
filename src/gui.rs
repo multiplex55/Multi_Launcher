@@ -1,4 +1,5 @@
 use crate::actions::Action;
+use crate::actions_editor::ActionsEditor;
 use crate::launcher::launch_action;
 use crate::plugin::PluginManager;
 use eframe::egui;
@@ -14,10 +15,13 @@ pub struct LauncherApp {
     pub error: Option<String>,
     pub plugins: PluginManager,
     pub usage: HashMap<String, u32>,
+    pub show_editor: bool,
+    pub actions_path: String,
+    pub editor: ActionsEditor,
 }
 
 impl LauncherApp {
-    pub fn new(actions: Vec<Action>, plugins: PluginManager) -> Self {
+    pub fn new(actions: Vec<Action>, plugins: PluginManager, actions_path: String) -> Self {
         Self {
             actions: actions.clone(),
             query: String::new(),
@@ -26,10 +30,13 @@ impl LauncherApp {
             error: None,
             plugins,
             usage: HashMap::new(),
+            show_editor: false,
+            actions_path,
+            editor: ActionsEditor::default(),
         }
     }
 
-    fn search(&mut self) {
+    pub fn search(&mut self) {
         let mut res: Vec<Action> = if self.query.is_empty() {
             self.actions.clone()
         } else {
@@ -59,6 +66,9 @@ impl eframe::App for LauncherApp {
 
         CentralPanel::default().show(ctx, |ui| {
             ui.heading("🚀 LNCHR");
+            if ui.button("Edit Commands").clicked() {
+                self.show_editor = !self.show_editor;
+            }
             if let Some(err) = &self.error {
                 ui.colored_label(Color32::RED, err);
             }
@@ -80,6 +90,9 @@ impl eframe::App for LauncherApp {
                     }
                 }
             });
+            if self.show_editor {
+                self.editor.ui(ctx, self);
+            }
         });
     }
 }
