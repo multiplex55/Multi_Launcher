@@ -1,4 +1,6 @@
 use rdev::Key;
+
+use crate::hotkey::parse_hotkey;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -28,11 +30,11 @@ impl Settings {
     }
 
     pub fn hotkey_key(&self) -> Key {
-        match self.hotkey.as_deref() {
-            Some("CapsLock") | None => Key::CapsLock,
-            Some("F2") => Key::F2,
-            Some("F1") => Key::F1,
-            _ => Key::CapsLock,
+        if let Some(hotkey) = &self.hotkey {
+            if let Some(k) = parse_hotkey(hotkey) {
+                return k;
+            }
         }
+        Key::CapsLock
     }
 }
