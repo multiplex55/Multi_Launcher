@@ -1,4 +1,5 @@
 {
     "hotkey": "CapsLock",
-    "index_paths": null
+    "index_paths": null,
+    "plugin_dirs": null
 }

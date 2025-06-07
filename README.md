@@ -21,15 +21,27 @@ Create a `settings.json` next to the binary to customise the launcher. Example:
 ```json
 {
   "hotkey": "F2",
-  "index_paths": ["/usr/share/applications"]
+  "index_paths": ["/usr/share/applications"],
+  "plugin_dirs": ["./plugins"]
 }
 ```
 
 ## Plugins
 
 Built-in plugins provide Google web search (`g query`) and an inline calculator
-(using the `=` prefix). Additional plugins can be added by extending the
-`Plugin` trait.
+(using the `=` prefix). Additional plugins can be added by building separate
+shared libraries. Each plugin crate should be compiled as a `cdylib` and export
+a `create_plugin` function returning `Box<dyn Plugin>`:
+
+```rust
+#[no_mangle]
+pub extern "C" fn create_plugin() -> Box<dyn Plugin> {
+    Box::new(MyPlugin::default())
+}
+```
+
+Place the resulting library file in one of the directories listed under
+`plugin_dirs` in `settings.json`.
 
 ## Packaging
 

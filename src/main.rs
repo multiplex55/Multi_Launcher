@@ -44,6 +44,13 @@ fn main() -> anyhow::Result<()> {
             let mut plugins = PluginManager::new();
             plugins.register(Box::new(WebSearchPlugin));
             plugins.register(Box::new(CalculatorPlugin));
+            if let Some(dirs) = &settings.plugin_dirs {
+                for dir in dirs {
+                    if let Err(e) = plugins.load_dir(dir) {
+                        tracing::error!("Failed to load plugins from {}: {}", dir, e);
+                    }
+                }
+            }
 
             let _ = eframe::run_native(
                 "Multi_LNCHR",
