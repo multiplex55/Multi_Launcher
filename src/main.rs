@@ -54,10 +54,20 @@ fn main() -> anyhow::Result<()> {
             }
 
             let actions_path = "actions.json".to_string();
+            let plugin_dirs = settings.plugin_dirs.clone();
+            let index_paths = settings.index_paths.clone();
             let _ = eframe::run_native(
                 "Multi_LNCHR",
                 native_options,
-                Box::new(move |_cc| Box::new(LauncherApp::new(actions_for_window, plugins, actions_path))),
+                Box::new(move |_cc| {
+                    Box::new(LauncherApp::new(
+                        actions_for_window,
+                        plugins,
+                        actions_path,
+                        plugin_dirs,
+                        index_paths,
+                    ))
+                }),
             );
         }
         std::thread::sleep(std::time::Duration::from_millis(50));

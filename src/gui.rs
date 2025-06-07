@@ -1,11 +1,20 @@
-use crate::actions::Action;
+use crate::actions::{load_actions, Action};
 use crate::actions_editor::ActionsEditor;
 use crate::launcher::launch_action;
 use crate::plugin::PluginManager;
+use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
+use crate::indexer;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher, Config, EventKind};
+use std::sync::mpsc::{channel, Receiver};
 use eframe::egui;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use std::collections::HashMap;
+
+enum WatchEvent {
+    Actions,
+    Plugins,
+}
 
 pub struct LauncherApp {
     pub actions: Vec<Action>,
@@ -18,10 +27,68 @@ pub struct LauncherApp {
     pub show_editor: bool,
     pub actions_path: String,
     pub editor: ActionsEditor,
+    #[allow(dead_code)]
+    watchers: Vec<RecommendedWatcher>,
+    rx: Receiver<WatchEvent>,
+    plugin_dirs: Option<Vec<String>>,
+    index_paths: Option<Vec<String>>,
 }
 
 impl LauncherApp {
-    pub fn new(actions: Vec<Action>, plugins: PluginManager, actions_path: String) -> Self {
+    pub fn new(
+        actions: Vec<Action>,
+        plugins: PluginManager,
+        actions_path: String,
+        plugin_dirs: Option<Vec<String>>,
+        index_paths: Option<Vec<String>>,
+    ) -> Self {
+        let (tx, rx) = channel();
+        let mut watchers = Vec::new();
+
+        if let Ok(mut watcher) = RecommendedWatcher::new(
+            {
+                let tx = tx.clone();
+                move |res| match res {
+                    Ok(event) => {
+                        if matches!(event.kind, EventKind::Modify(_)|EventKind::Create(_)|EventKind::Remove(_)) {
+                            let _ = tx.send(WatchEvent::Actions);
+                        }
+                    }
+                    Err(e) => tracing::error!("watch error: {:?}", e),
+                }
+            },
+            Config::default(),
+        ) {
+            use std::path::Path;
+            if watcher.watch(Path::new(&actions_path), RecursiveMode::NonRecursive).is_ok() {
+                watchers.push(watcher);
+            }
+        }
+
+        if let Some(dirs) = &plugin_dirs {
+            for dir in dirs {
+                let dir_clone = dir.clone();
+                if let Ok(mut watcher) = RecommendedWatcher::new(
+                    {
+                        let tx = tx.clone();
+                        move |res| match res {
+                            Ok(event) => {
+                                if matches!(event.kind, EventKind::Modify(_)|EventKind::Create(_)|EventKind::Remove(_)) {
+                                    let _ = tx.send(WatchEvent::Plugins);
+                                }
+                            }
+                            Err(e) => tracing::error!("watch error: {:?}", e),
+                        }
+                    },
+                    Config::default(),
+                ) {
+                    if watcher.watch(dir_clone, RecursiveMode::Recursive).is_ok() {
+                        watchers.push(watcher);
+                    }
+                }
+            }
+        }
+
         Self {
             actions: actions.clone(),
             query: String::new(),
@@ -33,6 +100,10 @@ impl LauncherApp {
             show_editor: false,
             actions_path,
             editor: ActionsEditor::default(),
+            watchers,
+            rx,
+            plugin_dirs,
+            index_paths,
         }
     }
 
@@ -63,6 +134,36 @@ impl LauncherApp {
 impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use egui::*;
+
+        while let Ok(ev) = self.rx.try_recv() {
+            match ev {
+                WatchEvent::Actions => {
+                    if let Ok(mut acts) = load_actions(&self.actions_path) {
+                        if let Some(paths) = &self.index_paths {
+                            acts.extend(indexer::index_paths(paths));
+                        }
+                        self.actions = acts;
+                        self.search();
+                        tracing::info!("actions reloaded");
+                    }
+                }
+                WatchEvent::Plugins => {
+                    let mut plugins = PluginManager::new();
+                    plugins.register(Box::new(WebSearchPlugin));
+                    plugins.register(Box::new(CalculatorPlugin));
+                    if let Some(dirs) = &self.plugin_dirs {
+                        for dir in dirs {
+                            if let Err(e) = plugins.load_dir(dir) {
+                                tracing::error!("Failed to load plugins from {}: {}", dir, e);
+                            }
+                        }
+                    }
+                    self.plugins = plugins;
+                    self.search();
+                    tracing::info!("plugins reloaded");
+                }
+            }
+        }
 
         CentralPanel::default().show(ctx, |ui| {
             ui.heading("🚀 LNCHR");
