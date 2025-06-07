@@ -12,3 +12,9 @@ pub fn load_actions(path: &str) -> anyhow::Result<Vec<Action>> {
     let actions: Vec<Action> = serde_json::from_str(&content)?;
     Ok(actions)
 }
+
+pub fn save_actions(path: &str, actions: &[Action]) -> anyhow::Result<()> {
+    let json = serde_json::to_string_pretty(actions)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
