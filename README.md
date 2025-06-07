@@ -19,7 +19,7 @@ Create a `settings.json` next to the binary to customise the launcher. Example:
 
 ```json
 {
-  "hotkey": "CapsLock",
+  "hotkey": "F2",
   "index_paths": ["/usr/share/applications"]
 }
 ```
