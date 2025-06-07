@@ -38,8 +38,9 @@ fn main() -> anyhow::Result<()> {
     loop {
         if let Some((handle, flag)) = &running {
             if handle.is_finished() {
-                let _ = handle.join();
-                running = None;
+                if let Some((handle, _)) = running.take() {
+                    let _ = handle.join();
+                }
             } else if flag.load(Ordering::SeqCst) {
                 // waiting for close
             }
