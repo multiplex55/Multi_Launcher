@@ -7,7 +7,7 @@ It supports configurable hotkeys, basic plugin architecture and file indexing to
 
 Requirements:
 - Rust toolchain
-- On Linux you may need X11 development libraries (`libxcb` and friends).
+- On Linux you may need X11 development libraries (`libxcb`, `libxi` and friends).
 
 ```
 cargo build --release
