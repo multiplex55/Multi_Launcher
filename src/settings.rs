@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     pub hotkey: Option<String>,
     pub index_paths: Option<Vec<String>>,
+    pub plugin_dirs: Option<Vec<String>>,
 }
 
 impl Default for Settings {
@@ -12,6 +13,7 @@ impl Default for Settings {
         Self {
             hotkey: Some("CapsLock".into()),
             index_paths: None,
+            plugin_dirs: None,
         }
     }
 }

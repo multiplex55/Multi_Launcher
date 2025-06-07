@@ -2033,6 +2033,7 @@ dependencies = [
  "anyhow",
  "eframe",
  "fuzzy-matcher",
+ "libloading 0.8.6",
  "meval",
  "open",
  "rdev",
