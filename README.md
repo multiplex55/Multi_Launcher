@@ -1,0 +1,38 @@
+# Multi Launcher
+
+Multi Launcher is a lightweight application launcher built with Rust and `eframe`.
+It supports configurable hotkeys, basic plugin architecture and file indexing to
+quickly open applications or files.
+
+## Building
+
+Requirements:
+- Rust toolchain
+- On Linux you may need X11 development libraries (`libxcb` and friends).
+
+```
+cargo build --release
+```
+
+## Settings
+
+Create a `settings.json` next to the binary to customise the launcher. Example:
+
+```json
+{
+  "hotkey": "F2",
+  "index_paths": ["/usr/share/applications"]
+}
+```
+
+## Plugins
+
+Built-in plugins provide Google web search (`g query`) and an inline calculator
+(using the `=` prefix). Additional plugins can be added by extending the
+`Plugin` trait.
+
+## Packaging
+
+The project can be compiled for Windows, macOS and Linux using `cargo build
+--release`. Afterwards bundle the binary for distribution (e.g. using `cargo
+bundle` on macOS or `cargo wix` on Windows).
