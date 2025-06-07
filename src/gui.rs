@@ -147,7 +147,7 @@ impl eframe::App for LauncherApp {
         use egui::*;
 
         if self.close_requested.load(Ordering::SeqCst) {
-            _frame.close();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
 
