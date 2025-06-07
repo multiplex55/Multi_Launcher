@@ -8,7 +8,7 @@ eframe = "0.27"               # egui-based GUI
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 fuzzy-matcher = "0.3"
-rdev = "0.5"                   # Global hotkeys (Windows)
+rdev = { version = "0.5", features = ["unstable_grab"] }                   # Global hotkeys
 open = "5.0"                   # Open files/folders/apps cross-platform
 anyhow = "1.0"
 walkdir = "2.4"

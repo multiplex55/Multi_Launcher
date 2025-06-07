@@ -32,6 +32,10 @@ Examples include `"Ctrl+Shift+Space"` or `"Alt+F1"`. Supported modifiers are
 keys (`F1`-`F12`) and common keys like `Space`, `Tab`, `Return`, `Escape`,
 `Delete`, arrow keys and `CapsLock`.
 
+If you choose `CapsLock` as the hotkey, the launcher suppresses the normal
+CapsLock toggle. Press `Shift`+`CapsLock` to change the keyboard state while the
+application is running.
+
 ## Plugins
 
 Built-in plugins provide Google web search (`g query`) and an inline calculator
