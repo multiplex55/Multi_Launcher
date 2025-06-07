@@ -48,9 +48,12 @@ impl LauncherApp {
         if let Ok(mut watcher) = RecommendedWatcher::new(
             {
                 let tx = tx.clone();
-                move |res| match res {
+                move |res: notify::Result<notify::Event>| match res {
                     Ok(event) => {
-                        if matches!(event.kind, EventKind::Modify(_)|EventKind::Create(_)|EventKind::Remove(_)) {
+                        if matches!(
+                            event.kind,
+                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                        ) {
                             let _ = tx.send(WatchEvent::Actions);
                         }
                     }
@@ -71,9 +74,12 @@ impl LauncherApp {
                 if let Ok(mut watcher) = RecommendedWatcher::new(
                     {
                         let tx = tx.clone();
-                        move |res| match res {
+                        move |res: notify::Result<notify::Event>| match res {
                             Ok(event) => {
-                                if matches!(event.kind, EventKind::Modify(_)|EventKind::Create(_)|EventKind::Remove(_)) {
+                                if matches!(
+                                    event.kind,
+                                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                                ) {
                                     let _ = tx.send(WatchEvent::Plugins);
                                 }
                             }
@@ -82,7 +88,8 @@ impl LauncherApp {
                     },
                     Config::default(),
                 ) {
-                    if watcher.watch(dir_clone, RecursiveMode::Recursive).is_ok() {
+                    use std::path::Path;
+                    if watcher.watch(Path::new(&dir_clone), RecursiveMode::Recursive).is_ok() {
                         watchers.push(watcher);
                     }
                 }
@@ -191,9 +198,12 @@ impl eframe::App for LauncherApp {
                     }
                 }
             });
-            if self.show_editor {
-                self.editor.ui(ctx, self);
-            }
         });
+        let show_editor = self.show_editor;
+        if show_editor {
+            let mut editor = std::mem::take(&mut self.editor);
+            editor.ui(ctx, self);
+            self.editor = editor;
+        }
     }
 }
