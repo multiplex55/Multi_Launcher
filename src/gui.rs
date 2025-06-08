@@ -230,9 +230,8 @@ impl eframe::App for LauncherApp {
         }
     }
 
-    fn on_close_event(&mut self) -> bool {
+    fn on_exit(&mut self) {
         self.visible_flag.store(false, Ordering::SeqCst);
         self.last_visible = false;
-        false
     }
 }
