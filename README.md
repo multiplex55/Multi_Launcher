@@ -85,6 +85,14 @@ The project can be compiled for Windows, macOS and Linux using `cargo build
 --release`. Afterwards bundle the binary for distribution (e.g. using `cargo
 bundle` on macOS or `cargo wix` on Windows).
 
+## Troubleshooting
+
+When diagnosing hotkey issues it can be helpful to enable info level logging:
+
+```bash
+RUST_LOG=info cargo run
+```
+
 ## Manual Test Plan
 
 1. Build and run the project with `cargo run`.
