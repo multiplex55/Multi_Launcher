@@ -33,7 +33,7 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
         let next = !old;
         tracing::debug!(from=?old, to=?next, "visibility updated");
         visibility.store(next, Ordering::SeqCst);
-        if let Ok(mut guard) = ctx_handle.lock() {
+        if let Ok(guard) = ctx_handle.lock() {
             if let Some(c) = &*guard {
                 c.send_viewport_cmd(egui::ViewportCommand::Visible(next));
                 c.request_repaint();
@@ -47,7 +47,7 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
         }
     } else if let Some(next) = *queued_visibility {
         tracing::debug!("Processing previously queued visibility: {}", next);
-        if let Ok(mut guard) = ctx_handle.lock() {
+        if let Ok(guard) = ctx_handle.lock() {
             if let Some(c) = &*guard {
                 let old = visibility.load(Ordering::SeqCst);
                 visibility.store(next, Ordering::SeqCst);

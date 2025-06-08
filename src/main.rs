@@ -116,7 +116,7 @@ fn main() -> anyhow::Result<()> {
 
     let (handle, visibility, ctx) = spawn_gui(actions.clone(), &settings);
     visibility.store(false, Ordering::SeqCst);
-    let mut queued_visibility: Option<bool> = None;
+    let _queued_visibility: Option<bool> = None;
     let mut quit_requested = false;
 
     loop {
@@ -140,7 +140,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         if quit_requested {
-            if let Ok(mut guard) = ctx.lock() {
+            if let Ok(guard) = ctx.lock() {
                 if let Some(c) = &*guard {
                     c.send_viewport_cmd(egui::ViewportCommand::Close);
                     c.request_repaint();
@@ -151,7 +151,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         visibility.store(true, Ordering::SeqCst);
-        if let Ok(mut guard) = ctx.lock() {
+        if let Ok(guard) = ctx.lock() {
             if let Some(c) = &*guard {
                 c.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 c.request_repaint();
