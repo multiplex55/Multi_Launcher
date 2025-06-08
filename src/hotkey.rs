@@ -3,6 +3,7 @@ use rdev::{listen, EventType, Key};
 use rdev::{grab, Event};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Hotkey {
@@ -169,10 +170,7 @@ impl HotkeyTrigger {
         let need_alt = self.alt;
         tracing::debug!("starting hotkey listener for {:?}", watch);
         thread::spawn(move || {
-            let mut watch_pressed = false;
-            let mut triggered = false;
             let mut ctrl_pressed = false;
-            let mut shift_pressed = false;
             let mut alt_pressed = false;
             #[cfg(feature = "unstable_grab")]
             {
@@ -254,80 +252,91 @@ impl HotkeyTrigger {
                 }
             }
 
-            if let Err(e) = listen(move |event| {
-                match event.event_type {
-                    EventType::KeyPress(k) => {
-                        tracing::debug!("key pressed: {:?}", k);
-                        match k {
-                            Key::ControlLeft | Key::ControlRight => ctrl_pressed = true,
-                            Key::ShiftLeft | Key::ShiftRight => shift_pressed = true,
-                            Key::Alt | Key::AltGr => alt_pressed = true,
-                            _ => {}
+            loop {
+                let mut watch_pressed = false;
+                let mut triggered = false;
+                let mut ctrl_pressed = false;
+                let mut shift_pressed = false;
+                let mut alt_pressed = false;
+                let open_listener = open.clone();
+
+                let result = listen(move |event| {
+                    match event.event_type {
+                        EventType::KeyPress(k) => {
+                            tracing::debug!("key pressed: {:?}", k);
+                            match k {
+                                Key::ControlLeft | Key::ControlRight => ctrl_pressed = true,
+                                Key::ShiftLeft | Key::ShiftRight => shift_pressed = true,
+                                Key::Alt | Key::AltGr => alt_pressed = true,
+                                _ => {}
+                            }
+                            if k == watch {
+                                watch_pressed = true;
+                            }
+                            tracing::debug!(
+                                "state: ctrl={}, shift={}, alt={}, watch={}",
+                                ctrl_pressed,
+                                shift_pressed,
+                                alt_pressed,
+                                watch_pressed
+                            );
                         }
-                        if k == watch {
-                            watch_pressed = true;
+                        EventType::KeyRelease(k) => {
+                            tracing::debug!("key released: {:?}", k);
+                            match k {
+                                Key::ControlLeft | Key::ControlRight => ctrl_pressed = false,
+                                Key::ShiftLeft | Key::ShiftRight => shift_pressed = false,
+                                Key::Alt | Key::AltGr => alt_pressed = false,
+                                _ => {}
+                            }
+                            if k == watch {
+                                watch_pressed = false;
+                            }
+                            tracing::debug!(
+                                "state: ctrl={}, shift={}, alt={}, watch={}",
+                                ctrl_pressed,
+                                shift_pressed,
+                                alt_pressed,
+                                watch_pressed
+                            );
                         }
+                        _ => {}
+                    }
+
+                    let combo = watch_pressed
+                        && (!need_ctrl || ctrl_pressed)
+                        && (!need_shift || shift_pressed)
+                        && (!need_alt || alt_pressed);
+                    if combo {
                         tracing::debug!(
-                            "state: ctrl={}, shift={}, alt={}, watch={}",
+                            "combo={} state: ctrl={}, shift={}, alt={}, watch={}",
+                            combo,
                             ctrl_pressed,
                             shift_pressed,
                             alt_pressed,
                             watch_pressed
                         );
-                    }
-                    EventType::KeyRelease(k) => {
-                        tracing::debug!("key released: {:?}", k);
-                        match k {
-                            Key::ControlLeft | Key::ControlRight => ctrl_pressed = false,
-                            Key::ShiftLeft | Key::ShiftRight => shift_pressed = false,
-                            Key::Alt | Key::AltGr => alt_pressed = false,
-                            _ => {}
+                        if !triggered {
+                            triggered = true;
+                            tracing::debug!("hotkey match -> open=true");
+                            if let Ok(mut flag) = open_listener.lock() {
+                                *flag = true;
+                            }
                         }
-                        if k == watch {
-                            watch_pressed = false;
+                    } else {
+                        if triggered {
+                            tracing::debug!("combo released");
                         }
-                        tracing::debug!(
-                            "state: ctrl={}, shift={}, alt={}, watch={}",
-                            ctrl_pressed,
-                            shift_pressed,
-                            alt_pressed,
-                            watch_pressed
-                        );
+                        triggered = false;
                     }
-                    _ => {}
+                });
+
+                match result {
+                    Ok(()) => tracing::warn!("Hotkey listener exited unexpectedly. Restarting shortly"),
+                    Err(e) => tracing::warn!("Hotkey listener failed: {:?}. Retrying shortly", e),
                 }
 
-                let combo = watch_pressed
-                    && (!need_ctrl || ctrl_pressed)
-                    && (!need_shift || shift_pressed)
-                    && (!need_alt || alt_pressed);
-                if combo {
-                    tracing::debug!(
-                        "combo={} state: ctrl={}, shift={}, alt={}, watch={}",
-                        combo,
-                        ctrl_pressed,
-                        shift_pressed,
-                        alt_pressed,
-                        watch_pressed
-                    );
-                    if !triggered {
-                        triggered = true;
-                        tracing::debug!("hotkey match -> open=true");
-                        if let Ok(mut flag) = open.lock() {
-                            *flag = true;
-                        }
-                    }
-                } else {
-                    if triggered {
-                        tracing::debug!("combo released");
-                    }
-                    triggered = false;
-                }
-            }) {
-                tracing::warn!(
-                    "Hotkey listener failed: {:?}. Hotkeys will not work. Please verify system permissions.",
-                    e
-                );
+                thread::sleep(Duration::from_millis(500));
             }
         });
     }
