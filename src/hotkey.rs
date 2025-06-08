@@ -191,6 +191,13 @@ impl HotkeyTrigger {
                                 if k == watch {
                                     watch_pressed = true;
                                 }
+                                tracing::debug!(
+                                    "state: ctrl={}, shift={}, alt={}, watch={}",
+                                    ctrl_pressed,
+                                    shift_pressed,
+                                    alt_pressed,
+                                    watch_pressed
+                                );
                             }
                             EventType::KeyRelease(k) => {
                                 tracing::debug!("grab key release: {:?}", k);
@@ -200,12 +207,27 @@ impl HotkeyTrigger {
                                 if k == watch {
                                     watch_pressed = false;
                                 }
+                                tracing::debug!(
+                                    "state: ctrl={}, shift={}, alt={}, watch={}",
+                                    ctrl_pressed,
+                                    shift_pressed,
+                                    alt_pressed,
+                                    watch_pressed
+                                );
                             }
                             _ => {}
                         }
 
                         let combo = watch_pressed && !shift_pressed;
                         if combo {
+                            tracing::debug!(
+                                "combo={} state: ctrl={}, shift={}, alt={}, watch={}",
+                                combo,
+                                ctrl_pressed,
+                                shift_pressed,
+                                alt_pressed,
+                                watch_pressed
+                            );
                             if !triggered {
                                 triggered = true;
                                 tracing::debug!("hotkey match -> open=true");
@@ -215,6 +237,9 @@ impl HotkeyTrigger {
                                 return None;
                             }
                         } else {
+                            if triggered {
+                                tracing::debug!("combo released");
+                            }
                             triggered = false;
                         }
 
@@ -242,6 +267,13 @@ impl HotkeyTrigger {
                         if k == watch {
                             watch_pressed = true;
                         }
+                        tracing::debug!(
+                            "state: ctrl={}, shift={}, alt={}, watch={}",
+                            ctrl_pressed,
+                            shift_pressed,
+                            alt_pressed,
+                            watch_pressed
+                        );
                     }
                     EventType::KeyRelease(k) => {
                         tracing::debug!("key released: {:?}", k);
@@ -254,6 +286,13 @@ impl HotkeyTrigger {
                         if k == watch {
                             watch_pressed = false;
                         }
+                        tracing::debug!(
+                            "state: ctrl={}, shift={}, alt={}, watch={}",
+                            ctrl_pressed,
+                            shift_pressed,
+                            alt_pressed,
+                            watch_pressed
+                        );
                     }
                     _ => {}
                 }
@@ -263,6 +302,14 @@ impl HotkeyTrigger {
                     && (!need_shift || shift_pressed)
                     && (!need_alt || alt_pressed);
                 if combo {
+                    tracing::debug!(
+                        "combo={} state: ctrl={}, shift={}, alt={}, watch={}",
+                        combo,
+                        ctrl_pressed,
+                        shift_pressed,
+                        alt_pressed,
+                        watch_pressed
+                    );
                     if !triggered {
                         triggered = true;
                         tracing::debug!("hotkey match -> open=true");
@@ -271,6 +318,9 @@ impl HotkeyTrigger {
                         }
                     }
                 } else {
+                    if triggered {
+                        tracing::debug!("combo released");
+                    }
                     triggered = false;
                 }
             }) {
