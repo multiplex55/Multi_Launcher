@@ -1,6 +1,6 @@
 use rdev::Key;
 
-use crate::hotkey::parse_hotkey;
+use crate::hotkey::{parse_hotkey, Hotkey};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -29,12 +29,17 @@ impl Settings {
         Ok(serde_json::from_str(&content)?)
     }
 
-    pub fn hotkey_key(&self) -> Key {
+    pub fn hotkey(&self) -> Hotkey {
         if let Some(hotkey) = &self.hotkey {
             if let Some(k) = parse_hotkey(hotkey) {
                 return k;
             }
         }
-        Key::CapsLock
+        Hotkey {
+            key: Key::CapsLock,
+            ctrl: false,
+            shift: false,
+            alt: false,
+        }
     }
 }

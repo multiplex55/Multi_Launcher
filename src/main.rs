@@ -96,9 +96,9 @@ fn main() -> anyhow::Result<()> {
         actions.extend(indexer::index_paths(paths));
     }
 
-    let trigger_key = settings.hotkey_key();
-    tracing::debug!(?trigger_key, "configuring hotkey");
-    let trigger = HotkeyTrigger::new(trigger_key);
+    let hotkey = settings.hotkey();
+    tracing::debug!(?hotkey, "configuring hotkey");
+    let trigger = HotkeyTrigger::new(hotkey);
     trigger.start_listener();
 
 
