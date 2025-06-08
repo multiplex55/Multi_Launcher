@@ -157,8 +157,8 @@ impl eframe::App for LauncherApp {
         use egui::*;
 
         tracing::debug!("LauncherApp::update called");
-        frame.set_visible(true);
-        ctx.send_viewport_cmd(egui::ViewportCommand::SetTitle("Launcher Visible Debug".into()));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title("Launcher Visible Debug".into()));
 
         let should_be_visible = self.visible_flag.load(Ordering::SeqCst);
         tracing::debug!(
