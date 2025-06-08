@@ -102,7 +102,6 @@ fn main() -> anyhow::Result<()> {
 
 
     let (handle, visibility) = spawn_gui(actions.clone(), &settings);
-    let mut desired_visible = false;
     visibility.store(false, Ordering::SeqCst);
 
     loop {
@@ -113,9 +112,9 @@ fn main() -> anyhow::Result<()> {
         }
 
         if trigger.take() {
-            desired_visible = !desired_visible;
-            visibility.store(desired_visible, Ordering::SeqCst);
-            tracing::debug!("toggle visible -> {}", desired_visible);
+            let next = !visibility.load(Ordering::SeqCst);
+            visibility.store(next, Ordering::SeqCst);
+            tracing::debug!("toggle visible -> {}", next);
         }
 
         std::thread::sleep(std::time::Duration::from_millis(50));
