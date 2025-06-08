@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Settings {
     pub hotkey: Option<String>,
+    pub quit_hotkey: Option<String>,
     pub index_paths: Option<Vec<String>>,
     pub plugin_dirs: Option<Vec<String>>,
 }
@@ -14,6 +15,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             hotkey: Some("F2".into()),
+            quit_hotkey: None,
             index_paths: None,
             plugin_dirs: None,
         }
@@ -47,5 +49,20 @@ impl Settings {
             shift: false,
             alt: false,
         }
+    }
+
+    pub fn quit_hotkey(&self) -> Option<Hotkey> {
+        if let Some(hotkey) = &self.quit_hotkey {
+            match parse_hotkey(hotkey) {
+                Some(k) => return Some(k),
+                None => {
+                    tracing::warn!(
+                        "provided quit_hotkey string '{}' is invalid; ignoring",
+                        hotkey
+                    );
+                }
+            }
+        }
+        None
     }
 }

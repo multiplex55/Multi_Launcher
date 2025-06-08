@@ -34,6 +34,7 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
 ```json
 {
   "hotkey": "F2",
+  "quit_hotkey": "Shift+Escape",
   "index_paths": ["/usr/share/applications"],
   "plugin_dirs": ["./plugins"]
 }
@@ -44,6 +45,10 @@ Examples include `"Ctrl+Shift+Space"` or `"Alt+F1"`. Supported modifiers are
 `Ctrl`, `Shift` and `Alt`. Valid keys cover alphanumeric characters, function
 keys (`F1`-`F12`) and common keys like `Space`, `Tab`, `Return`, `Escape`,
 `Delete`, arrow keys and `CapsLock`.
+
+`quit_hotkey` can be set to another key combination to close the launcher from
+anywhere. If omitted, the application only quits when the window is closed
+through the GUI.
 
 If you choose `CapsLock` as the hotkey, the launcher suppresses the normal
 CapsLock toggle **when compiled with the `unstable_grab` feature enabled**.

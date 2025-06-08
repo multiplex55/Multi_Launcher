@@ -105,16 +105,45 @@ fn main() -> anyhow::Result<()> {
     let trigger = HotkeyTrigger::new(hotkey);
     trigger.start_listener();
 
+    let quit_trigger = settings.quit_hotkey().map(|hk| {
+        let t = HotkeyTrigger::new(hk);
+        t.start_listener();
+        t
+    });
+
 
     let (handle, visibility, ctx) = spawn_gui(actions.clone(), &settings);
     visibility.store(false, Ordering::SeqCst);
     let mut queued_visibility: Option<bool> = None;
+    let mut quit_requested = false;
 
     loop {
         if handle.is_finished() {
-            tracing::error!("gui thread terminated unexpectedly");
-            let _ = handle.join();
-            break Ok(());
+            if quit_requested {
+                let _ = handle.join();
+                break Ok(());
+            } else {
+                tracing::error!("gui thread terminated unexpectedly");
+                let _ = handle.join();
+                break Ok(());
+            }
+        }
+
+        if let Some(qt) = &quit_trigger {
+            if qt.take() {
+                quit_requested = true;
+            }
+        }
+
+        if quit_requested {
+            if let Ok(mut guard) = ctx.lock() {
+                if let Some(c) = &*guard {
+                    c.send_viewport_cmd(egui::ViewportCommand::Close);
+                    c.request_repaint();
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            continue;
         }
 
         if trigger.take() {
