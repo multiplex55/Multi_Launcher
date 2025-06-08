@@ -14,8 +14,9 @@ Requirements:
 cargo build --release
 ```
 
-To build with support for suppressing the `CapsLock` toggle, enable the optional
-`unstable_grab` feature:
+To capture `CapsLock` reliably and suppress its normal toggle, build with the
+optional `unstable_grab` feature. Without this feature some systems may ignore
+the `CapsLock` hotkey:
 
 ```
 cargo build --release --features unstable_grab
