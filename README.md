@@ -25,6 +25,19 @@ cargo build --release --features unstable_grab
 This feature is defined in `Cargo.toml` and enables the underlying `rdev`
 capability used to grab keyboard events.
 
+For debugging, set the `RUST_LOG` environment variable before running the
+program to see informational messages:
+
+```bash
+RUST_LOG=info cargo run --release --features unstable_grab
+```
+
+If hotkeys do nothing, check the output for warnings starting with
+`Hotkey listener failed`. Lack of permissions is a common cause on Linux
+(running under `sudo` or granting access to `/dev/input` may be required).
+When using `CapsLock` as the hotkey you almost always need to build with
+`--features unstable_grab` so the listener can grab the key.
+
 ## Settings
 
 Create a `settings.json` next to the binary to customise the launcher. The
