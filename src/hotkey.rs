@@ -169,7 +169,8 @@ impl HotkeyTrigger {
         let need_alt = self.alt;
         tracing::debug!("starting hotkey listener for {:?}", watch);
         thread::spawn(move || {
-            let mut pressed = false;
+            let mut watch_pressed = false;
+            let mut triggered = false;
             let mut ctrl_pressed = false;
             let mut shift_pressed = false;
             let mut alt_pressed = false;
@@ -177,7 +178,8 @@ impl HotkeyTrigger {
             {
                 if watch == Key::CapsLock {
                     let mut shift_pressed = false;
-                    let mut pressed = false;
+                    let mut watch_pressed = false;
+                    let mut triggered = false;
                     let callback = move |event: Event| -> Option<Event> {
                         tracing::debug!("grabbed event: {:?}", event.event_type);
                         match event.event_type {
@@ -185,27 +187,37 @@ impl HotkeyTrigger {
                                 tracing::debug!("grab key press: {:?}", k);
                                 if k == Key::ShiftLeft || k == Key::ShiftRight {
                                     shift_pressed = true;
-                                } else if k == watch {
-                                    if !shift_pressed && !pressed {
-                                        pressed = true;
-                                        tracing::debug!("hotkey match -> open=true");
-                                        if let Ok(mut flag) = open.lock() {
-                                            *flag = true;
-                                        }
-                                        return None;
-                                    }
+                                }
+                                if k == watch {
+                                    watch_pressed = true;
                                 }
                             }
                             EventType::KeyRelease(k) => {
                                 tracing::debug!("grab key release: {:?}", k);
                                 if k == Key::ShiftLeft || k == Key::ShiftRight {
                                     shift_pressed = false;
-                                } else if k == watch {
-                                    pressed = false;
+                                }
+                                if k == watch {
+                                    watch_pressed = false;
                                 }
                             }
                             _ => {}
                         }
+
+                        let combo = watch_pressed && !shift_pressed;
+                        if combo {
+                            if !triggered {
+                                triggered = true;
+                                tracing::debug!("hotkey match -> open=true");
+                                if let Ok(mut flag) = open.lock() {
+                                    *flag = true;
+                                }
+                                return None;
+                            }
+                        } else {
+                            triggered = false;
+                        }
+
                         Some(event)
                     };
                     match grab(callback) {
@@ -227,17 +239,8 @@ impl HotkeyTrigger {
                             Key::Alt | Key::AltGr => alt_pressed = true,
                             _ => {}
                         }
-                        if k == watch && !pressed {
-                            if (!need_ctrl || ctrl_pressed)
-                                && (!need_shift || shift_pressed)
-                                && (!need_alt || alt_pressed)
-                            {
-                                pressed = true;
-                                tracing::debug!("hotkey match -> open=true");
-                                if let Ok(mut flag) = open.lock() {
-                                    *flag = true;
-                                }
-                            }
+                        if k == watch {
+                            watch_pressed = true;
                         }
                     }
                     EventType::KeyRelease(k) => {
@@ -249,10 +252,26 @@ impl HotkeyTrigger {
                             _ => {}
                         }
                         if k == watch {
-                            pressed = false;
+                            watch_pressed = false;
                         }
                     }
                     _ => {}
+                }
+
+                let combo = watch_pressed
+                    && (!need_ctrl || ctrl_pressed)
+                    && (!need_shift || shift_pressed)
+                    && (!need_alt || alt_pressed);
+                if combo {
+                    if !triggered {
+                        triggered = true;
+                        tracing::debug!("hotkey match -> open=true");
+                        if let Ok(mut flag) = open.lock() {
+                            *flag = true;
+                        }
+                    }
+                } else {
+                    triggered = false;
                 }
             }) {
                 tracing::warn!(
