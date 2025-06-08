@@ -8,16 +8,18 @@ mod plugins_builtin;
 mod indexer;
 mod settings;
 mod logging;
+mod visibility;
 
 use crate::actions::{load_actions, Action};
 use crate::gui::LauncherApp;
 use crate::hotkey::HotkeyTrigger;
+use crate::visibility::handle_visibility_trigger;
 use crate::plugin::PluginManager;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::Settings;
 
 use eframe::egui;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}, Mutex};
+use std::sync::{Arc, atomic::AtomicBool, Mutex};
 use std::thread;
 
 fn spawn_gui(
@@ -115,8 +117,7 @@ fn main() -> anyhow::Result<()> {
 
 
     let (handle, visibility, ctx) = spawn_gui(actions.clone(), &settings);
-    visibility.store(false, Ordering::SeqCst);
-    let _queued_visibility: Option<bool> = None;
+    let mut queued_visibility: Option<bool> = None;
     let mut quit_requested = false;
 
     loop {
@@ -150,13 +151,7 @@ fn main() -> anyhow::Result<()> {
             break Ok(());
         }
 
-        visibility.store(true, Ordering::SeqCst);
-        if let Ok(guard) = ctx.lock() {
-            if let Some(c) = &*guard {
-                c.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                c.request_repaint();
-            }
-        }
+        handle_visibility_trigger(trigger.as_ref(), &visibility, &ctx, &mut queued_visibility);
 
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
