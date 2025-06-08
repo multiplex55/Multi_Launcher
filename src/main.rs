@@ -74,6 +74,7 @@ fn spawn_gui(
             Box::new(move |cc| {
                 *ctx_clone.lock().unwrap() = Some(cc.egui_ctx.clone());
                 Box::new(LauncherApp::new(
+                    &cc.egui_ctx,
                     actions_for_window,
                     plugins,
                     actions_path,
