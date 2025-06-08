@@ -150,34 +150,11 @@ fn main() -> anyhow::Result<()> {
             break Ok(());
         }
 
-        if trigger.take() {
-            let old = visibility.load(Ordering::SeqCst);
-            let next = !old;
-            tracing::debug!(from=?old, to=?next, "visibility updated");
-            visibility.store(next, Ordering::SeqCst);
-            if let Ok(mut guard) = ctx.lock() {
-                if let Some(c) = &*guard {
-                    tracing::debug!(visible=next, "sending visibility command");
-                    c.send_viewport_cmd(egui::ViewportCommand::Visible(next));
-                    c.request_repaint();
-                    queued_visibility = None;
-                } else {
-                    queued_visibility = Some(next);
-                }
-            } else {
-                queued_visibility = Some(next);
-            }
-        } else if let Some(next) = queued_visibility {
-            if let Ok(mut guard) = ctx.lock() {
-                if let Some(c) = &*guard {
-                    let old = visibility.load(Ordering::SeqCst);
-                    visibility.store(next, Ordering::SeqCst);
-                    tracing::debug!(from=?old, to=?next, "visibility updated");
-                    tracing::debug!(visible=next, "applying queued visibility");
-                    c.send_viewport_cmd(egui::ViewportCommand::Visible(next));
-                    c.request_repaint();
-                    queued_visibility = None;
-                }
+        visibility.store(true, Ordering::SeqCst);
+        if let Ok(mut guard) = ctx.lock() {
+            if let Some(c) = &*guard {
+                c.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                c.request_repaint();
             }
         }
 

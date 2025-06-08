@@ -156,10 +156,19 @@ impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         use egui::*;
 
+        tracing::debug!("LauncherApp::update called");
+        frame.set_visible(true);
+        ctx.send_viewport_cmd(egui::ViewportCommand::SetTitle("Launcher Visible Debug".into()));
+
         let should_be_visible = self.visible_flag.load(Ordering::SeqCst);
+        tracing::debug!(
+            should_be_visible=?should_be_visible,
+            last_visible=?self.last_visible
+        );
         if self.last_visible != should_be_visible {
             tracing::debug!("gui thread -> visible: {}", should_be_visible);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(should_be_visible));
+            tracing::debug!("ViewportCommand::Visible({}) sent", should_be_visible);
             self.last_visible = should_be_visible;
         }
 
@@ -209,6 +218,9 @@ impl eframe::App for LauncherApp {
             ui.heading("🚀 LNCHR");
             if ui.button("Edit Commands").clicked() {
                 self.show_editor = !self.show_editor;
+            }
+            if ui.button("Force Hide").clicked() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             }
             if let Some(err) = &self.error {
                 ui.colored_label(Color32::RED, err);
