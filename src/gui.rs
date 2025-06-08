@@ -230,7 +230,7 @@ impl eframe::App for LauncherApp {
         }
     }
 
-    fn on_exit(&mut self) {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.visible_flag.store(false, Ordering::SeqCst);
         self.last_visible = false;
     }
