@@ -4,14 +4,59 @@ use rdev::{grab, Event};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-/// Parse a hotkey string like "Ctrl+Shift+Space" and return the final key.
-pub fn parse_hotkey(s: &str) -> Option<Key> {
-    let key_part = s.split('+').last()?.trim();
-    let upper = key_part.to_ascii_uppercase();
-    match upper.as_str() {
-        "CTRL" | "CONTROL" => Some(Key::ControlLeft),
-        "SHIFT" => Some(Key::ShiftLeft),
-        "ALT" => Some(Key::Alt),
+#[derive(Debug, Clone, Copy)]
+pub struct Hotkey {
+    pub key: Key,
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
+impl Default for Hotkey {
+    fn default() -> Self {
+        Self {
+            key: Key::CapsLock,
+            ctrl: false,
+            shift: false,
+            alt: false,
+        }
+    }
+}
+
+/// Parse a hotkey string like "Ctrl+Shift+Space" into a [`Hotkey`].
+pub fn parse_hotkey(s: &str) -> Option<Hotkey> {
+    let mut ctrl = false;
+    let mut shift = false;
+    let mut alt = false;
+    let mut key: Option<Key> = None;
+
+    for part in s.split('+') {
+        let upper = part.trim().to_ascii_uppercase();
+        match upper.as_str() {
+            "CTRL" | "CONTROL" => ctrl = true,
+            "SHIFT" => shift = true,
+            "ALT" => alt = true,
+            "" => {},
+            _ => {
+                if let Some(k) = parse_key(&upper) {
+                    key = Some(k);
+                } else {
+                    return None;
+                }
+            }
+        }
+    }
+
+    key.map(|k| Hotkey {
+        key: k,
+        ctrl,
+        shift,
+        alt,
+    })
+}
+
+fn parse_key(upper: &str) -> Option<Key> {
+    match upper {
         "SPACE" => Some(Key::Space),
         "TAB" => Some(Key::Tab),
         "ENTER" | "RETURN" => Some(Key::Return),
@@ -100,22 +145,34 @@ pub fn parse_hotkey(s: &str) -> Option<Key> {
 pub struct HotkeyTrigger {
     pub open: Arc<Mutex<bool>>,
     pub key: Key,
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
 }
 
 impl HotkeyTrigger {
-    pub fn new(key: Key) -> Self {
+    pub fn new(hotkey: Hotkey) -> Self {
         Self {
             open: Arc::new(Mutex::new(false)),
-            key,
+            key: hotkey.key,
+            ctrl: hotkey.ctrl,
+            shift: hotkey.shift,
+            alt: hotkey.alt,
         }
     }
 
     pub fn start_listener(&self) {
         let open = self.open.clone();
         let watch = self.key;
+        let need_ctrl = self.ctrl;
+        let need_shift = self.shift;
+        let need_alt = self.alt;
         tracing::debug!("starting hotkey listener for {:?}", watch);
         thread::spawn(move || {
             let mut pressed = false;
+            let mut ctrl_pressed = false;
+            let mut shift_pressed = false;
+            let mut alt_pressed = false;
             #[cfg(feature = "unstable_grab")]
             {
                 if watch == Key::CapsLock {
@@ -162,15 +219,32 @@ impl HotkeyTrigger {
                 match event.event_type {
                     EventType::KeyPress(k) => {
                         tracing::debug!("key pressed: {:?}", k);
+                        match k {
+                            Key::ControlLeft | Key::ControlRight => ctrl_pressed = true,
+                            Key::ShiftLeft | Key::ShiftRight => shift_pressed = true,
+                            Key::Alt | Key::AltGr => alt_pressed = true,
+                            _ => {}
+                        }
                         if k == watch && !pressed {
-                            pressed = true;
-                            tracing::debug!("hotkey triggered");
-                            if let Ok(mut flag) = open.lock() {
-                                *flag = true;
+                            if (!need_ctrl || ctrl_pressed)
+                                && (!need_shift || shift_pressed)
+                                && (!need_alt || alt_pressed)
+                            {
+                                pressed = true;
+                                tracing::debug!("hotkey triggered");
+                                if let Ok(mut flag) = open.lock() {
+                                    *flag = true;
+                                }
                             }
                         }
                     }
                     EventType::KeyRelease(k) => {
+                        match k {
+                            Key::ControlLeft | Key::ControlRight => ctrl_pressed = false,
+                            Key::ShiftLeft | Key::ShiftRight => shift_pressed = false,
+                            Key::Alt | Key::AltGr => alt_pressed = false,
+                            _ => {}
+                        }
                         if k == watch {
                             pressed = false;
                         }
