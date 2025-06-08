@@ -39,6 +39,7 @@ pub struct LauncherApp {
 
 impl LauncherApp {
     pub fn new(
+        ctx: &egui::Context,
         actions: Vec<Action>,
         plugins: PluginManager,
         actions_path: String,
@@ -100,7 +101,9 @@ impl LauncherApp {
             }
         }
 
-        Self {
+        let initial_visible = visible_flag.load(Ordering::SeqCst);
+
+        let app = Self {
             actions: actions.clone(),
             query: String::new(),
             results: actions,
@@ -116,8 +119,13 @@ impl LauncherApp {
             plugin_dirs,
             index_paths,
             visible_flag: visible_flag.clone(),
-            last_visible: visible_flag.load(Ordering::SeqCst),
-        }
+            last_visible: initial_visible,
+        };
+
+        tracing::debug!("initial viewport visible: {}", initial_visible);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(initial_visible));
+
+        app
     }
 
     pub fn search(&mut self) {
