@@ -8,13 +8,17 @@ eframe = "0.27"               # egui-based GUI
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 fuzzy-matcher = "0.3"
-rdev = { version = "0.5", features = ["unstable_grab"] }                   # Global hotkeys
+rdev = { version = "0.5" }                                                # Global hotkeys
 open = "5.0"                   # Open files/folders/apps cross-platform
 anyhow = "1.0"
 walkdir = "2.4"
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 meval = "0.2"
 libloading = "0.8"
 notify = "6"
 winit = "0.29"
+
+
+[features]
+unstable_grab = ["rdev/unstable_grab"]
