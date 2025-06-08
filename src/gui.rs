@@ -33,7 +33,8 @@ pub struct LauncherApp {
     rx: Receiver<WatchEvent>,
     plugin_dirs: Option<Vec<String>>,
     index_paths: Option<Vec<String>>,
-    close_requested: Arc<AtomicBool>,
+    visible_flag: Arc<AtomicBool>,
+    last_visible: bool,
 }
 
 impl LauncherApp {
@@ -43,7 +44,7 @@ impl LauncherApp {
         actions_path: String,
         plugin_dirs: Option<Vec<String>>,
         index_paths: Option<Vec<String>>,
-        close_requested: Arc<AtomicBool>,
+        visible_flag: Arc<AtomicBool>,
     ) -> Self {
         let (tx, rx) = channel();
         let mut watchers = Vec::new();
@@ -114,7 +115,8 @@ impl LauncherApp {
             rx,
             plugin_dirs,
             index_paths,
-            close_requested,
+            visible_flag: visible_flag.clone(),
+            last_visible: visible_flag.load(Ordering::SeqCst),
         }
     }
 
@@ -146,9 +148,10 @@ impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use egui::*;
 
-        if self.close_requested.load(Ordering::SeqCst) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
+        let should_be_visible = self.visible_flag.load(Ordering::SeqCst);
+        if self.last_visible != should_be_visible {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(should_be_visible));
+            self.last_visible = should_be_visible;
         }
 
         TopBottomPanel::top("menu_bar").show(ctx, |ui| {

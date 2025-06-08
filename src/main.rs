@@ -39,8 +39,8 @@ fn spawn_gui(
     let actions_path = "actions.json".to_string();
     let plugin_dirs = settings.plugin_dirs.clone();
     let index_paths = settings.index_paths.clone();
-    let close_flag = Arc::new(AtomicBool::new(false));
-    let flag_clone = close_flag.clone();
+    let visible_flag = Arc::new(AtomicBool::new(false));
+    let flag_clone = visible_flag.clone();
 
     let handle = thread::spawn(move || {
         let native_options = eframe::NativeOptions {
@@ -81,7 +81,7 @@ fn spawn_gui(
         );
     });
 
-    (handle, close_flag)
+    (handle, visible_flag)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -101,33 +101,20 @@ fn main() -> anyhow::Result<()> {
     trigger.start_listener();
 
 
-    let mut running: Option<(thread::JoinHandle<()>, Arc<AtomicBool>)> = None;
+    let (handle, visibility) = spawn_gui(actions.clone(), &settings);
     let mut desired_visible = false;
+    visibility.store(false, Ordering::SeqCst);
 
     loop {
-        if let Some((handle, flag)) = &running {
-            if !desired_visible {
-                flag.store(true, Ordering::SeqCst);
-            }
-
-            if handle.is_finished() {
-                if let Some((handle, _)) = running.take() {
-                    tracing::debug!("gui thread finished");
-                    let _ = handle.join();
-                }
-            }
-        }
-
-        if running.is_none() && desired_visible {
-            tracing::debug!("spawning gui");
-            let (h, f) = spawn_gui(actions.clone(), &settings);
-            running = Some((h, f));
-        } else if running.is_some() && !desired_visible {
-            tracing::debug!("hiding gui");
+        if handle.is_finished() {
+            tracing::error!("gui thread terminated unexpectedly");
+            let _ = handle.join();
+            break;
         }
 
         if trigger.take() {
             desired_visible = !desired_visible;
+            visibility.store(desired_visible, Ordering::SeqCst);
             tracing::debug!("toggle visible -> {}", desired_visible);
         }
 
