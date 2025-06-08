@@ -208,14 +208,16 @@ impl HotkeyTrigger {
                         }
                         Some(event)
                     };
-                    if let Err(e) = grab(callback) {
-                        eprintln!("Failed to grab events: {:?}", e);
+                    match grab(callback) {
+                        Ok(()) => return,
+                        Err(e) => {
+                            tracing::error!("Failed to grab events: {:?}. Falling back to listening", e);
+                        }
                     }
-                    return;
                 }
             }
 
-            listen(move |event| {
+            if let Err(e) = listen(move |event| {
                 match event.event_type {
                     EventType::KeyPress(k) => {
                         tracing::debug!("key pressed: {:?}", k);
@@ -252,8 +254,9 @@ impl HotkeyTrigger {
                     }
                     _ => {}
                 }
-            })
-            .unwrap();
+            }) {
+                tracing::error!("hotkey listener failed: {:?}. Hotkeys will no longer work", e);
+            }
         });
     }
 
