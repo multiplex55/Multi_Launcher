@@ -47,10 +47,8 @@ fn main() -> anyhow::Result<()> {
         }
 
         if trigger.take() {
-            if let Some((handle, flag)) = running.take() {
+            if let Some((_handle, flag)) = &running {
                 flag.store(true, Ordering::SeqCst);
-                let _ = handle.join();
-                running = None;
             } else {
                 let actions_for_window = actions.clone();
                 let mut plugins = PluginManager::new();
