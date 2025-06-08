@@ -137,18 +137,17 @@ fn main() -> anyhow::Result<()> {
             if qt.take() {
                 quit_requested = true;
                 listener.stop();
-            }
-        }
 
-        if quit_requested {
-            if let Ok(guard) = ctx.lock() {
-                if let Some(c) = &*guard {
-                    c.send_viewport_cmd(egui::ViewportCommand::Close);
-                    c.request_repaint();
+                if let Ok(guard) = ctx.lock() {
+                    if let Some(c) = &*guard {
+                        c.send_viewport_cmd(egui::ViewportCommand::Close);
+                        c.request_repaint();
+                    }
                 }
+
+                let _ = handle.join();
+                break Ok(());
             }
-            let _ = handle.join();
-            break Ok(());
         }
 
         handle_visibility_trigger(trigger.as_ref(), &visibility, &ctx, &mut queued_visibility);
