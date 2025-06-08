@@ -150,6 +150,7 @@ impl eframe::App for LauncherApp {
 
         let should_be_visible = self.visible_flag.load(Ordering::SeqCst);
         if self.last_visible != should_be_visible {
+            tracing::debug!("gui thread -> visible: {}", should_be_visible);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(should_be_visible));
             self.last_visible = should_be_visible;
         }
