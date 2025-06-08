@@ -132,6 +132,8 @@ fn main() -> anyhow::Result<()> {
         if let Some(qt) = &quit_trigger {
             if qt.take() {
                 quit_requested = true;
+                qt.stop();
+                trigger.stop();
             }
         }
 
