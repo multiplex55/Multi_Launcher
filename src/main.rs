@@ -117,6 +117,7 @@ fn main() -> anyhow::Result<()> {
 
         if trigger.take() {
             let next = !visibility.load(Ordering::SeqCst);
+            tracing::debug!("trigger.take -> next visibility: {}", next);
             visibility.store(next, Ordering::SeqCst);
             if let Ok(mut guard) = ctx.lock() {
                 if let Some(c) = &*guard {
@@ -124,7 +125,6 @@ fn main() -> anyhow::Result<()> {
                     c.request_repaint();
                 }
             }
-            tracing::debug!("toggle visible -> {}", next);
         }
 
         std::thread::sleep(std::time::Duration::from_millis(50));
