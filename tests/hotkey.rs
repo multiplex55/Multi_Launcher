@@ -16,6 +16,13 @@ fn parse_combo_hotkey() {
 }
 
 #[test]
+fn parse_shift_escape() {
+    let hk = parse_hotkey("Shift+Escape").expect("should parse shift+escape");
+    assert_eq!(hk.key, Key::Escape);
+    assert!(!hk.ctrl && hk.shift && !hk.alt);
+}
+
+#[test]
 fn parse_invalid_hotkey() {
     assert!(parse_hotkey("Ctrl+Foo").is_none());
     assert!(parse_hotkey("Ctrl+Shift").is_none());

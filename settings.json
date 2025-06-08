@@ -1,5 +1,6 @@
 {
     "hotkey": "F2",
+    "quit_hotkey": "Shift+Escape",
     "index_paths": null,
     "plugin_dirs": null
 }
