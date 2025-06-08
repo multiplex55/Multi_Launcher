@@ -113,18 +113,22 @@ impl HotkeyTrigger {
     pub fn start_listener(&self) {
         let open = self.open.clone();
         let watch = self.key;
+        tracing::debug!("starting hotkey listener for {:?}", watch);
         thread::spawn(move || {
             #[cfg(feature = "unstable_grab")]
             {
                 if watch == Key::CapsLock {
                     let mut shift_pressed = false;
                     let callback = move |event: Event| -> Option<Event> {
+                        tracing::debug!("grabbed event: {:?}", event.event_type);
                         match event.event_type {
                             EventType::KeyPress(k) => {
+                                tracing::debug!("grab key press: {:?}", k);
                                 if k == Key::ShiftLeft || k == Key::ShiftRight {
                                     shift_pressed = true;
                                 } else if k == watch {
                                     if !shift_pressed {
+                                        tracing::debug!("hotkey triggered");
                                         if let Ok(mut flag) = open.lock() {
                                             *flag = true;
                                         }
@@ -133,6 +137,7 @@ impl HotkeyTrigger {
                                 }
                             }
                             EventType::KeyRelease(k) => {
+                                tracing::debug!("grab key release: {:?}", k);
                                 if k == Key::ShiftLeft || k == Key::ShiftRight {
                                     shift_pressed = false;
                                 }
@@ -150,7 +155,9 @@ impl HotkeyTrigger {
 
             listen(move |event| {
                 if let EventType::KeyPress(k) = event.event_type {
+                    tracing::debug!("key pressed: {:?}", k);
                     if k == watch {
+                        tracing::debug!("hotkey triggered");
                         if let Ok(mut flag) = open.lock() {
                             *flag = true;
                         }
