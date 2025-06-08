@@ -73,6 +73,7 @@ fn spawn_gui(
             native_options,
             Box::new(move |cc| {
                 *ctx_clone.lock().unwrap() = Some(cc.egui_ctx.clone());
+                tracing::debug!("egui context stored");
                 Box::new(LauncherApp::new(
                     &cc.egui_ctx,
                     actions_for_window,
@@ -156,6 +157,7 @@ fn main() -> anyhow::Result<()> {
             visibility.store(next, Ordering::SeqCst);
             if let Ok(mut guard) = ctx.lock() {
                 if let Some(c) = &*guard {
+                    tracing::debug!(visible=next, "sending visibility command");
                     c.send_viewport_cmd(egui::ViewportCommand::Visible(next));
                     c.request_repaint();
                     queued_visibility = None;
@@ -171,6 +173,7 @@ fn main() -> anyhow::Result<()> {
                     let old = visibility.load(Ordering::SeqCst);
                     visibility.store(next, Ordering::SeqCst);
                     tracing::debug!(from=?old, to=?next, "visibility updated");
+                    tracing::debug!(visible=next, "applying queued visibility");
                     c.send_viewport_cmd(egui::ViewportCommand::Visible(next));
                     c.request_repaint();
                     queued_visibility = None;
