@@ -119,14 +119,11 @@ fn main() -> anyhow::Result<()> {
 
     loop {
         if handle.is_finished() {
-            if quit_requested {
-                let _ = handle.join();
-                break Ok(());
-            } else {
+            if !quit_requested {
                 tracing::error!("gui thread terminated unexpectedly");
-                let _ = handle.join();
-                break Ok(());
             }
+            let _ = handle.join();
+            break Ok(());
         }
 
         if let Some(qt) = &quit_trigger {
@@ -142,8 +139,8 @@ fn main() -> anyhow::Result<()> {
                     c.request_repaint();
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            continue;
+            let _ = handle.join();
+            break Ok(());
         }
 
         if trigger.take() {
