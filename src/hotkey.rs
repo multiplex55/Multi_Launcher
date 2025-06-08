@@ -251,6 +251,7 @@ impl HotkeyTrigger {
         let mut open = self.open.lock().unwrap();
         if *open {
             *open = false;
+            tracing::debug!("HotkeyTrigger fired!");
             true
         } else {
             false
