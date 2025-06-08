@@ -14,6 +14,16 @@ Requirements:
 cargo build --release
 ```
 
+To build with support for suppressing the `CapsLock` toggle, enable the optional
+`unstable_grab` feature:
+
+```
+cargo build --release --features unstable_grab
+```
+
+This feature is defined in `Cargo.toml` and enables the underlying `rdev`
+capability used to grab keyboard events.
+
 ## Settings
 
 Create a `settings.json` next to the binary to customise the launcher. Example:
@@ -33,8 +43,9 @@ keys (`F1`-`F12`) and common keys like `Space`, `Tab`, `Return`, `Escape`,
 `Delete`, arrow keys and `CapsLock`.
 
 If you choose `CapsLock` as the hotkey, the launcher suppresses the normal
-CapsLock toggle. Press `Shift`+`CapsLock` to change the keyboard state while the
-application is running.
+CapsLock toggle **when compiled with the `unstable_grab` feature enabled**.
+Press `Shift`+`CapsLock` to change the keyboard state while the application is
+running.
 
 ## Plugins
 
