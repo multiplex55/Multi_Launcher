@@ -87,13 +87,17 @@ fn spawn_gui(
 fn main() -> anyhow::Result<()> {
     logging::init();
     let settings = Settings::load("settings.json").unwrap_or_default();
+    tracing::debug!(?settings, "settings loaded");
     let mut actions = load_actions("actions.json").unwrap_or_default();
+    tracing::debug!("{} actions loaded", actions.len());
 
     if let Some(paths) = &settings.index_paths {
         actions.extend(indexer::index_paths(paths));
     }
 
-    let trigger = HotkeyTrigger::new(settings.hotkey_key());
+    let trigger_key = settings.hotkey_key();
+    tracing::debug!(?trigger_key, "configuring hotkey");
+    let trigger = HotkeyTrigger::new(trigger_key);
     trigger.start_listener();
 
 
@@ -108,18 +112,23 @@ fn main() -> anyhow::Result<()> {
 
             if handle.is_finished() {
                 if let Some((handle, _)) = running.take() {
+                    tracing::debug!("gui thread finished");
                     let _ = handle.join();
                 }
             }
         }
 
         if running.is_none() && desired_visible {
+            tracing::debug!("spawning gui");
             let (h, f) = spawn_gui(actions.clone(), &settings);
             running = Some((h, f));
+        } else if running.is_some() && !desired_visible {
+            tracing::debug!("hiding gui");
         }
 
         if trigger.take() {
             desired_visible = !desired_visible;
+            tracing::debug!("toggle visible -> {}", desired_visible);
         }
 
         std::thread::sleep(std::time::Duration::from_millis(50));
