@@ -255,7 +255,10 @@ impl HotkeyTrigger {
                     _ => {}
                 }
             }) {
-                tracing::error!("hotkey listener failed: {:?}. Hotkeys will no longer work", e);
+                tracing::warn!(
+                    "Hotkey listener failed: {:?}. Hotkeys will not work. Please verify system permissions.",
+                    e
+                );
             }
         });
     }
