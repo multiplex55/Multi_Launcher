@@ -23,6 +23,13 @@ fn parse_shift_escape() {
 }
 
 #[test]
+fn parse_zero_hotkey() {
+    let hk = parse_hotkey("0").expect("should parse numeric zero");
+    assert_eq!(hk.key, Key::Num0);
+    assert!(!hk.ctrl && !hk.shift && !hk.alt);
+}
+
+#[test]
 fn parse_invalid_hotkey() {
     assert!(parse_hotkey("Ctrl+Foo").is_none());
     assert!(parse_hotkey("Ctrl+Shift").is_none());
