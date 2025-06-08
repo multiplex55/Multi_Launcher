@@ -120,6 +120,7 @@ fn main() -> anyhow::Result<()> {
             visibility.store(next, Ordering::SeqCst);
             if let Ok(mut guard) = ctx.lock() {
                 if let Some(c) = &*guard {
+                    c.send_viewport_cmd(egui::ViewportCommand::Visible(next));
                     c.request_repaint();
                 }
             }
