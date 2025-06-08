@@ -103,11 +103,11 @@ fn main() -> anyhow::Result<()> {
     let hotkey = settings.hotkey();
     tracing::debug!(?hotkey, "configuring hotkey");
     let trigger = HotkeyTrigger::new(hotkey);
-    trigger.start_listener();
+    trigger.start_listener("launch");
 
     let quit_trigger = settings.quit_hotkey().map(|hk| {
         let t = HotkeyTrigger::new(hk);
-        t.start_listener();
+        t.start_listener("quit");
         t
     });
 
