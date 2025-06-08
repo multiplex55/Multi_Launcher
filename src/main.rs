@@ -109,7 +109,7 @@ fn main() -> anyhow::Result<()> {
         if handle.is_finished() {
             tracing::error!("gui thread terminated unexpectedly");
             let _ = handle.join();
-            break;
+            break Ok(());
         }
 
         if trigger.take() {
