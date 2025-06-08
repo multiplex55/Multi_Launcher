@@ -145,7 +145,7 @@ impl LauncherApp {
 }
 
 impl eframe::App for LauncherApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         use egui::*;
 
         let should_be_visible = self.visible_flag.load(Ordering::SeqCst);
@@ -158,6 +158,7 @@ impl eframe::App for LauncherApp {
             menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Close Application").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         self.visible_flag.store(false, Ordering::SeqCst);
                         self.last_visible = false;
                     }
