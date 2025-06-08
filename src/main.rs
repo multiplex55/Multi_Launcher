@@ -101,15 +101,16 @@ fn main() -> anyhow::Result<()> {
     }
 
     let hotkey = settings.hotkey();
-    tracing::debug!(?hotkey, "configuring hotkey");
-    let trigger = HotkeyTrigger::new(hotkey);
-    trigger.start_listener("launch");
+    tracing::debug!(?hotkey, "configuring hotkeys");
+    let trigger = Arc::new(HotkeyTrigger::new(hotkey));
+    let quit_trigger = settings.quit_hotkey().map(|hk| Arc::new(HotkeyTrigger::new(hk)));
 
-    let quit_trigger = settings.quit_hotkey().map(|hk| {
-        let t = HotkeyTrigger::new(hk);
-        t.start_listener("quit");
-        t
-    });
+    let mut watched = vec![trigger.clone()];
+    if let Some(qt) = &quit_trigger {
+        watched.push(qt.clone());
+    }
+
+    let listener = HotkeyTrigger::start_listener(watched, "main");
 
 
     let (handle, visibility, ctx) = spawn_gui(actions.clone(), &settings);
@@ -119,6 +120,7 @@ fn main() -> anyhow::Result<()> {
 
     loop {
         if handle.is_finished() {
+            listener.stop();
             if quit_requested {
                 let _ = handle.join();
                 break Ok(());
@@ -132,8 +134,7 @@ fn main() -> anyhow::Result<()> {
         if let Some(qt) = &quit_trigger {
             if qt.take() {
                 quit_requested = true;
-                qt.stop();
-                trigger.stop();
+                listener.stop();
             }
         }
 
