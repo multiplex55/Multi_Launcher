@@ -230,6 +230,13 @@ impl HotkeyTrigger {
                             );
                             if !triggered {
                                 triggered = true;
+                                tracing::info!(
+                                    "hotkey triggered: key={:?} ctrl={} shift={} alt={}",
+                                    watch,
+                                    need_ctrl,
+                                    need_shift,
+                                    need_alt
+                                );
                                 tracing::debug!("hotkey match -> open=true");
                                 if let Ok(mut flag) = open.lock() {
                                     *flag = true;
@@ -312,6 +319,13 @@ impl HotkeyTrigger {
                     );
                     if !triggered {
                         triggered = true;
+                        tracing::info!(
+                            "hotkey triggered: key={:?} ctrl={} shift={} alt={}",
+                            watch,
+                            need_ctrl,
+                            need_shift,
+                            need_alt
+                        );
                         tracing::debug!("hotkey match -> open=true");
                         if let Ok(mut flag) = open.lock() {
                             *flag = true;

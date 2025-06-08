@@ -87,6 +87,9 @@ bundle` on macOS or `cargo wix` on Windows).
 
 ## Manual Test Plan
 
+For troubleshooting, run the application with `RUST_LOG=info` to enable
+informational logs.
+
 1. Build and run the project with `cargo run`.
 2. **Before** the launcher window appears, press the configured hotkey once.
 3. Observe the log output. There should be a message indicating a visibility
