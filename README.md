@@ -76,3 +76,13 @@ add or remove entries. Changes are saved back to `actions.json` immediately.
 The project can be compiled for Windows, macOS and Linux using `cargo build
 --release`. Afterwards bundle the binary for distribution (e.g. using `cargo
 bundle` on macOS or `cargo wix` on Windows).
+
+## Manual Test Plan
+
+1. Build and run the project with `cargo run`.
+2. **Before** the launcher window appears, press the configured hotkey once.
+3. Observe the log output. There should be a message indicating a visibility
+   change was queued.
+4. When the GUI finishes initialising, it should immediately apply the queued
+   visibility change and the window becomes visible. A log entry confirms this.
+5. Press the hotkey again to ensure normal toggling after start-up.
