@@ -1,4 +1,4 @@
-use multi_launcher::hotkey::{parse_hotkey, Hotkey};
+use multi_launcher::hotkey::{parse_hotkey, Hotkey, HotkeyTrigger};
 use rdev::Key;
 
 #[test]
@@ -19,4 +19,16 @@ fn parse_combo_hotkey() {
 fn parse_invalid_hotkey() {
     assert!(parse_hotkey("Ctrl+Foo").is_none());
     assert!(parse_hotkey("Ctrl+Shift").is_none());
+}
+
+#[test]
+fn trigger_take() {
+    let hk = Hotkey::default();
+    let trigger = HotkeyTrigger::new(hk);
+    {
+        let mut open = trigger.open.lock().unwrap();
+        *open = true;
+    }
+    assert!(trigger.take());
+    assert!(!trigger.take());
 }
