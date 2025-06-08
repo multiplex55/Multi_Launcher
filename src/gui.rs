@@ -158,7 +158,8 @@ impl eframe::App for LauncherApp {
             menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Close Application").clicked() {
-                        std::process::exit(0);
+                        self.visible_flag.store(false, Ordering::SeqCst);
+                        self.last_visible = false;
                     }
                 });
             });
@@ -227,5 +228,11 @@ impl eframe::App for LauncherApp {
             editor.ui(ctx, self);
             self.editor = editor;
         }
+    }
+
+    fn on_close_event(&mut self) -> bool {
+        self.visible_flag.store(false, Ordering::SeqCst);
+        self.last_visible = false;
+        false
     }
 }
