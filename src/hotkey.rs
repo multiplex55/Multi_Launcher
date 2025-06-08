@@ -264,3 +264,66 @@ impl HotkeyListener {
         self.stop.store(true, Ordering::SeqCst);
     }
 }
+
+pub fn process_test_events(triggers: &[Arc<HotkeyTrigger>], events: &[EventType]) {
+    let open_listeners: Vec<_> = triggers.iter().map(|t| t.open.clone()).collect();
+    let watch_keys: Vec<Key> = triggers.iter().map(|t| t.key).collect();
+    let need_ctrl: Vec<bool> = triggers.iter().map(|t| t.ctrl).collect();
+    let need_shift: Vec<bool> = triggers.iter().map(|t| t.shift).collect();
+    let need_alt: Vec<bool> = triggers.iter().map(|t| t.alt).collect();
+
+    let mut watch_pressed = vec![false; triggers.len()];
+    let mut triggered = vec![false; triggers.len()];
+    let mut ctrl_pressed = false;
+    let mut shift_pressed = false;
+    let mut alt_pressed = false;
+
+    for event in events {
+        match *event {
+            EventType::KeyPress(k) => {
+                match k {
+                    Key::ControlLeft | Key::ControlRight => ctrl_pressed = true,
+                    Key::ShiftLeft | Key::ShiftRight => shift_pressed = true,
+                    Key::Alt | Key::AltGr => alt_pressed = true,
+                    _ => {}
+                }
+                for (i, wk) in watch_keys.iter().enumerate() {
+                    if k == *wk {
+                        watch_pressed[i] = true;
+                    }
+                }
+            }
+            EventType::KeyRelease(k) => {
+                match k {
+                    Key::ControlLeft | Key::ControlRight => ctrl_pressed = false,
+                    Key::ShiftLeft | Key::ShiftRight => shift_pressed = false,
+                    Key::Alt | Key::AltGr => alt_pressed = false,
+                    _ => {}
+                }
+                for (i, wk) in watch_keys.iter().enumerate() {
+                    if k == *wk {
+                        watch_pressed[i] = false;
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        for i in 0..watch_keys.len() {
+            let combo = watch_pressed[i]
+                && (!need_ctrl[i] || ctrl_pressed)
+                && (!need_shift[i] || shift_pressed)
+                && (!need_alt[i] || alt_pressed);
+            if combo {
+                if !triggered[i] {
+                    triggered[i] = true;
+                    if let Ok(mut flag) = open_listeners[i].lock() {
+                        *flag = true;
+                    }
+                }
+            } else {
+                triggered[i] = false;
+            }
+        }
+    }
+}
