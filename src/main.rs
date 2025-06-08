@@ -17,13 +17,13 @@ use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::Settings;
 
 use eframe::egui;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}, Mutex};
 use std::thread;
 
 fn spawn_gui(
     actions: Vec<Action>,
     settings: &Settings,
-) -> (thread::JoinHandle<()>, Arc<AtomicBool>) {
+) -> (thread::JoinHandle<()>, Arc<AtomicBool>, Arc<Mutex<Option<egui::Context>>>) {
     let actions_for_window = actions.clone();
     let mut plugins = PluginManager::new();
     plugins.register(Box::new(WebSearchPlugin));
@@ -41,6 +41,8 @@ fn spawn_gui(
     let index_paths = settings.index_paths.clone();
     let visible_flag = Arc::new(AtomicBool::new(false));
     let flag_clone = visible_flag.clone();
+    let ctx_handle = Arc::new(Mutex::new(None));
+    let ctx_clone = ctx_handle.clone();
 
     let handle = thread::spawn(move || {
         let native_options = eframe::NativeOptions {
@@ -69,7 +71,8 @@ fn spawn_gui(
         let _ = eframe::run_native(
             "Multi_LNCHR",
             native_options,
-            Box::new(move |_cc| {
+            Box::new(move |cc| {
+                *ctx_clone.lock().unwrap() = Some(cc.egui_ctx.clone());
                 Box::new(LauncherApp::new(
                     actions_for_window,
                     plugins,
@@ -82,7 +85,7 @@ fn spawn_gui(
         );
     });
 
-    (handle, visible_flag)
+    (handle, visible_flag, ctx_handle)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -102,7 +105,7 @@ fn main() -> anyhow::Result<()> {
     trigger.start_listener();
 
 
-    let (handle, visibility) = spawn_gui(actions.clone(), &settings);
+    let (handle, visibility, ctx) = spawn_gui(actions.clone(), &settings);
     visibility.store(false, Ordering::SeqCst);
 
     loop {
@@ -115,6 +118,11 @@ fn main() -> anyhow::Result<()> {
         if trigger.take() {
             let next = !visibility.load(Ordering::SeqCst);
             visibility.store(next, Ordering::SeqCst);
+            if let Ok(mut guard) = ctx.lock() {
+                if let Some(c) = &*guard {
+                    c.request_repaint();
+                }
+            }
             tracing::debug!("toggle visible -> {}", next);
         }
 
