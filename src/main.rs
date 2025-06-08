@@ -144,8 +144,8 @@ fn main() -> anyhow::Result<()> {
                     c.request_repaint();
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            continue;
+            let _ = handle.join();
+            break Ok(());
         }
 
         if trigger.take() {
