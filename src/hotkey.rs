@@ -1,7 +1,7 @@
 use rdev::{listen, EventType, Key};
 #[cfg(feature = "unstable_grab")]
 use rdev::{grab, Event};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::thread;
 use std::time::Duration;
 
@@ -145,6 +145,7 @@ fn parse_key(upper: &str) -> Option<Key> {
 // Shared signal to open launcher
 pub struct HotkeyTrigger {
     pub open: Arc<Mutex<bool>>,
+    stop: Arc<AtomicBool>,
     pub key: Key,
     pub ctrl: bool,
     pub shift: bool,
@@ -155,6 +156,7 @@ impl HotkeyTrigger {
     pub fn new(hotkey: Hotkey) -> Self {
         Self {
             open: Arc::new(Mutex::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
             key: hotkey.key,
             ctrl: hotkey.ctrl,
             shift: hotkey.shift,
@@ -164,6 +166,7 @@ impl HotkeyTrigger {
 
     pub fn start_listener(&self) {
         let open = self.open.clone();
+        let stop_flag = self.stop.clone();
         let watch = self.key;
         let need_ctrl = self.ctrl;
         let need_shift = self.shift;
@@ -256,7 +259,7 @@ impl HotkeyTrigger {
                 }
             }
 
-            loop {
+            while !stop_flag.load(Ordering::SeqCst) {
                 let mut watch_pressed = false;
                 let mut triggered = false;
                 let mut ctrl_pressed = false;
@@ -357,5 +360,9 @@ impl HotkeyTrigger {
         } else {
             false
         }
+    }
+
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
     }
 }
