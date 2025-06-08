@@ -2,18 +2,9 @@ use multi_launcher::hotkey::{Hotkey, HotkeyTrigger};
 use eframe::egui;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 
-#[derive(Clone, Default)]
-struct MockCtx {
-    commands: Arc<Mutex<Vec<egui::ViewportCommand>>>,
-}
-
-impl MockCtx {
-    fn send_viewport_cmd(&self, cmd: egui::ViewportCommand) {
-        self.commands.lock().unwrap().push(cmd);
-    }
-
-    fn request_repaint(&self) {}
-}
+#[path = "mock_ctx.rs"]
+mod mock_ctx;
+use mock_ctx::MockCtx;
 
 #[test]
 fn queued_visibility_applies_when_context_available() {
