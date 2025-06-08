@@ -47,7 +47,8 @@ fn spawn_gui(
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([400.0, 220.0])
                 .with_min_inner_size([320.0, 160.0])
-                .with_always_on_top(),
+                .with_always_on_top()
+                .with_visible(false),
             event_loop_builder: Some(Box::new(|builder| {
                 #[cfg(target_os = "windows")]
                 {
