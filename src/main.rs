@@ -149,8 +149,9 @@ fn main() -> anyhow::Result<()> {
         }
 
         if trigger.take() {
-            let next = !visibility.load(Ordering::SeqCst);
-            tracing::debug!("trigger.take -> next visibility: {}", next);
+            let old = visibility.load(Ordering::SeqCst);
+            let next = !old;
+            tracing::debug!(from=?old, to=?next, "visibility updated");
             visibility.store(next, Ordering::SeqCst);
             if let Ok(mut guard) = ctx.lock() {
                 if let Some(c) = &*guard {
@@ -166,7 +167,9 @@ fn main() -> anyhow::Result<()> {
         } else if let Some(next) = queued_visibility {
             if let Ok(mut guard) = ctx.lock() {
                 if let Some(c) = &*guard {
-                    tracing::debug!("applying queued visibility: {}", next);
+                    let old = visibility.load(Ordering::SeqCst);
+                    visibility.store(next, Ordering::SeqCst);
+                    tracing::debug!(from=?old, to=?next, "visibility updated");
                     c.send_viewport_cmd(egui::ViewportCommand::Visible(next));
                     c.request_repaint();
                     queued_visibility = None;
