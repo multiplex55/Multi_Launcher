@@ -31,8 +31,14 @@ impl Settings {
 
     pub fn hotkey(&self) -> Hotkey {
         if let Some(hotkey) = &self.hotkey {
-            if let Some(k) = parse_hotkey(hotkey) {
-                return k;
+            match parse_hotkey(hotkey) {
+                Some(k) => return k,
+                None => {
+                    tracing::warn!(
+                        "provided hotkey string '{}' is invalid; using default CapsLock",
+                        hotkey
+                    );
+                }
             }
         }
         Hotkey {
