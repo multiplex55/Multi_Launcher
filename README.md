@@ -26,7 +26,9 @@ capability used to grab keyboard events.
 
 ## Settings
 
-Create a `settings.json` next to the binary to customise the launcher. Example:
+Create a `settings.json` next to the binary to customise the launcher. The
+default hotkey is `F2`. To use a different key, set the `hotkey` value in
+`settings.json` as shown below:
 
 ```json
 {

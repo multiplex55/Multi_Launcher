@@ -13,7 +13,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            hotkey: Some("CapsLock".into()),
+            hotkey: Some("F2".into()),
             index_paths: None,
             plugin_dirs: None,
         }
@@ -35,14 +35,14 @@ impl Settings {
                 Some(k) => return k,
                 None => {
                     tracing::warn!(
-                        "provided hotkey string '{}' is invalid; using default CapsLock",
+                        "provided hotkey string '{}' is invalid; using default F2",
                         hotkey
                     );
                 }
             }
         }
         Hotkey {
-            key: Key::CapsLock,
+            key: Key::F2,
             ctrl: false,
             shift: false,
             alt: false,
