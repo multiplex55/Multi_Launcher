@@ -167,6 +167,21 @@ impl LauncherApp {
 
         self.results = res;
     }
+
+    #[cfg(target_os = "windows")]
+    pub fn unregister_all_hotkeys(&self) {
+        use windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
+        let mut registered_hotkeys = self.registered_hotkeys.lock().unwrap();
+        for id in registered_hotkeys.values() {
+            unsafe {
+                let _ = UnregisterHotKey(None, *id as i32);
+            }
+        }
+        registered_hotkeys.clear();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub fn unregister_all_hotkeys(&self) {}
 }
 
 impl eframe::App for LauncherApp {
@@ -298,6 +313,7 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.unregister_all_hotkeys();
         self.visible_flag.store(false, Ordering::SeqCst);
         self.last_visible = false;
     }
