@@ -1,6 +1,7 @@
 use crate::actions::{Action, save_actions};
 use crate::gui::LauncherApp;
 use eframe::egui;
+use rfd::FileDialog;
 
 pub struct ActionsEditor {
     label: String,
@@ -51,6 +52,15 @@ impl ActionsEditor {
             ui.horizontal(|ui| {
                 ui.label("Path");
                 ui.text_edit_singleline(&mut self.path);
+                if ui.button("Browse").clicked() {
+                    if let Some(file) = FileDialog::new().pick_file() {
+                        if let Some(p) = file.to_str() {
+                            self.path = p.to_owned();
+                        } else {
+                            self.path = file.display().to_string();
+                        }
+                    }
+                }
             });
             if ui.button("Add").clicked() {
                 if !self.path.is_empty() {

@@ -18,6 +18,7 @@ meval = "0.2"
 libloading = "0.8"
 notify = "6"
 winit = "0.29"
+rfd = "0.15.3"
 
 
 [features]

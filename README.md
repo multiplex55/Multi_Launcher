@@ -90,7 +90,9 @@ Place the resulting library file in one of the directories listed under
 The launcher stores its custom actions in `actions.json`. While running the
 application you can manage this list using the **Edit Commands** dialog. Open
 the launcher with the configured hotkey and press the *Edit Commands* button to
-add or remove entries. Changes are saved back to `actions.json` immediately.
+add or remove entries. A **Browse** button next to the path field opens a native
+file dialog so you can select the executable or file interactively. Changes are
+saved back to `actions.json` immediately.
 
 ## Packaging
 
