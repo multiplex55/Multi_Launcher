@@ -1,5 +1,6 @@
 mod actions;
 mod actions_editor;
+mod settings_editor;
 mod gui;
 mod hotkey;
 mod launcher;
@@ -19,12 +20,22 @@ use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::Settings;
 
 use eframe::egui;
-use std::sync::{Arc, atomic::AtomicBool, Mutex};
+use std::sync::{Arc, atomic::AtomicBool, Mutex, mpsc::{Sender, channel}};
 use std::thread;
+use once_cell::sync::Lazy;
+
+static RESTART_TX: Lazy<Mutex<Option<Sender<Settings>>>> = Lazy::new(|| Mutex::new(None));
+
+pub fn request_hotkey_restart(settings: Settings) {
+    if let Some(tx) = RESTART_TX.lock().unwrap().as_ref() {
+        let _ = tx.send(settings);
+    }
+}
 
 fn spawn_gui(
     actions: Vec<Action>,
-    settings: &Settings,
+    settings: Settings,
+    settings_path: String,
 ) -> (thread::JoinHandle<()>, Arc<AtomicBool>, Arc<Mutex<Option<egui::Context>>>) {
     let actions_for_window = actions.clone();
     let mut plugins = PluginManager::new();
@@ -39,6 +50,7 @@ fn spawn_gui(
     }
 
     let actions_path = "actions.json".to_string();
+    let settings_path_for_window = settings_path.clone();
     let plugin_dirs = settings.plugin_dirs.clone();
     let index_paths = settings.index_paths.clone();
     let visible_flag = Arc::new(AtomicBool::new(false));
@@ -61,8 +73,6 @@ fn spawn_gui(
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    use winit::platform::wayland::EventLoopBuilderExtWayland;
-                    use winit::platform::x11::EventLoopBuilderExtX11;
                     winit::platform::x11::EventLoopBuilderExtX11::with_any_thread(builder, true);
                     winit::platform::wayland::EventLoopBuilderExtWayland::with_any_thread(builder, true);
                 }
@@ -81,6 +91,8 @@ fn spawn_gui(
                     actions_for_window,
                     plugins,
                     actions_path,
+                    settings_path_for_window,
+                    settings.clone(),
                     plugin_dirs,
                     index_paths,
                     flag_clone,
@@ -94,10 +106,13 @@ fn spawn_gui(
 
 fn main() -> anyhow::Result<()> {
     logging::init();
-    let settings = Settings::load("settings.json").unwrap_or_default();
+    let mut settings = Settings::load("settings.json").unwrap_or_default();
     tracing::debug!(?settings, "settings loaded");
     let mut actions = load_actions("actions.json").unwrap_or_default();
     tracing::debug!("{} actions loaded", actions.len());
+
+    let (restart_tx, restart_rx) = channel::<Settings>();
+    *RESTART_TX.lock().unwrap() = Some(restart_tx);
 
     if let Some(paths) = &settings.index_paths {
         actions.extend(indexer::index_paths(paths));
@@ -105,37 +120,29 @@ fn main() -> anyhow::Result<()> {
 
     let hotkey = settings.hotkey();
     tracing::debug!(?hotkey, "configuring hotkeys");
-    let trigger = Arc::new(HotkeyTrigger::new(hotkey));
-    let quit_trigger = settings.quit_hotkey().map(|hk| Arc::new(HotkeyTrigger::new(hk)));
+    let mut trigger = Arc::new(HotkeyTrigger::new(hotkey));
+    let mut quit_trigger = settings.quit_hotkey().map(|hk| Arc::new(HotkeyTrigger::new(hk)));
 
     let mut watched = vec![trigger.clone()];
     if let Some(qt) = &quit_trigger {
         watched.push(qt.clone());
     }
 
-    let listener = HotkeyTrigger::start_listener(watched, "main");
+    let mut listener = HotkeyTrigger::start_listener(watched, "main");
 
 
-    let (handle, visibility, ctx) = spawn_gui(actions.clone(), &settings);
+    let (handle, visibility, ctx) = spawn_gui(actions.clone(), settings.clone(), "settings.json".to_string());
     let mut queued_visibility: Option<bool> = None;
-    let mut quit_requested = false;
 
     loop {
         if handle.is_finished() {
             listener.stop();
-            if quit_requested {
-                let _ = handle.join();
-                break Ok(());
-            } else {
-                tracing::error!("gui thread terminated unexpectedly");
-                let _ = handle.join();
-                break Ok(());
-            }
+            let _ = handle.join();
+            break Ok(());
         }
 
         if let Some(qt) = &quit_trigger {
             if qt.take() {
-                quit_requested = true;
                 listener.stop();
 
                 if let Ok(guard) = ctx.lock() {
@@ -148,6 +155,19 @@ fn main() -> anyhow::Result<()> {
                 let _ = handle.join();
                 break Ok(());
             }
+        }
+
+
+        if let Ok(new_settings) = restart_rx.try_recv() {
+            listener.stop();
+            settings = new_settings.clone();
+            trigger = Arc::new(HotkeyTrigger::new(settings.hotkey()));
+            quit_trigger = settings.quit_hotkey().map(|hk| Arc::new(HotkeyTrigger::new(hk)));
+            let mut watched = vec![trigger.clone()];
+            if let Some(qt) = &quit_trigger {
+                watched.push(qt.clone());
+            }
+            listener = HotkeyTrigger::start_listener(watched, "main");
         }
 
         handle_visibility_trigger(trigger.as_ref(), &visibility, &ctx, &mut queued_visibility);
