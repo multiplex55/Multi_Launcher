@@ -11,6 +11,7 @@ pub struct SettingsEditor {
     plugin_dirs: Vec<String>,
     index_input: String,
     plugin_input: String,
+    debug_logging: bool,
 }
 
 impl SettingsEditor {
@@ -22,6 +23,7 @@ impl SettingsEditor {
             plugin_dirs: settings.plugin_dirs.clone().unwrap_or_default(),
             index_input: String::new(),
             plugin_input: String::new(),
+            debug_logging: settings.debug_logging,
         }
     }
 
@@ -47,6 +49,7 @@ impl SettingsEditor {
             } else {
                 Some(self.plugin_dirs.clone())
             },
+            debug_logging: self.debug_logging,
         }
     }
 
@@ -59,6 +62,19 @@ impl SettingsEditor {
             ui.horizontal(|ui| {
                 ui.label("Quit hotkey");
                 ui.text_edit_singleline(&mut self.quit_hotkey);
+            });
+
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_label("Debug logging")
+                    .selected_text(if self.debug_logging {
+                        "Enabled"
+                    } else {
+                        "Disabled"
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.debug_logging, false, "Disabled");
+                        ui.selectable_value(&mut self.debug_logging, true, "Enabled");
+                    });
             });
 
             ui.separator();

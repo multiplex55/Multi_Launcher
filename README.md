@@ -25,8 +25,9 @@ cargo build --release --features unstable_grab
 This feature is defined in `Cargo.toml` and enables the underlying `rdev`
 capability used to grab keyboard events.
 
-For debugging, set the `RUST_LOG` environment variable before running the
-program to see informational messages:
+For debugging, enable **Debug logging** in the settings window. When this
+option is active, you can further adjust the verbosity by setting the
+`RUST_LOG` environment variable before running the program:
 
 ```bash
 RUST_LOG=info cargo run --release --features unstable_grab
@@ -49,7 +50,8 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
   "hotkey": "F2",
   "quit_hotkey": "Shift+Escape",
   "index_paths": ["/usr/share/applications"],
-  "plugin_dirs": ["./plugins"]
+  "plugin_dirs": ["./plugins"],
+  "debug_logging": false
 }
 ```
 

@@ -105,8 +105,8 @@ fn spawn_gui(
 }
 
 fn main() -> anyhow::Result<()> {
-    logging::init();
     let mut settings = Settings::load("settings.json").unwrap_or_default();
+    logging::init(settings.debug_logging);
     tracing::debug!(?settings, "settings loaded");
     let mut actions = load_actions("actions.json").unwrap_or_default();
     tracing::debug!("{} actions loaded", actions.len());
