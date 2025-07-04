@@ -153,6 +153,8 @@ pub struct HotkeyTrigger {
 
 pub struct HotkeyListener {
     stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+    stop_tx: crossbeam_channel::Sender<()>,
 }
 
 impl HotkeyTrigger {
@@ -166,14 +168,16 @@ impl HotkeyTrigger {
         }
     }
 
+    #[cfg(not(test))]
     pub fn start_listener(triggers: Vec<Arc<HotkeyTrigger>>, label: &'static str) -> HotkeyListener {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_clone = stop_flag.clone();
+        let (tx, rx) = crossbeam_channel::bounded::<()>(1);
         let watch_keys: Vec<Key> = triggers.iter().map(|t| t.key).collect();
         let need_ctrl: Vec<bool> = triggers.iter().map(|t| t.ctrl).collect();
         let need_shift: Vec<bool> = triggers.iter().map(|t| t.shift).collect();
         let need_alt: Vec<bool> = triggers.iter().map(|t| t.alt).collect();
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             while !stop_clone.load(Ordering::SeqCst) {
                 let open_listeners: Vec<_> = triggers.iter().map(|t| t.open.clone()).collect();
                 let mut watch_pressed = vec![false; triggers.len()];
@@ -186,7 +190,11 @@ impl HotkeyTrigger {
                 let need_shift = need_shift.clone();
                 let need_alt = need_alt.clone();
 
+                let rx_inner = rx.clone();
                 let result = listen(move |event| {
+                    if rx_inner.try_recv().is_ok() {
+                        return;
+                    }
                     match event.event_type {
                         EventType::KeyPress(k) => {
                             match k {
@@ -244,7 +252,23 @@ impl HotkeyTrigger {
             }
         });
 
-        HotkeyListener { stop: stop_flag }
+        HotkeyListener { stop: stop_flag, handle: Some(handle), stop_tx: tx }
+    }
+
+    #[cfg(test)]
+    pub fn start_listener(_triggers: Vec<Arc<HotkeyTrigger>>, _label: &'static str) -> HotkeyListener {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop_flag.clone();
+        let (tx, rx) = crossbeam_channel::bounded::<()>(1);
+        let handle = thread::spawn(move || {
+            while !stop_clone.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(10));
+                if rx.try_recv().is_ok() {
+                    break;
+                }
+            }
+        });
+        HotkeyListener { stop: stop_flag, handle: Some(handle), stop_tx: tx }
     }
 
     pub fn take(&self) -> bool {
@@ -261,8 +285,12 @@ impl HotkeyTrigger {
 }
 
 impl HotkeyListener {
-    pub fn stop(&self) {
+    pub fn stop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        let _ = self.stop_tx.send(());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 

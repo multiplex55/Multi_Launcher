@@ -2317,6 +2317,7 @@ name = "multi_launcher"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "crossbeam-channel",
  "eframe",
  "fuzzy-matcher",
  "libloading 0.8.6",
