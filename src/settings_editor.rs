@@ -1,5 +1,6 @@
 use crate::settings::Settings;
 use crate::gui::LauncherApp;
+use crate::{request_hotkey_restart, request_hotkey_unregister};
 use eframe::egui;
 use rfd::FileDialog;
 
@@ -12,6 +13,7 @@ pub struct SettingsEditor {
     index_input: String,
     plugin_input: String,
     debug_logging: bool,
+    hotkey_changed: bool,
 }
 
 impl SettingsEditor {
@@ -24,6 +26,7 @@ impl SettingsEditor {
             index_input: String::new(),
             plugin_input: String::new(),
             debug_logging: settings.debug_logging,
+            hotkey_changed: false,
         }
     }
 
@@ -60,7 +63,11 @@ impl SettingsEditor {
             .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Launcher hotkey");
-                ui.text_edit_singleline(&mut self.hotkey);
+                let resp = ui.text_edit_singleline(&mut self.hotkey);
+                if resp.changed() && !self.hotkey_changed {
+                    request_hotkey_unregister();
+                    self.hotkey_changed = true;
+                }
             });
             ui.horizontal(|ui| {
                 ui.label("Quit hotkey");
@@ -147,7 +154,8 @@ impl SettingsEditor {
                         new_settings.plugin_dirs.clone(),
                         new_settings.index_paths.clone(),
                     );
-                    crate::request_hotkey_restart(new_settings);
+                    request_hotkey_restart(new_settings);
+                    self.hotkey_changed = false;
                 }
             }
         });

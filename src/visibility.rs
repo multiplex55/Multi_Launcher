@@ -2,6 +2,8 @@ use eframe::egui;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 
 use crate::hotkey::HotkeyTrigger;
+use poll_promise::Promise;
+use std::time::Duration;
 
 
 /// Trait abstracting over an `egui::Context` for viewport commands.
@@ -58,6 +60,35 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
                 tracing::debug!("Applied queued visibility: {}", next);
             }
         }
+    }
+}
+
+pub struct HotkeyPoller {
+    stop: Arc<AtomicBool>,
+    promise: Promise<()>,
+}
+
+pub fn start_hotkey_poller(trigger: Arc<HotkeyTrigger>) -> HotkeyPoller {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = stop.clone();
+    let promise = Promise::spawn_thread("hotkey_poller", move || {
+        while !stop_clone.load(Ordering::SeqCst) {
+            if trigger.peek() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    HotkeyPoller { stop, promise }
+}
+
+impl HotkeyPoller {
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+
+    pub fn ready(&self) -> bool {
+        self.promise.ready().is_some()
     }
 }
 

@@ -258,6 +258,11 @@ impl HotkeyTrigger {
         }
     }
 
+    /// Check if the trigger flag is set without consuming it.
+    pub fn peek(&self) -> bool {
+        *self.open.lock().unwrap()
+    }
+
 }
 
 impl HotkeyListener {

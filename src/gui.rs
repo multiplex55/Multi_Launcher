@@ -198,6 +198,9 @@ impl eframe::App for LauncherApp {
                     });
                     if ui.button("Force Hide").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                        ctx.request_repaint();
+                        self.visible_flag.store(false, Ordering::SeqCst);
+                        self.last_visible = false;
                     }
                     if ui.button("Close Application").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
