@@ -4,7 +4,6 @@ use rdev::{grab, Event};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::thread;
 use std::time::Duration;
-use tracing;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Hotkey {
@@ -174,7 +173,6 @@ impl HotkeyTrigger {
         let need_ctrl: Vec<bool> = triggers.iter().map(|t| t.ctrl).collect();
         let need_shift: Vec<bool> = triggers.iter().map(|t| t.shift).collect();
         let need_alt: Vec<bool> = triggers.iter().map(|t| t.alt).collect();
-
         tracing::debug!(?watch_keys, %label, "Hotkey listener started");
         thread::spawn(move || {
             while !stop_clone.load(Ordering::SeqCst) {

@@ -10,11 +10,12 @@ mod indexer;
 mod settings;
 mod logging;
 mod visibility;
+mod system_hotkey;
 
 use crate::actions::{load_actions, Action};
 use crate::gui::LauncherApp;
 use crate::hotkey::HotkeyTrigger;
-use crate::visibility::{handle_visibility_trigger, HotkeyPoller, start_hotkey_poller};
+use crate::visibility::handle_visibility_trigger;
 use crate::plugin::PluginManager;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::Settings;
@@ -129,6 +130,14 @@ fn main() -> anyhow::Result<()> {
 
     let hotkey = settings.hotkey();
     tracing::debug!(?hotkey, "configuring hotkeys");
+    let mut system_hotkey = system_hotkey::SystemHotkey::new(
+        settings.hotkey.as_deref().unwrap_or("F2"),
+    )
+    .unwrap_or_else(|e| {
+        tracing::warn!("{}", e);
+        system_hotkey::SystemHotkey::new("F2").unwrap()
+    });
+    system_hotkey.register(1);
     let mut trigger = Arc::new(HotkeyTrigger::new(hotkey));
     let mut quit_trigger = settings.quit_hotkey().map(|hk| Arc::new(HotkeyTrigger::new(hk)));
 
@@ -138,9 +147,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut listener = HotkeyTrigger::start_listener(watched, "main");
-    let mut poller = start_hotkey_poller(trigger.clone());
+    let mut poller = visibility::start_hotkey_poller(trigger.clone());
     let mut listener_active = true;
-
 
     let (handle, visibility, ctx) = spawn_gui(actions.clone(), settings.clone(), "settings.json".to_string());
     let mut queued_visibility: Option<bool> = None;
@@ -172,6 +180,7 @@ fn main() -> anyhow::Result<()> {
         if unregister_rx.try_recv().is_ok() && listener_active {
             listener.stop();
             poller.stop();
+            system_hotkey.unregister();
             listener_active = false;
         }
 
@@ -179,6 +188,7 @@ fn main() -> anyhow::Result<()> {
             if listener_active {
                 listener.stop();
                 poller.stop();
+                system_hotkey.unregister();
             }
             settings = new_settings.clone();
             trigger = Arc::new(HotkeyTrigger::new(settings.hotkey()));
@@ -188,13 +198,18 @@ fn main() -> anyhow::Result<()> {
                 watched.push(qt.clone());
             }
             listener = HotkeyTrigger::start_listener(watched, "main");
-            poller = start_hotkey_poller(trigger.clone());
+            poller = visibility::start_hotkey_poller(trigger.clone());
+            system_hotkey = system_hotkey::SystemHotkey::new(
+                settings.hotkey.as_deref().unwrap_or("F2"),
+            )
+            .unwrap_or_else(|_| system_hotkey::SystemHotkey::new("F2").unwrap());
+            system_hotkey.register(1);
             listener_active = true;
         }
 
         if poller.ready() {
             handle_visibility_trigger(trigger.as_ref(), &visibility, &ctx, &mut queued_visibility);
-            poller = start_hotkey_poller(trigger.clone());
+            poller = visibility::start_hotkey_poller(trigger.clone());
         }
 
         std::thread::sleep(std::time::Duration::from_millis(50));

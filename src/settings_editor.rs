@@ -65,7 +65,7 @@ impl SettingsEditor {
                 ui.label("Launcher hotkey");
                 let resp = ui.text_edit_singleline(&mut self.hotkey);
                 if resp.changed() && !self.hotkey_changed {
-                    request_hotkey_unregister();
+                    crate::request_hotkey_unregister();
                     self.hotkey_changed = true;
                 }
             });
@@ -154,7 +154,7 @@ impl SettingsEditor {
                         new_settings.plugin_dirs.clone(),
                         new_settings.index_paths.clone(),
                     );
-                    request_hotkey_restart(new_settings);
+                    crate::request_hotkey_restart(new_settings);
                     self.hotkey_changed = false;
                 }
             }

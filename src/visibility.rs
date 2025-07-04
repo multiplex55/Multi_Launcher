@@ -63,6 +63,7 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
     }
 }
 
+
 pub struct HotkeyPoller {
     stop: Arc<AtomicBool>,
     promise: Promise<()>,
@@ -91,4 +92,3 @@ impl HotkeyPoller {
         self.promise.ready().is_some()
     }
 }
-
