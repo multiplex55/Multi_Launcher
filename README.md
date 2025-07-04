@@ -25,9 +25,9 @@ cargo build --release --features unstable_grab
 This feature is defined in `Cargo.toml` and enables the underlying `rdev`
 capability used to grab keyboard events.
 
-For debugging, set the `RUST_LOG` environment variable before running the
-program to see informational messages, or enable **Debug logging** in the
-settings window:
+For debugging, enable **Debug logging** in the settings window. When this
+option is active, you can further adjust the verbosity by setting the
+`RUST_LOG` environment variable before running the program:
 
 ```bash
 RUST_LOG=info cargo run --release --features unstable_grab
