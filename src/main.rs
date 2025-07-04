@@ -53,7 +53,7 @@ fn spawn_gui(
     let settings_path_for_window = settings_path.clone();
     let plugin_dirs = settings.plugin_dirs.clone();
     let index_paths = settings.index_paths.clone();
-    let visible_flag = Arc::new(AtomicBool::new(false));
+    let visible_flag = Arc::new(AtomicBool::new(true));
     let flag_clone = visible_flag.clone();
     let ctx_handle = Arc::new(Mutex::new(None));
     let ctx_clone = ctx_handle.clone();
@@ -64,7 +64,7 @@ fn spawn_gui(
                 .with_inner_size([400.0, 220.0])
                 .with_min_inner_size([320.0, 160.0])
                 .with_always_on_top()
-                .with_visible(false),
+                .with_visible(true),
             event_loop_builder: Some(Box::new(|builder| {
                 #[cfg(target_os = "windows")]
                 {
