@@ -14,7 +14,7 @@ mod visibility;
 use crate::actions::{load_actions, Action};
 use crate::gui::LauncherApp;
 use crate::hotkey::HotkeyTrigger;
-use crate::visibility::handle_visibility_trigger;
+use crate::visibility::{handle_visibility_trigger, HotkeyPoller, start_hotkey_poller};
 use crate::plugin::PluginManager;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::Settings;
@@ -25,10 +25,17 @@ use std::thread;
 use once_cell::sync::Lazy;
 
 static RESTART_TX: Lazy<Mutex<Option<Sender<Settings>>>> = Lazy::new(|| Mutex::new(None));
+static UNREGISTER_TX: Lazy<Mutex<Option<Sender<()>>>> = Lazy::new(|| Mutex::new(None));
 
 pub fn request_hotkey_restart(settings: Settings) {
     if let Some(tx) = RESTART_TX.lock().unwrap().as_ref() {
         let _ = tx.send(settings);
+    }
+}
+
+pub fn request_hotkey_unregister() {
+    if let Some(tx) = UNREGISTER_TX.lock().unwrap().as_ref() {
+        let _ = tx.send(());
     }
 }
 
@@ -113,6 +120,8 @@ fn main() -> anyhow::Result<()> {
 
     let (restart_tx, restart_rx) = channel::<Settings>();
     *RESTART_TX.lock().unwrap() = Some(restart_tx);
+    let (unregister_tx, unregister_rx) = channel::<()>();
+    *UNREGISTER_TX.lock().unwrap() = Some(unregister_tx);
 
     if let Some(paths) = &settings.index_paths {
         actions.extend(indexer::index_paths(paths));
@@ -129,6 +138,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut listener = HotkeyTrigger::start_listener(watched, "main");
+    let mut poller = start_hotkey_poller(trigger.clone());
+    let mut listener_active = true;
 
 
     let (handle, visibility, ctx) = spawn_gui(actions.clone(), settings.clone(), "settings.json".to_string());
@@ -158,8 +169,17 @@ fn main() -> anyhow::Result<()> {
         }
 
 
-        if let Ok(new_settings) = restart_rx.try_recv() {
+        if unregister_rx.try_recv().is_ok() && listener_active {
             listener.stop();
+            poller.stop();
+            listener_active = false;
+        }
+
+        if let Ok(new_settings) = restart_rx.try_recv() {
+            if listener_active {
+                listener.stop();
+                poller.stop();
+            }
             settings = new_settings.clone();
             trigger = Arc::new(HotkeyTrigger::new(settings.hotkey()));
             quit_trigger = settings.quit_hotkey().map(|hk| Arc::new(HotkeyTrigger::new(hk)));
@@ -168,9 +188,14 @@ fn main() -> anyhow::Result<()> {
                 watched.push(qt.clone());
             }
             listener = HotkeyTrigger::start_listener(watched, "main");
+            poller = start_hotkey_poller(trigger.clone());
+            listener_active = true;
         }
 
-        handle_visibility_trigger(trigger.as_ref(), &visibility, &ctx, &mut queued_visibility);
+        if poller.ready() {
+            handle_visibility_trigger(trigger.as_ref(), &visibility, &ctx, &mut queued_visibility);
+            poller = start_hotkey_poller(trigger.clone());
+        }
 
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
