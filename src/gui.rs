@@ -43,6 +43,11 @@ pub struct LauncherApp {
 }
 
 impl LauncherApp {
+    pub fn update_paths(&mut self, plugin_dirs: Option<Vec<String>>, index_paths: Option<Vec<String>>) {
+        self.plugin_dirs = plugin_dirs;
+        self.index_paths = index_paths;
+    }
+
     pub fn new(
         ctx: &egui::Context,
         actions: Vec<Action>,
@@ -163,7 +168,7 @@ impl LauncherApp {
 }
 
 impl eframe::App for LauncherApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use egui::*;
 
         tracing::debug!("LauncherApp::update called");

@@ -20,7 +20,7 @@ use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::Settings;
 
 use eframe::egui;
-use std::sync::{Arc, atomic::AtomicBool, Mutex, mpsc::{Sender, Receiver, channel}};
+use std::sync::{Arc, atomic::AtomicBool, Mutex, mpsc::{Sender, channel}};
 use std::thread;
 use once_cell::sync::Lazy;
 
@@ -34,7 +34,7 @@ pub fn request_hotkey_restart(settings: Settings) {
 
 fn spawn_gui(
     actions: Vec<Action>,
-    settings: &Settings,
+    settings: Settings,
     settings_path: String,
 ) -> (thread::JoinHandle<()>, Arc<AtomicBool>, Arc<Mutex<Option<egui::Context>>>) {
     let actions_for_window = actions.clone();
@@ -73,8 +73,6 @@ fn spawn_gui(
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    use winit::platform::wayland::EventLoopBuilderExtWayland;
-                    use winit::platform::x11::EventLoopBuilderExtX11;
                     winit::platform::x11::EventLoopBuilderExtX11::with_any_thread(builder, true);
                     winit::platform::wayland::EventLoopBuilderExtWayland::with_any_thread(builder, true);
                 }
@@ -133,26 +131,18 @@ fn main() -> anyhow::Result<()> {
     let mut listener = HotkeyTrigger::start_listener(watched, "main");
 
 
-    let (handle, visibility, ctx) = spawn_gui(actions.clone(), &settings, "settings.json".to_string());
+    let (handle, visibility, ctx) = spawn_gui(actions.clone(), settings.clone(), "settings.json".to_string());
     let mut queued_visibility: Option<bool> = None;
-    let mut quit_requested = false;
 
     loop {
         if handle.is_finished() {
             listener.stop();
-            if quit_requested {
-                let _ = handle.join();
-                break Ok(());
-            } else {
-                tracing::error!("gui thread terminated unexpectedly");
-                let _ = handle.join();
-                break Ok(());
-            }
+            let _ = handle.join();
+            break Ok(());
         }
 
         if let Some(qt) = &quit_trigger {
             if qt.take() {
-                quit_requested = true;
                 listener.stop();
 
                 if let Ok(guard) = ctx.lock() {

@@ -18,7 +18,7 @@ meval = "0.2"
 libloading = "0.8"
 notify = "6"
 winit = "0.29"
-rfd = "0.15.3"
+rfd = { version = "0.15.3", default-features = false, features = ["gtk3"] }
 once_cell = "1"
 
 

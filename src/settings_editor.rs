@@ -3,6 +3,7 @@ use crate::gui::LauncherApp;
 use eframe::egui;
 use rfd::FileDialog;
 
+#[derive(Default)]
 pub struct SettingsEditor {
     hotkey: String,
     quit_hotkey: String,
@@ -123,8 +124,10 @@ impl SettingsEditor {
                 if let Err(e) = new_settings.save(&app.settings_path) {
                     app.error = Some(format!("Failed to save: {e}"));
                 } else {
-                    app.plugin_dirs = new_settings.plugin_dirs.clone();
-                    app.index_paths = new_settings.index_paths.clone();
+                    app.update_paths(
+                        new_settings.plugin_dirs.clone(),
+                        new_settings.index_paths.clone(),
+                    );
                     crate::request_hotkey_restart(new_settings);
                 }
             }
