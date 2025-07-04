@@ -49,6 +49,8 @@ impl Hotkey {
             unsafe {
                 if RegisterHotKey(None, id, HOT_KEY_MODIFIERS(modifiers), vk).is_ok() {
                     self.id = Some(id);
+                    let mut registered_hotkeys = app.registered_hotkeys.lock().unwrap();
+                    registered_hotkeys.insert(self.key_sequence.clone(), id as usize);
                     info!("Registered hotkey '{}' with ID {}.", self.key_sequence, id);
                     return true;
                 } else {
@@ -62,10 +64,12 @@ impl Hotkey {
         false
     }
 
-    pub fn unregister(&self) -> bool {
+    pub fn unregister(&self, app: &crate::gui::LauncherApp) -> bool {
         if let Some(id) = self.id {
             unsafe {
                 if UnregisterHotKey(None, id).is_ok() {
+                    let mut registered_hotkeys = app.registered_hotkeys.lock().unwrap();
+                    registered_hotkeys.remove(&self.key_sequence);
                     info!("Unregistered hotkey '{}'.", self.key_sequence);
                     return true;
                 } else {

@@ -8,7 +8,7 @@ use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::indexer;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher, Config, EventKind};
 use std::sync::mpsc::{channel, Receiver};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use eframe::egui;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -27,6 +27,7 @@ pub struct LauncherApp {
     pub error: Option<String>,
     pub plugins: PluginManager,
     pub usage: HashMap<String, u32>,
+    pub registered_hotkeys: Mutex<HashMap<String, usize>>,
     pub show_editor: bool,
     pub show_settings: bool,
     pub actions_path: String,
@@ -123,6 +124,7 @@ impl LauncherApp {
             error: None,
             plugins,
             usage: HashMap::new(),
+            registered_hotkeys: Mutex::new(HashMap::new()),
             show_editor: false,
             show_settings: false,
             actions_path,
