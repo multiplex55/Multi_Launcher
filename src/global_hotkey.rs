@@ -2,9 +2,11 @@ use crate::workspace::is_valid_key_combo;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use windows::Win32::UI::Input::KeyboardAndMouse::RegisterHotKey;
-use windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
-use windows::Win32::UI::Input::KeyboardAndMouse::HOT_KEY_MODIFIERS;
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_ALT,
+    MOD_SHIFT, MOD_WIN,
+};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Hotkey {
@@ -31,16 +33,17 @@ impl Hotkey {
         }
     }
 
+    #[cfg(target_os = "windows")]
     pub fn register(&mut self, app: &crate::gui::LauncherApp, id: i32) -> bool {
         let mut modifiers: u32 = 0;
         let mut vk_code: Option<u32> = None;
 
         for part in self.key_sequence.split('+') {
             match part.to_lowercase().as_str() {
-                "ctrl" => modifiers |= windows::Win32::UI::Input::KeyboardAndMouse::MOD_CONTROL.0,
-                "alt" => modifiers |= windows::Win32::UI::Input::KeyboardAndMouse::MOD_ALT.0,
-                "shift" => modifiers |= windows::Win32::UI::Input::KeyboardAndMouse::MOD_SHIFT.0,
-                "win" => modifiers |= windows::Win32::UI::Input::KeyboardAndMouse::MOD_WIN.0,
+                "ctrl" => modifiers |= MOD_CONTROL.0,
+                "alt" => modifiers |= MOD_ALT.0,
+                "shift" => modifiers |= MOD_SHIFT.0,
+                "win" => modifiers |= MOD_WIN.0,
                 _ => vk_code = crate::window_manager::virtual_key_from_string(part),
             }
         }
@@ -64,6 +67,13 @@ impl Hotkey {
         false
     }
 
+    #[cfg(not(target_os = "windows"))]
+    pub fn register(&mut self, _app: &crate::gui::LauncherApp, _id: i32) -> bool {
+        warn!("Hotkey registration is only supported on Windows.");
+        false
+    }
+
+    #[cfg(target_os = "windows")]
     pub fn unregister(&self, app: &crate::gui::LauncherApp) -> bool {
         if let Some(id) = self.id {
             unsafe {
@@ -77,6 +87,12 @@ impl Hotkey {
                 }
             }
         }
+        false
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub fn unregister(&self, _app: &crate::gui::LauncherApp) -> bool {
+        warn!("Hotkey unregistration is only supported on Windows.");
         false
     }
 }
