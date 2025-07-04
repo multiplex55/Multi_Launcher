@@ -25,7 +25,10 @@ impl Default for ActionsEditor {
 
 impl ActionsEditor {
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
-        egui::Window::new("Command Editor").show(ctx, |ui| {
+        let mut open = app.show_editor;
+        egui::Window::new("Command Editor")
+            .open(&mut open)
+            .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Search");
                 ui.text_edit_singleline(&mut self.search);
@@ -117,5 +120,6 @@ impl ActionsEditor {
                 });
             });
         }
+        app.show_editor = open;
     }
 }
