@@ -54,7 +54,10 @@ impl SettingsEditor {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
-        egui::Window::new("Settings").show(ctx, |ui| {
+        let mut open = app.show_settings;
+        egui::Window::new("Settings")
+            .open(&mut open)
+            .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Launcher hotkey");
                 ui.text_edit_singleline(&mut self.hotkey);
@@ -148,5 +151,6 @@ impl SettingsEditor {
                 }
             }
         });
+        app.show_settings = open;
     }
 }

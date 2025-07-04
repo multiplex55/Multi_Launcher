@@ -190,6 +190,14 @@ impl eframe::App for LauncherApp {
         TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    ui.menu_button("Commands", |ui| {
+                        if ui.button("Edit Commands").clicked() {
+                            self.show_editor = !self.show_editor;
+                        }
+                    });
+                    if ui.button("Force Hide").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    }
                     if ui.button("Close Application").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         self.visible_flag.store(false, Ordering::SeqCst);
@@ -236,12 +244,6 @@ impl eframe::App for LauncherApp {
 
         CentralPanel::default().show(ctx, |ui| {
             ui.heading("🚀 LNCHR");
-            if ui.button("Edit Commands").clicked() {
-                self.show_editor = !self.show_editor;
-            }
-            if ui.button("Force Hide").clicked() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            }
             if let Some(err) = &self.error {
                 ui.colored_label(Color32::RED, err);
             }
