@@ -9,6 +9,10 @@ pub struct Settings {
     pub quit_hotkey: Option<String>,
     pub index_paths: Option<Vec<String>>,
     pub plugin_dirs: Option<Vec<String>>,
+    /// When enabled the application initialises the logger at debug level.
+    /// Defaults to `false` when the field is missing in the settings file.
+    #[serde(default)]
+    pub debug_logging: bool,
 }
 
 impl Default for Settings {
@@ -18,6 +22,7 @@ impl Default for Settings {
             quit_hotkey: None,
             index_paths: None,
             plugin_dirs: None,
+            debug_logging: false,
         }
     }
 }
