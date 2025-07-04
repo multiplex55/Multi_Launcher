@@ -82,6 +82,8 @@ impl ActionsEditor {
                             }
                         });
                     });
+                } else if ui.button("New Command").clicked() {
+                    self.show_new = true;
                 }
             });
 
@@ -115,10 +117,6 @@ impl ActionsEditor {
                 }
             }
 
-            ui.separator();
-            if ui.button("New Command").clicked() {
-                self.show_new = true;
-            }
         });
 
         app.show_editor = open;
