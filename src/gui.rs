@@ -1,5 +1,7 @@
 use crate::actions::{load_actions, Action};
 use crate::actions_editor::ActionsEditor;
+use crate::settings_editor::SettingsEditor;
+use crate::settings::Settings;
 use crate::launcher::launch_action;
 use crate::plugin::PluginManager;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
@@ -26,8 +28,11 @@ pub struct LauncherApp {
     pub plugins: PluginManager,
     pub usage: HashMap<String, u32>,
     pub show_editor: bool,
+    pub show_settings: bool,
     pub actions_path: String,
     pub editor: ActionsEditor,
+    pub settings_editor: SettingsEditor,
+    pub settings_path: String,
     #[allow(dead_code)]
     watchers: Vec<RecommendedWatcher>,
     rx: Receiver<WatchEvent>,
@@ -43,6 +48,8 @@ impl LauncherApp {
         actions: Vec<Action>,
         plugins: PluginManager,
         actions_path: String,
+        settings_path: String,
+        settings: Settings,
         plugin_dirs: Option<Vec<String>>,
         index_paths: Option<Vec<String>>,
         visible_flag: Arc<AtomicBool>,
@@ -112,8 +119,11 @@ impl LauncherApp {
             plugins,
             usage: HashMap::new(),
             show_editor: false,
+            show_settings: false,
             actions_path,
             editor: ActionsEditor::default(),
+            settings_editor: SettingsEditor::new(&settings),
+            settings_path,
             watchers,
             rx,
             plugin_dirs,
@@ -179,6 +189,11 @@ impl eframe::App for LauncherApp {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         self.visible_flag.store(false, Ordering::SeqCst);
                         self.last_visible = false;
+                    }
+                });
+                ui.menu_button("Settings", |ui| {
+                    if ui.button("Edit Settings").clicked() {
+                        self.show_settings = !self.show_settings;
                     }
                 });
             });
@@ -249,6 +264,12 @@ impl eframe::App for LauncherApp {
             let mut editor = std::mem::take(&mut self.editor);
             editor.ui(ctx, self);
             self.editor = editor;
+        }
+        let show_settings = self.show_settings;
+        if show_settings {
+            let mut ed = std::mem::take(&mut self.settings_editor);
+            ed.ui(ctx, self);
+            self.settings_editor = ed;
         }
     }
 
