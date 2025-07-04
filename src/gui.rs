@@ -219,8 +219,11 @@ impl eframe::App for LauncherApp {
                     }
                     if ui.button("Close Application").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        self.unregister_all_hotkeys();
                         self.visible_flag.store(false, Ordering::SeqCst);
                         self.last_visible = false;
+                        #[cfg(not(test))]
+                        std::process::exit(0);
                     }
                 });
                 ui.menu_button("Settings", |ui| {
@@ -316,5 +319,7 @@ impl eframe::App for LauncherApp {
         self.unregister_all_hotkeys();
         self.visible_flag.store(false, Ordering::SeqCst);
         self.last_visible = false;
+        #[cfg(not(test))]
+        std::process::exit(0);
     }
 }
