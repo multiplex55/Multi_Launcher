@@ -21,6 +21,8 @@ use crate::settings::Settings;
 
 use eframe::egui;
 use std::sync::{Arc, atomic::AtomicBool, Mutex, mpsc::{Sender, channel}};
+
+static EXIT_TX: Lazy<Mutex<Option<Sender<()>>>> = Lazy::new(|| Mutex::new(None));
 use std::thread;
 use once_cell::sync::Lazy;
 
@@ -29,6 +31,12 @@ static RESTART_TX: Lazy<Mutex<Option<Sender<Settings>>>> = Lazy::new(|| Mutex::n
 pub fn request_hotkey_restart(settings: Settings) {
     if let Some(tx) = RESTART_TX.lock().unwrap().as_ref() {
         let _ = tx.send(settings);
+    }
+}
+
+pub fn request_exit() {
+    if let Some(tx) = EXIT_TX.lock().unwrap().as_ref() {
+        let _ = tx.send(());
     }
 }
 
@@ -113,6 +121,8 @@ fn main() -> anyhow::Result<()> {
 
     let (restart_tx, restart_rx) = channel::<Settings>();
     *RESTART_TX.lock().unwrap() = Some(restart_tx);
+    let (exit_tx, exit_rx) = channel::<()>();
+    *EXIT_TX.lock().unwrap() = Some(exit_tx);
 
     if let Some(paths) = &settings.index_paths {
         actions.extend(indexer::index_paths(paths));
@@ -137,6 +147,18 @@ fn main() -> anyhow::Result<()> {
     loop {
         if handle.is_finished() {
             listener.stop();
+            let _ = handle.join();
+            break Ok(());
+        }
+
+        if exit_rx.try_recv().is_ok() {
+            listener.stop();
+            if let Ok(guard) = ctx.lock() {
+                if let Some(c) = &*guard {
+                    c.send_viewport_cmd(egui::ViewportCommand::Close);
+                    c.request_repaint();
+                }
+            }
             let _ = handle.join();
             break Ok(());
         }

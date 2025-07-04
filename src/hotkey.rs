@@ -1,4 +1,4 @@
-use rdev::{listen, EventType, Key};
+use rdev::{listen, simulate, EventType, Key};
 #[cfg(feature = "unstable_grab")]
 use rdev::{grab, Event};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
@@ -288,6 +288,8 @@ impl HotkeyListener {
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = self.stop_tx.send(());
+        // wake the listener so it can observe the stop signal
+        let _ = simulate(&EventType::MouseMove { x: 0.0, y: 0.0 });
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }

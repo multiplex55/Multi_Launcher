@@ -18,3 +18,10 @@ pub mod gui;
 pub fn request_hotkey_restart(_settings: settings::Settings) {
     // no-op stub for library context
 }
+
+/// Request the running application to exit.
+///
+/// This is a no-op when the library is used standalone.
+pub fn request_exit() {
+    // no-op stub for library context
+}

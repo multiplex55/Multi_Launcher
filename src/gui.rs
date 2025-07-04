@@ -184,6 +184,7 @@ impl eframe::App for LauncherApp {
         if self.last_visible != should_be_visible {
             tracing::debug!("gui thread -> visible: {}", should_be_visible);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(should_be_visible));
+            ctx.request_repaint();
             tracing::debug!("ViewportCommand::Visible({}) sent", should_be_visible);
             self.last_visible = should_be_visible;
         }
@@ -204,6 +205,8 @@ impl eframe::App for LauncherApp {
                     }
                     if ui.button("Close Application").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        ctx.request_repaint();
+                        crate::request_exit();
                         self.visible_flag.store(false, Ordering::SeqCst);
                         self.last_visible = false;
                     }
