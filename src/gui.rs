@@ -180,6 +180,7 @@ impl eframe::App for LauncherApp {
             should_be_visible=?should_be_visible,
             last_visible=?self.last_visible
         );
+        let just_became_visible = !self.last_visible && should_be_visible;
         if self.last_visible != should_be_visible {
             tracing::debug!("gui thread -> visible: {}", should_be_visible);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(should_be_visible));
@@ -249,8 +250,21 @@ impl eframe::App for LauncherApp {
             }
 
             let input = ui.text_edit_singleline(&mut self.query);
+            if just_became_visible {
+                input.request_focus();
+            }
             if input.changed() {
                 self.search();
+            }
+
+            if self.results.len() == 1 && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if let Err(e) = launch_action(&self.results[0]) {
+                    self.error = Some(format!("Failed: {e}"));
+                } else {
+                    let a = &self.results[0];
+                    let count = self.usage.entry(a.action.clone()).or_insert(0);
+                    *count += 1;
+                }
             }
 
             ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
