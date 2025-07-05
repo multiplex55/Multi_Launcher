@@ -200,7 +200,7 @@ pub fn current_mouse_position() -> Option<(f32, f32)> {
 }
 
 #[cfg(target_os = "windows")]
-use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
+use raw_window_handle::{HasRawWindowHandle, HasWindowHandle, RawWindowHandle};
 
 /// On Windows, restore the window and bring it to the foreground.
 #[cfg(target_os = "windows")]
@@ -215,8 +215,13 @@ pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
 /// Extract the HWND from an eframe [`Frame`].
 #[cfg(target_os = "windows")]
 pub fn get_hwnd(frame: &eframe::Frame) -> Option<windows::Win32::Foundation::HWND> {
-    match frame.raw_window_handle() {
-        RawWindowHandle::Win32(handle) => Some(windows::Win32::Foundation::HWND(handle.hwnd.get())),
-        _ => None,
+    if let Ok(handle) = frame.window_handle() {
+        match handle.raw_window_handle() {
+            RawWindowHandle::Win32(h) =>
+                Some(windows::Win32::Foundation::HWND(h.hwnd.cast())),
+            _ => None,
+        }
+    } else {
+        None
     }
 }
