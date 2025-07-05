@@ -14,6 +14,8 @@ pub struct SettingsEditor {
     debug_logging: bool,
     offscreen_x: i32,
     offscreen_y: i32,
+    window_w: i32,
+    window_h: i32,
 }
 
 impl SettingsEditor {
@@ -28,6 +30,8 @@ impl SettingsEditor {
             debug_logging: settings.debug_logging,
             offscreen_x: settings.offscreen_pos.unwrap_or((2000, 2000)).0,
             offscreen_y: settings.offscreen_pos.unwrap_or((2000, 2000)).1,
+            window_w: settings.window_size.unwrap_or((400, 220)).0,
+            window_h: settings.window_size.unwrap_or((400, 220)).1,
         }
     }
 
@@ -55,6 +59,7 @@ impl SettingsEditor {
             },
             debug_logging: self.debug_logging,
             offscreen_pos: Some((self.offscreen_x, self.offscreen_y)),
+            window_size: Some((self.window_w, self.window_h)),
         }
     }
 
