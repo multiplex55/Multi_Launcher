@@ -17,6 +17,9 @@ pub struct Settings {
     /// Defaults to `(2000, 2000)` if missing.
     #[serde(default)]
     pub offscreen_pos: Option<(i32, i32)>,
+    /// Last known window size. If absent, a default size is used.
+    #[serde(default)]
+    pub window_size: Option<(i32, i32)>,
 }
 
 impl Default for Settings {
@@ -28,6 +31,7 @@ impl Default for Settings {
             plugin_dirs: None,
             debug_logging: false,
             offscreen_pos: Some((2000, 2000)),
+            window_size: Some((400, 220)),
         }
     }
 }

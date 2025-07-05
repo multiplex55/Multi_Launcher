@@ -69,9 +69,10 @@ fn spawn_gui(
     let ctx_clone = ctx_handle.clone();
 
     let handle = thread::spawn(move || {
+        let (w, h) = settings.window_size.unwrap_or((400, 220));
         let native_options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([400.0, 220.0])
+                .with_inner_size([w as f32, h as f32])
                 .with_min_inner_size([320.0, 160.0])
                 .with_always_on_top()
                 .with_visible(true),
