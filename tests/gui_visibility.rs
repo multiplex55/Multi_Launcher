@@ -1,6 +1,7 @@
 use multi_launcher::hotkey::{Hotkey, HotkeyTrigger};
-use eframe::egui;
+use multi_launcher::visibility::handle_visibility_trigger;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use eframe::egui;
 
 #[path = "mock_ctx.rs"]
 mod mock_ctx;
@@ -13,24 +14,9 @@ fn queued_visibility_applies_when_context_available() {
     let ctx_handle: Arc<Mutex<Option<MockCtx>>> = Arc::new(Mutex::new(None));
     let mut queued_visibility: Option<bool> = None;
 
-    // simulate hotkey press
+    // simulate hotkey press while no context is available
     *trigger.open.lock().unwrap() = true;
-
-    if trigger.take() {
-        let next = !visibility.load(Ordering::SeqCst);
-        visibility.store(next, Ordering::SeqCst);
-        if let Ok(mut guard) = ctx_handle.lock() {
-            if let Some(c) = &*guard {
-                c.send_viewport_cmd(egui::ViewportCommand::Visible(next));
-                c.request_repaint();
-                queued_visibility = None;
-            } else {
-                queued_visibility = Some(next);
-            }
-        } else {
-            queued_visibility = Some(next);
-        }
-    }
+    handle_visibility_trigger(&trigger, &visibility, &ctx_handle, &mut queued_visibility);
 
     assert_eq!(visibility.load(Ordering::SeqCst), true);
     assert_eq!(queued_visibility, Some(true));
@@ -42,21 +28,17 @@ fn queued_visibility_applies_when_context_available() {
         *guard = Some(ctx.clone());
     }
 
-    if let Some(next) = queued_visibility {
-        if let Ok(mut guard) = ctx_handle.lock() {
-            if let Some(c) = &*guard {
-                c.send_viewport_cmd(egui::ViewportCommand::Visible(next));
-                c.request_repaint();
-                queued_visibility = None;
-            }
-        }
-    }
+    handle_visibility_trigger(&trigger, &visibility, &ctx_handle, &mut queued_visibility);
 
     assert!(queued_visibility.is_none());
     let cmds = ctx.commands.lock().unwrap();
-    assert_eq!(cmds.len(), 1);
+    assert_eq!(cmds.len(), 2);
     match cmds[0] {
         egui::ViewportCommand::Visible(v) => assert!(v),
+        _ => panic!("unexpected command"),
+    }
+    match cmds[1] {
+        egui::ViewportCommand::Minimized(m) => assert!(!m),
         _ => panic!("unexpected command"),
     }
 }

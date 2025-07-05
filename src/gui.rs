@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use eframe::egui;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use crate::visibility::apply_visibility;
 use std::collections::HashMap;
 
 enum WatchEvent {
@@ -140,7 +141,7 @@ impl LauncherApp {
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(initial_visible));
+        apply_visibility(initial_visible, ctx);
 
         #[cfg(target_os = "windows")]
         {
@@ -213,8 +214,7 @@ impl eframe::App for LauncherApp {
         let just_became_visible = !self.last_visible && should_be_visible;
         if self.last_visible != should_be_visible {
             tracing::debug!("gui thread -> visible: {}", should_be_visible);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(should_be_visible));
-            tracing::debug!("ViewportCommand::Visible({}) sent", should_be_visible);
+            apply_visibility(should_be_visible, ctx);
             self.last_visible = should_be_visible;
         }
 
@@ -227,8 +227,7 @@ impl eframe::App for LauncherApp {
                         }
                     });
                     if ui.button("Force Hide").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                        ctx.request_repaint();
+                        apply_visibility(false, ctx);
                         self.visible_flag.store(false, Ordering::SeqCst);
                         self.last_visible = false;
                     }
