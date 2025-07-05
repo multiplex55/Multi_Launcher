@@ -202,7 +202,7 @@ pub fn current_mouse_position() -> Option<(f32, f32)> {
 #[cfg(target_os = "windows")]
 use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
 #[cfg(target_os = "windows")]
-use raw_window_handle::borrowed::HasWindowHandle;
+use raw_window_handle::HasWindowHandle;
 
 /// On Windows, restore the window and bring it to the foreground.
 #[cfg(target_os = "windows")]
