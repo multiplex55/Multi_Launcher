@@ -1,4 +1,6 @@
 use rdev::{EventType, Key};
+#[cfg(not(target_os = "windows"))]
+use rdev::listen;
 #[cfg(feature = "unstable_grab")]
 use rdev::{grab, Event};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
