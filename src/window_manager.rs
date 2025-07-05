@@ -127,3 +127,117 @@ pub fn virtual_key_from_string(key: &str) -> Option<u32> {
         _ => None,
     }
 }
+
+/// Return the current mouse position in screen coordinates.
+pub fn current_mouse_position() -> Option<(f32, f32)> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut pt = POINT::default();
+        if unsafe { GetCursorPos(&mut pt).is_ok() } {
+            Some((pt.x as f32, pt.y as f32))
+        } else {
+            Some((0.0, 0.0))
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use std::ptr;
+        use x11::xlib;
+        unsafe {
+            let display = xlib::XOpenDisplay(ptr::null());
+            if display.is_null() {
+                return Some((0.0, 0.0));
+            }
+            let root = xlib::XDefaultRootWindow(display);
+            let mut root_ret = 0;
+            let mut child_ret = 0;
+            let mut root_x = 0;
+            let mut root_y = 0;
+            let mut win_x = 0;
+            let mut win_y = 0;
+            let mut mask = 0;
+            let status = xlib::XQueryPointer(
+                display,
+                root,
+                &mut root_ret,
+                &mut child_ret,
+                &mut root_x,
+                &mut root_y,
+                &mut win_x,
+                &mut win_y,
+                &mut mask,
+            );
+            xlib::XCloseDisplay(display);
+            if status == 0 {
+                Some((0.0, 0.0))
+            } else {
+                Some((root_x as f32, root_y as f32))
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use core_graphics::event::{CGEvent, CGEventSource};
+        use core_graphics::event_source::CGEventSourceStateID;
+        let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok();
+        if let Some(source) = source {
+            if let Ok(event) = CGEvent::new(source) {
+                let loc = event.location();
+                return Some((loc.x as f32, loc.y as f32));
+            }
+        }
+        Some((0.0, 0.0))
+    }
+
+    #[cfg(not(any(target_os = "windows", unix)))]
+    {
+        Some((0.0, 0.0))
+    }
+}
+
+#[cfg(target_os = "windows")]
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+/// On Windows, restore the window and bring it to the foreground.
+#[cfg(target_os = "windows")]
+pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
+    use windows::Win32::Foundation::BOOL;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        AttachThreadInput, GetCurrentThreadId, GetForegroundWindow, GetWindowThreadProcessId,
+        SetForegroundWindow, ShowWindowAsync, SW_RESTORE,
+    };
+    unsafe {
+        let fg_hwnd = GetForegroundWindow();
+        let fg_thread = GetWindowThreadProcessId(fg_hwnd, std::ptr::null_mut());
+        let current_thread = GetCurrentThreadId();
+
+        tracing::debug!("Forcing window restore and foreground");
+        ShowWindowAsync(hwnd, SW_RESTORE);
+
+        // Temporarily attach input processing so SetForegroundWindow succeeds
+        let _ = AttachThreadInput(fg_thread, current_thread, true);
+        let fg_success: BOOL = SetForegroundWindow(hwnd);
+        let _ = AttachThreadInput(fg_thread, current_thread, false);
+
+        tracing::debug!("SetForegroundWindow success: {}", fg_success.as_bool());
+    }
+}
+
+/// Extract the HWND from an eframe [`Frame`].
+#[cfg(target_os = "windows")]
+pub fn get_hwnd(frame: &eframe::Frame) -> Option<windows::Win32::Foundation::HWND> {
+    if let Ok(handle) = frame.window_handle() {
+        match handle.as_raw() {
+            RawWindowHandle::Win32(h) => Some(windows::Win32::Foundation::HWND(
+                h.hwnd.get() as *mut core::ffi::c_void,
+            )),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
