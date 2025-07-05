@@ -44,6 +44,7 @@ pub struct LauncherApp {
     restore_flag: Arc<AtomicBool>,
     last_visible: bool,
     offscreen_pos: (f32, f32),
+    window_size: (f32, f32),
 }
 
 impl LauncherApp {
@@ -127,6 +128,10 @@ impl LauncherApp {
             let (x, y) = settings.offscreen_pos.unwrap_or((2000, 2000));
             (x as f32, y as f32)
         };
+        let initial_window_size = {
+            let (w, h) = settings.window_size.unwrap_or((400, 220));
+            (w as f32, h as f32)
+        };
 
         let app = Self {
             actions: actions.clone(),
@@ -151,6 +156,7 @@ impl LauncherApp {
             restore_flag: restore_flag.clone(),
             last_visible: initial_visible,
             offscreen_pos,
+            window_size: initial_window_size,
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -218,6 +224,8 @@ impl eframe::App for LauncherApp {
         use egui::*;
 
         tracing::debug!("LauncherApp::update called");
+        let info = frame.info();
+        self.window_size = (info.window_info.size.x, info.window_info.size.y);
         let do_restore = self.restore_flag.swap(false, Ordering::SeqCst);
         if do_restore {
             tracing::debug!("Restoring window on restore_flag");
@@ -355,6 +363,10 @@ impl eframe::App for LauncherApp {
         self.unregister_all_hotkeys();
         self.visible_flag.store(false, Ordering::SeqCst);
         self.last_visible = false;
+        if let Ok(mut s) = crate::settings::Settings::load(&self.settings_path) {
+            s.window_size = Some((self.window_size.0 as i32, self.window_size.1 as i32));
+            let _ = s.save(&self.settings_path);
+        }
         #[cfg(not(test))]
         std::process::exit(0);
     }
