@@ -15,6 +15,7 @@ fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
         Settings::default(),
         None,
         None,
+        None,
         Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicBool::new(false)),
     )

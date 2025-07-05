@@ -27,6 +27,11 @@ impl PluginManager {
         self.plugins.push(plugin);
     }
 
+    /// Return a list of registered plugin names.
+    pub fn plugin_names(&self) -> Vec<String> {
+        self.plugins.iter().map(|p| p.name().to_string()).collect()
+    }
+
     pub fn load_dir(&mut self, path: &str) -> anyhow::Result<()> {
         use std::ffi::OsStr;
 
@@ -52,6 +57,50 @@ impl PluginManager {
                 let lib = Library::new(entry.path())?;
                 let constructor: libloading::Symbol<unsafe extern "C" fn() -> Box<dyn Plugin>> = lib.get(b"create_plugin")?;
                 let plugin = constructor();
+                self.plugins.push(plugin);
+                self.libs.push(lib);
+            }
+        }
+        Ok(())
+    }
+
+    /// Load plugins from a directory, enabling only those whose names are
+    /// present in `enabled` when provided.
+    pub fn load_dir_filtered(
+        &mut self,
+        path: &str,
+        enabled: Option<&Vec<String>>,
+    ) -> anyhow::Result<()> {
+        use std::ffi::OsStr;
+
+        let ext = if cfg!(target_os = "windows") {
+            "dll"
+        } else if cfg!(target_os = "macos") {
+            "dylib"
+        } else {
+            "so"
+        };
+
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if !file_type.is_file() {
+                continue;
+            }
+            if entry.path().extension() != Some(OsStr::new(ext)) {
+                continue;
+            }
+
+            unsafe {
+                let lib = Library::new(entry.path())?;
+                let constructor: libloading::Symbol<unsafe extern "C" fn() -> Box<dyn Plugin>> =
+                    lib.get(b"create_plugin")?;
+                let plugin = constructor();
+                if let Some(list) = enabled {
+                    if !list.contains(&plugin.name().to_string()) {
+                        continue;
+                    }
+                }
                 self.plugins.push(plugin);
                 self.libs.push(lib);
             }

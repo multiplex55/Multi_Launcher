@@ -3,7 +3,7 @@ use crate::actions_editor::ActionsEditor;
 use crate::settings_editor::SettingsEditor;
 use crate::settings::Settings;
 use crate::launcher::launch_action;
-use crate::plugin::PluginManager;
+use crate::plugin::{PluginManager, Plugin};
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::plugins::clipboard::ClipboardPlugin;
 use crate::indexer;
@@ -42,6 +42,7 @@ pub struct LauncherApp {
     rx: Receiver<WatchEvent>,
     plugin_dirs: Option<Vec<String>>,
     index_paths: Option<Vec<String>>,
+    enabled_plugins: Option<Vec<String>>,
     visible_flag: Arc<AtomicBool>,
     restore_flag: Arc<AtomicBool>,
     last_visible: bool,
@@ -50,9 +51,16 @@ pub struct LauncherApp {
 }
 
 impl LauncherApp {
-    pub fn update_paths(&mut self, plugin_dirs: Option<Vec<String>>, index_paths: Option<Vec<String>>, offscreen_pos: Option<(i32, i32)>) {
+    pub fn update_paths(
+        &mut self,
+        plugin_dirs: Option<Vec<String>>,
+        index_paths: Option<Vec<String>>,
+        enabled_plugins: Option<Vec<String>>,
+        offscreen_pos: Option<(i32, i32)>,
+    ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
+        self.enabled_plugins = enabled_plugins;
         if let Some((x, y)) = offscreen_pos {
             self.offscreen_pos = (x as f32, y as f32);
         }
@@ -67,6 +75,7 @@ impl LauncherApp {
         settings: Settings,
         plugin_dirs: Option<Vec<String>>,
         index_paths: Option<Vec<String>>,
+        enabled_plugins: Option<Vec<String>>,
         visible_flag: Arc<AtomicBool>,
         restore_flag: Arc<AtomicBool>,
     ) -> Self {
@@ -152,6 +161,7 @@ impl LauncherApp {
             rx,
             plugin_dirs,
             index_paths,
+            enabled_plugins,
             visible_flag: visible_flag.clone(),
             restore_flag: restore_flag.clone(),
             last_visible: initial_visible,
@@ -333,12 +343,41 @@ impl eframe::App for LauncherApp {
                 }
                 WatchEvent::Plugins => {
                     let mut plugins = PluginManager::new();
-                    plugins.register(Box::new(WebSearchPlugin));
-                    plugins.register(Box::new(CalculatorPlugin));
-                    plugins.register(Box::new(ClipboardPlugin::default()));
+                    {
+                        let ws = WebSearchPlugin;
+                        if self
+                            .enabled_plugins
+                            .as_ref()
+                            .map_or(true, |l| l.contains(&ws.name().to_string()))
+                        {
+                            plugins.register(Box::new(ws));
+                        }
+                    }
+                    {
+                        let calc = CalculatorPlugin;
+                        if self
+                            .enabled_plugins
+                            .as_ref()
+                            .map_or(true, |l| l.contains(&calc.name().to_string()))
+                        {
+                            plugins.register(Box::new(calc));
+                        }
+                    }
+                    {
+                        let cb = ClipboardPlugin::default();
+                        if self
+                            .enabled_plugins
+                            .as_ref()
+                            .map_or(true, |l| l.contains(&cb.name().to_string()))
+                        {
+                            plugins.register(Box::new(cb));
+                        }
+                    }
                     if let Some(dirs) = &self.plugin_dirs {
                         for dir in dirs {
-                            if let Err(e) = plugins.load_dir(dir) {
+                            if let Err(e) =
+                                plugins.load_dir_filtered(dir, self.enabled_plugins.as_ref())
+                            {
                                 tracing::error!("Failed to load plugins from {}: {}", dir, e);
                             }
                         }

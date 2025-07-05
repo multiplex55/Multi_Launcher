@@ -19,7 +19,7 @@ use crate::actions::{load_actions, Action};
 use crate::gui::LauncherApp;
 use crate::hotkey::HotkeyTrigger;
 use crate::visibility::handle_visibility_trigger;
-use crate::plugin::PluginManager;
+use crate::plugin::{PluginManager, Plugin};
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::plugins::clipboard::ClipboardPlugin;
 use crate::settings::Settings;
@@ -49,12 +49,39 @@ fn spawn_gui(
 ) {
     let actions_for_window = actions.clone();
     let mut plugins = PluginManager::new();
-    plugins.register(Box::new(WebSearchPlugin));
-    plugins.register(Box::new(CalculatorPlugin));
-    plugins.register(Box::new(ClipboardPlugin::default()));
+    {
+        let ws = WebSearchPlugin;
+        if settings
+            .enabled_plugins
+            .as_ref()
+            .map_or(true, |l| l.contains(&ws.name().to_string()))
+        {
+            plugins.register(Box::new(ws));
+        }
+    }
+    {
+        let calc = CalculatorPlugin;
+        if settings
+            .enabled_plugins
+            .as_ref()
+            .map_or(true, |l| l.contains(&calc.name().to_string()))
+        {
+            plugins.register(Box::new(calc));
+        }
+    }
+    {
+        let cb = ClipboardPlugin::default();
+        if settings
+            .enabled_plugins
+            .as_ref()
+            .map_or(true, |l| l.contains(&cb.name().to_string()))
+        {
+            plugins.register(Box::new(cb));
+        }
+    }
     if let Some(dirs) = &settings.plugin_dirs {
         for dir in dirs {
-            if let Err(e) = plugins.load_dir(dir) {
+            if let Err(e) = plugins.load_dir_filtered(dir, settings.enabled_plugins.as_ref()) {
                 tracing::error!("Failed to load plugins from {}: {}", dir, e);
             }
         }
@@ -64,6 +91,7 @@ fn spawn_gui(
     let settings_path_for_window = settings_path.clone();
     let plugin_dirs = settings.plugin_dirs.clone();
     let index_paths = settings.index_paths.clone();
+    let enabled_plugins = settings.enabled_plugins.clone();
     let visible_flag = Arc::new(AtomicBool::new(true));
     let restore_flag = Arc::new(AtomicBool::new(false));
     let flag_clone = visible_flag.clone();
@@ -109,6 +137,7 @@ fn spawn_gui(
                     settings.clone(),
                     plugin_dirs,
                     index_paths,
+                    enabled_plugins,
                     flag_clone,
                     restore_clone,
                 ))
