@@ -116,7 +116,7 @@ impl LauncherApp {
 
         let initial_visible = visible_flag.load(Ordering::SeqCst);
 
-        let app = Self {
+        let mut app = Self {
             actions: actions.clone(),
             query: String::new(),
             results: actions,
@@ -141,6 +141,21 @@ impl LauncherApp {
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(initial_visible));
+
+        #[cfg(target_os = "windows")]
+        {
+            use crate::global_hotkey::Hotkey as WinHotkey;
+            if let Some(ref seq) = settings.hotkey {
+                if let Ok(mut hk) = WinHotkey::new(seq) {
+                    hk.register(&app, 1);
+                }
+            }
+            if let Some(ref seq) = settings.quit_hotkey {
+                if let Ok(mut hk) = WinHotkey::new(seq) {
+                    hk.register(&app, 2);
+                }
+            }
+        }
 
         app
     }
