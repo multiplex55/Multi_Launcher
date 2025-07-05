@@ -10,8 +10,10 @@ fn parse_simple_f_key() {
 
 #[test]
 fn parse_high_function_keys() {
-    assert!(parse_hotkey("F13").is_none());
-    assert!(parse_hotkey("F24").is_none());
+    let f13 = parse_hotkey("F13").expect("should parse F13");
+    assert_eq!(f13.key, Key::F13);
+    let f24 = parse_hotkey("F24").expect("should parse F24");
+    assert_eq!(f24.key, Key::F24);
 }
 
 #[test]
