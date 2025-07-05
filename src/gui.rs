@@ -27,6 +27,7 @@ pub struct LauncherApp {
     pub matcher: SkimMatcherV2,
     pub error: Option<String>,
     pub plugins: PluginManager,
+    pub selected: Option<usize>,
     pub usage: HashMap<String, u32>,
     pub registered_hotkeys: Mutex<HashMap<String, usize>>,
     pub show_editor: bool,
@@ -137,6 +138,7 @@ impl LauncherApp {
             matcher: SkimMatcherV2::default(),
             error: None,
             plugins,
+            selected: None,
             usage: HashMap::new(),
             registered_hotkeys: Mutex::new(HashMap::new()),
             show_editor: false,
@@ -198,6 +200,46 @@ impl LauncherApp {
         res.sort_by_key(|a| std::cmp::Reverse(self.usage.get(&a.action).cloned().unwrap_or(0)));
 
         self.results = res;
+        self.selected = None;
+    }
+
+    /// Handle a keyboard navigation key. Returns the index of a selected
+    /// action when `Enter` is pressed and a selection is available.
+    pub fn handle_key(&mut self, key: egui::Key) -> Option<usize> {
+        match key {
+            egui::Key::ArrowDown => {
+                if !self.results.is_empty() {
+                    let max = self.results.len() - 1;
+                    self.selected = match self.selected {
+                        Some(i) if i < max => Some(i + 1),
+                        Some(i) => Some(i),
+                        None => Some(0),
+                    };
+                }
+                None
+            }
+            egui::Key::ArrowUp => {
+                if !self.results.is_empty() {
+                    let max = self.results.len() - 1;
+                    self.selected = match self.selected {
+                        Some(i) if i > 0 => Some(i - 1),
+                        Some(i) => Some(i.min(max)),
+                        None => Some(0),
+                    };
+                }
+                None
+            }
+            egui::Key::Enter => {
+                if let Some(i) = self.selected {
+                    Some(i)
+                } else if self.results.len() == 1 {
+                    Some(0)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -320,25 +362,41 @@ impl eframe::App for LauncherApp {
                 self.search();
             }
 
-            if self.results.len() == 1 && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-                if let Err(e) = launch_action(&self.results[0]) {
-                    self.error = Some(format!("Failed: {e}"));
-                } else {
-                    let a = &self.results[0];
-                    let count = self.usage.entry(a.action.clone()).or_insert(0);
-                    *count += 1;
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                self.handle_key(egui::Key::ArrowDown);
+            }
+
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                self.handle_key(egui::Key::ArrowUp);
+            }
+
+            let mut launch_idx: Option<usize> = None;
+            if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                launch_idx = self.handle_key(egui::Key::Enter);
+            }
+
+            if let Some(i) = launch_idx {
+                if let Some(a) = self.results.get(i) {
+                    if let Err(e) = launch_action(a) {
+                        self.error = Some(format!("Failed: {e}"));
+                    } else {
+                        let count = self.usage.entry(a.action.clone()).or_insert(0);
+                        *count += 1;
+                    }
                 }
             }
 
             ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
-                for a in self.results.iter() {
-                    if ui.button(format!("{} : {}", a.label, a.desc)).clicked() {
+                for (idx, a) in self.results.iter().enumerate() {
+                    let label = format!("{} : {}", a.label, a.desc);
+                    if ui.selectable_label(self.selected == Some(idx), label).clicked() {
                         if let Err(e) = launch_action(a) {
                             self.error = Some(format!("Failed: {e}"));
                         } else {
                             let count = self.usage.entry(a.action.clone()).or_insert(0);
                             *count += 1;
                         }
+                        self.selected = Some(idx);
                     }
                 }
             });
