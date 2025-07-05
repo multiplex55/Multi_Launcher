@@ -1,4 +1,4 @@
-use rdev::{listen, EventType, Key};
+use rdev::{EventType, Key};
 #[cfg(feature = "unstable_grab")]
 use rdev::{grab, Event};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
@@ -166,6 +166,7 @@ impl HotkeyTrigger {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     pub fn start_listener(triggers: Vec<Arc<HotkeyTrigger>>, label: &'static str) -> HotkeyListener {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_clone = stop_flag.clone();
@@ -241,6 +242,130 @@ impl HotkeyTrigger {
                 }
 
                 thread::sleep(Duration::from_millis(500));
+            }
+        });
+
+        HotkeyListener { stop: stop_flag }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn start_listener(triggers: Vec<Arc<HotkeyTrigger>>, _label: &'static str) -> HotkeyListener {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            GetAsyncKeyState, VK_LCONTROL, VK_RCONTROL, VK_LSHIFT, VK_RSHIFT, VK_LMENU, VK_RMENU,
+        };
+        use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
+
+        fn is_down(vk: i32) -> bool {
+            unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 }
+        }
+
+        fn vk_from_key(key: Key) -> Option<i32> {
+            use rdev::Key::*;
+            Some(match key {
+                F1 => 0x70,
+                F2 => 0x71,
+                F3 => 0x72,
+                F4 => 0x73,
+                F5 => 0x74,
+                F6 => 0x75,
+                F7 => 0x76,
+                F8 => 0x77,
+                F9 => 0x78,
+                F10 => 0x79,
+                F11 => 0x7A,
+                F12 => 0x7B,
+                KeyA => 0x41,
+                KeyB => 0x42,
+                KeyC => 0x43,
+                KeyD => 0x44,
+                KeyE => 0x45,
+                KeyF => 0x46,
+                KeyG => 0x47,
+                KeyH => 0x48,
+                KeyI => 0x49,
+                KeyJ => 0x4A,
+                KeyK => 0x4B,
+                KeyL => 0x4C,
+                KeyM => 0x4D,
+                KeyN => 0x4E,
+                KeyO => 0x4F,
+                KeyP => 0x50,
+                KeyQ => 0x51,
+                KeyR => 0x52,
+                KeyS => 0x53,
+                KeyT => 0x54,
+                KeyU => 0x55,
+                KeyV => 0x56,
+                KeyW => 0x57,
+                KeyX => 0x58,
+                KeyY => 0x59,
+                KeyZ => 0x5A,
+                Num0 => 0x30,
+                Num1 => 0x31,
+                Num2 => 0x32,
+                Num3 => 0x33,
+                Num4 => 0x34,
+                Num5 => 0x35,
+                Num6 => 0x36,
+                Num7 => 0x37,
+                Num8 => 0x38,
+                Num9 => 0x39,
+                Escape => 0x1B,
+                Space => 0x20,
+                Return => 0x0D,
+                Tab => 0x09,
+                Backspace => 0x08,
+                Delete => 0x2E,
+                Home => 0x24,
+                End => 0x23,
+                PageUp => 0x21,
+                PageDown => 0x22,
+                LeftArrow => 0x25,
+                RightArrow => 0x27,
+                UpArrow => 0x26,
+                DownArrow => 0x28,
+                CapsLock => 0x14,
+                _ => return None,
+            })
+        }
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop_flag.clone();
+        let vk_keys: Vec<_> = triggers.iter().map(|t| vk_from_key(t.key)).collect();
+        let need_ctrl: Vec<bool> = triggers.iter().map(|t| t.ctrl).collect();
+        let need_shift: Vec<bool> = triggers.iter().map(|t| t.shift).collect();
+        let need_alt: Vec<bool> = triggers.iter().map(|t| t.alt).collect();
+        thread::spawn(move || {
+            unsafe {
+                let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+            }
+            let open_listeners: Vec<_> = triggers.iter().map(|t| t.open.clone()).collect();
+            let mut triggered = vec![false; triggers.len()];
+            while !stop_clone.load(Ordering::SeqCst) {
+                let ctrl_pressed = is_down(VK_LCONTROL.0 as i32) || is_down(VK_RCONTROL.0 as i32);
+                let shift_pressed = is_down(VK_LSHIFT.0 as i32) || is_down(VK_RSHIFT.0 as i32);
+                let alt_pressed = is_down(VK_LMENU.0 as i32) || is_down(VK_RMENU.0 as i32);
+
+                for i in 0..vk_keys.len() {
+                    if let Some(vk) = vk_keys[i] {
+                        let key_down = is_down(vk);
+                        let combo = key_down
+                            && (!need_ctrl[i] || ctrl_pressed)
+                            && (!need_shift[i] || shift_pressed)
+                            && (!need_alt[i] || alt_pressed);
+                        if combo {
+                            if !triggered[i] {
+                                triggered[i] = true;
+                                if let Ok(mut flag) = open_listeners[i].lock() {
+                                    *flag = true;
+                                }
+                            }
+                        } else {
+                            triggered[i] = false;
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_millis(20));
             }
         });
 
