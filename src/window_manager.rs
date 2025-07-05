@@ -219,8 +219,9 @@ pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
 pub fn get_hwnd(frame: &eframe::Frame) -> Option<windows::Win32::Foundation::HWND> {
     if let Ok(handle) = frame.window_handle() {
         match handle.raw_window_handle() {
-            RawWindowHandle::Win32(h) =>
-                Some(windows::Win32::Foundation::HWND(h.hwnd.cast())),
+            RawWindowHandle::Win32(h) => Some(windows::Win32::Foundation::HWND(
+                h.hwnd.get() as *mut core::ffi::c_void,
+            )),
             _ => None,
         }
     } else {
