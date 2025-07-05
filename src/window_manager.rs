@@ -133,7 +133,7 @@ pub fn current_mouse_position() -> Option<(f32, f32)> {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::Foundation::POINT;
-        use windows::Win32::UI::Input::KeyboardAndMouse::GetCursorPos;
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
         let mut pt = POINT::default();
         if unsafe { GetCursorPos(&mut pt).as_bool() } {
             Some((pt.x as f32, pt.y as f32))
