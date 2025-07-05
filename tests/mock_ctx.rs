@@ -14,13 +14,3 @@ impl MockCtx {
     pub fn request_repaint(&self) {}
 }
 
-// Implement the trait from the main crate so tests can reuse visibility logic.
-impl multi_launcher::visibility::ViewportCtx for MockCtx {
-    fn send_viewport_cmd(&self, cmd: egui::ViewportCommand) {
-        self.send_viewport_cmd(cmd);
-    }
-
-    fn request_repaint(&self) {
-        self.request_repaint();
-    }
-}

@@ -1,11 +1,7 @@
 use multi_launcher::hotkey::{parse_hotkey, HotkeyTrigger, process_test_events};
 use multi_launcher::visibility::handle_visibility_trigger;
 use rdev::{EventType, Key};
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
-
-#[path = "mock_ctx.rs"]
-mod mock_ctx;
-use mock_ctx::MockCtx;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 #[test]
 fn launcher_and_quit_hotkeys_toggle_flags() {
@@ -46,13 +42,11 @@ fn zero_key_events_toggle_visibility() {
     process_test_events(&triggers, &events);
 
     let visibility = Arc::new(AtomicBool::new(false));
-    let ctx_handle: Arc<Mutex<Option<MockCtx>>> = Arc::new(Mutex::new(None));
-    let mut queued_visibility: Option<bool> = None;
 
-    handle_visibility_trigger(&trigger, &visibility, &ctx_handle, &mut queued_visibility);
+    handle_visibility_trigger(&trigger, &visibility);
     assert_eq!(visibility.load(Ordering::SeqCst), true);
 
     process_test_events(&triggers, &events);
-    handle_visibility_trigger(&trigger, &visibility, &ctx_handle, &mut queued_visibility);
+    handle_visibility_trigger(&trigger, &visibility);
     assert_eq!(visibility.load(Ordering::SeqCst), false);
 }

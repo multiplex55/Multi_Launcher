@@ -40,7 +40,7 @@ pub struct LauncherApp {
     plugin_dirs: Option<Vec<String>>,
     index_paths: Option<Vec<String>>,
     visible_flag: Arc<AtomicBool>,
-    last_visible: bool,
+    show_window: bool,
 }
 
 impl LauncherApp {
@@ -136,7 +136,7 @@ impl LauncherApp {
             plugin_dirs,
             index_paths,
             visible_flag: visible_flag.clone(),
-            last_visible: initial_visible,
+            show_window: initial_visible,
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -191,17 +191,8 @@ impl eframe::App for LauncherApp {
         tracing::debug!("LauncherApp::update called");
 
         let should_be_visible = self.visible_flag.load(Ordering::SeqCst);
-        tracing::debug!(
-            should_be_visible=?should_be_visible,
-            last_visible=?self.last_visible
-        );
-        let just_became_visible = !self.last_visible && should_be_visible;
-        if self.last_visible != should_be_visible {
-            tracing::debug!("gui thread -> visible: {}", should_be_visible);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(should_be_visible));
-            tracing::debug!("ViewportCommand::Visible({}) sent", should_be_visible);
-            self.last_visible = should_be_visible;
-        }
+        let just_became_visible = !self.show_window && should_be_visible;
+        self.show_window = should_be_visible;
 
         TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             menu::bar(ui, |ui| {
@@ -211,17 +202,14 @@ impl eframe::App for LauncherApp {
                             self.show_editor = !self.show_editor;
                         }
                     });
-                    if ui.button("Force Hide").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                        ctx.request_repaint();
-                        self.visible_flag.store(false, Ordering::SeqCst);
-                        self.last_visible = false;
+                    if ui.button("Toggle Window").clicked() {
+                        self.show_window = !self.show_window;
+                        self.visible_flag.store(self.show_window, Ordering::SeqCst);
                     }
                     if ui.button("Close Application").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         self.unregister_all_hotkeys();
                         self.visible_flag.store(false, Ordering::SeqCst);
-                        self.last_visible = false;
                         #[cfg(not(test))]
                         std::process::exit(0);
                     }
@@ -264,11 +252,12 @@ impl eframe::App for LauncherApp {
             }
         }
 
-        CentralPanel::default().show(ctx, |ui| {
-            ui.heading("🚀 LNCHR");
-            if let Some(err) = &self.error {
-                ui.colored_label(Color32::RED, err);
-            }
+        if self.show_window {
+            CentralPanel::default().show(ctx, |ui| {
+                ui.heading("🚀 LNCHR");
+                if let Some(err) = &self.error {
+                    ui.colored_label(Color32::RED, err);
+                }
 
             let input = ui.text_edit_singleline(&mut self.query);
             if just_became_visible {
@@ -301,6 +290,7 @@ impl eframe::App for LauncherApp {
                 }
             });
         });
+        }
         let show_editor = self.show_editor;
         if show_editor {
             let mut editor = std::mem::take(&mut self.editor);
@@ -318,7 +308,6 @@ impl eframe::App for LauncherApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.unregister_all_hotkeys();
         self.visible_flag.store(false, Ordering::SeqCst);
-        self.last_visible = false;
         #[cfg(not(test))]
         std::process::exit(0);
     }

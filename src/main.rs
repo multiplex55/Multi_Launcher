@@ -132,7 +132,6 @@ fn main() -> anyhow::Result<()> {
 
 
     let (handle, visibility, ctx) = spawn_gui(actions.clone(), settings.clone(), "settings.json".to_string());
-    let mut queued_visibility: Option<bool> = None;
 
     loop {
         if handle.is_finished() {
@@ -170,7 +169,7 @@ fn main() -> anyhow::Result<()> {
             listener = HotkeyTrigger::start_listener(watched, "main");
         }
 
-        handle_visibility_trigger(trigger.as_ref(), &visibility, &ctx, &mut queued_visibility);
+        handle_visibility_trigger(trigger.as_ref(), &visibility);
 
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
