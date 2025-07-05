@@ -51,7 +51,9 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
   "quit_hotkey": "Shift+Escape",
   "index_paths": ["/usr/share/applications"],
   "plugin_dirs": ["./plugins"],
-  "debug_logging": false
+  "debug_logging": false,
+  "hidden_x": 2000,
+  "hidden_y": 2000
 }
 ```
 
@@ -64,6 +66,9 @@ keys (`F1`-`F12`) and common keys like `Space`, `Tab`, `Return`, `Escape`,
 `quit_hotkey` can be set to another key combination to close the launcher from
 anywhere. If omitted, the application only quits when the window is closed
 through the GUI.
+
+`hidden_x` and `hidden_y` configure the off-screen position used when the
+launcher hides itself.
 
 If you choose `CapsLock` as the hotkey, the launcher suppresses the normal
 CapsLock toggle **when compiled with the `unstable_grab` feature enabled**.

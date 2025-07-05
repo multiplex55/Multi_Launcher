@@ -190,6 +190,7 @@ fn main() -> anyhow::Result<()> {
             &restore_flag,
             &ctx,
             &mut queued_visibility,
+            settings.hidden_position(),
         );
 
         std::thread::sleep(std::time::Duration::from_millis(50));

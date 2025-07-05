@@ -3,6 +3,10 @@ use rdev::Key;
 use crate::hotkey::{parse_hotkey, Hotkey};
 use serde::{Deserialize, Serialize};
 
+fn default_hidden_coord() -> f32 {
+    2000.0
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Settings {
     pub hotkey: Option<String>,
@@ -13,6 +17,10 @@ pub struct Settings {
     /// Defaults to `false` when the field is missing in the settings file.
     #[serde(default)]
     pub debug_logging: bool,
+    #[serde(default = "default_hidden_coord")]
+    pub hidden_x: f32,
+    #[serde(default = "default_hidden_coord")]
+    pub hidden_y: f32,
 }
 
 impl Default for Settings {
@@ -23,6 +31,8 @@ impl Default for Settings {
             index_paths: None,
             plugin_dirs: None,
             debug_logging: false,
+            hidden_x: default_hidden_coord(),
+            hidden_y: default_hidden_coord(),
         }
     }
 }
@@ -75,5 +85,9 @@ impl Settings {
             }
         }
         None
+    }
+
+    pub fn hidden_position(&self) -> (f32, f32) {
+        (self.hidden_x, self.hidden_y)
     }
 }

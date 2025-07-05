@@ -43,6 +43,7 @@ pub struct LauncherApp {
     visible_flag: Arc<AtomicBool>,
     restore_flag: Arc<AtomicBool>,
     last_visible: bool,
+    pub hidden_position: (f32, f32),
 }
 
 impl LauncherApp {
@@ -141,10 +142,11 @@ impl LauncherApp {
             visible_flag: visible_flag.clone(),
             restore_flag: restore_flag.clone(),
             last_visible: initial_visible,
+            hidden_position: settings.hidden_position(),
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
-        apply_visibility(initial_visible, ctx);
+        apply_visibility(initial_visible, settings.hidden_position(), ctx);
 
         #[cfg(target_os = "windows")]
         {
@@ -211,7 +213,7 @@ impl eframe::App for LauncherApp {
         let do_restore = self.restore_flag.swap(false, Ordering::SeqCst);
         if do_restore {
             tracing::debug!("Restoring window on restore_flag");
-            apply_visibility(true, ctx);
+            apply_visibility(true, self.hidden_position, ctx);
             #[cfg(target_os = "windows")]
             if let Some(hwnd) = crate::window_manager::get_hwnd(frame) {
                 crate::window_manager::force_restore_and_foreground(hwnd);
@@ -226,7 +228,7 @@ impl eframe::App for LauncherApp {
         let just_became_visible = !self.last_visible && should_be_visible;
         if self.last_visible != should_be_visible {
             tracing::debug!("gui thread -> visible: {}", should_be_visible);
-            apply_visibility(should_be_visible, ctx);
+            apply_visibility(should_be_visible, self.hidden_position, ctx);
             self.last_visible = should_be_visible;
         }
 
@@ -239,7 +241,7 @@ impl eframe::App for LauncherApp {
                         }
                     });
                     if ui.button("Force Hide").clicked() {
-                        apply_visibility(false, ctx);
+                        apply_visibility(false, self.hidden_position, ctx);
                         self.visible_flag.store(false, Ordering::SeqCst);
                         self.last_visible = false;
                     }

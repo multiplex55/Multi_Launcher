@@ -12,6 +12,8 @@ pub struct SettingsEditor {
     index_input: String,
     plugin_input: String,
     debug_logging: bool,
+    hidden_x: String,
+    hidden_y: String,
 }
 
 impl SettingsEditor {
@@ -24,6 +26,8 @@ impl SettingsEditor {
             index_input: String::new(),
             plugin_input: String::new(),
             debug_logging: settings.debug_logging,
+            hidden_x: settings.hidden_x.to_string(),
+            hidden_y: settings.hidden_y.to_string(),
         }
     }
 
@@ -50,6 +54,8 @@ impl SettingsEditor {
                 Some(self.plugin_dirs.clone())
             },
             debug_logging: self.debug_logging,
+            hidden_x: self.hidden_x.parse().unwrap_or(2000.0),
+            hidden_y: self.hidden_y.parse().unwrap_or(2000.0),
         }
     }
 
@@ -78,6 +84,15 @@ impl SettingsEditor {
                         ui.selectable_value(&mut self.debug_logging, false, "Disabled");
                         ui.selectable_value(&mut self.debug_logging, true, "Enabled");
                     });
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Hidden X");
+                ui.text_edit_singleline(&mut self.hidden_x);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Hidden Y");
+                ui.text_edit_singleline(&mut self.hidden_y);
             });
 
             ui.separator();
@@ -147,6 +162,7 @@ impl SettingsEditor {
                         new_settings.plugin_dirs.clone(),
                         new_settings.index_paths.clone(),
                     );
+                    app.hidden_position = new_settings.hidden_position();
                     crate::request_hotkey_restart(new_settings);
                 }
             }
