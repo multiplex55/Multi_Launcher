@@ -2317,6 +2317,7 @@ name = "multi_launcher"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "core-graphics 0.23.2",
  "eframe",
  "fuzzy-matcher",
  "libloading 0.8.6",
@@ -2335,6 +2336,7 @@ dependencies = [
  "walkdir",
  "windows 0.58.0",
  "winit",
+ "x11",
 ]
 
 [[package]]

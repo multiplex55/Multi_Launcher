@@ -32,17 +32,21 @@ fn queued_visibility_applies_when_context_available() {
 
     assert!(queued_visibility.is_none());
     let cmds = ctx.commands.lock().unwrap();
-    assert_eq!(cmds.len(), 3);
+    assert_eq!(cmds.len(), 4);
     match cmds[0] {
-        egui::ViewportCommand::Visible(v) => assert!(v),
+        egui::ViewportCommand::OuterPosition(_) => {}
         _ => panic!("unexpected command"),
     }
     match cmds[1] {
-        egui::ViewportCommand::Minimized(m) => assert!(!m),
+        egui::ViewportCommand::Visible(v) => assert!(v),
         _ => panic!("unexpected command"),
     }
     match cmds[2] {
-        egui::ViewportCommand::Focus => {},
+        egui::ViewportCommand::Minimized(m) => assert!(!m),
+        _ => panic!("unexpected command"),
+    }
+    match cmds[3] {
+        egui::ViewportCommand::Focus => {}
         _ => panic!("unexpected command"),
     }
 }

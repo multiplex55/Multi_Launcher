@@ -20,8 +20,8 @@ impl ViewportCtx for egui::Context {
     }
 }
 
-/// Process a hotkey trigger and update visibility, issuing viewport commands
-/// when possible. This mirrors the logic from `main.rs`.
+/// Process a hotkey trigger and update the minimized state, issuing viewport
+/// commands when possible. This mirrors the logic from `main.rs`.
 pub fn handle_visibility_trigger<C: ViewportCtx>(
     trigger: &HotkeyTrigger,
     visibility: &Arc<AtomicBool>,
@@ -61,10 +61,15 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
 
 /// Apply the current visibility state to the viewport.
 pub fn apply_visibility<C: ViewportCtx>(visible: bool, ctx: &C) {
-    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(visible));
-    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(!visible));
     if visible {
+        if let Some((x, y)) = crate::window_manager::current_mouse_position() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    } else {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
     }
     ctx.request_repaint();
 }

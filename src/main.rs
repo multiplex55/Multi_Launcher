@@ -134,7 +134,10 @@ fn main() -> anyhow::Result<()> {
     let mut listener = HotkeyTrigger::start_listener(watched, "main");
 
 
-    let (handle, visibility, ctx) = spawn_gui(actions.clone(), settings.clone(), "settings.json".to_string());
+    // `visibility` holds whether the window is currently restored (true) or
+    // minimized (false).
+    let (handle, visibility, ctx) =
+        spawn_gui(actions.clone(), settings.clone(), "settings.json".to_string());
     let mut queued_visibility: Option<bool> = None;
 
     loop {
