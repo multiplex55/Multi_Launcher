@@ -2,6 +2,7 @@ use crate::settings::Settings;
 use crate::gui::LauncherApp;
 use eframe::egui;
 use rfd::FileDialog;
+use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct SettingsEditor {
@@ -10,6 +11,7 @@ pub struct SettingsEditor {
     index_paths: Vec<String>,
     plugin_dirs: Vec<String>,
     enabled_plugins: Vec<String>,
+    enabled_capabilities: HashMap<String, Vec<String>>,
     index_input: String,
     plugin_input: String,
     debug_logging: bool,
@@ -27,6 +29,7 @@ impl SettingsEditor {
             index_paths: settings.index_paths.clone().unwrap_or_default(),
             plugin_dirs: settings.plugin_dirs.clone().unwrap_or_default(),
             enabled_plugins: settings.enabled_plugins.clone().unwrap_or_default(),
+            enabled_capabilities: settings.enabled_capabilities.clone().unwrap_or_default(),
             index_input: String::new(),
             plugin_input: String::new(),
             debug_logging: settings.debug_logging,
@@ -63,6 +66,11 @@ impl SettingsEditor {
                 None
             } else {
                 Some(self.enabled_plugins.clone())
+            },
+            enabled_capabilities: if self.enabled_capabilities.is_empty() {
+                None
+            } else {
+                Some(self.enabled_capabilities.clone())
             },
             debug_logging: self.debug_logging,
             offscreen_pos: Some((self.offscreen_x, self.offscreen_y)),
@@ -177,6 +185,25 @@ impl SettingsEditor {
                 }
             }
 
+            ui.separator();
+            ui.label("Enabled capabilities:");
+            for (pname, caps) in app.plugins.plugin_capabilities() {
+                for cap in caps {
+                    let entry = self.enabled_capabilities.entry(pname.clone()).or_default();
+                    let mut enabled = entry.contains(&cap);
+                    let label = format!("{}: {}", pname, cap);
+                    if ui.checkbox(&mut enabled, label).changed() {
+                        if enabled {
+                            if !entry.contains(&cap) {
+                                entry.push(cap.clone());
+                            }
+                        } else if let Some(pos) = entry.iter().position(|c| c == &cap) {
+                            entry.remove(pos);
+                        }
+                    }
+                }
+            }
+
             if ui.button("Save").clicked() {
                 let new_settings = self.to_settings();
                 if let Err(e) = new_settings.save(&app.settings_path) {
@@ -186,6 +213,7 @@ impl SettingsEditor {
                         new_settings.plugin_dirs.clone(),
                         new_settings.index_paths.clone(),
                         new_settings.enabled_plugins.clone(),
+                        new_settings.enabled_capabilities.clone(),
                         new_settings.offscreen_pos,
                     );
                     crate::request_hotkey_restart(new_settings);

@@ -12,6 +12,8 @@ pub struct Settings {
     /// List of plugin names which should be enabled. If `None`, all loaded
     /// plugins are enabled.
     pub enabled_plugins: Option<Vec<String>>,
+    /// Map of plugin capability identifiers enabled per plugin.
+    pub enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
     /// When enabled the application initialises the logger at debug level.
     /// Defaults to `false` when the field is missing in the settings file.
     #[serde(default)]
@@ -33,6 +35,7 @@ impl Default for Settings {
             index_paths: None,
             plugin_dirs: None,
             enabled_plugins: None,
+            enabled_capabilities: None,
             debug_logging: false,
             offscreen_pos: Some((2000, 2000)),
             window_size: Some((400, 220)),
