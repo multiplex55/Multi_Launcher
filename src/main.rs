@@ -13,6 +13,7 @@ mod visibility;
 mod global_hotkey;
 mod window_manager;
 mod workspace;
+mod plugins;
 
 use crate::actions::{load_actions, Action};
 use crate::gui::LauncherApp;
@@ -20,6 +21,7 @@ use crate::hotkey::HotkeyTrigger;
 use crate::visibility::handle_visibility_trigger;
 use crate::plugin::PluginManager;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
+use crate::plugins::clipboard::ClipboardPlugin;
 use crate::settings::Settings;
 
 use eframe::egui;
@@ -49,6 +51,7 @@ fn spawn_gui(
     let mut plugins = PluginManager::new();
     plugins.register(Box::new(WebSearchPlugin));
     plugins.register(Box::new(CalculatorPlugin));
+    plugins.register(Box::new(ClipboardPlugin::default()));
     if let Some(dirs) = &settings.plugin_dirs {
         for dir in dirs {
             if let Err(e) = plugins.load_dir(dir) {

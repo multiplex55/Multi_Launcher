@@ -1,7 +1,13 @@
 use crate::actions::Action;
+use arboard::Clipboard;
 use std::path::Path;
 
 pub fn launch_action(action: &Action) -> anyhow::Result<()> {
+    if let Some(text) = action.action.strip_prefix("clipboard:") {
+        let mut cb = Clipboard::new()?;
+        cb.set_text(text.to_string())?;
+        return Ok(());
+    }
     let path = Path::new(&action.action);
 
     // If it's an .exe, launch it directly

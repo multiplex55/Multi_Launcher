@@ -82,8 +82,8 @@ running.
 
 ## Plugins
 
-Built-in plugins provide Google web search (`g query`) and an inline calculator
-(using the `=` prefix). Additional plugins can be added by building separate
+Built-in plugins provide Google web search (`g query`), an inline calculator
+(using the `=` prefix) and a clipboard history (`cb`). Selecting a clipboard entry copies it back to the clipboard. Additional plugins can be added by building separate
 shared libraries. Each plugin crate should be compiled as a `cdylib` and export
 a `create_plugin` function returning `Box<dyn Plugin>`:
 
