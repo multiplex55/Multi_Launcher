@@ -39,7 +39,12 @@ fn spawn_gui(
     actions: Vec<Action>,
     settings: Settings,
     settings_path: String,
-) -> (thread::JoinHandle<()>, Arc<AtomicBool>, Arc<Mutex<Option<egui::Context>>>) {
+) -> (
+    thread::JoinHandle<()>,
+    Arc<AtomicBool>,
+    Arc<Mutex<Option<egui::Context>>>,
+    Arc<AtomicBool>,
+) {
     let actions_for_window = actions.clone();
     let mut plugins = PluginManager::new();
     plugins.register(Box::new(WebSearchPlugin));
@@ -58,6 +63,8 @@ fn spawn_gui(
     let index_paths = settings.index_paths.clone();
     let visible_flag = Arc::new(AtomicBool::new(true));
     let flag_clone = visible_flag.clone();
+    let restore_pending = Arc::new(AtomicBool::new(false));
+    let restore_clone = restore_pending.clone();
     let ctx_handle = Arc::new(Mutex::new(None));
     let ctx_clone = ctx_handle.clone();
 
@@ -99,12 +106,13 @@ fn spawn_gui(
                     plugin_dirs,
                     index_paths,
                     flag_clone,
+                    restore_clone,
                 ))
             }),
         );
     });
 
-    (handle, visible_flag, ctx_handle)
+    (handle, visible_flag, ctx_handle, restore_pending)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -134,7 +142,8 @@ fn main() -> anyhow::Result<()> {
     let mut listener = HotkeyTrigger::start_listener(watched, "main");
 
 
-    let (handle, visibility, ctx) = spawn_gui(actions.clone(), settings.clone(), "settings.json".to_string());
+    let (handle, visibility, ctx, restore_flag) =
+        spawn_gui(actions.clone(), settings.clone(), "settings.json".to_string());
     let mut queued_visibility: Option<bool> = None;
 
     loop {
@@ -173,7 +182,11 @@ fn main() -> anyhow::Result<()> {
             listener = HotkeyTrigger::start_listener(watched, "main");
         }
 
+        let was_visible = visibility.load(Ordering::SeqCst);
         handle_visibility_trigger(trigger.as_ref(), &visibility, &ctx, &mut queued_visibility);
+        if !was_visible && visibility.load(Ordering::SeqCst) {
+            restore_flag.store(true, Ordering::SeqCst);
+        }
 
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
