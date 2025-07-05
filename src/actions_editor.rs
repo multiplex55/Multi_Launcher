@@ -1,24 +1,18 @@
-use crate::actions::{Action, save_actions};
+use crate::actions::save_actions;
+use crate::add_action_dialog::AddActionDialog;
 use crate::gui::LauncherApp;
 use eframe::egui;
-use rfd::FileDialog;
 
 pub struct ActionsEditor {
-    label: String,
-    desc: String,
-    path: String,
     search: String,
-    show_new: bool,
+    dialog: AddActionDialog,
 }
 
 impl Default for ActionsEditor {
     fn default() -> Self {
         Self {
-            label: String::new(),
-            desc: String::new(),
-            path: String::new(),
             search: String::new(),
-            show_new: false,
+            dialog: AddActionDialog::default(),
         }
     }
 }
@@ -32,60 +26,12 @@ impl ActionsEditor {
             ui.horizontal(|ui| {
                 ui.label("Search");
                 ui.text_edit_singleline(&mut self.search);
-                if self.show_new {
-                    ui.separator();
-                    ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("Label");
-                            ui.text_edit_singleline(&mut self.label);
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Description");
-                            ui.text_edit_singleline(&mut self.desc);
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Path");
-                            ui.text_edit_singleline(&mut self.path);
-                            if ui.button("Browse").clicked() {
-                                if let Some(file) = FileDialog::new().pick_file() {
-                                    if let Some(p) = file.to_str() {
-                                        self.path = p.to_owned();
-                                    } else {
-                                        self.path = file.display().to_string();
-                                    }
-                                }
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            if ui.button("Add").clicked() {
-                                use std::path::Path;
-                                if self.path.is_empty() || !Path::new(&self.path).exists() {
-                                    app.error = Some("Path does not exist".into());
-                                } else {
-                                    app.actions.push(Action {
-                                        label: self.label.clone(),
-                                        desc: self.desc.clone(),
-                                        action: self.path.clone(),
-                                    });
-                                    self.label.clear();
-                                    self.desc.clear();
-                                    self.path.clear();
-                                    self.show_new = false;
-                                    app.search();
-                                    if let Err(e) = save_actions(&app.actions_path, &app.actions) {
-                                        app.error = Some(format!("Failed to save: {e}"));
-                                    }
-                                }
-                            }
-                            if ui.button("Cancel").clicked() {
-                                self.show_new = false;
-                            }
-                        });
-                    });
-                } else if ui.button("New Command").clicked() {
-                    self.show_new = true;
+                if ui.button("New Command").clicked() {
+                    self.dialog.open = true;
                 }
             });
+
+            self.dialog.ui(ctx, app);
 
             ui.separator();
             let mut remove: Option<usize> = None;

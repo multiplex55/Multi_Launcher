@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod actions_editor;
+pub mod add_action_dialog;
 pub mod settings_editor;
 pub mod settings;
 pub mod launcher;
