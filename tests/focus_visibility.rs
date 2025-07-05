@@ -8,7 +8,7 @@ mod mock_ctx;
 use mock_ctx::MockCtx;
 
 #[test]
-fn visibility_toggle_immediate_when_context_present() {
+fn focus_when_becoming_visible() {
     let trigger = HotkeyTrigger::new(Hotkey::default());
     let visibility = Arc::new(AtomicBool::new(false));
     let ctx = MockCtx::default();

@@ -63,6 +63,9 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
 pub fn apply_visibility<C: ViewportCtx>(visible: bool, ctx: &C) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(visible));
     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(!visible));
+    if visible {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
     ctx.request_repaint();
 }
 
