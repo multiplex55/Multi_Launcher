@@ -10,6 +10,7 @@ mod indexer;
 mod settings;
 mod logging;
 mod visibility;
+mod global_hotkey;
 
 use crate::actions::{load_actions, Action};
 use crate::gui::LauncherApp;
