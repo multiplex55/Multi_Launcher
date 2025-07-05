@@ -190,6 +190,10 @@ fn main() -> anyhow::Result<()> {
             &restore_flag,
             &ctx,
             &mut queued_visibility,
+            {
+                let (x, y) = settings.offscreen_pos.unwrap_or((2000, 2000));
+                (x as f32, y as f32)
+            },
         );
 
         std::thread::sleep(std::time::Duration::from_millis(50));

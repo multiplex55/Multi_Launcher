@@ -12,6 +12,8 @@ pub struct SettingsEditor {
     index_input: String,
     plugin_input: String,
     debug_logging: bool,
+    offscreen_x: i32,
+    offscreen_y: i32,
 }
 
 impl SettingsEditor {
@@ -24,6 +26,8 @@ impl SettingsEditor {
             index_input: String::new(),
             plugin_input: String::new(),
             debug_logging: settings.debug_logging,
+            offscreen_x: settings.offscreen_pos.unwrap_or((2000, 2000)).0,
+            offscreen_y: settings.offscreen_pos.unwrap_or((2000, 2000)).1,
         }
     }
 
@@ -50,6 +54,7 @@ impl SettingsEditor {
                 Some(self.plugin_dirs.clone())
             },
             debug_logging: self.debug_logging,
+            offscreen_pos: Some((self.offscreen_x, self.offscreen_y)),
         }
     }
 
@@ -78,6 +83,13 @@ impl SettingsEditor {
                         ui.selectable_value(&mut self.debug_logging, false, "Disabled");
                         ui.selectable_value(&mut self.debug_logging, true, "Enabled");
                     });
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Off-screen X");
+                ui.add(egui::DragValue::new(&mut self.offscreen_x));
+                ui.label("Y");
+                ui.add(egui::DragValue::new(&mut self.offscreen_y));
             });
 
             ui.separator();
@@ -146,6 +158,7 @@ impl SettingsEditor {
                     app.update_paths(
                         new_settings.plugin_dirs.clone(),
                         new_settings.index_paths.clone(),
+                        new_settings.offscreen_pos,
                     );
                     crate::request_hotkey_restart(new_settings);
                 }
