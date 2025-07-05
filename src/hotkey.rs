@@ -189,6 +189,7 @@ impl HotkeyTrigger {
                 let need_ctrl = need_ctrl.clone();
                 let need_shift = need_shift.clone();
                 let need_alt = need_alt.clone();
+                let mouse_positions = mouse_positions.clone();
 
                 let result = listen(move |event| {
                     match event.event_type {
