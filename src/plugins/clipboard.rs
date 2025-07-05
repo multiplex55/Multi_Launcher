@@ -76,4 +76,8 @@ impl Plugin for ClipboardPlugin {
     fn name(&self) -> &str {
         "clipboard"
     }
+
+    fn capabilities(&self) -> &[&str] {
+        &["search"]
+    }
 }

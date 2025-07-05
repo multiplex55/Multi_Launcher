@@ -41,6 +41,7 @@ fn spawn_gui(
     actions: Vec<Action>,
     settings: Settings,
     settings_path: String,
+    enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
 ) -> (
     thread::JoinHandle<()>,
     Arc<AtomicBool>,
@@ -92,6 +93,7 @@ fn spawn_gui(
     let plugin_dirs = settings.plugin_dirs.clone();
     let index_paths = settings.index_paths.clone();
     let enabled_plugins = settings.enabled_plugins.clone();
+    let enabled_capabilities = settings.enabled_capabilities.clone();
     let visible_flag = Arc::new(AtomicBool::new(true));
     let restore_flag = Arc::new(AtomicBool::new(false));
     let flag_clone = visible_flag.clone();
@@ -138,6 +140,7 @@ fn spawn_gui(
                     plugin_dirs,
                     index_paths,
                     enabled_plugins,
+                    enabled_capabilities,
                     flag_clone,
                     restore_clone,
                 ))
@@ -178,7 +181,12 @@ fn main() -> anyhow::Result<()> {
     // `visibility` holds whether the window is currently restored (true) or
     // minimized (false).
     let (handle, visibility, restore_flag, ctx) =
-        spawn_gui(actions.clone(), settings.clone(), "settings.json".to_string());
+        spawn_gui(
+            actions.clone(),
+            settings.clone(),
+            "settings.json".to_string(),
+            settings.enabled_capabilities.clone(),
+        );
     let mut queued_visibility: Option<bool> = None;
 
     loop {

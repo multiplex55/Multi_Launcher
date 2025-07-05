@@ -43,6 +43,7 @@ pub struct LauncherApp {
     plugin_dirs: Option<Vec<String>>,
     index_paths: Option<Vec<String>>,
     enabled_plugins: Option<Vec<String>>,
+    enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
     visible_flag: Arc<AtomicBool>,
     restore_flag: Arc<AtomicBool>,
     last_visible: bool,
@@ -56,11 +57,13 @@ impl LauncherApp {
         plugin_dirs: Option<Vec<String>>,
         index_paths: Option<Vec<String>>,
         enabled_plugins: Option<Vec<String>>,
+        enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
         offscreen_pos: Option<(i32, i32)>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
         self.enabled_plugins = enabled_plugins;
+        self.enabled_capabilities = enabled_capabilities;
         if let Some((x, y)) = offscreen_pos {
             self.offscreen_pos = (x as f32, y as f32);
         }
@@ -76,6 +79,7 @@ impl LauncherApp {
         plugin_dirs: Option<Vec<String>>,
         index_paths: Option<Vec<String>>,
         enabled_plugins: Option<Vec<String>>,
+        enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
         visible_flag: Arc<AtomicBool>,
         restore_flag: Arc<AtomicBool>,
     ) -> Self {
@@ -162,6 +166,7 @@ impl LauncherApp {
             plugin_dirs,
             index_paths,
             enabled_plugins,
+            enabled_capabilities,
             visible_flag: visible_flag.clone(),
             restore_flag: restore_flag.clone(),
             last_visible: initial_visible,

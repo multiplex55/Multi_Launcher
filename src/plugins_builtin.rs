@@ -20,6 +20,10 @@ impl Plugin for WebSearchPlugin {
     fn name(&self) -> &str {
         "web_search"
     }
+
+    fn capabilities(&self) -> &[&str] {
+        &["search"]
+    }
 }
 
 pub struct CalculatorPlugin;
@@ -43,5 +47,9 @@ impl Plugin for CalculatorPlugin {
 
     fn name(&self) -> &str {
         "calculator"
+    }
+
+    fn capabilities(&self) -> &[&str] {
+        &["search"]
     }
 }
