@@ -14,6 +14,7 @@ pub mod window_manager;
 pub mod workspace;
 pub mod global_hotkey;
 pub mod gui;
+pub mod win_util;
 
 pub fn request_hotkey_restart(_settings: settings::Settings) {
     // no-op stub for library context
