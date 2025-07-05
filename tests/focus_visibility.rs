@@ -25,6 +25,7 @@ fn focus_when_becoming_visible() {
         &restore,
         &ctx_handle,
         &mut queued_visibility,
+        (0.0, 0.0),
     );
 
     assert_eq!(visibility.load(Ordering::SeqCst), true);

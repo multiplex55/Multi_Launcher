@@ -43,12 +43,16 @@ pub struct LauncherApp {
     visible_flag: Arc<AtomicBool>,
     restore_flag: Arc<AtomicBool>,
     last_visible: bool,
+    offscreen_pos: (f32, f32),
 }
 
 impl LauncherApp {
-    pub fn update_paths(&mut self, plugin_dirs: Option<Vec<String>>, index_paths: Option<Vec<String>>) {
+    pub fn update_paths(&mut self, plugin_dirs: Option<Vec<String>>, index_paths: Option<Vec<String>>, offscreen_pos: Option<(i32, i32)>) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
+        if let Some((x, y)) = offscreen_pos {
+            self.offscreen_pos = (x as f32, y as f32);
+        }
     }
 
     pub fn new(
@@ -119,6 +123,11 @@ impl LauncherApp {
 
         let initial_visible = visible_flag.load(Ordering::SeqCst);
 
+        let offscreen_pos = {
+            let (x, y) = settings.offscreen_pos.unwrap_or((2000, 2000));
+            (x as f32, y as f32)
+        };
+
         let app = Self {
             actions: actions.clone(),
             query: String::new(),
@@ -141,10 +150,11 @@ impl LauncherApp {
             visible_flag: visible_flag.clone(),
             restore_flag: restore_flag.clone(),
             last_visible: initial_visible,
+            offscreen_pos,
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
-        apply_visibility(initial_visible, ctx);
+        apply_visibility(initial_visible, ctx, offscreen_pos);
 
         #[cfg(target_os = "windows")]
         {
@@ -211,7 +221,7 @@ impl eframe::App for LauncherApp {
         let do_restore = self.restore_flag.swap(false, Ordering::SeqCst);
         if do_restore {
             tracing::debug!("Restoring window on restore_flag");
-            apply_visibility(true, ctx);
+            apply_visibility(true, ctx, self.offscreen_pos);
             #[cfg(target_os = "windows")]
             if let Some(hwnd) = crate::window_manager::get_hwnd(frame) {
                 crate::window_manager::force_restore_and_foreground(hwnd);
@@ -226,7 +236,7 @@ impl eframe::App for LauncherApp {
         let just_became_visible = !self.last_visible && should_be_visible;
         if self.last_visible != should_be_visible {
             tracing::debug!("gui thread -> visible: {}", should_be_visible);
-            apply_visibility(should_be_visible, ctx);
+            apply_visibility(should_be_visible, ctx, self.offscreen_pos);
             self.last_visible = should_be_visible;
         }
 
@@ -239,7 +249,7 @@ impl eframe::App for LauncherApp {
                         }
                     });
                     if ui.button("Force Hide").clicked() {
-                        apply_visibility(false, ctx);
+                        apply_visibility(false, ctx, self.offscreen_pos);
                         self.visible_flag.store(false, Ordering::SeqCst);
                         self.last_visible = false;
                     }

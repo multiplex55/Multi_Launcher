@@ -28,6 +28,7 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
     restore_flag: &Arc<AtomicBool>,
     ctx_handle: &Arc<Mutex<Option<C>>>,
     queued_visibility: &mut Option<bool>,
+    offscreen: (f32, f32),
 ) {
     if trigger.take() {
         let old = visibility.load(Ordering::SeqCst);
@@ -36,7 +37,7 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
         visibility.store(next, Ordering::SeqCst);
         if let Ok(guard) = ctx_handle.lock() {
             if let Some(c) = &*guard {
-                apply_visibility(next, c);
+                apply_visibility(next, c, offscreen);
                 if next {
                     restore_flag.store(true, Ordering::SeqCst);
                 }
@@ -61,7 +62,7 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
                 let old = visibility.load(Ordering::SeqCst);
                 visibility.store(next, Ordering::SeqCst);
                 tracing::debug!(from=?old, to=?next, "visibility updated");
-                apply_visibility(next, c);
+                apply_visibility(next, c, offscreen);
                 if next {
                     restore_flag.store(true, Ordering::SeqCst);
                 }
@@ -73,7 +74,7 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
 }
 
 /// Apply the current visibility state to the viewport.
-pub fn apply_visibility<C: ViewportCtx>(visible: bool, ctx: &C) {
+pub fn apply_visibility<C: ViewportCtx>(visible: bool, ctx: &C, offscreen: (f32, f32)) {
     if visible {
         if let Some((x, y)) = crate::window_manager::current_mouse_position() {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
@@ -82,7 +83,7 @@ pub fn apply_visibility<C: ViewportCtx>(visible: bool, ctx: &C) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     } else {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(offscreen.0, offscreen.1)));
     }
     ctx.request_repaint();
 }
