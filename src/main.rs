@@ -11,6 +11,8 @@ mod settings;
 mod logging;
 mod visibility;
 mod global_hotkey;
+mod window_manager;
+mod workspace;
 
 use crate::actions::{load_actions, Action};
 use crate::gui::LauncherApp;
