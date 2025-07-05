@@ -3,6 +3,9 @@ use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 
 use crate::hotkey::HotkeyTrigger;
 
+/// When hiding the window, move it far off-screen so that it can't be seen.
+pub const OFFSCREEN_POSITION: (f32, f32) = (2000.0, 2000.0);
+
 
 /// Trait abstracting over an `egui::Context` for viewport commands.
 pub trait ViewportCtx {
@@ -82,7 +85,8 @@ pub fn apply_visibility<C: ViewportCtx>(visible: bool, ctx: &C) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     } else {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        let (x, y) = OFFSCREEN_POSITION;
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
     }
     ctx.request_repaint();
 }

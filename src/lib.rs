@@ -15,6 +15,8 @@ pub mod workspace;
 pub mod global_hotkey;
 pub mod gui;
 
+pub use visibility::OFFSCREEN_POSITION;
+
 pub fn request_hotkey_restart(_settings: settings::Settings) {
     // no-op stub for library context
 }
