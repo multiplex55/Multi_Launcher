@@ -208,7 +208,9 @@ impl eframe::App for LauncherApp {
         use egui::*;
 
         tracing::debug!("LauncherApp::update called");
-        if self.restore_flag.swap(false, Ordering::SeqCst) {
+        let do_restore = self.restore_flag.swap(false, Ordering::SeqCst);
+        if do_restore {
+            tracing::debug!("Restoring window on restore_flag");
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
