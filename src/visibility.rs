@@ -3,6 +3,9 @@ use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 
 use crate::hotkey::HotkeyTrigger;
 
+/// Position used to hide the viewport offscreen when not visible.
+pub const OFFSCREEN_POS: (f32, f32) = (2000.0, 2000.0);
+
 
 /// Trait abstracting over an `egui::Context` for viewport commands.
 pub trait ViewportCtx {
@@ -82,7 +85,8 @@ pub fn apply_visibility<C: ViewportCtx>(visible: bool, ctx: &C) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     } else {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(OFFSCREEN_POS.0, OFFSCREEN_POS.1)));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
     }
     ctx.request_repaint();
 }
