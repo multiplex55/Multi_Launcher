@@ -25,6 +25,7 @@ impl ViewportCtx for egui::Context {
 pub fn handle_visibility_trigger<C: ViewportCtx>(
     trigger: &HotkeyTrigger,
     visibility: &Arc<AtomicBool>,
+    restore_flag: &Arc<AtomicBool>,
     ctx_handle: &Arc<Mutex<Option<C>>>,
     queued_visibility: &mut Option<bool>,
 ) {
@@ -36,13 +37,22 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
         if let Ok(guard) = ctx_handle.lock() {
             if let Some(c) = &*guard {
                 apply_visibility(next, c);
+                if next {
+                    restore_flag.store(true, Ordering::SeqCst);
+                }
                 *queued_visibility = None;
                 tracing::debug!("Applied queued visibility: {}", next);
             } else {
                 *queued_visibility = Some(next);
+                if next {
+                    restore_flag.store(true, Ordering::SeqCst);
+                }
             }
         } else {
             *queued_visibility = Some(next);
+            if next {
+                restore_flag.store(true, Ordering::SeqCst);
+            }
         }
     } else if let Some(next) = *queued_visibility {
         tracing::debug!("Processing previously queued visibility: {}", next);
@@ -52,6 +62,9 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
                 visibility.store(next, Ordering::SeqCst);
                 tracing::debug!(from=?old, to=?next, "visibility updated");
                 apply_visibility(next, c);
+                if next {
+                    restore_flag.store(true, Ordering::SeqCst);
+                }
                 *queued_visibility = None;
                 tracing::debug!("Applied queued visibility: {}", next);
             }

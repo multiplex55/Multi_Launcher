@@ -11,12 +11,19 @@ use mock_ctx::MockCtx;
 fn queued_visibility_applies_when_context_available() {
     let trigger = HotkeyTrigger::new(Hotkey::default());
     let visibility = Arc::new(AtomicBool::new(false));
+    let restore = Arc::new(AtomicBool::new(false));
     let ctx_handle: Arc<Mutex<Option<MockCtx>>> = Arc::new(Mutex::new(None));
     let mut queued_visibility: Option<bool> = None;
 
     // simulate hotkey press while no context is available
     *trigger.open.lock().unwrap() = true;
-    handle_visibility_trigger(&trigger, &visibility, &ctx_handle, &mut queued_visibility);
+    handle_visibility_trigger(
+        &trigger,
+        &visibility,
+        &restore,
+        &ctx_handle,
+        &mut queued_visibility,
+    );
 
     assert_eq!(visibility.load(Ordering::SeqCst), true);
     assert_eq!(queued_visibility, Some(true));
@@ -28,7 +35,13 @@ fn queued_visibility_applies_when_context_available() {
         *guard = Some(ctx.clone());
     }
 
-    handle_visibility_trigger(&trigger, &visibility, &ctx_handle, &mut queued_visibility);
+    handle_visibility_trigger(
+        &trigger,
+        &visibility,
+        &restore,
+        &ctx_handle,
+        &mut queued_visibility,
+    );
 
     assert!(queued_visibility.is_none());
     let cmds = ctx.commands.lock().unwrap();

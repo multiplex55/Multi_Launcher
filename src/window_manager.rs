@@ -198,3 +198,25 @@ pub fn current_mouse_position() -> Option<(f32, f32)> {
         Some((0.0, 0.0))
     }
 }
+
+#[cfg(target_os = "windows")]
+use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
+
+/// On Windows, restore the window and bring it to the foreground.
+#[cfg(target_os = "windows")]
+pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SetForegroundWindow, SW_RESTORE};
+    unsafe {
+        ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd);
+    }
+}
+
+/// Extract the HWND from an eframe [`Frame`].
+#[cfg(target_os = "windows")]
+pub fn get_hwnd(frame: &eframe::Frame) -> Option<windows::Win32::Foundation::HWND> {
+    match frame.raw_window_handle() {
+        RawWindowHandle::Win32(handle) => Some(windows::Win32::Foundation::HWND(handle.hwnd.get())),
+        _ => None,
+    }
+}

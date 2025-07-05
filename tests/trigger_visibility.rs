@@ -11,6 +11,7 @@ use mock_ctx::MockCtx;
 fn visibility_toggle_immediate_when_context_present() {
     let trigger = HotkeyTrigger::new(Hotkey::default());
     let visibility = Arc::new(AtomicBool::new(false));
+    let restore = Arc::new(AtomicBool::new(false));
     let ctx = MockCtx::default();
     let ctx_handle: Arc<Mutex<Option<MockCtx>>> = Arc::new(Mutex::new(Some(ctx.clone())));
     let mut queued_visibility: Option<bool> = None;
@@ -18,7 +19,13 @@ fn visibility_toggle_immediate_when_context_present() {
     // simulate hotkey press
     *trigger.open.lock().unwrap() = true;
 
-    handle_visibility_trigger(&trigger, &visibility, &ctx_handle, &mut queued_visibility);
+    handle_visibility_trigger(
+        &trigger,
+        &visibility,
+        &restore,
+        &ctx_handle,
+        &mut queued_visibility,
+    );
 
     assert_eq!(visibility.load(Ordering::SeqCst), true);
     assert!(queued_visibility.is_none());

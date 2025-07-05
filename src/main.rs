@@ -39,7 +39,12 @@ fn spawn_gui(
     actions: Vec<Action>,
     settings: Settings,
     settings_path: String,
-) -> (thread::JoinHandle<()>, Arc<AtomicBool>, Arc<Mutex<Option<egui::Context>>>) {
+) -> (
+    thread::JoinHandle<()>,
+    Arc<AtomicBool>,
+    Arc<AtomicBool>,
+    Arc<Mutex<Option<egui::Context>>>,
+) {
     let actions_for_window = actions.clone();
     let mut plugins = PluginManager::new();
     plugins.register(Box::new(WebSearchPlugin));
@@ -57,7 +62,9 @@ fn spawn_gui(
     let plugin_dirs = settings.plugin_dirs.clone();
     let index_paths = settings.index_paths.clone();
     let visible_flag = Arc::new(AtomicBool::new(true));
+    let restore_flag = Arc::new(AtomicBool::new(false));
     let flag_clone = visible_flag.clone();
+    let restore_clone = restore_flag.clone();
     let ctx_handle = Arc::new(Mutex::new(None));
     let ctx_clone = ctx_handle.clone();
 
@@ -99,12 +106,13 @@ fn spawn_gui(
                     plugin_dirs,
                     index_paths,
                     flag_clone,
+                    restore_clone,
                 ))
             }),
         );
     });
 
-    (handle, visible_flag, ctx_handle)
+    (handle, visible_flag, restore_flag, ctx_handle)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -136,7 +144,7 @@ fn main() -> anyhow::Result<()> {
 
     // `visibility` holds whether the window is currently restored (true) or
     // minimized (false).
-    let (handle, visibility, ctx) =
+    let (handle, visibility, restore_flag, ctx) =
         spawn_gui(actions.clone(), settings.clone(), "settings.json".to_string());
     let mut queued_visibility: Option<bool> = None;
 
@@ -176,7 +184,13 @@ fn main() -> anyhow::Result<()> {
             listener = HotkeyTrigger::start_listener(watched, "main");
         }
 
-        handle_visibility_trigger(trigger.as_ref(), &visibility, &ctx, &mut queued_visibility);
+        handle_visibility_trigger(
+            trigger.as_ref(),
+            &visibility,
+            &restore_flag,
+            &ctx,
+            &mut queued_visibility,
+        );
 
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
