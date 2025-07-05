@@ -149,6 +149,7 @@ pub struct HotkeyTrigger {
     pub ctrl: bool,
     pub shift: bool,
     pub alt: bool,
+    pub mouse_pos: Arc<Mutex<(f64, f64)>>,
 }
 
 pub struct HotkeyListener {
@@ -163,6 +164,7 @@ impl HotkeyTrigger {
             ctrl: hotkey.ctrl,
             shift: hotkey.shift,
             alt: hotkey.alt,
+            mouse_pos: Arc::new(Mutex::new((0.0, 0.0))),
         }
     }
 
@@ -173,6 +175,7 @@ impl HotkeyTrigger {
         let need_ctrl: Vec<bool> = triggers.iter().map(|t| t.ctrl).collect();
         let need_shift: Vec<bool> = triggers.iter().map(|t| t.shift).collect();
         let need_alt: Vec<bool> = triggers.iter().map(|t| t.alt).collect();
+        let mouse_positions: Vec<_> = triggers.iter().map(|t| t.mouse_pos.clone()).collect();
         thread::spawn(move || {
             while !stop_clone.load(Ordering::SeqCst) {
                 let open_listeners: Vec<_> = triggers.iter().map(|t| t.open.clone()).collect();
@@ -181,6 +184,7 @@ impl HotkeyTrigger {
                 let mut ctrl_pressed = false;
                 let mut shift_pressed = false;
                 let mut alt_pressed = false;
+                let mut last_pos = (0.0f64, 0.0f64);
                 let watch_keys = watch_keys.clone();
                 let need_ctrl = need_ctrl.clone();
                 let need_shift = need_shift.clone();
@@ -214,6 +218,9 @@ impl HotkeyTrigger {
                                 }
                             }
                         }
+                        EventType::MouseMove { x, y } => {
+                            last_pos = (x, y);
+                        }
                         _ => {}
                     }
 
@@ -227,6 +234,9 @@ impl HotkeyTrigger {
                                 triggered[i] = true;
                                 if let Ok(mut flag) = open_listeners[i].lock() {
                                     *flag = true;
+                                }
+                                if let Ok(mut mp) = mouse_positions[i].lock() {
+                                    *mp = last_pos;
                                 }
                             }
                         } else {
@@ -258,6 +268,10 @@ impl HotkeyTrigger {
         }
     }
 
+    pub fn mouse_pos(&self) -> (f64, f64) {
+        *self.mouse_pos.lock().unwrap()
+    }
+
 }
 
 impl HotkeyListener {
@@ -272,12 +286,14 @@ pub fn process_test_events(triggers: &[Arc<HotkeyTrigger>], events: &[EventType]
     let need_ctrl: Vec<bool> = triggers.iter().map(|t| t.ctrl).collect();
     let need_shift: Vec<bool> = triggers.iter().map(|t| t.shift).collect();
     let need_alt: Vec<bool> = triggers.iter().map(|t| t.alt).collect();
+    let mouse_positions: Vec<_> = triggers.iter().map(|t| t.mouse_pos.clone()).collect();
 
     let mut watch_pressed = vec![false; triggers.len()];
     let mut triggered = vec![false; triggers.len()];
     let mut ctrl_pressed = false;
     let mut shift_pressed = false;
     let mut alt_pressed = false;
+    let mut last_pos = (0.0f64, 0.0f64);
 
     for event in events {
         match *event {
@@ -307,6 +323,9 @@ pub fn process_test_events(triggers: &[Arc<HotkeyTrigger>], events: &[EventType]
                     }
                 }
             }
+            EventType::MouseMove { x, y } => {
+                last_pos = (x, y);
+            }
             _ => {}
         }
 
@@ -320,6 +339,9 @@ pub fn process_test_events(triggers: &[Arc<HotkeyTrigger>], events: &[EventType]
                     triggered[i] = true;
                     if let Ok(mut flag) = open_listeners[i].lock() {
                         *flag = true;
+                    }
+                    if let Ok(mut mp) = mouse_positions[i].lock() {
+                        *mp = last_pos;
                     }
                 }
             } else {

@@ -26,7 +26,7 @@ fn visibility_toggle_immediate_when_context_present() {
     let cmds = ctx.commands.lock().unwrap();
     assert_eq!(cmds.len(), 1);
     match cmds[0] {
-        egui::ViewportCommand::Visible(v) => assert!(v),
+        egui::ViewportCommand::Minimized(v) => assert!(!v),
         _ => panic!("unexpected command"),
     }
 }

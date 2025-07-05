@@ -21,7 +21,7 @@ fn queued_visibility_applies_when_context_available() {
         visibility.store(next, Ordering::SeqCst);
         if let Ok(mut guard) = ctx_handle.lock() {
             if let Some(c) = &*guard {
-                c.send_viewport_cmd(egui::ViewportCommand::Visible(next));
+                c.send_viewport_cmd(egui::ViewportCommand::Minimized(!next));
                 c.request_repaint();
                 queued_visibility = None;
             } else {
@@ -45,7 +45,7 @@ fn queued_visibility_applies_when_context_available() {
     if let Some(next) = queued_visibility {
         if let Ok(mut guard) = ctx_handle.lock() {
             if let Some(c) = &*guard {
-                c.send_viewport_cmd(egui::ViewportCommand::Visible(next));
+                c.send_viewport_cmd(egui::ViewportCommand::Minimized(!next));
                 c.request_repaint();
                 queued_visibility = None;
             }
@@ -56,7 +56,7 @@ fn queued_visibility_applies_when_context_available() {
     let cmds = ctx.commands.lock().unwrap();
     assert_eq!(cmds.len(), 1);
     match cmds[0] {
-        egui::ViewportCommand::Visible(v) => assert!(v),
+        egui::ViewportCommand::Minimized(v) => assert!(!v),
         _ => panic!("unexpected command"),
     }
 }

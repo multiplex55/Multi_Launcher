@@ -198,8 +198,8 @@ impl eframe::App for LauncherApp {
         let just_became_visible = !self.last_visible && should_be_visible;
         if self.last_visible != should_be_visible {
             tracing::debug!("gui thread -> visible: {}", should_be_visible);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(should_be_visible));
-            tracing::debug!("ViewportCommand::Visible({}) sent", should_be_visible);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(!should_be_visible));
+            tracing::debug!("ViewportCommand::Minimized({}) sent", !should_be_visible);
             self.last_visible = should_be_visible;
         }
 
@@ -212,7 +212,7 @@ impl eframe::App for LauncherApp {
                         }
                     });
                     if ui.button("Force Hide").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                         ctx.request_repaint();
                         self.visible_flag.store(false, Ordering::SeqCst);
                         self.last_visible = false;

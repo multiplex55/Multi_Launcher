@@ -35,8 +35,7 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
         visibility.store(next, Ordering::SeqCst);
         if let Ok(guard) = ctx_handle.lock() {
             if let Some(c) = &*guard {
-                c.send_viewport_cmd(egui::ViewportCommand::Visible(next));
-                c.request_repaint();
+                apply_visibility(c, trigger, next);
                 *queued_visibility = None;
                 tracing::debug!("Applied queued visibility: {}", next);
             } else {
@@ -52,12 +51,23 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
                 let old = visibility.load(Ordering::SeqCst);
                 visibility.store(next, Ordering::SeqCst);
                 tracing::debug!(from=?old, to=?next, "visibility updated");
-                c.send_viewport_cmd(egui::ViewportCommand::Visible(next));
-                c.request_repaint();
+                apply_visibility(c, trigger, next);
                 *queued_visibility = None;
                 tracing::debug!("Applied queued visibility: {}", next);
             }
         }
     }
+}
+
+fn apply_visibility<C: ViewportCtx>(ctx: &C, trigger: &HotkeyTrigger, visible: bool) {
+    if visible {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        let (x, y) = trigger.mouse_pos();
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::Pos2::new(x as f32, y as f32)));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    } else {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+    }
+    ctx.request_repaint();
 }
 
