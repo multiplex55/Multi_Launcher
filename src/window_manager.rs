@@ -127,3 +127,76 @@ pub fn virtual_key_from_string(key: &str) -> Option<u32> {
         _ => None,
     }
 }
+
+/// Return the current global mouse cursor position as `(x, y)`.
+///
+/// On failure this returns `(0.0, 0.0)`.
+pub fn global_mouse_position() -> (f32, f32) {
+    #[cfg(target_os = "windows")]
+    {
+        use winapi::shared::windef::POINT;
+        use winapi::um::winuser::GetCursorPos;
+        unsafe {
+            let mut pt: POINT = std::mem::zeroed();
+            if GetCursorPos(&mut pt) != 0 {
+                (pt.x as f32, pt.y as f32)
+            } else {
+                (0.0, 0.0)
+            }
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use std::ptr;
+        use x11::xlib;
+
+        unsafe {
+            let display = xlib::XOpenDisplay(ptr::null());
+            if display.is_null() {
+                return (0.0, 0.0);
+            }
+            let root = xlib::XDefaultRootWindow(display);
+            let mut root_ret: xlib::Window = 0;
+            let mut child_ret: xlib::Window = 0;
+            let mut root_x: i32 = 0;
+            let mut root_y: i32 = 0;
+            let mut win_x: i32 = 0;
+            let mut win_y: i32 = 0;
+            let mut mask_ret: u32 = 0;
+            let ok = xlib::XQueryPointer(
+                display,
+                root,
+                &mut root_ret,
+                &mut child_ret,
+                &mut root_x,
+                &mut root_y,
+                &mut win_x,
+                &mut win_y,
+                &mut mask_ret,
+            );
+            xlib::XCloseDisplay(display);
+            if ok == 0 {
+                (0.0, 0.0)
+            } else {
+                (root_x as f32, root_y as f32)
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use core_graphics::event::CGEvent;
+        if let Some(ev) = CGEvent::new(None) {
+            let loc = ev.location();
+            (loc.x as f32, loc.y as f32)
+        } else {
+            (0.0, 0.0)
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    {
+        (0.0, 0.0)
+    }
+}
