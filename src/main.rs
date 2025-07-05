@@ -13,6 +13,7 @@ mod visibility;
 mod global_hotkey;
 mod window_manager;
 mod workspace;
+mod plugins;
 
 use crate::actions::{load_actions, Action};
 use crate::gui::LauncherApp;
