@@ -5,6 +5,7 @@ use crate::settings::Settings;
 use crate::launcher::launch_action;
 use crate::plugin::PluginManager;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
+use crate::plugins::clipboard::ClipboardPlugin;
 use crate::indexer;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher, Config, EventKind};
 use std::sync::mpsc::{channel, Receiver};
@@ -334,6 +335,7 @@ impl eframe::App for LauncherApp {
                     let mut plugins = PluginManager::new();
                     plugins.register(Box::new(WebSearchPlugin));
                     plugins.register(Box::new(CalculatorPlugin));
+                    plugins.register(Box::new(ClipboardPlugin::default()));
                     if let Some(dirs) = &self.plugin_dirs {
                         for dir in dirs {
                             if let Err(e) = plugins.load_dir(dir) {

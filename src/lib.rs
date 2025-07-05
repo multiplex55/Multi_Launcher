@@ -5,6 +5,7 @@ pub mod settings;
 pub mod launcher;
 pub mod plugin;
 pub mod plugins_builtin;
+pub mod plugins;
 pub mod indexer;
 pub mod logging;
 pub mod hotkey;
