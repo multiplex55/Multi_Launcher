@@ -192,7 +192,10 @@ impl eframe::App for LauncherApp {
 
         let should_be_visible = self.visible_flag.load(Ordering::SeqCst);
         let just_became_visible = !self.show_window && should_be_visible;
-        self.show_window = should_be_visible;
+        if self.show_window != should_be_visible {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(should_be_visible));
+            self.show_window = should_be_visible;
+        }
 
         TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             menu::bar(ui, |ui| {
@@ -204,6 +207,7 @@ impl eframe::App for LauncherApp {
                     });
                     if ui.button("Toggle Window").clicked() {
                         self.show_window = !self.show_window;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(self.show_window));
                         self.visible_flag.store(self.show_window, Ordering::SeqCst);
                     }
                     if ui.button("Close Application").clicked() {
