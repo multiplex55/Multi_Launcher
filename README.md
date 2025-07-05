@@ -52,7 +52,8 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
   "index_paths": ["/usr/share/applications"],
   "plugin_dirs": ["./plugins"],
   "debug_logging": false,
-  "offscreen_pos": [2000, 2000]
+  "offscreen_pos": [2000, 2000],
+  "window_size": [400, 220]
 }
 ```
 
@@ -69,6 +70,8 @@ through the GUI.
 `offscreen_pos` specifies where the window is moved when hiding it. Choose
 coordinates outside the visible monitor area so the window stays accessible but
 off-screen. The default is `[2000, 2000]`.
+`window_size` records the last size of the launcher window. It is updated on
+exit so the next start uses the same dimensions. The default is `[400, 220]`.
 
 If you choose `CapsLock` as the hotkey, the launcher suppresses the normal
 CapsLock toggle **when compiled with the `unstable_grab` feature enabled**.
