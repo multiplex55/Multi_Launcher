@@ -12,6 +12,7 @@ mod logging;
 mod visibility;
 mod global_hotkey;
 mod window_manager;
+mod win_util;
 mod workspace;
 
 use crate::actions::{load_actions, Action};
@@ -23,7 +24,7 @@ use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::Settings;
 
 use eframe::egui;
-use std::sync::{Arc, atomic::AtomicBool, Mutex, mpsc::{Sender, channel}};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}, Mutex, mpsc::{Sender, channel}};
 use std::thread;
 use once_cell::sync::Lazy;
 

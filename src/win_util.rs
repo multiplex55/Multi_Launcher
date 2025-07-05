@@ -7,8 +7,8 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 pub fn force_restore_and_foreground(hwnd: HWND) {
     use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SetForegroundWindow, SW_RESTORE};
     unsafe {
-        ShowWindow(hwnd, SW_RESTORE);
-        SetForegroundWindow(hwnd);
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = SetForegroundWindow(hwnd);
     }
 }
 
