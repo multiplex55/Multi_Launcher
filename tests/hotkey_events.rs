@@ -47,12 +47,25 @@ fn zero_key_events_toggle_visibility() {
 
     let visibility = Arc::new(AtomicBool::new(false));
     let ctx_handle: Arc<Mutex<Option<MockCtx>>> = Arc::new(Mutex::new(None));
+    let restore = Arc::new(AtomicBool::new(false));
     let mut queued_visibility: Option<bool> = None;
 
-    handle_visibility_trigger(&trigger, &visibility, &ctx_handle, &mut queued_visibility);
+    handle_visibility_trigger(
+        &trigger,
+        &visibility,
+        &restore,
+        &ctx_handle,
+        &mut queued_visibility,
+    );
     assert_eq!(visibility.load(Ordering::SeqCst), true);
 
     process_test_events(&triggers, &events);
-    handle_visibility_trigger(&trigger, &visibility, &ctx_handle, &mut queued_visibility);
+    handle_visibility_trigger(
+        &trigger,
+        &visibility,
+        &restore,
+        &ctx_handle,
+        &mut queued_visibility,
+    );
     assert_eq!(visibility.load(Ordering::SeqCst), false);
 }

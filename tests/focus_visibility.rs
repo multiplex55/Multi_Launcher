@@ -11,6 +11,7 @@ use mock_ctx::MockCtx;
 fn focus_when_becoming_visible() {
     let trigger = HotkeyTrigger::new(Hotkey::default());
     let visibility = Arc::new(AtomicBool::new(false));
+    let restore = Arc::new(AtomicBool::new(false));
     let ctx = MockCtx::default();
     let ctx_handle: Arc<Mutex<Option<MockCtx>>> = Arc::new(Mutex::new(Some(ctx.clone())));
     let mut queued_visibility: Option<bool> = None;
@@ -18,22 +19,32 @@ fn focus_when_becoming_visible() {
     // simulate hotkey press
     *trigger.open.lock().unwrap() = true;
 
-    handle_visibility_trigger(&trigger, &visibility, &ctx_handle, &mut queued_visibility);
+    handle_visibility_trigger(
+        &trigger,
+        &visibility,
+        &restore,
+        &ctx_handle,
+        &mut queued_visibility,
+    );
 
     assert_eq!(visibility.load(Ordering::SeqCst), true);
     assert!(queued_visibility.is_none());
 
     let cmds = ctx.commands.lock().unwrap();
-    assert_eq!(cmds.len(), 3);
+    assert_eq!(cmds.len(), 4);
     match cmds[0] {
-        egui::ViewportCommand::Visible(v) => assert!(v),
+        egui::ViewportCommand::OuterPosition(_) => {}
         _ => panic!("unexpected command"),
     }
     match cmds[1] {
-        egui::ViewportCommand::Minimized(m) => assert!(!m),
+        egui::ViewportCommand::Visible(v) => assert!(v),
         _ => panic!("unexpected command"),
     }
     match cmds[2] {
+        egui::ViewportCommand::Minimized(m) => assert!(!m),
+        _ => panic!("unexpected command"),
+    }
+    match cmds[3] {
         egui::ViewportCommand::Focus => {},
         _ => panic!("unexpected command"),
     }
