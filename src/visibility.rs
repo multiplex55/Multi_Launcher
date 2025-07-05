@@ -35,8 +35,7 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
         visibility.store(next, Ordering::SeqCst);
         if let Ok(guard) = ctx_handle.lock() {
             if let Some(c) = &*guard {
-                c.send_viewport_cmd(egui::ViewportCommand::Visible(next));
-                c.request_repaint();
+                apply_visibility(next, c);
                 *queued_visibility = None;
                 tracing::debug!("Applied queued visibility: {}", next);
             } else {
@@ -52,12 +51,18 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
                 let old = visibility.load(Ordering::SeqCst);
                 visibility.store(next, Ordering::SeqCst);
                 tracing::debug!(from=?old, to=?next, "visibility updated");
-                c.send_viewport_cmd(egui::ViewportCommand::Visible(next));
-                c.request_repaint();
+                apply_visibility(next, c);
                 *queued_visibility = None;
                 tracing::debug!("Applied queued visibility: {}", next);
             }
         }
     }
+}
+
+/// Apply the current visibility state to the viewport.
+pub fn apply_visibility<C: ViewportCtx>(visible: bool, ctx: &C) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(visible));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(!visible));
+    ctx.request_repaint();
 }
 

@@ -1,7 +1,7 @@
 use multi_launcher::hotkey::{Hotkey, HotkeyTrigger};
 use multi_launcher::visibility::handle_visibility_trigger;
-use eframe::egui;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use eframe::egui;
 
 #[path = "mock_ctx.rs"]
 mod mock_ctx;
@@ -24,9 +24,13 @@ fn visibility_toggle_immediate_when_context_present() {
     assert!(queued_visibility.is_none());
 
     let cmds = ctx.commands.lock().unwrap();
-    assert_eq!(cmds.len(), 1);
+    assert_eq!(cmds.len(), 2);
     match cmds[0] {
         egui::ViewportCommand::Visible(v) => assert!(v),
+        _ => panic!("unexpected command"),
+    }
+    match cmds[1] {
+        egui::ViewportCommand::Minimized(m) => assert!(!m),
         _ => panic!("unexpected command"),
     }
 }
