@@ -9,6 +9,7 @@ pub struct SettingsEditor {
     quit_hotkey: String,
     index_paths: Vec<String>,
     plugin_dirs: Vec<String>,
+    enabled_plugins: Vec<String>,
     index_input: String,
     plugin_input: String,
     debug_logging: bool,
@@ -25,6 +26,7 @@ impl SettingsEditor {
             quit_hotkey: settings.quit_hotkey.clone().unwrap_or_default(),
             index_paths: settings.index_paths.clone().unwrap_or_default(),
             plugin_dirs: settings.plugin_dirs.clone().unwrap_or_default(),
+            enabled_plugins: settings.enabled_plugins.clone().unwrap_or_default(),
             index_input: String::new(),
             plugin_input: String::new(),
             debug_logging: settings.debug_logging,
@@ -56,6 +58,11 @@ impl SettingsEditor {
                 None
             } else {
                 Some(self.plugin_dirs.clone())
+            },
+            enabled_plugins: if self.enabled_plugins.is_empty() {
+                None
+            } else {
+                Some(self.enabled_plugins.clone())
             },
             debug_logging: self.debug_logging,
             offscreen_pos: Some((self.offscreen_x, self.offscreen_y)),
@@ -155,6 +162,21 @@ impl SettingsEditor {
                 }
             });
 
+            ui.separator();
+            ui.label("Enabled plugins:");
+            for name in app.plugins.plugin_names() {
+                let mut enabled = self.enabled_plugins.contains(&name);
+                if ui.checkbox(&mut enabled, &name).changed() {
+                    if enabled {
+                        if !self.enabled_plugins.contains(&name) {
+                            self.enabled_plugins.push(name.clone());
+                        }
+                    } else if let Some(pos) = self.enabled_plugins.iter().position(|n| n == &name) {
+                        self.enabled_plugins.remove(pos);
+                    }
+                }
+            }
+
             if ui.button("Save").clicked() {
                 let new_settings = self.to_settings();
                 if let Err(e) = new_settings.save(&app.settings_path) {
@@ -163,6 +185,7 @@ impl SettingsEditor {
                     app.update_paths(
                         new_settings.plugin_dirs.clone(),
                         new_settings.index_paths.clone(),
+                        new_settings.enabled_plugins.clone(),
                         new_settings.offscreen_pos,
                     );
                     crate::request_hotkey_restart(new_settings);
