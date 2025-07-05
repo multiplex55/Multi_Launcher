@@ -3,7 +3,7 @@ use crate::actions_editor::ActionsEditor;
 use crate::settings_editor::SettingsEditor;
 use crate::settings::Settings;
 use crate::launcher::launch_action;
-use crate::plugin::PluginManager;
+use crate::plugin::{PluginManager, Plugin};
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::plugins::clipboard::ClipboardPlugin;
 use crate::indexer;

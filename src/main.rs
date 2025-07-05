@@ -19,7 +19,7 @@ use crate::actions::{load_actions, Action};
 use crate::gui::LauncherApp;
 use crate::hotkey::HotkeyTrigger;
 use crate::visibility::handle_visibility_trigger;
-use crate::plugin::PluginManager;
+use crate::plugin::{PluginManager, Plugin};
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::plugins::clipboard::ClipboardPlugin;
 use crate::settings::Settings;
