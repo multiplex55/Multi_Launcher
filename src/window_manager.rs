@@ -127,3 +127,28 @@ pub fn virtual_key_from_string(key: &str) -> Option<u32> {
         _ => None,
     }
 }
+
+/// Return the current global mouse cursor position as `(x, y)`.
+///
+/// On failure this returns `(0.0, 0.0)`.
+pub fn global_mouse_position() -> (f32, f32) {
+    #[cfg(target_os = "windows")]
+    {
+        use winapi::shared::windef::POINT;
+        use winapi::um::winuser::GetCursorPos;
+
+        unsafe {
+            let mut pt: POINT = std::mem::zeroed();
+            if GetCursorPos(&mut pt) != 0 {
+                (pt.x as f32, pt.y as f32)
+            } else {
+                (0.0, 0.0)
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        (0.0, 0.0)
+    }
+}

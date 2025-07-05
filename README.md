@@ -70,6 +70,12 @@ CapsLock toggle **when compiled with the `unstable_grab` feature enabled**.
 Press `Shift`+`CapsLock` to change the keyboard state while the application is
 running.
 
+## Window Visibility
+
+Press the launcher hotkey to toggle the window. When hidden the window is
+minimized rather than closed. Triggering the hotkey again restores the launcher
+at the current mouse cursor position and focuses the search box.
+
 ## Plugins
 
 Built-in plugins provide Google web search (`g query`) and an inline calculator
