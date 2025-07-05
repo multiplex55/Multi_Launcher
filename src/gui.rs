@@ -41,6 +41,7 @@ pub struct LauncherApp {
     plugin_dirs: Option<Vec<String>>,
     index_paths: Option<Vec<String>>,
     visible_flag: Arc<AtomicBool>,
+    restore_flag: Arc<AtomicBool>,
     last_visible: bool,
 }
 
@@ -60,6 +61,7 @@ impl LauncherApp {
         plugin_dirs: Option<Vec<String>>,
         index_paths: Option<Vec<String>>,
         visible_flag: Arc<AtomicBool>,
+        restore_flag: Arc<AtomicBool>,
     ) -> Self {
         let (tx, rx) = channel();
         let mut watchers = Vec::new();
@@ -137,6 +139,7 @@ impl LauncherApp {
             plugin_dirs,
             index_paths,
             visible_flag: visible_flag.clone(),
+            restore_flag: restore_flag.clone(),
             last_visible: initial_visible,
         };
 
@@ -201,10 +204,19 @@ impl LauncherApp {
 }
 
 impl eframe::App for LauncherApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         use egui::*;
 
         tracing::debug!("LauncherApp::update called");
+        let do_restore = self.restore_flag.swap(false, Ordering::SeqCst);
+        if do_restore {
+            tracing::debug!("Restoring window on restore_flag");
+            apply_visibility(true, ctx);
+            #[cfg(target_os = "windows")]
+            if let Some(hwnd) = crate::window_manager::get_hwnd(frame) {
+                crate::window_manager::force_restore_and_foreground(hwnd);
+            }
+        }
 
         let should_be_visible = self.visible_flag.load(Ordering::SeqCst);
         tracing::debug!(
