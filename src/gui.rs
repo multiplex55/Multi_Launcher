@@ -116,7 +116,7 @@ impl LauncherApp {
 
         let initial_visible = visible_flag.load(Ordering::SeqCst);
 
-        let mut app = Self {
+        let app = Self {
             actions: actions.clone(),
             query: String::new(),
             results: actions,

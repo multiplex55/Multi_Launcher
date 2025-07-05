@@ -1,4 +1,4 @@
-use rdev::{listen, EventType, Key};
+use rdev::{EventType, Key};
 #[cfg(feature = "unstable_grab")]
 use rdev::{grab, Event};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
