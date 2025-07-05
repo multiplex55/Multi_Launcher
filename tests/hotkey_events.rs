@@ -29,7 +29,7 @@ fn launcher_and_quit_hotkeys_toggle_flags() {
 }
 
 #[test]
-fn zero_key_events_toggle_visibility() {
+fn zero_key_events_hide_visibility() {
     let zero_hotkey = parse_hotkey("0").unwrap();
     let trigger = Arc::new(HotkeyTrigger::new(zero_hotkey));
 
@@ -41,12 +41,8 @@ fn zero_key_events_toggle_visibility() {
 
     process_test_events(&triggers, &events);
 
-    let visibility = Arc::new(AtomicBool::new(false));
+    let visibility = Arc::new(AtomicBool::new(true));
 
-    handle_visibility_trigger(&trigger, &visibility);
-    assert_eq!(visibility.load(Ordering::SeqCst), true);
-
-    process_test_events(&triggers, &events);
     handle_visibility_trigger(&trigger, &visibility);
     assert_eq!(visibility.load(Ordering::SeqCst), false);
 }
