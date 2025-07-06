@@ -16,10 +16,11 @@ pub struct PluginEditor {
 }
 
 impl PluginEditor {
-    pub fn new(settings: &Settings, plugins: &PluginManager) -> Self {
-        let info = plugins.plugin_infos();
+    pub fn new(settings: &Settings) -> Self {
+        let plugin_dirs = settings.plugin_dirs.clone().unwrap_or_default();
+        let info = Self::gather_available(&plugin_dirs);
         Self {
-            plugin_dirs: settings.plugin_dirs.clone().unwrap_or_default(),
+            plugin_dirs,
             enabled_plugins: settings.enabled_plugins.clone().unwrap_or_default(),
             enabled_capabilities: settings
                 .enabled_capabilities
@@ -30,7 +31,14 @@ impl PluginEditor {
         }
     }
 
-    fn save_settings(&self, app: &mut LauncherApp) {
+    fn gather_available(plugin_dirs: &[String]) -> Vec<(String, String, Vec<String>)> {
+        let mut pm = PluginManager::new();
+        pm.reload_from_dirs(plugin_dirs);
+        pm.plugin_infos()
+    }
+
+    fn save_settings(&mut self, app: &mut LauncherApp) {
+        tracing::debug!(?self.plugin_dirs, ?self.enabled_plugins, "saving plugin settings");
         match Settings::load(&app.settings_path) {
             Ok(mut s) => {
                 s.plugin_dirs = if self.plugin_dirs.is_empty() {
@@ -58,6 +66,12 @@ impl PluginEditor {
                         s.enabled_capabilities.clone(),
                         s.offscreen_pos,
                     );
+
+                    app.plugins.reload_from_dirs(&self.plugin_dirs);
+                    tracing::debug!(available=?app.plugins.plugin_names(), "plugins reloaded");
+                    self.available = Self::gather_available(&self.plugin_dirs);
+                    app.search();
+
                     crate::request_hotkey_restart(s);
                 }
             }
@@ -67,6 +81,7 @@ impl PluginEditor {
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         let mut open = app.show_plugins;
+        let mut changed = false;
         egui::Window::new("Plugin Settings")
             .open(&mut open)
             .show(ctx, |ui| {
@@ -82,6 +97,7 @@ impl PluginEditor {
                 }
                 if let Some(i) = remove {
                     self.plugin_dirs.remove(i);
+                    changed = true;
                 }
                 ui.horizontal(|ui| {
                     ui.text_edit_singleline(&mut self.plugin_input);
@@ -94,6 +110,7 @@ impl PluginEditor {
                         if !self.plugin_input.is_empty() {
                             self.plugin_dirs.push(self.plugin_input.clone());
                             self.plugin_input.clear();
+                            changed = true;
                         }
                     }
                 });
@@ -104,21 +121,29 @@ impl PluginEditor {
                     for (name, desc, caps) in &self.available {
                         let mut enabled = self.enabled_plugins.contains(name);
                         ui.horizontal(|ui| {
-                            if ui.checkbox(&mut enabled, name).on_hover_text(desc).changed() {
+                            if ui
+                                .checkbox(&mut enabled, name)
+                                .on_hover_text(desc)
+                                .changed()
+                            {
                                 if enabled {
                                     if !self.enabled_plugins.contains(name) {
                                         self.enabled_plugins.push(name.clone());
                                     }
-                                } else if let Some(pos) = self.enabled_plugins.iter().position(|n| n == name) {
+                                } else if let Some(pos) =
+                                    self.enabled_plugins.iter().position(|n| n == name)
+                                {
                                     self.enabled_plugins.remove(pos);
                                     self.enabled_capabilities.remove(name);
                                 }
+                                changed = true;
                             }
                         });
                         ui.indent(name, |ui| {
                             ui.add_enabled_ui(enabled, |ui| {
                                 for cap in caps {
-                                    let entry = self.enabled_capabilities.entry(name.clone()).or_default();
+                                    let entry =
+                                        self.enabled_capabilities.entry(name.clone()).or_default();
                                     let mut cap_enabled = entry.contains(cap);
                                     let label = format!("{}", cap);
                                     if ui.checkbox(&mut cap_enabled, label).changed() {
@@ -129,6 +154,7 @@ impl PluginEditor {
                                         } else if let Some(pos) = entry.iter().position(|c| c == cap) {
                                             entry.remove(pos);
                                         }
+                                        changed = true;
                                     }
                                 }
                             });
@@ -137,9 +163,12 @@ impl PluginEditor {
                 });
 
                 if ui.button("Save").clicked() {
-                    self.save_settings(app);
+                    changed = true;
                 }
             });
         app.show_plugins = open;
+        if changed {
+            self.save_settings(app);
+        }
     }
 }

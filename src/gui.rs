@@ -4,9 +4,7 @@ use crate::plugin_editor::PluginEditor;
 use crate::settings_editor::SettingsEditor;
 use crate::settings::Settings;
 use crate::launcher::launch_action;
-use crate::plugin::{PluginManager, Plugin};
-use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
-use crate::plugins::clipboard::ClipboardPlugin;
+use crate::plugin::PluginManager;
 use crate::indexer;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher, Config, EventKind};
 use std::sync::mpsc::{channel, Receiver};
@@ -19,7 +17,6 @@ use std::collections::HashMap;
 
 enum WatchEvent {
     Actions,
-    Plugins,
 }
 
 pub struct LauncherApp {
@@ -112,33 +109,6 @@ impl LauncherApp {
             }
         }
 
-        if let Some(dirs) = &plugin_dirs {
-            for dir in dirs {
-                let dir_clone = dir.clone();
-                if let Ok(mut watcher) = RecommendedWatcher::new(
-                    {
-                        let tx = tx.clone();
-                        move |res: notify::Result<notify::Event>| match res {
-                            Ok(event) => {
-                                if matches!(
-                                    event.kind,
-                                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                                ) {
-                                    let _ = tx.send(WatchEvent::Plugins);
-                                }
-                            }
-                            Err(e) => tracing::error!("watch error: {:?}", e),
-                        }
-                    },
-                    Config::default(),
-                ) {
-                    use std::path::Path;
-                    if watcher.watch(Path::new(&dir_clone), RecursiveMode::Recursive).is_ok() {
-                        watchers.push(watcher);
-                    }
-                }
-            }
-        }
 
         let initial_visible = visible_flag.load(Ordering::SeqCst);
 
@@ -149,7 +119,7 @@ impl LauncherApp {
         let win_size = settings.window_size.unwrap_or((400, 220));
 
         let settings_editor = SettingsEditor::new(&settings);
-        let plugin_editor = PluginEditor::new(&settings, &plugins);
+        let plugin_editor = PluginEditor::new(&settings);
         let app = Self {
             actions: actions.clone(),
             query: String::new(),
@@ -216,8 +186,12 @@ impl LauncherApp {
                 .collect()
         };
 
-        // append plugin results
-        res.extend(self.plugins.search(&self.query));
+        // append plugin results respecting enabled plugin settings
+        res.extend(self.plugins.search_filtered(
+            &self.query,
+            self.enabled_plugins.as_ref(),
+            self.enabled_capabilities.as_ref(),
+        ));
 
         // sort by usage count if available
         res.sort_by_key(|a| std::cmp::Reverse(self.usage.get(&a.action).cloned().unwrap_or(0)));
@@ -300,10 +274,6 @@ impl eframe::App for LauncherApp {
         }
 
         let should_be_visible = self.visible_flag.load(Ordering::SeqCst);
-        tracing::debug!(
-            should_be_visible=?should_be_visible,
-            last_visible=?self.last_visible
-        );
         let just_became_visible = !self.last_visible && should_be_visible;
         if self.last_visible != should_be_visible {
             tracing::debug!("gui thread -> visible: {}", should_be_visible);
@@ -355,51 +325,6 @@ impl eframe::App for LauncherApp {
                         self.search();
                         tracing::info!("actions reloaded");
                     }
-                }
-                WatchEvent::Plugins => {
-                    let mut plugins = PluginManager::new();
-                    {
-                        let ws = WebSearchPlugin;
-                        if self
-                            .enabled_plugins
-                            .as_ref()
-                            .map_or(true, |l| l.contains(&ws.name().to_string()))
-                        {
-                            plugins.register(Box::new(ws));
-                        }
-                    }
-                    {
-                        let calc = CalculatorPlugin;
-                        if self
-                            .enabled_plugins
-                            .as_ref()
-                            .map_or(true, |l| l.contains(&calc.name().to_string()))
-                        {
-                            plugins.register(Box::new(calc));
-                        }
-                    }
-                    {
-                        let cb = ClipboardPlugin::default();
-                        if self
-                            .enabled_plugins
-                            .as_ref()
-                            .map_or(true, |l| l.contains(&cb.name().to_string()))
-                        {
-                            plugins.register(Box::new(cb));
-                        }
-                    }
-                    if let Some(dirs) = &self.plugin_dirs {
-                        for dir in dirs {
-                            if let Err(e) =
-                                plugins.load_dir_filtered(dir, self.enabled_plugins.as_ref())
-                            {
-                                tracing::error!("Failed to load plugins from {}: {}", dir, e);
-                            }
-                        }
-                    }
-                    self.plugins = plugins;
-                    self.search();
-                    tracing::info!("plugins reloaded");
                 }
             }
         }

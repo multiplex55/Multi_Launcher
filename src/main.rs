@@ -52,43 +52,9 @@ fn spawn_gui(
 ) {
     let actions_for_window = actions.clone();
     let mut plugins = PluginManager::new();
-    {
-        let ws = WebSearchPlugin;
-        if settings
-            .enabled_plugins
-            .as_ref()
-            .map_or(true, |l| l.contains(&ws.name().to_string()))
-        {
-            plugins.register(Box::new(ws));
-        }
-    }
-    {
-        let calc = CalculatorPlugin;
-        if settings
-            .enabled_plugins
-            .as_ref()
-            .map_or(true, |l| l.contains(&calc.name().to_string()))
-        {
-            plugins.register(Box::new(calc));
-        }
-    }
-    {
-        let cb = ClipboardPlugin::default();
-        if settings
-            .enabled_plugins
-            .as_ref()
-            .map_or(true, |l| l.contains(&cb.name().to_string()))
-        {
-            plugins.register(Box::new(cb));
-        }
-    }
-    if let Some(dirs) = &settings.plugin_dirs {
-        for dir in dirs {
-            if let Err(e) = plugins.load_dir_filtered(dir, settings.enabled_plugins.as_ref()) {
-                tracing::error!("Failed to load plugins from {}: {}", dir, e);
-            }
-        }
-    }
+    let empty_dirs = Vec::new();
+    let dirs = settings.plugin_dirs.as_ref().unwrap_or(&empty_dirs);
+    plugins.reload_from_dirs(dirs);
 
     let actions_path = "actions.json".to_string();
     let settings_path_for_window = settings_path.clone();
