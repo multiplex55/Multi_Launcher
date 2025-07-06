@@ -1,14 +1,16 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 
-#[derive(Default)]
 pub struct BookmarksPlugin {
     bookmarks: Vec<String>,
+    matcher: SkimMatcherV2,
 }
 
 impl BookmarksPlugin {
     pub fn new(bookmarks: Vec<String>) -> Self {
-        Self { bookmarks }
+        Self { bookmarks, matcher: SkimMatcherV2::default() }
     }
 }
 
@@ -30,7 +32,7 @@ pub fn save_bookmarks(path: &str, bookmarks: &[String]) -> anyhow::Result<()> {
 impl Default for BookmarksPlugin {
     fn default() -> Self {
         let bookmarks = load_bookmarks("bookmarks.json").unwrap_or_default();
-        Self { bookmarks }
+        Self::new(bookmarks)
     }
 }
 
@@ -42,7 +44,11 @@ impl Plugin for BookmarksPlugin {
         let filter = query.strip_prefix("bm").unwrap_or("").trim();
         self.bookmarks
             .iter()
-            .filter(|url| url.contains(filter))
+            .filter(|url| {
+                self.matcher
+                    .fuzzy_match(url, filter)
+                    .is_some()
+            })
             .map(|url| Action {
                 label: url.clone(),
                 desc: "Bookmark".into(),

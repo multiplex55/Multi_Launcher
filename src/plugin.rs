@@ -42,7 +42,7 @@ impl PluginManager {
         self.register(Box::new(WebSearchPlugin));
         self.register(Box::new(CalculatorPlugin));
         self.register(Box::new(ClipboardPlugin::default()));
-        self.register(Box::new(crate::plugins::bookmarks::BookmarksPlugin::default()));
+        self.register(Box::new(BookmarksPlugin::default()));
         self.register(Box::new(ShellPlugin));
         for dir in dirs {
             tracing::debug!("loading plugins from {dir}");
