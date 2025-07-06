@@ -66,7 +66,7 @@ impl PluginEditor {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
-        let mut open = app.show_plugin_editor;
+        let mut open = app.show_plugins;
         egui::Window::new("Plugin Settings")
             .open(&mut open)
             .show(ctx, |ui| {
@@ -137,6 +137,6 @@ impl PluginEditor {
                     self.save_settings(app);
                 }
             });
-        app.show_plugin_editor = open;
+        app.show_plugins = open;
     }
 }

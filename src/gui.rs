@@ -34,7 +34,7 @@ pub struct LauncherApp {
     pub registered_hotkeys: Mutex<HashMap<String, usize>>,
     pub show_editor: bool,
     pub show_settings: bool,
-    pub show_plugin_editor: bool,
+    pub show_plugins: bool,
     pub actions_path: String,
     pub editor: ActionsEditor,
     pub settings_editor: SettingsEditor,
@@ -162,7 +162,7 @@ impl LauncherApp {
             registered_hotkeys: Mutex::new(HashMap::new()),
             show_editor: false,
             show_settings: false,
-            show_plugin_editor: false,
+            show_plugins: false,
             actions_path,
             editor: ActionsEditor::default(),
             settings_editor,
@@ -318,6 +318,9 @@ impl eframe::App for LauncherApp {
                         if ui.button("Edit Commands").clicked() {
                             self.show_editor = !self.show_editor;
                         }
+                        if ui.button("Plugins").clicked() {
+                            self.show_plugins = !self.show_plugins;
+                        }
                     });
                     if ui.button("Force Hide").clicked() {
                         apply_visibility(false, ctx, self.offscreen_pos);
@@ -338,7 +341,7 @@ impl eframe::App for LauncherApp {
                         self.show_settings = !self.show_settings;
                     }
                     if ui.button("Edit Plugins").clicked() {
-                        self.show_plugin_editor = !self.show_plugin_editor;
+                        self.show_plugins = !self.show_plugins;
                     }
                 });
             });
@@ -469,7 +472,7 @@ impl eframe::App for LauncherApp {
             ed.ui(ctx, self);
             self.settings_editor = ed;
         }
-        let show_plugin = self.show_plugin_editor;
+        let show_plugin = self.show_plugins;
         if show_plugin {
             let mut ed = std::mem::take(&mut self.plugin_editor);
             ed.ui(ctx, self);
