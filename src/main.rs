@@ -1,5 +1,6 @@
 mod actions;
 mod actions_editor;
+mod add_action_dialog;
 mod settings_editor;
 mod gui;
 mod hotkey;
