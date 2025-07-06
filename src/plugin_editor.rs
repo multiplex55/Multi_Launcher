@@ -1,5 +1,5 @@
 use crate::settings::Settings;
-use crate::plugin::PluginManager;
+use crate::plugin::{PluginManager, Plugin};
 use crate::gui::LauncherApp;
 use eframe::egui;
 use rfd::FileDialog;
@@ -63,40 +63,37 @@ impl PluginEditor {
                     let mut plugins = PluginManager::new();
                     {
                         let ws = crate::plugins_builtin::WebSearchPlugin;
-                        if app
+                        if self
                             .enabled_plugins
-                            .as_ref()
-                            .map_or(true, |l| l.contains(&ws.name().to_string()))
+                            .contains(&ws.name().to_string())
+                            || self.enabled_plugins.is_empty()
                         {
                             plugins.register(Box::new(ws));
                         }
                     }
                     {
                         let calc = crate::plugins_builtin::CalculatorPlugin;
-                        if app
+                        if self
                             .enabled_plugins
-                            .as_ref()
-                            .map_or(true, |l| l.contains(&calc.name().to_string()))
+                            .contains(&calc.name().to_string())
+                            || self.enabled_plugins.is_empty()
                         {
                             plugins.register(Box::new(calc));
                         }
                     }
                     {
                         let cb = crate::plugins::clipboard::ClipboardPlugin::default();
-                        if app
+                        if self
                             .enabled_plugins
-                            .as_ref()
-                            .map_or(true, |l| l.contains(&cb.name().to_string()))
+                            .contains(&cb.name().to_string())
+                            || self.enabled_plugins.is_empty()
                         {
                             plugins.register(Box::new(cb));
                         }
                     }
-                    if let Some(dirs) = &app.plugin_dirs {
-                        for dir in dirs {
-                            if let Err(e) = plugins.load_dir_filtered(dir, app.enabled_plugins.as_ref())
-                            {
-                                tracing::error!("Failed to load plugins from {}: {}", dir, e);
-                            }
+                    for dir in &self.plugin_dirs {
+                        if let Err(e) = plugins.load_dir_filtered(dir, Some(&self.enabled_plugins)) {
+                            tracing::error!("Failed to load plugins from {}: {}", dir, e);
                         }
                     }
                     app.plugins = plugins;
