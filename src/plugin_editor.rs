@@ -16,10 +16,11 @@ pub struct PluginEditor {
 }
 
 impl PluginEditor {
-    pub fn new(settings: &Settings, plugins: &PluginManager) -> Self {
-        let info = plugins.plugin_infos();
+    pub fn new(settings: &Settings) -> Self {
+        let plugin_dirs = settings.plugin_dirs.clone().unwrap_or_default();
+        let info = Self::gather_available(&plugin_dirs);
         Self {
-            plugin_dirs: settings.plugin_dirs.clone().unwrap_or_default(),
+            plugin_dirs,
             enabled_plugins: settings.enabled_plugins.clone().unwrap_or_default(),
             enabled_capabilities: settings
                 .enabled_capabilities
@@ -28,6 +29,17 @@ impl PluginEditor {
             plugin_input: String::new(),
             available: info,
         }
+    }
+
+    fn gather_available(plugin_dirs: &[String]) -> Vec<(String, String, Vec<String>)> {
+        let mut pm = PluginManager::new();
+        pm.register(Box::new(crate::plugins_builtin::WebSearchPlugin));
+        pm.register(Box::new(crate::plugins_builtin::CalculatorPlugin));
+        pm.register(Box::new(crate::plugins::clipboard::ClipboardPlugin::default()));
+        for dir in plugin_dirs {
+            let _ = pm.load_dir(dir);
+        }
+        pm.plugin_infos()
     }
 
     fn save_settings(&mut self, app: &mut LauncherApp) {
@@ -97,7 +109,7 @@ impl PluginEditor {
                         }
                     }
                     app.plugins = plugins;
-                    self.available = app.plugins.plugin_infos();
+                    self.available = Self::gather_available(&self.plugin_dirs);
                     app.search();
 
                     crate::request_hotkey_restart(s);
