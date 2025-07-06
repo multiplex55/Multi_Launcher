@@ -38,6 +38,7 @@ impl PluginEditor {
     }
 
     fn save_settings(&mut self, app: &mut LauncherApp) {
+        tracing::debug!(?self.plugin_dirs, ?self.enabled_plugins, "saving plugin settings");
         match Settings::load(&app.settings_path) {
             Ok(mut s) => {
                 s.plugin_dirs = if self.plugin_dirs.is_empty() {
@@ -67,6 +68,7 @@ impl PluginEditor {
                     );
 
                     app.plugins.reload_from_dirs(&self.plugin_dirs);
+                    tracing::debug!(available=?app.plugins.plugin_names(), "plugins reloaded");
                     self.available = Self::gather_available(&self.plugin_dirs);
                     app.search();
 

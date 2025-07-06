@@ -274,10 +274,6 @@ impl eframe::App for LauncherApp {
         }
 
         let should_be_visible = self.visible_flag.load(Ordering::SeqCst);
-        tracing::debug!(
-            should_be_visible=?should_be_visible,
-            last_visible=?self.last_visible
-        );
         let just_became_visible = !self.last_visible && should_be_visible;
         if self.last_visible != should_be_visible {
             tracing::debug!("gui thread -> visible: {}", should_be_visible);

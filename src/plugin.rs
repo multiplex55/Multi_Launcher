@@ -41,8 +41,10 @@ impl PluginManager {
         self.register(Box::new(CalculatorPlugin));
         self.register(Box::new(ClipboardPlugin::default()));
         for dir in dirs {
+            tracing::debug!("loading plugins from {dir}");
             let _ = self.load_dir(dir);
         }
+        tracing::debug!(loaded=?self.plugin_names());
     }
 
     pub fn register(&mut self, plugin: Box<dyn Plugin>) {
