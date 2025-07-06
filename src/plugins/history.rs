@@ -2,6 +2,8 @@ use crate::actions::Action;
 use crate::plugin::Plugin;
 use crate::history::get_history;
 
+const MAX_HISTORY_RESULTS: usize = 10;
+
 pub struct HistoryPlugin;
 
 impl Plugin for HistoryPlugin {
@@ -14,6 +16,7 @@ impl Plugin for HistoryPlugin {
             .into_iter()
             .enumerate()
             .filter(|(_, entry)| entry.query.contains(filter))
+            .take(MAX_HISTORY_RESULTS)
             .map(|(idx, entry)| Action {
                 label: entry.query,
                 desc: "History".into(),
