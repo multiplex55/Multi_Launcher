@@ -26,9 +26,11 @@ impl AddActionDialog {
         if !self.open {
             return;
         }
+        let mut open = self.open;
         egui::Window::new("Add Command")
-            .open(&mut self.open)
+            .open(&mut open)
             .show(ctx, |ui| {
+                let mut close = false;
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         ui.label("Label");
@@ -65,7 +67,7 @@ impl AddActionDialog {
                                 self.label.clear();
                                 self.desc.clear();
                                 self.path.clear();
-                                self.open = false;
+                                close = true;
                                 app.search();
                                 if let Err(e) = save_actions(&app.actions_path, &app.actions) {
                                     app.error = Some(format!("Failed to save: {e}"));
@@ -73,11 +75,15 @@ impl AddActionDialog {
                             }
                         }
                         if ui.button("Cancel").clicked() {
-                            self.open = false;
+                            close = true;
                         }
                     });
                 });
+                if close {
+                    open = false;
+                }
             });
+        self.open = open;
     }
 }
 
