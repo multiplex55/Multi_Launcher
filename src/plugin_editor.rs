@@ -5,6 +5,8 @@ use eframe::egui;
 use rfd::FileDialog;
 use std::collections::HashMap;
 
+#[derive(Default)]
+
 pub struct PluginEditor {
     plugin_dirs: Vec<String>,
     enabled_plugins: Vec<String>,

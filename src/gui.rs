@@ -149,6 +149,7 @@ impl LauncherApp {
         let win_size = settings.window_size.unwrap_or((400, 220));
 
         let settings_editor = SettingsEditor::new(&settings, &plugins);
+        let plugin_editor = PluginEditor::new(&settings, &plugins);
         let app = Self {
             actions: actions.clone(),
             query: String::new(),
@@ -165,7 +166,7 @@ impl LauncherApp {
             actions_path,
             editor: ActionsEditor::default(),
             settings_editor,
-            plugin_editor: PluginEditor::new(&settings, &plugins),
+            plugin_editor,
             settings_path,
             watchers,
             rx,
