@@ -358,11 +358,18 @@ impl eframe::App for LauncherApp {
 
             if let Some(i) = launch_idx {
                 if let Some(a) = self.results.get(i) {
+                    let action_str = a.action.clone();
                     if let Err(e) = launch_action(a) {
                         self.error = Some(format!("Failed: {e}"));
                     } else {
-                        let count = self.usage.entry(a.action.clone()).or_insert(0);
+                        let count = self.usage.entry(action_str.clone()).or_insert(0);
                         *count += 1;
+                        if action_str.starts_with("bookmark:add:") {
+                            self.query.clear();
+                            self.search();
+                        } else if action_str.starts_with("bookmark:remove:") {
+                            self.search();
+                        }
                     }
                 }
             }
@@ -371,11 +378,18 @@ impl eframe::App for LauncherApp {
                 for (idx, a) in self.results.iter().enumerate() {
                     let label = format!("{} : {}", a.label, a.desc);
                     if ui.selectable_label(self.selected == Some(idx), label).clicked() {
+                        let action_str = a.action.clone();
                         if let Err(e) = launch_action(a) {
                             self.error = Some(format!("Failed: {e}"));
                         } else {
-                            let count = self.usage.entry(a.action.clone()).or_insert(0);
+                            let count = self.usage.entry(action_str.clone()).or_insert(0);
                             *count += 1;
+                            if action_str.starts_with("bookmark:add:") {
+                                self.query.clear();
+                                self.search();
+                            } else if action_str.starts_with("bookmark:remove:") {
+                                self.search();
+                            }
                         }
                         self.selected = Some(idx);
                     }
