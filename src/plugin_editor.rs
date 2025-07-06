@@ -65,6 +65,7 @@ impl PluginEditor {
                         s.enabled_plugins.clone(),
                         s.enabled_capabilities.clone(),
                         s.offscreen_pos,
+                        Some(s.enable_toasts),
                     );
 
                     app.plugins.reload_from_dirs(&self.plugin_dirs);

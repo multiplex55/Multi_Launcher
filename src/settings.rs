@@ -25,7 +25,12 @@ pub struct Settings {
     /// Last known window size. If absent, a default size is used.
     #[serde(default)]
     pub window_size: Option<(i32, i32)>,
+    /// Enable toast notifications in the UI.
+    #[serde(default = "default_toasts")] 
+    pub enable_toasts: bool,
 }
+
+fn default_toasts() -> bool { true }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -39,6 +44,7 @@ impl Default for Settings {
             debug_logging: false,
             offscreen_pos: Some((2000, 2000)),
             window_size: Some((400, 220)),
+            enable_toasts: true,
         }
     }
 }

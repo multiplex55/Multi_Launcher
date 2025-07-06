@@ -11,6 +11,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher, Config, EventKind};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use eframe::egui;
+use egui_toast::{Toasts, Toast, ToastKind, ToastOptions};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use crate::visibility::apply_visibility;
@@ -51,6 +52,8 @@ pub struct LauncherApp {
     offscreen_pos: (f32, f32),
     window_size: (i32, i32),
     focus_query: bool,
+    toasts: egui_toast::Toasts,
+    enable_toasts: bool,
 }
 
 impl LauncherApp {
@@ -61,6 +64,7 @@ impl LauncherApp {
         enabled_plugins: Option<Vec<String>>,
         enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
         offscreen_pos: Option<(i32, i32)>,
+        enable_toasts: Option<bool>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -68,6 +72,9 @@ impl LauncherApp {
         self.enabled_capabilities = enabled_capabilities;
         if let Some((x, y)) = offscreen_pos {
             self.offscreen_pos = (x as f32, y as f32);
+        }
+        if let Some(v) = enable_toasts {
+            self.enable_toasts = v;
         }
     }
 
@@ -87,6 +94,8 @@ impl LauncherApp {
     ) -> Self {
         let (tx, rx) = channel();
         let mut watchers = Vec::new();
+        let mut toasts = Toasts::new().anchor(egui::Align2::RIGHT_TOP, [10.0, 10.0]);
+        let enable_toasts = settings.enable_toasts;
 
         if let Ok(mut watcher) = RecommendedWatcher::new(
             {
@@ -152,6 +161,8 @@ impl LauncherApp {
             offscreen_pos,
             window_size: win_size,
             focus_query: false,
+            toasts,
+            enable_toasts,
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -263,6 +274,9 @@ impl eframe::App for LauncherApp {
         use egui::*;
 
         tracing::debug!("LauncherApp::update called");
+        if self.enable_toasts {
+            self.toasts.show(ctx);
+        }
         if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
             self.window_size = (rect.width() as i32, rect.height() as i32);
         }
@@ -367,7 +381,19 @@ impl eframe::App for LauncherApp {
                     let mut refresh = false;
                     if let Err(e) = launch_action(&a) {
                         self.error = Some(format!("Failed: {e}"));
+                        if self.enable_toasts {
+                            self.toasts.add(Toast::new()
+                                .kind(ToastKind::Error)
+                                .text(format!("Failed: {e}"))
+                                .options(ToastOptions::default().duration_in_seconds(3.0)));
+                        }
                     } else {
+                        if self.enable_toasts {
+                            self.toasts.add(Toast::new()
+                                .kind(ToastKind::Success)
+                                .text(format!("Launched {}", a.label))
+                                .options(ToastOptions::default().duration_in_seconds(3.0)));
+                        }
                         let _ = history::append_history(HistoryEntry { query: current, action: a.clone() });
                         let count = self.usage.entry(a.action.clone()).or_insert(0);
                         *count += 1;
@@ -386,19 +412,33 @@ impl eframe::App for LauncherApp {
                 }
             }
 
-            ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
+            let area_height = ui.available_height();
+            ScrollArea::vertical().max_height(area_height).show(ui, |ui| {
                 let mut refresh = false;
                 for (idx, a) in self.results.iter().enumerate() {
                     let label = format!("{} : {}", a.label, a.desc);
-                    if ui
-                        .selectable_label(self.selected == Some(idx), label)
-                        .clicked()
-                    {
+                    let resp = ui.selectable_label(self.selected == Some(idx), label);
+                    if self.selected == Some(idx) {
+                        resp.scroll_to_me(Some(egui::Align::Center));
+                    }
+                    if resp.clicked() {
                         let a = a.clone();
                         let current = self.query.clone();
                         if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
+                            if self.enable_toasts {
+                                self.toasts.add(Toast::new()
+                                    .kind(ToastKind::Error)
+                                    .text(format!("Failed: {e}"))
+                                    .options(ToastOptions::default().duration_in_seconds(3.0)));
+                            }
                         } else {
+                            if self.enable_toasts {
+                                self.toasts.add(Toast::new()
+                                    .kind(ToastKind::Success)
+                                    .text(format!("Launched {}", a.label))
+                                    .options(ToastOptions::default().duration_in_seconds(3.0)));
+                            }
                             let _ = history::append_history(HistoryEntry { query: current, action: a.clone() });
                             let count = self.usage.entry(a.action.clone()).or_insert(0);
                             *count += 1;
