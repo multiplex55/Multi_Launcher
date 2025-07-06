@@ -154,6 +154,6 @@ impl Plugin for FoldersPlugin {
     }
 
     fn capabilities(&self) -> &[&str] {
-        &["search"]
+        &["search", "show_full_path"]
     }
 }

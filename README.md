@@ -111,7 +111,8 @@ Example:
 The folders plugin recognises the `f` prefix. Use `f add <path>` to add a folder
 shortcut and `f rm <pattern>` to remove one via fuzzy search. Custom entries can
 be aliased by right clicking them in the results list. Hovering a folder result
-shows its full path.
+shows its full path. A plugin setting "show full path always" controls whether
+the full path is displayed next to an alias or only as a tooltip.
 ### Security Considerations
 The shell plugin runs commands using the system shell without sanitising input. Only enable it if you trust the commands you type. Errors while spawning the process are logged.
 ## Editing Commands

@@ -435,14 +435,31 @@ impl eframe::App for LauncherApp {
             ScrollArea::vertical().max_height(area_height).show(ui, |ui| {
                 let mut refresh = false;
                 let mut set_focus = false;
-                let custom = crate::plugins::folders::load_folders(crate::plugins::folders::FOLDERS_FILE)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|f| f.path)
+                let alias_list = crate::plugins::folders::load_folders(crate::plugins::folders::FOLDERS_FILE)
+                    .unwrap_or_default();
+                let custom = alias_list
+                    .iter()
+                    .map(|f| f.path.clone())
                     .collect::<std::collections::HashSet<_>>();
+                let alias_map = alias_list
+                    .into_iter()
+                    .map(|f| (f.path, f.alias))
+                    .collect::<std::collections::HashMap<_, _>>();
+                let show_full = self
+                    .enabled_capabilities
+                    .as_ref()
+                    .and_then(|m| m.get("folders"))
+                    .map(|caps| caps.contains(&"show_full_path".to_string()))
+                    .unwrap_or(false);
                 for (idx, a) in self.results.iter().enumerate() {
-                    let label = format!("{} : {}", a.label, a.desc);
-                    let mut resp = ui.selectable_label(self.selected == Some(idx), label);
+                    let aliased = alias_map.get(&a.action).and_then(|v| v.as_ref());
+                    let show_path = show_full || aliased.is_none();
+                    let text = if show_path {
+                        format!("{} : {}", a.label, a.desc)
+                    } else {
+                        a.label.clone()
+                    };
+                    let mut resp = ui.selectable_label(self.selected == Some(idx), text);
                     if custom.contains(&a.action) && !a.action.starts_with("folder:") {
                         resp = resp.on_hover_text(&a.action);
                         resp.clone().context_menu(|ui| {
