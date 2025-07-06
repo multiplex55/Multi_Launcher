@@ -24,6 +24,11 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         cb.set_text(text.to_string())?;
         return Ok(());
     }
+    if let Some(value) = action.action.strip_prefix("calc:") {
+        let mut cb = Clipboard::new()?;
+        cb.set_text(value.to_string())?;
+        return Ok(());
+    }
     if let Some(url) = action.action.strip_prefix("bookmark:add:") {
         append_bookmark("bookmarks.json", url)?;
         return Ok(());

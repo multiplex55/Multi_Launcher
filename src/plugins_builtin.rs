@@ -40,7 +40,7 @@ impl Plugin for CalculatorPlugin {
                 Ok(v) => vec![Action {
                     label: format!("{} = {}", expr, v),
                     desc: "Calculator".into(),
-                    action: format!("{}", v),
+                    action: format!("calc:{}", v),
                 }],
                 Err(_) => Vec::new(),
             }
