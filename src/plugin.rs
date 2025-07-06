@@ -48,6 +48,7 @@ impl PluginManager {
     }
 
     pub fn register(&mut self, plugin: Box<dyn Plugin>) {
+        tracing::debug!("registered plugin {}", plugin.name());
         self.plugins.push(plugin);
     }
 
@@ -108,8 +109,10 @@ impl PluginManager {
                 let lib = Library::new(entry.path())?;
                 let constructor: libloading::Symbol<unsafe extern "C" fn() -> Box<dyn Plugin>> = lib.get(b"create_plugin")?;
                 let plugin = constructor();
+                let name = plugin.name().to_string();
                 self.plugins.push(plugin);
                 self.libs.push(lib);
+                tracing::debug!("loaded plugin {name}");
             }
         }
         Ok(())
@@ -147,13 +150,16 @@ impl PluginManager {
                 let constructor: libloading::Symbol<unsafe extern "C" fn() -> Box<dyn Plugin>> =
                     lib.get(b"create_plugin")?;
                 let plugin = constructor();
+                let name = plugin.name().to_string();
                 if let Some(list) = enabled {
-                    if !list.contains(&plugin.name().to_string()) {
+                    if !list.contains(&name) {
+                        tracing::debug!("skipping disabled plugin {name}");
                         continue;
                     }
                 }
                 self.plugins.push(plugin);
                 self.libs.push(lib);
+                tracing::debug!("loaded plugin {name}");
             }
         }
         Ok(())
