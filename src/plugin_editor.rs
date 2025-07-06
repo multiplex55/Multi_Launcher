@@ -1,5 +1,5 @@
 use crate::settings::Settings;
-use crate::plugin::{PluginManager, Plugin};
+use crate::plugin::PluginManager;
 use crate::gui::LauncherApp;
 use eframe::egui;
 use rfd::FileDialog;
@@ -73,38 +73,13 @@ impl PluginEditor {
 
                     // rebuild plugins using the same logic as the watch handler
                     let mut plugins = PluginManager::new();
-                    {
-                        let ws = crate::plugins_builtin::WebSearchPlugin;
-                        if self
-                            .enabled_plugins
-                            .contains(&ws.name().to_string())
-                            || self.enabled_plugins.is_empty()
-                        {
-                            plugins.register(Box::new(ws));
-                        }
-                    }
-                    {
-                        let calc = crate::plugins_builtin::CalculatorPlugin;
-                        if self
-                            .enabled_plugins
-                            .contains(&calc.name().to_string())
-                            || self.enabled_plugins.is_empty()
-                        {
-                            plugins.register(Box::new(calc));
-                        }
-                    }
-                    {
-                        let cb = crate::plugins::clipboard::ClipboardPlugin::default();
-                        if self
-                            .enabled_plugins
-                            .contains(&cb.name().to_string())
-                            || self.enabled_plugins.is_empty()
-                        {
-                            plugins.register(Box::new(cb));
-                        }
-                    }
+                    plugins.register(Box::new(crate::plugins_builtin::WebSearchPlugin));
+                    plugins.register(Box::new(crate::plugins_builtin::CalculatorPlugin));
+                    plugins.register(Box::new(
+                        crate::plugins::clipboard::ClipboardPlugin::default(),
+                    ));
                     for dir in &self.plugin_dirs {
-                        if let Err(e) = plugins.load_dir_filtered(dir, Some(&self.enabled_plugins)) {
+                        if let Err(e) = plugins.load_dir(dir) {
                             tracing::error!("Failed to load plugins from {}: {}", dir, e);
                         }
                     }

@@ -216,8 +216,12 @@ impl LauncherApp {
                 .collect()
         };
 
-        // append plugin results
-        res.extend(self.plugins.search(&self.query));
+        // append plugin results respecting enabled plugin settings
+        res.extend(self.plugins.search_filtered(
+            &self.query,
+            self.enabled_plugins.as_ref(),
+            self.enabled_capabilities.as_ref(),
+        ));
 
         // sort by usage count if available
         res.sort_by_key(|a| std::cmp::Reverse(self.usage.get(&a.action).cloned().unwrap_or(0)));
@@ -358,41 +362,12 @@ impl eframe::App for LauncherApp {
                 }
                 WatchEvent::Plugins => {
                     let mut plugins = PluginManager::new();
-                    {
-                        let ws = WebSearchPlugin;
-                        if self
-                            .enabled_plugins
-                            .as_ref()
-                            .map_or(true, |l| l.contains(&ws.name().to_string()))
-                        {
-                            plugins.register(Box::new(ws));
-                        }
-                    }
-                    {
-                        let calc = CalculatorPlugin;
-                        if self
-                            .enabled_plugins
-                            .as_ref()
-                            .map_or(true, |l| l.contains(&calc.name().to_string()))
-                        {
-                            plugins.register(Box::new(calc));
-                        }
-                    }
-                    {
-                        let cb = ClipboardPlugin::default();
-                        if self
-                            .enabled_plugins
-                            .as_ref()
-                            .map_or(true, |l| l.contains(&cb.name().to_string()))
-                        {
-                            plugins.register(Box::new(cb));
-                        }
-                    }
+                    plugins.register(Box::new(WebSearchPlugin));
+                    plugins.register(Box::new(CalculatorPlugin));
+                    plugins.register(Box::new(ClipboardPlugin::default()));
                     if let Some(dirs) = &self.plugin_dirs {
                         for dir in dirs {
-                            if let Err(e) =
-                                plugins.load_dir_filtered(dir, self.enabled_plugins.as_ref())
-                            {
+                            if let Err(e) = plugins.load_dir(dir) {
                                 tracing::error!("Failed to load plugins from {}: {}", dir, e);
                             }
                         }

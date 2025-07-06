@@ -146,4 +146,31 @@ impl PluginManager {
         }
         actions
     }
+
+    /// Search with plugin and capability filters.
+    pub fn search_filtered(
+        &self,
+        query: &str,
+        enabled_plugins: Option<&Vec<String>>,
+        enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
+    ) -> Vec<Action> {
+        let mut actions = Vec::new();
+        for p in &self.plugins {
+            let name = p.name();
+            if let Some(list) = enabled_plugins {
+                if !list.contains(&name.to_string()) {
+                    continue;
+                }
+            }
+            if let Some(map) = enabled_caps {
+                if let Some(caps) = map.get(name) {
+                    if !caps.contains(&"search".to_string()) {
+                        continue;
+                    }
+                }
+            }
+            actions.extend(p.search(query));
+        }
+        actions
+    }
 }
