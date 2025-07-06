@@ -21,6 +21,10 @@ impl Plugin for WebSearchPlugin {
         "web_search"
     }
 
+    fn description(&self) -> &str {
+        "Perform web searches using Google"
+    }
+
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
@@ -47,6 +51,10 @@ impl Plugin for CalculatorPlugin {
 
     fn name(&self) -> &str {
         "calculator"
+    }
+
+    fn description(&self) -> &str {
+        "Evaluate mathematical expressions"
     }
 
     fn capabilities(&self) -> &[&str] {
