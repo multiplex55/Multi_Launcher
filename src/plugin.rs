@@ -6,6 +6,8 @@ pub trait Plugin: Send + Sync {
     fn search(&self, query: &str) -> Vec<Action>;
     /// Name of the plugin
     fn name(&self) -> &str;
+    /// Human readable description of the plugin
+    fn description(&self) -> &str;
     /// Capabilities offered by the plugin
     fn capabilities(&self) -> &[&str];
 }
@@ -41,6 +43,20 @@ impl PluginManager {
             .map(|p| {
                 (
                     p.name().to_string(),
+                    p.capabilities().iter().map(|c| c.to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// Return names, descriptions and capabilities for all plugins.
+    pub fn plugin_infos(&self) -> Vec<(String, String, Vec<String>)> {
+        self.plugins
+            .iter()
+            .map(|p| {
+                (
+                    p.name().to_string(),
+                    p.description().to_string(),
                     p.capabilities().iter().map(|c| c.to_string()).collect(),
                 )
             })

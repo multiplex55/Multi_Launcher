@@ -77,6 +77,10 @@ impl Plugin for ClipboardPlugin {
         "clipboard"
     }
 
+    fn description(&self) -> &str {
+        "Provides clipboard history search"
+    }
+
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
