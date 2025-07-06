@@ -51,7 +51,7 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
   "quit_hotkey": "Shift+Escape",
   "index_paths": ["/usr/share/applications"],
   "plugin_dirs": ["./plugins"],
-  "enabled_plugins": ["web_search", "calculator", "clipboard", "shell"],
+  "enabled_plugins": ["web_search", "calculator", "clipboard", "shell", "runescape_search"],
   "debug_logging": false,
   "offscreen_pos": [2000, 2000],
   "window_size": [400, 220]
@@ -83,7 +83,7 @@ running.
 
 ## Plugins
 
-Built-in plugins provide Google web search (`g query`), an inline calculator
+Built-in plugins provide Google web search (`g query`), RuneScape wiki search (`rs query` or `osrs query`), an inline calculator
 (using the `=` prefix), a clipboard history (`cb`) and a shell command runner (`sh <command>`). Selecting a clipboard entry copies it back to the clipboard. Additional plugins can be added by building
 shared libraries. Each plugin crate should be compiled as a `cdylib` and export
 a `create_plugin` function returning `Box<dyn Plugin>`:
@@ -105,7 +105,7 @@ Example:
 
 ```json
 {
-  "enabled_plugins": ["web_search", "calculator", "clipboard", "shell"]
+  "enabled_plugins": ["web_search", "calculator", "clipboard", "shell", "runescape_search"]
 }
 ```
 ### Security Considerations

@@ -4,6 +4,7 @@ use crate::plugins_builtin::{WebSearchPlugin, CalculatorPlugin};
 use crate::plugins::clipboard::ClipboardPlugin;
 use crate::plugins::shell::ShellPlugin;
 use crate::plugins::bookmarks::BookmarksPlugin;
+use crate::plugins::runescape::RunescapeSearchPlugin;
 
 pub trait Plugin: Send + Sync {
     /// Return actions based on the query string
@@ -41,6 +42,7 @@ impl PluginManager {
         self.clear_plugins();
         self.register(Box::new(WebSearchPlugin));
         self.register(Box::new(CalculatorPlugin));
+        self.register(Box::new(RunescapeSearchPlugin));
         self.register(Box::new(ClipboardPlugin::default()));
         self.register(Box::new(BookmarksPlugin::default()));
         self.register(Box::new(ShellPlugin));
