@@ -1,4 +1,5 @@
 use crate::actions::Action;
+use crate::plugins::bookmarks::append_bookmark;
 use arboard::Clipboard;
 use std::path::Path;
 
@@ -21,6 +22,10 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     if let Some(text) = action.action.strip_prefix("clipboard:") {
         let mut cb = Clipboard::new()?;
         cb.set_text(text.to_string())?;
+        return Ok(());
+    }
+    if let Some(url) = action.action.strip_prefix("bookmark:add:") {
+        append_bookmark("bookmarks.json", url)?;
         return Ok(());
     }
     let path = Path::new(&action.action);
