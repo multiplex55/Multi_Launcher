@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::plugins::bookmarks::{append_bookmark, remove_bookmark};
+use crate::plugins::folders::{append_folder, remove_folder, FOLDERS_FILE};
 use crate::history;
 use arboard::Clipboard;
 use std::path::Path;
@@ -36,6 +37,14 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     }
     if let Some(url) = action.action.strip_prefix("bookmark:remove:") {
         remove_bookmark("bookmarks.json", url)?;
+        return Ok(());
+    }
+    if let Some(path) = action.action.strip_prefix("folder:add:") {
+        append_folder(FOLDERS_FILE, path)?;
+        return Ok(());
+    }
+    if let Some(path) = action.action.strip_prefix("folder:remove:") {
+        remove_folder(FOLDERS_FILE, path)?;
         return Ok(());
     }
     if let Some(idx) = action.action.strip_prefix("history:") {
