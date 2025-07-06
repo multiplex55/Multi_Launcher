@@ -5,8 +5,6 @@ use crate::settings_editor::SettingsEditor;
 use crate::settings::Settings;
 use crate::launcher::launch_action;
 use crate::plugin::{PluginManager, Plugin};
-use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
-use crate::plugins::clipboard::ClipboardPlugin;
 use crate::indexer;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher, Config, EventKind};
 use std::sync::mpsc::{channel, Receiver};
@@ -19,7 +17,6 @@ use std::collections::HashMap;
 
 enum WatchEvent {
     Actions,
-    Plugins,
 }
 
 pub struct LauncherApp {
@@ -112,33 +109,6 @@ impl LauncherApp {
             }
         }
 
-        if let Some(dirs) = &plugin_dirs {
-            for dir in dirs {
-                let dir_clone = dir.clone();
-                if let Ok(mut watcher) = RecommendedWatcher::new(
-                    {
-                        let tx = tx.clone();
-                        move |res: notify::Result<notify::Event>| match res {
-                            Ok(event) => {
-                                if matches!(
-                                    event.kind,
-                                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                                ) {
-                                    let _ = tx.send(WatchEvent::Plugins);
-                                }
-                            }
-                            Err(e) => tracing::error!("watch error: {:?}", e),
-                        }
-                    },
-                    Config::default(),
-                ) {
-                    use std::path::Path;
-                    if watcher.watch(Path::new(&dir_clone), RecursiveMode::Recursive).is_ok() {
-                        watchers.push(watcher);
-                    }
-                }
-            }
-        }
 
         let initial_visible = visible_flag.load(Ordering::SeqCst);
 
@@ -359,13 +329,6 @@ impl eframe::App for LauncherApp {
                         self.search();
                         tracing::info!("actions reloaded");
                     }
-                }
-                WatchEvent::Plugins => {
-                    let empty: Vec<String> = Vec::new();
-                    let dirs = self.plugin_dirs.as_ref().unwrap_or(&empty);
-                    self.plugins.reload_from_dirs(dirs);
-                    self.search();
-                    tracing::info!("plugins reloaded");
                 }
             }
         }
