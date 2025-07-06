@@ -1,5 +1,6 @@
 use crate::settings::Settings;
 use crate::gui::LauncherApp;
+use crate::plugin::PluginManager;
 use eframe::egui;
 use rfd::FileDialog;
 use std::collections::HashMap;
@@ -19,10 +20,17 @@ pub struct SettingsEditor {
     offscreen_y: i32,
     window_w: i32,
     window_h: i32,
+    available_plugins: Vec<String>,
+    available_capabilities: HashMap<String, Vec<String>>, 
 }
 
 impl SettingsEditor {
-    pub fn new(settings: &Settings) -> Self {
+    pub fn new(settings: &Settings, plugins: &PluginManager) -> Self {
+        let available_plugins = plugins.plugin_names();
+        let available_capabilities = plugins
+            .plugin_capabilities()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
         Self {
             hotkey: settings.hotkey.clone().unwrap_or_default(),
             quit_hotkey: settings.quit_hotkey.clone().unwrap_or_default(),
@@ -37,6 +45,8 @@ impl SettingsEditor {
             offscreen_y: settings.offscreen_pos.unwrap_or((2000, 2000)).1,
             window_w: settings.window_size.unwrap_or((400, 220)).0,
             window_h: settings.window_size.unwrap_or((400, 220)).1,
+            available_plugins,
+            available_capabilities,
         }
     }
 
@@ -172,14 +182,14 @@ impl SettingsEditor {
 
             ui.separator();
             ui.label("Enabled plugins:");
-            for name in app.plugins.plugin_names() {
-                let mut enabled = self.enabled_plugins.contains(&name);
-                if ui.checkbox(&mut enabled, &name).changed() {
+            for name in &self.available_plugins {
+                let mut enabled = self.enabled_plugins.contains(name);
+                if ui.checkbox(&mut enabled, name).changed() {
                     if enabled {
-                        if !self.enabled_plugins.contains(&name) {
+                        if !self.enabled_plugins.contains(name) {
                             self.enabled_plugins.push(name.clone());
                         }
-                    } else if let Some(pos) = self.enabled_plugins.iter().position(|n| n == &name) {
+                    } else if let Some(pos) = self.enabled_plugins.iter().position(|n| n == name) {
                         self.enabled_plugins.remove(pos);
                     }
                 }
@@ -187,17 +197,17 @@ impl SettingsEditor {
 
             ui.separator();
             ui.label("Enabled capabilities:");
-            for (pname, caps) in app.plugins.plugin_capabilities() {
+            for (pname, caps) in &self.available_capabilities {
                 for cap in caps {
                     let entry = self.enabled_capabilities.entry(pname.clone()).or_default();
-                    let mut enabled = entry.contains(&cap);
+                    let mut enabled = entry.contains(cap);
                     let label = format!("{}: {}", pname, cap);
                     if ui.checkbox(&mut enabled, label).changed() {
                         if enabled {
-                            if !entry.contains(&cap) {
+                            if !entry.contains(cap) {
                                 entry.push(cap.clone());
                             }
-                        } else if let Some(pos) = entry.iter().position(|c| c == &cap) {
+                        } else if let Some(pos) = entry.iter().position(|c| c == cap) {
                             entry.remove(pos);
                         }
                     }
