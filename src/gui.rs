@@ -335,7 +335,7 @@ impl eframe::App for LauncherApp {
                 ui.colored_label(Color32::RED, err);
             }
 
-            let input = ui.text_edit_singleline(&mut self.query);
+            let input = ui.add(egui::TextEdit::singleline(&mut self.query).id_source("search_input"));
             if just_became_visible {
                 input.request_focus();
             }
@@ -371,6 +371,13 @@ impl eframe::App for LauncherApp {
                         } else if a.action.starts_with("bookmark:remove:") {
                             refresh = true;
                         }
+                        if a.action.starts_with("bookmark:add:")
+                            || a.action.starts_with("bookmark:remove:")
+                        {
+                            ui.ctx().memory_mut(|m| {
+                                m.request_focus(egui::Id::new("search_input"))
+                            });
+                        }
                     }
                     if refresh {
                         self.search();
@@ -397,6 +404,13 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                             } else if a.action.starts_with("bookmark:remove:") {
                                 refresh = true;
+                            }
+                            if a.action.starts_with("bookmark:add:")
+                                || a.action.starts_with("bookmark:remove:")
+                            {
+                                ui.ctx().memory_mut(|m| {
+                                    m.request_focus(egui::Id::new("search_input"))
+                                });
                             }
                         }
                         self.selected = Some(idx);
