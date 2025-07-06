@@ -5,6 +5,7 @@ mod settings_editor;
 mod plugin_editor;
 mod gui;
 mod hotkey;
+mod history;
 mod launcher;
 mod plugin;
 mod plugins_builtin;

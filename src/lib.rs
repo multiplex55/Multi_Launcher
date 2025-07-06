@@ -11,6 +11,7 @@ pub mod plugins;
 pub mod indexer;
 pub mod logging;
 pub mod hotkey;
+pub mod history;
 pub mod visibility;
 
 pub mod window_manager;
