@@ -49,6 +49,7 @@ pub struct LauncherApp {
     last_visible: bool,
     offscreen_pos: (f32, f32),
     window_size: (i32, i32),
+    focus_query: bool,
 }
 
 impl LauncherApp {
@@ -149,6 +150,7 @@ impl LauncherApp {
             last_visible: initial_visible,
             offscreen_pos,
             window_size: win_size,
+            focus_query: false,
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -336,8 +338,9 @@ impl eframe::App for LauncherApp {
             }
 
             let input = ui.text_edit_singleline(&mut self.query);
-            if just_became_visible {
+            if just_became_visible || self.focus_query {
                 input.request_focus();
+                self.focus_query = false;
             }
             if input.changed() {
                 self.search();
@@ -368,8 +371,10 @@ impl eframe::App for LauncherApp {
                         if a.action.starts_with("bookmark:add:") {
                             self.query.clear();
                             refresh = true;
+                            self.focus_query = true;
                         } else if a.action.starts_with("bookmark:remove:") {
                             refresh = true;
+                            self.focus_query = true;
                         }
                     }
                     if refresh {
@@ -395,8 +400,10 @@ impl eframe::App for LauncherApp {
                             if a.action.starts_with("bookmark:add:") {
                                 self.query.clear();
                                 refresh = true;
+                                self.focus_query = true;
                             } else if a.action.starts_with("bookmark:remove:") {
                                 refresh = true;
+                                self.focus_query = true;
                             }
                         }
                         self.selected = Some(idx);
