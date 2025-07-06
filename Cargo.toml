@@ -25,7 +25,7 @@ windows = { version = "0.58", features = ["Win32_UI_Input_KeyboardAndMouse", "Wi
 log = "0.4"
 raw-window-handle = "0.6"
 arboard = "3"
-egui-toast = "0.17"
+egui-toast = "0.13"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11 = "2.21"
