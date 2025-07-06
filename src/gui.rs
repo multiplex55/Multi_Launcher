@@ -318,7 +318,7 @@ impl eframe::App for LauncherApp {
                         if ui.button("Edit Commands").clicked() {
                             self.show_editor = !self.show_editor;
                         }
-                        if ui.button("Plugins").clicked() {
+                        if ui.button("Edit Plugins").clicked() {
                             self.show_plugins = !self.show_plugins;
                         }
                     });
@@ -339,9 +339,6 @@ impl eframe::App for LauncherApp {
                 ui.menu_button("Settings", |ui| {
                     if ui.button("Edit Settings").clicked() {
                         self.show_settings = !self.show_settings;
-                    }
-                    if ui.button("Edit Plugins").clicked() {
-                        self.show_plugins = !self.show_plugins;
                     }
                 });
             });
