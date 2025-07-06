@@ -4,6 +4,7 @@ use crate::plugin_editor::PluginEditor;
 use crate::settings_editor::SettingsEditor;
 use crate::settings::Settings;
 use crate::launcher::launch_action;
+use crate::history::{self, HistoryEntry};
 use crate::plugin::PluginManager;
 use crate::indexer;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher, Config, EventKind};
@@ -362,10 +363,12 @@ impl eframe::App for LauncherApp {
             if let Some(i) = launch_idx {
                 if let Some(a) = self.results.get(i) {
                     let a = a.clone();
+                    let current = self.query.clone();
                     let mut refresh = false;
                     if let Err(e) = launch_action(&a) {
                         self.error = Some(format!("Failed: {e}"));
                     } else {
+                        let _ = history::append_history(HistoryEntry { query: current, action: a.clone() });
                         let count = self.usage.entry(a.action.clone()).or_insert(0);
                         *count += 1;
                         if a.action.starts_with("bookmark:add:") {
@@ -392,9 +395,11 @@ impl eframe::App for LauncherApp {
                         .clicked()
                     {
                         let a = a.clone();
+                        let current = self.query.clone();
                         if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
                         } else {
+                            let _ = history::append_history(HistoryEntry { query: current, action: a.clone() });
                             let count = self.usage.entry(a.action.clone()).or_insert(0);
                             *count += 1;
                             if a.action.starts_with("bookmark:add:") {
