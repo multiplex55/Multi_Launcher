@@ -2,6 +2,7 @@ use crate::actions::Action;
 use libloading::Library;
 use crate::plugins_builtin::{WebSearchPlugin, CalculatorPlugin};
 use crate::plugins::clipboard::ClipboardPlugin;
+use crate::plugins::shell::ShellPlugin;
 
 pub trait Plugin: Send + Sync {
     /// Return actions based on the query string
@@ -40,6 +41,7 @@ impl PluginManager {
         self.register(Box::new(WebSearchPlugin));
         self.register(Box::new(CalculatorPlugin));
         self.register(Box::new(ClipboardPlugin::default()));
+        self.register(Box::new(ShellPlugin));
         for dir in dirs {
             tracing::debug!("loading plugins from {dir}");
             let _ = self.load_dir(dir);

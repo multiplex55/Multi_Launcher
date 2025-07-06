@@ -51,7 +51,7 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
   "quit_hotkey": "Shift+Escape",
   "index_paths": ["/usr/share/applications"],
   "plugin_dirs": ["./plugins"],
-  "enabled_plugins": ["web_search", "calculator", "clipboard"],
+  "enabled_plugins": ["web_search", "calculator", "clipboard", "shell"],
   "debug_logging": false,
   "offscreen_pos": [2000, 2000],
   "window_size": [400, 220]
@@ -84,7 +84,7 @@ running.
 ## Plugins
 
 Built-in plugins provide Google web search (`g query`), an inline calculator
-(using the `=` prefix) and a clipboard history (`cb`). Selecting a clipboard entry copies it back to the clipboard. Additional plugins can be added by building separate
+(using the `=` prefix), a clipboard history (`cb`) and a shell command runner (`sh <command>`). Selecting a clipboard entry copies it back to the clipboard. Additional plugins can be added by building
 shared libraries. Each plugin crate should be compiled as a `cdylib` and export
 a `create_plugin` function returning `Box<dyn Plugin>`:
 
@@ -105,12 +105,12 @@ Example:
 
 ```json
 {
-  "enabled_plugins": ["web_search", "calculator", "clipboard"]
+  "enabled_plugins": ["web_search", "calculator", "clipboard", "shell"]
 }
 ```
-
+### Security Considerations
+The shell plugin runs commands using the system shell without sanitising input. Only enable it if you trust the commands you type. Errors while spawning the process are logged.
 ## Editing Commands
-
 The launcher stores its custom actions in `actions.json`. While running the
 application you can manage this list through **Edit Commands**. Open the
 launcher with the configured hotkey and choose *Edit Commands* from the menu.

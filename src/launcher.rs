@@ -3,6 +3,21 @@ use arboard::Clipboard;
 use std::path::Path;
 
 pub fn launch_action(action: &Action) -> anyhow::Result<()> {
+    if let Some(cmd) = action.action.strip_prefix("shell:") {
+        #[cfg(target_os = "windows")]
+        let mut command = {
+            let mut c = std::process::Command::new("cmd");
+            c.arg("/C").arg(cmd);
+            c
+        };
+        #[cfg(not(target_os = "windows"))]
+        let mut command = {
+            let mut c = std::process::Command::new("sh");
+            c.arg("-c").arg(cmd);
+            c
+        };
+        return command.spawn().map(|_| ()).map_err(|e| e.into());
+    }
     if let Some(text) = action.action.strip_prefix("clipboard:") {
         let mut cb = Clipboard::new()?;
         cb.set_text(text.to_string())?;
