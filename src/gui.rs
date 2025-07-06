@@ -361,18 +361,9 @@ impl eframe::App for LauncherApp {
                     }
                 }
                 WatchEvent::Plugins => {
-                    let mut plugins = PluginManager::new();
-                    plugins.register(Box::new(WebSearchPlugin));
-                    plugins.register(Box::new(CalculatorPlugin));
-                    plugins.register(Box::new(ClipboardPlugin::default()));
-                    if let Some(dirs) = &self.plugin_dirs {
-                        for dir in dirs {
-                            if let Err(e) = plugins.load_dir(dir) {
-                                tracing::error!("Failed to load plugins from {}: {}", dir, e);
-                            }
-                        }
-                    }
-                    self.plugins = plugins;
+                    let empty: Vec<String> = Vec::new();
+                    let dirs = self.plugin_dirs.as_ref().unwrap_or(&empty);
+                    self.plugins.reload_from_dirs(dirs);
                     self.search();
                     tracing::info!("plugins reloaded");
                 }

@@ -33,12 +33,7 @@ impl PluginEditor {
 
     fn gather_available(plugin_dirs: &[String]) -> Vec<(String, String, Vec<String>)> {
         let mut pm = PluginManager::new();
-        pm.register(Box::new(crate::plugins_builtin::WebSearchPlugin));
-        pm.register(Box::new(crate::plugins_builtin::CalculatorPlugin));
-        pm.register(Box::new(crate::plugins::clipboard::ClipboardPlugin::default()));
-        for dir in plugin_dirs {
-            let _ = pm.load_dir(dir);
-        }
+        pm.reload_from_dirs(plugin_dirs);
         pm.plugin_infos()
     }
 
@@ -72,18 +67,7 @@ impl PluginEditor {
                     );
 
                     // rebuild plugins using the same logic as the watch handler
-                    let mut plugins = PluginManager::new();
-                    plugins.register(Box::new(crate::plugins_builtin::WebSearchPlugin));
-                    plugins.register(Box::new(crate::plugins_builtin::CalculatorPlugin));
-                    plugins.register(Box::new(
-                        crate::plugins::clipboard::ClipboardPlugin::default(),
-                    ));
-                    for dir in &self.plugin_dirs {
-                        if let Err(e) = plugins.load_dir(dir) {
-                            tracing::error!("Failed to load plugins from {}: {}", dir, e);
-                        }
-                    }
-                    app.plugins = plugins;
+                    app.plugins.reload_from_dirs(&self.plugin_dirs);
                     self.available = Self::gather_available(&self.plugin_dirs);
                     app.search();
 

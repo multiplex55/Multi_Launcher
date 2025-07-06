@@ -1,5 +1,7 @@
 use crate::actions::Action;
 use libloading::Library;
+use crate::plugins_builtin::{WebSearchPlugin, CalculatorPlugin};
+use crate::plugins::clipboard::ClipboardPlugin;
 
 pub trait Plugin: Send + Sync {
     /// Return actions based on the query string
@@ -24,6 +26,22 @@ impl PluginManager {
         Self {
             plugins: Vec::new(),
             libs: Vec::new(),
+        }
+    }
+
+    /// Remove all registered plugins without unloading libraries.
+    pub fn clear_plugins(&mut self) {
+        self.plugins.clear();
+    }
+
+    /// Rebuild the plugin list, keeping previously loaded libraries alive.
+    pub fn reload_from_dirs(&mut self, dirs: &[String]) {
+        self.clear_plugins();
+        self.register(Box::new(crate::plugins_builtin::WebSearchPlugin));
+        self.register(Box::new(crate::plugins_builtin::CalculatorPlugin));
+        self.register(Box::new(crate::plugins::clipboard::ClipboardPlugin::default()));
+        for dir in dirs {
+            let _ = self.load_dir(dir);
         }
     }
 
