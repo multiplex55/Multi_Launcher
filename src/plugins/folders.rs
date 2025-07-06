@@ -10,21 +10,23 @@ pub const FOLDERS_FILE: &str = "folders.json";
 pub struct FolderEntry {
     pub label: String,
     pub path: String,
+    #[serde(default)]
+    pub alias: Option<String>,
 }
 
 pub fn default_folders() -> Vec<FolderEntry> {
     let mut out = Vec::new();
     if let Some(p) = dirs_next::home_dir() {
-        out.push(FolderEntry { label: "Home".into(), path: p.to_string_lossy().into() });
+        out.push(FolderEntry { label: "Home".into(), path: p.to_string_lossy().into(), alias: None });
     }
     if let Some(p) = dirs_next::download_dir() {
-        out.push(FolderEntry { label: "Downloads".into(), path: p.to_string_lossy().into() });
+        out.push(FolderEntry { label: "Downloads".into(), path: p.to_string_lossy().into(), alias: None });
     }
     if let Some(p) = dirs_next::desktop_dir() {
-        out.push(FolderEntry { label: "Desktop".into(), path: p.to_string_lossy().into() });
+        out.push(FolderEntry { label: "Desktop".into(), path: p.to_string_lossy().into(), alias: None });
     }
     if let Some(p) = dirs_next::document_dir() {
-        out.push(FolderEntry { label: "Documents".into(), path: p.to_string_lossy().into() });
+        out.push(FolderEntry { label: "Documents".into(), path: p.to_string_lossy().into(), alias: None });
     }
     out
 }
@@ -51,7 +53,7 @@ pub fn append_folder(path: &str, folder: &str) -> anyhow::Result<()> {
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| folder.to_string());
-        list.push(FolderEntry { label, path: folder.to_string() });
+        list.push(FolderEntry { label, path: folder.to_string(), alias: None });
         save_folders(path, &list)?;
     }
     Ok(())
@@ -61,6 +63,15 @@ pub fn remove_folder(path: &str, folder: &str) -> anyhow::Result<()> {
     let mut list = load_folders(path).unwrap_or_else(|_| default_folders());
     if let Some(pos) = list.iter().position(|f| f.path == folder) {
         list.remove(pos);
+        save_folders(path, &list)?;
+    }
+    Ok(())
+}
+
+pub fn set_alias(path: &str, folder: &str, alias: &str) -> anyhow::Result<()> {
+    let mut list = load_folders(path).unwrap_or_else(|_| default_folders());
+    if let Some(item) = list.iter_mut().find(|f| f.path == folder) {
+        item.alias = if alias.is_empty() { None } else { Some(alias.to_string()) };
         save_folders(path, &list)?;
     }
     Ok(())
@@ -106,7 +117,7 @@ impl Plugin for FoldersPlugin {
                 })
                 .map(|f| Action {
                     label: format!("Remove folder {} ({})", f.label, f.path),
-                    desc: "Folder".into(),
+                    desc: f.path.clone(),
                     action: format!("folder:remove:{}", f.path),
                 })
                 .collect();
@@ -123,10 +134,13 @@ impl Plugin for FoldersPlugin {
                 self.matcher.fuzzy_match(&f.label, filter).is_some()
                     || self.matcher.fuzzy_match(&f.path, filter).is_some()
             })
-            .map(|f| Action {
-                label: f.label.clone(),
-                desc: "Folder".into(),
-                action: f.path,
+            .map(|f| {
+                let label = f.alias.clone().unwrap_or_else(|| f.label.clone());
+                Action {
+                    label,
+                    desc: f.path.clone(),
+                    action: f.path,
+                }
             })
             .collect()
     }

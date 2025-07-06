@@ -54,6 +54,7 @@ pub struct LauncherApp {
     focus_query: bool,
     toasts: egui_toast::Toasts,
     enable_toasts: bool,
+    alias_dialog: crate::alias_dialog::AliasDialog,
 }
 
 impl LauncherApp {
@@ -163,6 +164,7 @@ impl LauncherApp {
             focus_query: false,
             toasts,
             enable_toasts,
+            alias_dialog: crate::alias_dialog::AliasDialog::default(),
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -251,6 +253,10 @@ impl LauncherApp {
             }
             _ => None,
         }
+    }
+
+    pub fn focus_input(&mut self) {
+        self.focus_query = true;
     }
 
     #[cfg(target_os = "windows")]
@@ -379,6 +385,7 @@ impl eframe::App for LauncherApp {
                     let a = a.clone();
                     let current = self.query.clone();
                     let mut refresh = false;
+                    let mut set_focus = false;
                     if let Err(e) = launch_action(&a) {
                         self.error = Some(format!("Failed: {e}"));
                         if self.enable_toasts {
@@ -402,14 +409,24 @@ impl eframe::App for LauncherApp {
                         if a.action.starts_with("bookmark:add:") {
                             self.query.clear();
                             refresh = true;
-                            self.focus_query = true;
+                            set_focus = true;
                         } else if a.action.starts_with("bookmark:remove:") {
                             refresh = true;
-                            self.focus_query = true;
+                            set_focus = true;
+                        } else if a.action.starts_with("folder:add:") {
+                            self.query.clear();
+                            refresh = true;
+                            set_focus = true;
+                        } else if a.action.starts_with("folder:remove:") {
+                            refresh = true;
+                            set_focus = true;
                         }
                     }
                     if refresh {
                         self.search();
+                    }
+                    if set_focus {
+                        self.focus_input();
                     }
                 }
             }
@@ -417,9 +434,26 @@ impl eframe::App for LauncherApp {
             let area_height = ui.available_height();
             ScrollArea::vertical().max_height(area_height).show(ui, |ui| {
                 let mut refresh = false;
+                let mut set_focus = false;
+                let custom = crate::plugins::folders::load_folders(crate::plugins::folders::FOLDERS_FILE)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|f| f.path)
+                    .collect::<std::collections::HashSet<_>>();
                 for (idx, a) in self.results.iter().enumerate() {
                     let label = format!("{} : {}", a.label, a.desc);
-                    let resp = ui.selectable_label(self.selected == Some(idx), label);
+                    let mut resp = ui.selectable_label(self.selected == Some(idx), label);
+                    if custom.contains(&a.action) && !a.action.starts_with("folder:") {
+                        resp = resp.on_hover_text(&a.action);
+                        resp.clone().context_menu(|ui| {
+                            if ui.button("Set Alias").clicked() {
+                                self.alias_dialog.open(&a.action);
+                                ui.close_menu();
+                            }
+                        });
+                    } else {
+                        resp = resp.on_hover_text(&a.action);
+                    }
                     if self.selected == Some(idx) {
                         resp.scroll_to_me(Some(egui::Align::Center));
                     }
@@ -449,18 +483,28 @@ impl eframe::App for LauncherApp {
                             if a.action.starts_with("bookmark:add:") {
                                 self.query.clear();
                                 refresh = true;
-                                self.focus_query = true;
+                                set_focus = true;
                             } else if a.action.starts_with("bookmark:remove:") {
                                 refresh = true;
-                                self.focus_query = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("folder:add:") {
+                                self.query.clear();
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("folder:remove:") {
+                                refresh = true;
+                                set_focus = true;
                             }
                         }
                         self.selected = Some(idx);
                     }
                 }
-                if refresh {
-                    self.search();
-                }
+                    if refresh {
+                        self.search();
+                    }
+                    if set_focus {
+                        self.focus_input();
+                    }
             });
         });
         let show_editor = self.show_editor;
@@ -481,6 +525,9 @@ impl eframe::App for LauncherApp {
             ed.ui(ctx, self);
             self.plugin_editor = ed;
         }
+        let mut dlg = std::mem::take(&mut self.alias_dialog);
+        dlg.ui(ctx, self);
+        self.alias_dialog = dlg;
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

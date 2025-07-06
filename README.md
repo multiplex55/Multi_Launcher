@@ -109,7 +109,9 @@ Example:
 }
 ```
 The folders plugin recognises the `f` prefix. Use `f add <path>` to add a folder
-shortcut and `f rm <pattern>` to remove one via fuzzy search.
+shortcut and `f rm <pattern>` to remove one via fuzzy search. Custom entries can
+be aliased by right clicking them in the results list. Hovering a folder result
+shows its full path.
 ### Security Considerations
 The shell plugin runs commands using the system shell without sanitising input. Only enable it if you trust the commands you type. Errors while spawning the process are logged.
 ## Editing Commands
