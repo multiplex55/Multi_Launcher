@@ -1,5 +1,6 @@
 use crate::actions::{load_actions, Action};
 use crate::actions_editor::ActionsEditor;
+use crate::plugin_editor::PluginEditor;
 use crate::settings_editor::SettingsEditor;
 use crate::settings::Settings;
 use crate::launcher::launch_action;
@@ -33,9 +34,11 @@ pub struct LauncherApp {
     pub registered_hotkeys: Mutex<HashMap<String, usize>>,
     pub show_editor: bool,
     pub show_settings: bool,
+    pub show_plugin_editor: bool,
     pub actions_path: String,
     pub editor: ActionsEditor,
     pub settings_editor: SettingsEditor,
+    pub plugin_editor: PluginEditor,
     pub settings_path: String,
     #[allow(dead_code)]
     watchers: Vec<RecommendedWatcher>,
@@ -146,6 +149,7 @@ impl LauncherApp {
         let win_size = settings.window_size.unwrap_or((400, 220));
 
         let settings_editor = SettingsEditor::new(&settings, &plugins);
+        let plugin_editor = PluginEditor::new(&settings, &plugins);
         let app = Self {
             actions: actions.clone(),
             query: String::new(),
@@ -158,9 +162,11 @@ impl LauncherApp {
             registered_hotkeys: Mutex::new(HashMap::new()),
             show_editor: false,
             show_settings: false,
+            show_plugin_editor: false,
             actions_path,
             editor: ActionsEditor::default(),
             settings_editor,
+            plugin_editor,
             settings_path,
             watchers,
             rx,
@@ -331,6 +337,9 @@ impl eframe::App for LauncherApp {
                     if ui.button("Edit Settings").clicked() {
                         self.show_settings = !self.show_settings;
                     }
+                    if ui.button("Edit Plugins").clicked() {
+                        self.show_plugin_editor = !self.show_plugin_editor;
+                    }
                 });
             });
         });
@@ -459,6 +468,12 @@ impl eframe::App for LauncherApp {
             let mut ed = std::mem::take(&mut self.settings_editor);
             ed.ui(ctx, self);
             self.settings_editor = ed;
+        }
+        let show_plugin = self.show_plugin_editor;
+        if show_plugin {
+            let mut ed = std::mem::take(&mut self.plugin_editor);
+            ed.ui(ctx, self);
+            self.plugin_editor = ed;
         }
     }
 
