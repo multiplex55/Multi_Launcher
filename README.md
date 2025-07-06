@@ -51,6 +51,7 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
   "quit_hotkey": "Shift+Escape",
   "index_paths": ["/usr/share/applications"],
   "plugin_dirs": ["./plugins"],
+  "enabled_plugins": ["web_search", "calculator", "clipboard"],
   "debug_logging": false,
   "offscreen_pos": [2000, 2000],
   "window_size": [400, 220]
@@ -97,14 +98,26 @@ pub extern "C" fn create_plugin() -> Box<dyn Plugin> {
 Place the resulting library file in one of the directories listed under
 `plugin_dirs` in `settings.json`.
 
+Plugins can be enabled or disabled from the **Settings** window. The list of
+active plugins is stored in the `enabled_plugins` section of `settings.json`.
+
+Example:
+
+```json
+{
+  "enabled_plugins": ["web_search", "calculator", "clipboard"]
+}
+```
+
 ## Editing Commands
 
 The launcher stores its custom actions in `actions.json`. While running the
-application you can manage this list using the **Edit Commands** dialog. Open
-the launcher with the configured hotkey and press the *Edit Commands* button to
-add or remove entries. A **Browse** button next to the path field opens a native
-file dialog so you can select the executable or file interactively. Changes are
-saved back to `actions.json` immediately.
+application you can manage this list through **Edit Commands**. Open the
+launcher with the configured hotkey and choose *Edit Commands* from the menu.
+Use the **New Command** button to open the *Add Command* dialog where you enter
+a label, description and the executable path. The **Browse** button lets you
+select the file interactively. Commands can also be removed from the list. All
+changes are written to `actions.json` immediately.
 
 ## Packaging
 
