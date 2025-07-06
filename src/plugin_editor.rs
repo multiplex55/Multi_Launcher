@@ -111,24 +111,27 @@ impl PluginEditor {
                                     }
                                 } else if let Some(pos) = self.enabled_plugins.iter().position(|n| n == name) {
                                     self.enabled_plugins.remove(pos);
+                                    self.enabled_capabilities.remove(name);
                                 }
                             }
                         });
                         ui.indent(name, |ui| {
-                            for cap in caps {
-                                let entry = self.enabled_capabilities.entry(name.clone()).or_default();
-                                let mut cap_enabled = entry.contains(cap);
-                                let label = format!("{}", cap);
-                                if ui.checkbox(&mut cap_enabled, label).changed() {
-                                    if cap_enabled {
-                                        if !entry.contains(cap) {
-                                            entry.push(cap.clone());
+                            ui.add_enabled_ui(enabled, |ui| {
+                                for cap in caps {
+                                    let entry = self.enabled_capabilities.entry(name.clone()).or_default();
+                                    let mut cap_enabled = entry.contains(cap);
+                                    let label = format!("{}", cap);
+                                    if ui.checkbox(&mut cap_enabled, label).changed() {
+                                        if cap_enabled {
+                                            if !entry.contains(cap) {
+                                                entry.push(cap.clone());
+                                            }
+                                        } else if let Some(pos) = entry.iter().position(|c| c == cap) {
+                                            entry.remove(pos);
                                         }
-                                    } else if let Some(pos) = entry.iter().position(|c| c == cap) {
-                                        entry.remove(pos);
                                     }
                                 }
-                            }
+                            });
                         });
                     }
                 });
