@@ -37,9 +37,9 @@ impl PluginManager {
     /// Rebuild the plugin list, keeping previously loaded libraries alive.
     pub fn reload_from_dirs(&mut self, dirs: &[String]) {
         self.clear_plugins();
-        self.register(Box::new(crate::plugins_builtin::WebSearchPlugin));
-        self.register(Box::new(crate::plugins_builtin::CalculatorPlugin));
-        self.register(Box::new(crate::plugins::clipboard::ClipboardPlugin::default()));
+        self.register(Box::new(WebSearchPlugin));
+        self.register(Box::new(CalculatorPlugin));
+        self.register(Box::new(ClipboardPlugin::default()));
         for dir in dirs {
             let _ = self.load_dir(dir);
         }

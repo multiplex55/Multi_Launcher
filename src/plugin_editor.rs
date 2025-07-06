@@ -58,7 +58,6 @@ impl PluginEditor {
                 if let Err(e) = s.save(&app.settings_path) {
                     app.error = Some(format!("Failed to save: {e}"));
                 } else {
-                    let old_dirs = app.plugin_dirs.clone();
                     app.update_paths(
                         s.plugin_dirs.clone(),
                         s.index_paths.clone(),
@@ -67,11 +66,7 @@ impl PluginEditor {
                         s.offscreen_pos,
                     );
 
-                    for dir in &self.plugin_dirs {
-                        if old_dirs.as_ref().map_or(true, |d| !d.contains(dir)) {
-                            let _ = app.plugins.load_dir(dir);
-                        }
-                    }
+                    app.plugins.reload_from_dirs(&self.plugin_dirs);
                     self.available = Self::gather_available(&self.plugin_dirs);
                     app.search();
 

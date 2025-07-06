@@ -4,7 +4,7 @@ use crate::plugin_editor::PluginEditor;
 use crate::settings_editor::SettingsEditor;
 use crate::settings::Settings;
 use crate::launcher::launch_action;
-use crate::plugin::{PluginManager, Plugin};
+use crate::plugin::PluginManager;
 use crate::indexer;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher, Config, EventKind};
 use std::sync::mpsc::{channel, Receiver};
