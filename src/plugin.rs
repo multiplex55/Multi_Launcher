@@ -5,6 +5,7 @@ use crate::plugins::clipboard::ClipboardPlugin;
 use crate::plugins::shell::ShellPlugin;
 use crate::plugins::bookmarks::BookmarksPlugin;
 use crate::plugins::runescape::RunescapeSearchPlugin;
+use crate::plugins::history::HistoryPlugin;
 
 pub trait Plugin: Send + Sync {
     /// Return actions based on the query string
@@ -46,6 +47,7 @@ impl PluginManager {
         self.register(Box::new(ClipboardPlugin::default()));
         self.register(Box::new(BookmarksPlugin::default()));
         self.register(Box::new(ShellPlugin));
+        self.register(Box::new(HistoryPlugin));
         for dir in dirs {
             tracing::debug!("loading plugins from {dir}");
             let _ = self.load_dir(dir);
