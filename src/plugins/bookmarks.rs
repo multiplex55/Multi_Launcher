@@ -39,6 +39,15 @@ pub fn append_bookmark(path: &str, url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn remove_bookmark(path: &str, url: &str) -> anyhow::Result<()> {
+    let mut list = load_bookmarks(path).unwrap_or_default();
+    if let Some(pos) = list.iter().position(|u| u == url) {
+        list.remove(pos);
+        save_bookmarks(path, &list)?;
+    }
+    Ok(())
+}
+
 impl Default for BookmarksPlugin {
     fn default() -> Self {
         Self::new()
@@ -56,6 +65,20 @@ impl Plugin for BookmarksPlugin {
                     action: format!("bookmark:add:{url}"),
                 }];
             }
+        }
+
+        if let Some(pattern) = query.strip_prefix("bm rm ") {
+            let filter = pattern.trim();
+            let bookmarks = load_bookmarks(BOOKMARKS_FILE).unwrap_or_default();
+            return bookmarks
+                .into_iter()
+                .filter(|url| self.matcher.fuzzy_match(url, filter).is_some())
+                .map(|url| Action {
+                    label: format!("Remove bookmark {url}"),
+                    desc: "Bookmark".into(),
+                    action: format!("bookmark:remove:{url}"),
+                })
+                .collect();
         }
 
         if !query.starts_with("bm") {
