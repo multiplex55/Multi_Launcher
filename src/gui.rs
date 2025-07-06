@@ -94,7 +94,7 @@ impl LauncherApp {
     ) -> Self {
         let (tx, rx) = channel();
         let mut watchers = Vec::new();
-        let mut toasts = Toasts::new().anchor(egui::Align2::RIGHT_TOP, [10.0, 10.0]);
+        let toasts = Toasts::new().anchor(egui::Align2::RIGHT_TOP, [10.0, 10.0]);
         let enable_toasts = settings.enable_toasts;
 
         if let Ok(mut watcher) = RecommendedWatcher::new(
@@ -382,17 +382,19 @@ impl eframe::App for LauncherApp {
                     if let Err(e) = launch_action(&a) {
                         self.error = Some(format!("Failed: {e}"));
                         if self.enable_toasts {
-                            self.toasts.add(Toast::new()
-                                .kind(ToastKind::Error)
-                                .text(format!("Failed: {e}"))
-                                .options(ToastOptions::default().duration_in_seconds(3.0)));
+                            self.toasts.add(Toast {
+                                text: format!("Failed: {e}").into(),
+                                kind: ToastKind::Error,
+                                options: ToastOptions::default().duration_in_seconds(3.0),
+                            });
                         }
                     } else {
                         if self.enable_toasts {
-                            self.toasts.add(Toast::new()
-                                .kind(ToastKind::Success)
-                                .text(format!("Launched {}", a.label))
-                                .options(ToastOptions::default().duration_in_seconds(3.0)));
+                            self.toasts.add(Toast {
+                                text: format!("Launched {}", a.label).into(),
+                                kind: ToastKind::Success,
+                                options: ToastOptions::default().duration_in_seconds(3.0),
+                            });
                         }
                         let _ = history::append_history(HistoryEntry { query: current, action: a.clone() });
                         let count = self.usage.entry(a.action.clone()).or_insert(0);
@@ -427,17 +429,19 @@ impl eframe::App for LauncherApp {
                         if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
                             if self.enable_toasts {
-                                self.toasts.add(Toast::new()
-                                    .kind(ToastKind::Error)
-                                    .text(format!("Failed: {e}"))
-                                    .options(ToastOptions::default().duration_in_seconds(3.0)));
+                                self.toasts.add(Toast {
+                                    text: format!("Failed: {e}").into(),
+                                    kind: ToastKind::Error,
+                                    options: ToastOptions::default().duration_in_seconds(3.0),
+                                });
                             }
                         } else {
                             if self.enable_toasts {
-                                self.toasts.add(Toast::new()
-                                    .kind(ToastKind::Success)
-                                    .text(format!("Launched {}", a.label))
-                                    .options(ToastOptions::default().duration_in_seconds(3.0)));
+                                self.toasts.add(Toast {
+                                    text: format!("Launched {}", a.label).into(),
+                                    kind: ToastKind::Success,
+                                    options: ToastOptions::default().duration_in_seconds(3.0),
+                                });
                             }
                             let _ = history::append_history(HistoryEntry { query: current, action: a.clone() });
                             let count = self.usage.entry(a.action.clone()).or_insert(0);
