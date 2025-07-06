@@ -3,5 +3,6 @@
     "quit_hotkey": "Shift+Escape",
     "index_paths": null,
     "plugin_dirs": null,
-    "debug_logging": false
+    "debug_logging": false,
+    "enable_toasts": true
 }

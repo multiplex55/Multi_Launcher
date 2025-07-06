@@ -10,6 +10,7 @@ pub struct SettingsEditor {
     index_paths: Vec<String>,
     index_input: String,
     debug_logging: bool,
+    show_toasts: bool,
     offscreen_x: i32,
     offscreen_y: i32,
     window_w: i32,
@@ -24,6 +25,7 @@ impl SettingsEditor {
             index_paths: settings.index_paths.clone().unwrap_or_default(),
             index_input: String::new(),
             debug_logging: settings.debug_logging,
+            show_toasts: settings.enable_toasts,
             offscreen_x: settings.offscreen_pos.unwrap_or((2000, 2000)).0,
             offscreen_y: settings.offscreen_pos.unwrap_or((2000, 2000)).1,
             window_w: settings.window_size.unwrap_or((400, 220)).0,
@@ -52,6 +54,7 @@ impl SettingsEditor {
             enabled_plugins: current.enabled_plugins.clone(),
             enabled_capabilities: current.enabled_capabilities.clone(),
             debug_logging: self.debug_logging,
+            enable_toasts: self.show_toasts,
             offscreen_pos: Some((self.offscreen_x, self.offscreen_y)),
             window_size: Some((self.window_w, self.window_h)),
         }
@@ -83,6 +86,8 @@ impl SettingsEditor {
                         ui.selectable_value(&mut self.debug_logging, true, "Enabled");
                     });
             });
+
+            ui.checkbox(&mut self.show_toasts, "Enable toast notifications");
 
             ui.horizontal(|ui| {
                 ui.label("Off-screen X");
@@ -133,6 +138,7 @@ impl SettingsEditor {
                                 new_settings.enabled_plugins.clone(),
                                 new_settings.enabled_capabilities.clone(),
                                 new_settings.offscreen_pos,
+                                Some(new_settings.enable_toasts),
                             );
                             crate::request_hotkey_restart(new_settings);
                         }
