@@ -78,6 +78,8 @@ pub struct LauncherApp {
     /// Number of user defined commands at the start of `actions`.
     pub custom_len: usize,
     pub history_limit: usize,
+    pub fuzzy_weight: f32,
+    pub usage_weight: f32,
 }
 
 impl LauncherApp {
@@ -89,6 +91,8 @@ impl LauncherApp {
         enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
         offscreen_pos: Option<(i32, i32)>,
         enable_toasts: Option<bool>,
+        fuzzy_weight: Option<f32>,
+        usage_weight: Option<f32>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -99,6 +103,12 @@ impl LauncherApp {
         }
         if let Some(v) = enable_toasts {
             self.enable_toasts = v;
+        }
+        if let Some(v) = fuzzy_weight {
+            self.fuzzy_weight = v;
+        }
+        if let Some(v) = usage_weight {
+            self.usage_weight = v;
         }
     }
 
@@ -196,6 +206,8 @@ impl LauncherApp {
             list_scale,
             custom_len,
             history_limit: settings.history_limit,
+            fuzzy_weight: settings.fuzzy_weight,
+            usage_weight: settings.usage_weight,
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -220,30 +232,44 @@ impl LauncherApp {
     }
 
     pub fn search(&mut self) {
-        let mut res: Vec<Action> = if self.query.is_empty() {
-            self.actions.clone()
-        } else {
-            self.actions
-                .iter()
-                .filter(|a| {
-                    self.matcher.fuzzy_match(&a.label, &self.query).is_some()
-                        || self.matcher.fuzzy_match(&a.desc, &self.query).is_some()
-                })
-                .cloned()
-                .collect()
-        };
+        let mut res: Vec<(Action, f32)> = Vec::new();
 
-        // append plugin results respecting enabled plugin settings
+        if self.query.is_empty() {
+            res.extend(self.actions.iter().cloned().map(|a| (a, 0.0)));
+        } else {
+            for a in &self.actions {
+                let s1 = self.matcher.fuzzy_match(&a.label, &self.query);
+                let s2 = self.matcher.fuzzy_match(&a.desc, &self.query);
+                if let Some(score) = s1.max(s2) {
+                    res.push((a.clone(), score as f32 * self.fuzzy_weight));
+                }
+            }
+        }
+
         res.extend(self.plugins.search_filtered(
             &self.query,
             self.enabled_plugins.as_ref(),
             self.enabled_capabilities.as_ref(),
-        ));
+        ).into_iter().map(|a| {
+            let score = if self.query.is_empty() {
+                0.0
+            } else {
+                self
+                    .matcher
+                    .fuzzy_match(&a.label, &self.query)
+                    .max(self.matcher.fuzzy_match(&a.desc, &self.query))
+                    .unwrap_or(0) as f32 * self.fuzzy_weight
+            };
+            (a, score)
+        }));
 
-        // sort by usage count if available
-        res.sort_by_key(|a| std::cmp::Reverse(self.usage.get(&a.action).cloned().unwrap_or(0)));
+        for (a, score) in res.iter_mut() {
+            *score += self.usage.get(&a.action).cloned().unwrap_or(0) as f32 * self.usage_weight;
+        }
 
-        self.results = res;
+        res.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        self.results = res.into_iter().map(|(a, _)| a).collect();
         self.selected = None;
     }
 

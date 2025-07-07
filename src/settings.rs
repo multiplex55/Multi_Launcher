@@ -34,6 +34,12 @@ pub struct Settings {
     /// Scale factor for the action list. Defaults to `1.0`.
     #[serde(default = "default_scale")]
     pub list_scale: Option<f32>,
+    /// Weight of the fuzzy match score when ranking results.
+    #[serde(default = "default_fuzzy_weight")]
+    pub fuzzy_weight: f32,
+    /// Weight of the usage count when ranking results.
+    #[serde(default = "default_usage_weight")]
+    pub usage_weight: f32,
     /// Maximum number of entries kept in the history list.
     #[serde(default = "default_history_limit")]
     pub history_limit: usize,
@@ -44,6 +50,10 @@ fn default_toasts() -> bool { true }
 fn default_scale() -> Option<f32> { Some(1.0) }
 
 fn default_history_limit() -> usize { 100 }
+
+fn default_fuzzy_weight() -> f32 { 1.0 }
+
+fn default_usage_weight() -> f32 { 1.0 }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -60,6 +70,8 @@ impl Default for Settings {
             enable_toasts: true,
             query_scale: Some(1.0),
             list_scale: Some(1.0),
+            fuzzy_weight: default_fuzzy_weight(),
+            usage_weight: default_usage_weight(),
             history_limit: default_history_limit(),
         }
     }
