@@ -51,6 +51,7 @@ fn example_queries(name: &str) -> Option<&'static [&'static str]> {
         "web_search" => Some(&["g rust"]),
         "runescape_search" => Some(&["rs dragon scimitar", "osrs agility guide"]),
         "youtube" => Some(&["yt rust"]),
+        "reddit" => Some(&["red cats"]),
         "calculator" => Some(&["= 1+2"]),
         "clipboard" => Some(&["cb"]),
         "bookmarks" => Some(&["bm add https://example.com"]),
