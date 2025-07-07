@@ -163,6 +163,12 @@ impl SettingsEditor {
                     ui.add(egui::DragValue::new(&mut self.static_w));
                     ui.label("H");
                     ui.add(egui::DragValue::new(&mut self.static_h));
+                    if ui.button("Snapshot").clicked() {
+                        self.static_x = app.window_pos.0;
+                        self.static_y = app.window_pos.1;
+                        self.static_w = app.window_size.0;
+                        self.static_h = app.window_size.1;
+                    }
                 });
             }
 
