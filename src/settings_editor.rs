@@ -1,6 +1,7 @@
 use crate::settings::Settings;
 use crate::gui::LauncherApp;
 use eframe::egui;
+#[cfg(target_os = "windows")]
 use rfd::FileDialog;
 
 #[derive(Default)]
@@ -113,6 +114,7 @@ impl SettingsEditor {
             ui.horizontal(|ui| {
                 ui.text_edit_singleline(&mut self.index_input);
                 if ui.button("Browse").clicked() {
+                    #[cfg(target_os = "windows")]
                     if let Some(dir) = FileDialog::new().pick_folder() {
                         self.index_input = dir.display().to_string();
                     }

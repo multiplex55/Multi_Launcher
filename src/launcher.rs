@@ -33,64 +33,7 @@ fn system_command(action: &str) -> Option<std::process::Command> {
             _ => None,
         };
     }
-    #[cfg(target_os = "macos")]
-    {
-        use std::process::Command;
-        return match action {
-            "shutdown" => {
-                let mut c = Command::new("osascript");
-                c.args(["-e", "tell app \"System Events\" to shut down"]);
-                Some(c)
-            }
-            "reboot" => {
-                let mut c = Command::new("osascript");
-                c.args(["-e", "tell app \"System Events\" to restart"]);
-                Some(c)
-            }
-            "lock" => {
-                let mut c = Command::new(
-                    "/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession",
-                );
-                c.arg("-suspend");
-                Some(c)
-            }
-            "logoff" => {
-                let mut c = Command::new("osascript");
-                c.args(["-e", "tell app \"System Events\" to log out"]);
-                Some(c)
-            }
-            _ => None,
-        };
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::process::Command;
-        return match action {
-            "shutdown" => {
-                let mut c = Command::new("systemctl");
-                c.arg("poweroff");
-                Some(c)
-            }
-            "reboot" => {
-                let mut c = Command::new("systemctl");
-                c.arg("reboot");
-                Some(c)
-            }
-            "lock" => {
-                let mut c = Command::new("loginctl");
-                c.arg("lock-session");
-                Some(c)
-            }
-            "logoff" => {
-                let mut c = Command::new("loginctl");
-                c.arg("terminate-user");
-                c.arg(std::env::var("USER").unwrap_or_default());
-                Some(c)
-            }
-            _ => None,
-        };
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    #[cfg(not(target_os = "windows"))]
     {
         let _ = action;
         None
@@ -98,20 +41,19 @@ fn system_command(action: &str) -> Option<std::process::Command> {
 }
 
 pub fn launch_action(action: &Action) -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
     if let Some(cmd) = action.action.strip_prefix("shell:") {
-        #[cfg(target_os = "windows")]
         let mut command = {
             let mut c = std::process::Command::new("cmd");
             c.arg("/C").arg(cmd);
             c
         };
-        #[cfg(not(target_os = "windows"))]
-        let mut command = {
-            let mut c = std::process::Command::new("sh");
-            c.arg("-c").arg(cmd);
-            c
-        };
         return command.spawn().map(|_| ()).map_err(|e| e.into());
+    }
+    #[cfg(not(target_os = "windows"))]
+    if let Some(_cmd) = action.action.strip_prefix("shell:") {
+        // Shell commands are only supported on Windows
+        return Ok(());
     }
     if let Some(text) = action.action.strip_prefix("clipboard:") {
         let mut cb = Clipboard::new()?;
@@ -164,35 +106,6 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
             .spawn()
             .map(|_| ())
             .map_err(|e| e.into());
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut should_spawn = false;
-
-        #[cfg(target_os = "macos")]
-        {
-            if path.extension().map(|e| e == "app").unwrap_or(false) {
-                should_spawn = true;
-            }
-        }
-
-        if !should_spawn {
-            if let Ok(meta) = path.metadata() {
-                if meta.permissions().mode() & 0o111 != 0 {
-                    should_spawn = true;
-                }
-            }
-        }
-
-        if should_spawn {
-            return std::process::Command::new(path)
-                .spawn()
-                .map(|_| ())
-                .map_err(|e| e.into());
-        }
     }
 
     open::that(&action.action).map_err(|e| e.into())

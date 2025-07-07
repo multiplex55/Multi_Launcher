@@ -99,13 +99,7 @@ impl PluginManager {
     pub fn load_dir(&mut self, path: &str) -> anyhow::Result<()> {
         use std::ffi::OsStr;
 
-        let ext = if cfg!(target_os = "windows") {
-            "dll"
-        } else if cfg!(target_os = "macos") {
-            "dylib"
-        } else {
-            "so"
-        };
+        let ext = "dll";
 
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;
@@ -139,13 +133,7 @@ impl PluginManager {
     ) -> anyhow::Result<()> {
         use std::ffi::OsStr;
 
-        let ext = if cfg!(target_os = "windows") {
-            "dll"
-        } else if cfg!(target_os = "macos") {
-            "dylib"
-        } else {
-            "so"
-        };
+        let ext = "dll";
 
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;

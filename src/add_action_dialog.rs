@@ -1,6 +1,7 @@
 use crate::actions::{Action, save_actions};
 use crate::gui::LauncherApp;
 use eframe::egui;
+#[cfg(target_os = "windows")]
 use rfd::FileDialog;
 
 pub struct AddActionDialog {
@@ -43,6 +44,7 @@ impl AddActionDialog {
                         ui.label("Path");
                         ui.text_edit_singleline(&mut self.path);
                         if ui.button("Browse").clicked() {
+                            #[cfg(target_os = "windows")]
                             if let Some(file) = FileDialog::new().pick_file() {
                                 if let Some(p) = file.to_str() {
                                     self.path = p.to_owned();

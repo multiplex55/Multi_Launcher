@@ -67,11 +67,6 @@ impl Hotkey {
         false
     }
 
-    #[cfg(not(target_os = "windows"))]
-    pub fn register(&mut self, _app: &crate::gui::LauncherApp, _id: i32) -> bool {
-        warn!("Hotkey registration is only supported on Windows.");
-        false
-    }
 
     #[cfg(target_os = "windows")]
     pub fn unregister(&self, app: &crate::gui::LauncherApp) -> bool {
@@ -90,9 +85,4 @@ impl Hotkey {
         false
     }
 
-    #[cfg(not(target_os = "windows"))]
-    pub fn unregister(&self, _app: &crate::gui::LauncherApp) -> bool {
-        warn!("Hotkey unregistration is only supported on Windows.");
-        false
-    }
 }

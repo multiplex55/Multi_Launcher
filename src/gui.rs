@@ -271,8 +271,6 @@ impl LauncherApp {
         registered_hotkeys.clear();
     }
 
-    #[cfg(not(target_os = "windows"))]
-    pub fn unregister_all_hotkeys(&self) {}
 }
 
 impl eframe::App for LauncherApp {

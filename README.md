@@ -8,7 +8,6 @@ quickly open applications or files.
 
 Requirements:
 - Rust toolchain
-- On Linux you may need X11 development libraries (`libxcb` and friends).
 
 ```
 cargo build --release
@@ -34,10 +33,9 @@ RUST_LOG=info cargo run --release --features unstable_grab
 ```
 
 If hotkeys do nothing, check the output for warnings starting with
-`Hotkey listener failed`. Lack of permissions is a common cause on Linux
-(running under `sudo` or granting access to `/dev/input` may be required).
-When using `CapsLock` as the hotkey you almost always need to build with
-`--features unstable_grab` so the listener can grab the key.
+`Hotkey listener failed`. When using `CapsLock` as the hotkey you almost
+always need to build with `--features unstable_grab` so the listener can
+grab the key.
 
 ## Settings
 
@@ -49,7 +47,7 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
 {
   "hotkey": "F2",
   "quit_hotkey": "Shift+Escape",
-  "index_paths": ["/usr/share/applications"],
+  "index_paths": ["C:/ProgramData/Microsoft/Windows/Start Menu/Programs"],
   "plugin_dirs": ["./plugins"],
   "enabled_plugins": ["web_search", "calculator", "clipboard", "shell", "runescape_search", "system"],
   "debug_logging": false,
@@ -126,9 +124,9 @@ changes are written to `actions.json` immediately.
 
 ## Packaging
 
-The project can be compiled for Windows, macOS and Linux using `cargo build
---release`. Afterwards bundle the binary for distribution (e.g. using `cargo
-bundle` on macOS or `cargo wix` on Windows).
+The project can be compiled for Windows using `cargo build --release`.
+Afterwards bundle the binary for distribution using a Windows packaging tool
+such as `cargo wix`.
 
 ## Troubleshooting
 
