@@ -20,13 +20,28 @@ impl PluginEditor {
     pub fn new(settings: &Settings) -> Self {
         let plugin_dirs = settings.plugin_dirs.clone().unwrap_or_default();
         let info = Self::gather_available(&plugin_dirs);
+
+        // If settings don't specify enabled plugins, enable all gathered ones by
+        // default.
+        let enabled_plugins = match &settings.enabled_plugins {
+            Some(list) => list.clone(),
+            None => info.iter().map(|(n, _, _)| n.clone()).collect(),
+        };
+
+        // Likewise enable all advertised capabilities per plugin when the
+        // settings don't provide a map.
+        let enabled_capabilities = match &settings.enabled_capabilities {
+            Some(map) => map.clone(),
+            None => info
+                .iter()
+                .map(|(name, _, caps)| (name.clone(), caps.clone()))
+                .collect(),
+        };
+
         Self {
             plugin_dirs,
-            enabled_plugins: settings.enabled_plugins.clone().unwrap_or_default(),
-            enabled_capabilities: settings
-                .enabled_capabilities
-                .clone()
-                .unwrap_or_default(),
+            enabled_plugins,
+            enabled_capabilities,
             plugin_input: String::new(),
             available: info,
         }
@@ -47,16 +62,44 @@ impl PluginEditor {
                 } else {
                     Some(self.plugin_dirs.clone())
                 };
-                s.enabled_plugins = if self.enabled_plugins.is_empty() {
+                let all_plugins_enabled = self.enabled_plugins.len() == self.available.len()
+                    && self
+                        .available
+                        .iter()
+                        .all(|(name, _, _)| self.enabled_plugins.contains(name));
+                s.enabled_plugins = if all_plugins_enabled {
                     None
                 } else {
                     Some(self.enabled_plugins.clone())
                 };
-                s.enabled_capabilities = if self.enabled_capabilities.is_empty() {
-                    None
+
+                let mut default_caps = true;
+                for (name, _, caps) in &self.available {
+                    if !self.enabled_plugins.contains(name) {
+                        continue;
+                    }
+                    match self.enabled_capabilities.get(name) {
+                        Some(en) => {
+                            if en.len() != caps.len()
+                                || !caps.iter().all(|c| en.contains(c))
+                            {
+                                default_caps = false;
+                                break;
+                            }
+                        }
+                        None => {
+                            if !caps.is_empty() {
+                                default_caps = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if default_caps && self.enabled_capabilities.len() == self.enabled_plugins.len() {
+                    s.enabled_capabilities = None;
                 } else {
-                    Some(self.enabled_capabilities.clone())
-                };
+                    s.enabled_capabilities = Some(self.enabled_capabilities.clone());
+                }
                 if let Err(e) = s.save(&app.settings_path) {
                     app.error = Some(format!("Failed to save: {e}"));
                 } else {
