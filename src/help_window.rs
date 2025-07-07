@@ -4,6 +4,7 @@ use eframe::egui;
 #[derive(Default)]
 pub struct HelpWindow {
     pub open: bool,
+    pub show_examples: bool,
 }
 
 impl HelpWindow {
@@ -19,6 +20,8 @@ impl HelpWindow {
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| ui.heading("Available commands"));
                 ui.separator();
+                ui.checkbox(&mut self.show_examples, "Show examples");
+                ui.separator();
                 let mut infos = app.plugins.plugin_infos();
                 infos.sort_by(|a, b| a.0.cmp(&b.0));
                 let area_height = ui.available_height();
@@ -26,13 +29,35 @@ impl HelpWindow {
                     .max_height(area_height)
                     .show(ui, |ui| {
                         for (name, desc, _) in infos {
-                            ui.horizontal(|ui| {
-                                ui.monospace(format!("{name:>8}"));
-                                ui.label(desc);
-                            });
+                            ui.label(egui::RichText::new(&name).strong());
+                            ui.label(desc);
+                            if self.show_examples {
+                                if let Some(examples) = example_queries(&name) {
+                                    for ex in examples {
+                                        ui.monospace(format!("  {ex}"));
+                                    }
+                                }
+                            }
+                            ui.separator();
                         }
                     });
             });
         self.open = open;
+    }
+}
+
+fn example_queries(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        "web_search" => Some(&["g rust"]),
+        "runescape_search" => Some(&["rs dragon scimitar", "osrs agility guide"]),
+        "calculator" => Some(&["= 1+2"]),
+        "clipboard" => Some(&["cb"]),
+        "bookmarks" => Some(&["bm add https://example.com"]),
+        "folders" => Some(&["f add C:/path", "f rm docs"]),
+        "shell" => Some(&["sh echo hello"]),
+        "system" => Some(&["sys shutdown"]),
+        "history" => Some(&["hi"]),
+        "help" => Some(&["help"]),
+        _ => None,
     }
 }

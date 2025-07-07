@@ -98,18 +98,18 @@ running.
 
 Built-in plugins and their command prefixes are:
 
-- Google web search (`g query`)
-- RuneScape Wiki search (`rs query` or `osrs query`)
-- Calculator (`= expression`)
+- Google web search (`g rust`)
+- RuneScape Wiki search (`rs item` or `osrs item`)
+- Calculator (`= 2+2`)
 - Clipboard history (`cb`)
-- Bookmarks (`bm`)
-- Folder shortcuts (`f`)
-- Shell commands (`sh <command>`)
-- System actions (`sys <action>` with `shutdown`, `reboot`, `lock` or `logoff`)
+- Bookmarks (`bm add <url>` or `bm rm <pattern>`)
+- Folder shortcuts (`f`, `f add <path>`, `f rm <pattern>`)
+- Shell commands (`sh echo hi`)
+- System actions (`sys shutdown`)
 - Search history (`hi`)
 - Command overview (`help`)
 
-Selecting a clipboard entry copies it back to the clipboard. Type `help` and press <kbd>Enter</kbd> to open the command list. Additional plugins can be added by building
+Selecting a clipboard entry copies it back to the clipboard. Type `help` and press <kbd>Enter</kbd> to open the command list. The help window groups commands by plugin name and can optionally display example queries. Additional plugins can be added by building
 shared libraries. Each plugin crate should be compiled as a `cdylib` and export
 a `create_plugin` function returning `Box<dyn Plugin>`:
 
