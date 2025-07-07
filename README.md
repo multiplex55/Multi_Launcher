@@ -4,6 +4,16 @@ Multi Launcher is a lightweight application launcher built with Rust and `eframe
 It supports configurable hotkeys, basic plugin architecture and file indexing to
 quickly open applications or files.
 
+
+## Use Cases
+
+- Launch installed applications or custom commands from anywhere using a single hotkey.
+- Search your clipboard history or saved bookmarks to quickly paste or open items.
+- Run shell commands without opening a terminal.
+- Perform web searches or look up documentation directly.
+- Jump to frequently used folders with the folders plugin.
+
+
 ## Building
 
 Requirements:
@@ -62,6 +72,10 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
     "history",
     "help"
   ],
+  "enabled_capabilities": {"folders": ["search", "show_full_path"]},
+  "enable_toasts": true,
+  "fuzzy_weight": 1.0,
+  "usage_weight": 1.0,
   "debug_logging": false,
   "offscreen_pos": [2000, 2000],
   "window_size": [400, 220],
@@ -105,6 +119,11 @@ includes a *Snapshot* button to capture the current window position and size
 for these fields.
 
 `query_scale` and `list_scale` control the size of the search field and the results list separately. Values around `1.0` keep the default look while higher numbers enlarge the respective element up to five times.
+`enable_toasts` controls short pop-up notifications when saving settings or commands. Set it to `false` to disable these messages.
+`fuzzy_weight` and `usage_weight` adjust how results are ranked. The fuzzy weight multiplies the match score while the usage weight favours frequently launched actions.
+`history_limit` defines how many entries the history plugin keeps.
+`enabled_capabilities` maps plugin names to capability identifiers so features can be toggled individually. The folders plugin, for example, exposes `show_full_path`.
+
 
 If you choose `CapsLock` as the hotkey, the launcher suppresses the normal
 CapsLock toggle **when compiled with the `unstable_grab` feature enabled**.
@@ -146,6 +165,8 @@ Place the resulting library file in one of the directories listed under
 
 Plugins can be enabled or disabled from the **Settings** window. The list of
 active plugins is stored in the `enabled_plugins` section of `settings.json`.
+The **Plugin Settings** dialog provides a graphical way to manage plugin directories, enable or disable plugins and toggle capabilities like `show_full_path`.
+
 
 Example:
 
@@ -200,6 +221,13 @@ When diagnosing hotkey issues it can be helpful to enable info level logging:
 ```bash
 RUST_LOG=info cargo run
 ```
+## Tips
+
+- Press the help hotkey (F1 by default) to display a quick list of available commands.
+- Right click a folder result to set a custom alias for easier access.
+- Use the *Snapshot* button in Settings when adjusting static window placement.
+- Tweak `fuzzy_weight` and `usage_weight` if you want results to favour name matches or past usage differently.
+
 
 ## Manual Test Plan
 
