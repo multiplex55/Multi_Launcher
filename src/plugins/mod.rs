@@ -4,3 +4,4 @@ pub mod bookmarks;
 pub mod runescape;
 pub mod history;
 pub mod folders;
+pub mod system;

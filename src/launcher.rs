@@ -5,6 +5,98 @@ use crate::history;
 use arboard::Clipboard;
 use std::path::Path;
 
+fn system_command(action: &str) -> Option<std::process::Command> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        return match action {
+            "shutdown" => {
+                let mut c = Command::new("shutdown");
+                c.args(["/s", "/t", "0"]);
+                Some(c)
+            }
+            "reboot" => {
+                let mut c = Command::new("shutdown");
+                c.args(["/r", "/t", "0"]);
+                Some(c)
+            }
+            "lock" => {
+                let mut c = Command::new("rundll32.exe");
+                c.args(["user32.dll,LockWorkStation"]);
+                Some(c)
+            }
+            "logoff" => {
+                let mut c = Command::new("shutdown");
+                c.arg("/l");
+                Some(c)
+            }
+            _ => None,
+        };
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        return match action {
+            "shutdown" => {
+                let mut c = Command::new("osascript");
+                c.args(["-e", "tell app \"System Events\" to shut down"]);
+                Some(c)
+            }
+            "reboot" => {
+                let mut c = Command::new("osascript");
+                c.args(["-e", "tell app \"System Events\" to restart"]);
+                Some(c)
+            }
+            "lock" => {
+                let mut c = Command::new(
+                    "/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession",
+                );
+                c.arg("-suspend");
+                Some(c)
+            }
+            "logoff" => {
+                let mut c = Command::new("osascript");
+                c.args(["-e", "tell app \"System Events\" to log out"]);
+                Some(c)
+            }
+            _ => None,
+        };
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+        return match action {
+            "shutdown" => {
+                let mut c = Command::new("systemctl");
+                c.arg("poweroff");
+                Some(c)
+            }
+            "reboot" => {
+                let mut c = Command::new("systemctl");
+                c.arg("reboot");
+                Some(c)
+            }
+            "lock" => {
+                let mut c = Command::new("loginctl");
+                c.arg("lock-session");
+                Some(c)
+            }
+            "logoff" => {
+                let mut c = Command::new("loginctl");
+                c.arg("terminate-user");
+                c.arg(std::env::var("USER").unwrap_or_default());
+                Some(c)
+            }
+            _ => None,
+        };
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        let _ = action;
+        None
+    }
+}
+
 pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     if let Some(cmd) = action.action.strip_prefix("shell:") {
         #[cfg(target_os = "windows")]
@@ -53,6 +145,12 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
                 return launch_action(&entry.action);
             }
         }
+    }
+    if let Some(cmd) = action.action.strip_prefix("system:") {
+        if let Some(mut command) = system_command(cmd) {
+            return command.spawn().map(|_| ()).map_err(|e| e.into());
+        }
+        return Ok(());
     }
     let path = Path::new(&action.action);
 
