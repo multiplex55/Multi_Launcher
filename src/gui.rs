@@ -313,11 +313,6 @@ impl eframe::App for LauncherApp {
                             self.show_plugins = !self.show_plugins;
                         }
                     });
-                    if ui.button("Force Hide").clicked() {
-                        apply_visibility(false, ctx, self.offscreen_pos);
-                        self.visible_flag.store(false, Ordering::SeqCst);
-                        self.last_visible = false;
-                    }
                     if ui.button("Close Application").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         self.unregister_all_hotkeys();
