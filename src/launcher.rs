@@ -40,6 +40,14 @@ fn system_command(action: &str) -> Option<std::process::Command> {
     }
 }
 
+/// Launch an [`Action`], interpreting a variety of custom prefixes.
+///
+/// Depending on the prefix, this may spawn external processes, modify
+/// bookmarks or folders, copy text to the clipboard or evaluate calculator
+/// expressions. Shell commands are only executed on Windows.
+///
+/// Returns an error if spawning an external process or interacting with the
+/// clipboard fails.
 pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     #[cfg(target_os = "windows")]
     if let Some(cmd) = action.action.strip_prefix("shell:") {
