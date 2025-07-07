@@ -105,7 +105,9 @@ for these fields.
 If you choose `CapsLock` as the hotkey, the launcher suppresses the normal
 CapsLock toggle **when compiled with the `unstable_grab` feature enabled**.
 Press `Shift`+`CapsLock` to change the keyboard state while the application is
-running.
+running. The launcher only responds when `CapsLock` is pressed on its own; any
+other modifier keys will simply toggle the caps lock state without showing the
+window.
 
 ## Plugins
 
