@@ -355,6 +355,7 @@ impl HotkeyTrigger {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_clone = stop_flag.clone();
         let vk_keys: Vec<_> = triggers.iter().map(|t| vk_from_key(t.key)).collect();
+        let watch_keys: Vec<Key> = triggers.iter().map(|t| t.key).collect();
         let need_ctrl: Vec<bool> = triggers.iter().map(|t| t.ctrl).collect();
         let need_shift: Vec<bool> = triggers.iter().map(|t| t.shift).collect();
         let need_alt: Vec<bool> = triggers.iter().map(|t| t.alt).collect();
@@ -372,10 +373,18 @@ impl HotkeyTrigger {
                 for i in 0..vk_keys.len() {
                     if let Some(vk) = vk_keys[i] {
                         let key_down = is_down(vk);
-                        let combo = key_down
-                            && (!need_ctrl[i] || ctrl_pressed)
-                            && (!need_shift[i] || shift_pressed)
-                            && (!need_alt[i] || alt_pressed);
+                        let combo = if watch_keys[i] == Key::CapsLock
+                            && !need_ctrl[i]
+                            && !need_shift[i]
+                            && !need_alt[i]
+                        {
+                            key_down && !ctrl_pressed && !shift_pressed && !alt_pressed
+                        } else {
+                            key_down
+                                && (!need_ctrl[i] || ctrl_pressed)
+                                && (!need_shift[i] || shift_pressed)
+                                && (!need_alt[i] || alt_pressed)
+                        };
                         if combo {
                             if !triggered[i] {
                                 triggered[i] = true;
@@ -464,10 +473,18 @@ pub fn process_test_events(triggers: &[Arc<HotkeyTrigger>], events: &[EventType]
         }
 
         for i in 0..watch_keys.len() {
-            let combo = watch_pressed[i]
-                && (!need_ctrl[i] || ctrl_pressed)
-                && (!need_shift[i] || shift_pressed)
-                && (!need_alt[i] || alt_pressed);
+            let combo = if watch_keys[i] == Key::CapsLock
+                && !need_ctrl[i]
+                && !need_shift[i]
+                && !need_alt[i]
+            {
+                watch_pressed[i] && !ctrl_pressed && !shift_pressed && !alt_pressed
+            } else {
+                watch_pressed[i]
+                    && (!need_ctrl[i] || ctrl_pressed)
+                    && (!need_shift[i] || shift_pressed)
+                    && (!need_alt[i] || alt_pressed)
+            };
             if combo {
                 if !triggered[i] {
                     triggered[i] = true;

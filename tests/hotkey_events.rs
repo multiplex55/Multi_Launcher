@@ -79,3 +79,21 @@ fn zero_key_events_toggle_visibility() {
     );
     assert_eq!(visibility.load(Ordering::SeqCst), false);
 }
+
+#[test]
+fn shift_capslock_does_not_trigger() {
+    let caps_hotkey = parse_hotkey("CapsLock").unwrap();
+    let trigger = Arc::new(HotkeyTrigger::new(caps_hotkey));
+
+    let triggers = vec![trigger.clone()];
+    let events = vec![
+        EventType::KeyPress(Key::ShiftLeft),
+        EventType::KeyPress(Key::CapsLock),
+        EventType::KeyRelease(Key::CapsLock),
+        EventType::KeyRelease(Key::ShiftLeft),
+    ];
+
+    process_test_events(&triggers, &events);
+
+    assert!(!trigger.take());
+}
