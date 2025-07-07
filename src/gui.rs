@@ -17,6 +17,22 @@ use fuzzy_matcher::FuzzyMatcher;
 use crate::visibility::apply_visibility;
 use std::collections::HashMap;
 
+fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.scope(|ui| {
+        if (scale - 1.0).abs() > f32::EPSILON {
+            let mut style: egui::Style = (*ui.ctx().style()).clone();
+            style.spacing.item_spacing *= scale;
+            style.spacing.interact_size *= scale;
+            for font in style.text_styles.values_mut() {
+                font.size *= scale;
+            }
+            ui.set_style(style);
+        }
+        add_contents(ui)
+    })
+    .inner
+}
+
 enum WatchEvent {
     Actions,
 }
@@ -55,6 +71,8 @@ pub struct LauncherApp {
     toasts: egui_toast::Toasts,
     enable_toasts: bool,
     alias_dialog: crate::alias_dialog::AliasDialog,
+    pub query_scale: f32,
+    pub list_scale: f32,
 }
 
 impl LauncherApp {
@@ -129,6 +147,8 @@ impl LauncherApp {
             (x as f32, y as f32)
         };
         let win_size = settings.window_size.unwrap_or((400, 220));
+        let query_scale = settings.query_scale.unwrap_or(1.0).min(5.0);
+        let list_scale = settings.list_scale.unwrap_or(1.0).min(5.0);
 
         let settings_editor = SettingsEditor::new(&settings);
         let plugin_editor = PluginEditor::new(&settings);
@@ -165,6 +185,8 @@ impl LauncherApp {
             toasts,
             enable_toasts,
             alias_dialog: crate::alias_dialog::AliasDialog::default(),
+            query_scale,
+            list_scale,
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -351,85 +373,88 @@ impl eframe::App for LauncherApp {
                 ui.colored_label(Color32::RED, err);
             }
 
-            let input = ui.text_edit_singleline(&mut self.query);
-            if just_became_visible || self.focus_query {
-                input.request_focus();
-                self.focus_query = false;
-            }
-            if input.changed() {
-                self.search();
-            }
+            scale_ui(ui, self.query_scale, |ui| {
+                let input = ui.text_edit_singleline(&mut self.query);
+                if just_became_visible || self.focus_query {
+                    input.request_focus();
+                    self.focus_query = false;
+                }
+                if input.changed() {
+                    self.search();
+                }
 
-            if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-                self.handle_key(egui::Key::ArrowDown);
-            }
+                if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                    self.handle_key(egui::Key::ArrowDown);
+                }
 
-            if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-                self.handle_key(egui::Key::ArrowUp);
-            }
+                if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                    self.handle_key(egui::Key::ArrowUp);
+                }
 
-            let mut launch_idx: Option<usize> = None;
-            if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-                launch_idx = self.handle_key(egui::Key::Enter);
-            }
+                let mut launch_idx: Option<usize> = None;
+                if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    launch_idx = self.handle_key(egui::Key::Enter);
+                }
 
-            if let Some(i) = launch_idx {
-                if let Some(a) = self.results.get(i) {
-                    let a = a.clone();
-                    let current = self.query.clone();
-                    let mut refresh = false;
-                    let mut set_focus = false;
-                    if let Err(e) = launch_action(&a) {
-                        self.error = Some(format!("Failed: {e}"));
-                        if self.enable_toasts {
-                            self.toasts.add(Toast {
-                                text: format!("Failed: {e}").into(),
-                                kind: ToastKind::Error,
-                                options: ToastOptions::default().duration_in_seconds(3.0),
-                            });
+                if let Some(i) = launch_idx {
+                    if let Some(a) = self.results.get(i) {
+                        let a = a.clone();
+                        let current = self.query.clone();
+                        let mut refresh = false;
+                        let mut set_focus = false;
+                        if let Err(e) = launch_action(&a) {
+                            self.error = Some(format!("Failed: {e}"));
+                            if self.enable_toasts {
+                                self.toasts.add(Toast {
+                                    text: format!("Failed: {e}").into(),
+                                    kind: ToastKind::Error,
+                                    options: ToastOptions::default().duration_in_seconds(3.0),
+                                });
+                            }
+                        } else {
+                            if self.enable_toasts {
+                                self.toasts.add(Toast {
+                                    text: format!("Launched {}", a.label).into(),
+                                    kind: ToastKind::Success,
+                                    options: ToastOptions::default().duration_in_seconds(3.0),
+                                });
+                            }
+                            let _ = history::append_history(HistoryEntry { query: current, action: a.clone() });
+                            let count = self.usage.entry(a.action.clone()).or_insert(0);
+                            *count += 1;
+                            if a.action.starts_with("bookmark:add:") {
+                                self.query.clear();
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("bookmark:remove:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("folder:add:") {
+                                self.query.clear();
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("folder:remove:") {
+                                refresh = true;
+                                set_focus = true;
+                            }
                         }
-                    } else {
-                        if self.enable_toasts {
-                            self.toasts.add(Toast {
-                                text: format!("Launched {}", a.label).into(),
-                                kind: ToastKind::Success,
-                                options: ToastOptions::default().duration_in_seconds(3.0),
-                            });
+                        if refresh {
+                            self.search();
                         }
-                        let _ = history::append_history(HistoryEntry { query: current, action: a.clone() });
-                        let count = self.usage.entry(a.action.clone()).or_insert(0);
-                        *count += 1;
-                        if a.action.starts_with("bookmark:add:") {
-                            self.query.clear();
-                            refresh = true;
-                            set_focus = true;
-                        } else if a.action.starts_with("bookmark:remove:") {
-                            refresh = true;
-                            set_focus = true;
-                        } else if a.action.starts_with("folder:add:") {
-                            self.query.clear();
-                            refresh = true;
-                            set_focus = true;
-                        } else if a.action.starts_with("folder:remove:") {
-                            refresh = true;
-                            set_focus = true;
+                        if set_focus {
+                            self.focus_input();
                         }
-                    }
-                    if refresh {
-                        self.search();
-                    }
-                    if set_focus {
-                        self.focus_input();
                     }
                 }
-            }
+            });
 
             let area_height = ui.available_height();
             ScrollArea::vertical().max_height(area_height).show(ui, |ui| {
-                let mut refresh = false;
-                let mut set_focus = false;
-                let alias_list = crate::plugins::folders::load_folders(crate::plugins::folders::FOLDERS_FILE)
-                    .unwrap_or_default();
+                scale_ui(ui, self.list_scale, |ui| {
+                    let mut refresh = false;
+                    let mut set_focus = false;
+                    let alias_list = crate::plugins::folders::load_folders(crate::plugins::folders::FOLDERS_FILE)
+                        .unwrap_or_default();
                 let custom = alias_list
                     .iter()
                     .map(|f| f.path.clone())
@@ -515,6 +540,7 @@ impl eframe::App for LauncherApp {
                     if set_focus {
                         self.focus_input();
                     }
+                });
             });
         });
         let show_editor = self.show_editor;
