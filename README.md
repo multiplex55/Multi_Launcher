@@ -84,7 +84,9 @@ keys (`F1`-`F12`) and common keys like `Space`, `Tab`, `Return`, `Escape`,
 `quit_hotkey` can be set to another key combination to close the launcher from
 anywhere. If omitted, the application only quits when the window is closed
 through the GUI.
-`help_hotkey` shows a quick overlay listing commands. Remove it to disable the overlay.
+`help_hotkey` toggles a quick overlay listing commands. Set it to `null` or
+uncheck the *Enable help hotkey* box in the Settings window to disable this
+shortcut.
 
 `offscreen_pos` specifies where the window is moved when hiding it. Choose
 coordinates outside the visible monitor area so the window stays accessible but
