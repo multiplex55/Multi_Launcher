@@ -146,6 +146,7 @@ Built-in plugins and their command prefixes are:
 - Folder shortcuts (`f`, `f add <path>`, `f rm <pattern>`)
 - Shell commands (`sh echo hi`)
 - System actions (`sys shutdown`)
+- Process list (`ps`)
 - Search history (`hi`)
 - Command overview (`help`)
 
@@ -181,6 +182,7 @@ Example:
     "shell",
     "runescape_search",
     "system",
+    "processes",
     "history",
     "help"
   ]

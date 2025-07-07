@@ -8,3 +8,4 @@ pub mod system;
 pub mod help;
 pub mod youtube;
 pub mod reddit;
+pub mod processes;
