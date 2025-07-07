@@ -22,8 +22,16 @@ fn normalize_url(url: &str) -> String {
     } else if !out.starts_with("https://") {
         out = format!("https://{out}");
     }
-    if !out.contains("://www.") {
-        out = out.replacen("://", "://www.", 1);
+    if let Some(rest) = out.strip_prefix("https://") {
+        let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+        if !host.starts_with("www.") && !host.contains('.') {
+            let host = format!("www.{host}");
+            out = if path.is_empty() {
+                format!("https://{host}")
+            } else {
+                format!("https://{host}/{path}")
+            };
+        }
     }
     out
 }
