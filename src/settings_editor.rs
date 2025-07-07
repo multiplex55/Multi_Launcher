@@ -111,6 +111,9 @@ impl SettingsEditor {
         egui::Window::new("Settings")
             .open(&mut open)
             .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Launcher hotkey");
                 let resp = ui.text_edit_singleline(&mut self.hotkey);
@@ -280,6 +283,7 @@ impl SettingsEditor {
                     }
                 }
             }
+            });
         });
         app.show_settings = open;
     }
