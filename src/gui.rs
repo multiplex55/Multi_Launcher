@@ -74,6 +74,10 @@ pub struct LauncherApp {
     pub enable_toasts: bool,
     alias_dialog: crate::alias_dialog::AliasDialog,
     help_window: crate::help_window::HelpWindow,
+    pub help_flag: Arc<AtomicBool>,
+    pub hotkey_str: Option<String>,
+    pub quit_hotkey_str: Option<String>,
+    pub help_hotkey_str: Option<String>,
     pub query_scale: f32,
     pub list_scale: f32,
     /// Number of user defined commands at the start of `actions`.
@@ -150,6 +154,7 @@ impl LauncherApp {
         enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
         visible_flag: Arc<AtomicBool>,
         restore_flag: Arc<AtomicBool>,
+        help_flag: Arc<AtomicBool>,
     ) -> Self {
         let (tx, rx) = channel();
         let mut watchers = Vec::new();
@@ -231,6 +236,10 @@ impl LauncherApp {
             enable_toasts,
             alias_dialog: crate::alias_dialog::AliasDialog::default(),
             help_window: HelpWindow::default(),
+            help_flag: help_flag.clone(),
+            hotkey_str: settings.hotkey.clone(),
+            quit_hotkey_str: settings.quit_hotkey.clone(),
+            help_hotkey_str: settings.help_hotkey.clone(),
             query_scale,
             list_scale,
             custom_len,
@@ -389,6 +398,9 @@ impl eframe::App for LauncherApp {
             self.window_pos = (rect.min.x as i32, rect.min.y as i32);
         }
         let do_restore = self.restore_flag.swap(false, Ordering::SeqCst);
+        if self.help_flag.swap(false, Ordering::SeqCst) {
+            self.help_window.overlay_open = true;
+        }
         if do_restore {
             tracing::debug!("Restoring window on restore_flag");
             apply_visibility(

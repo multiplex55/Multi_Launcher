@@ -47,6 +47,7 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
 {
   "hotkey": "F2",
   "quit_hotkey": "Shift+Escape",
+  "help_hotkey": "F1",
   "index_paths": ["C:/ProgramData/Microsoft/Windows/Start Menu/Programs"],
   "plugin_dirs": ["./plugins"],
   "enabled_plugins": [
@@ -83,6 +84,7 @@ keys (`F1`-`F12`) and common keys like `Space`, `Tab`, `Return`, `Escape`,
 `quit_hotkey` can be set to another key combination to close the launcher from
 anywhere. If omitted, the application only quits when the window is closed
 through the GUI.
+`help_hotkey` shows a quick overlay listing commands. Remove it to disable the overlay.
 
 `offscreen_pos` specifies where the window is moved when hiding it. Choose
 coordinates outside the visible monitor area so the window stays accessible but

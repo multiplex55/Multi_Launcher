@@ -15,6 +15,10 @@ pub struct SettingsEditor {
     quit_hotkey: String,
     quit_hotkey_valid: bool,
     last_valid_quit_hotkey: String,
+    help_hotkey_enabled: bool,
+    help_hotkey: String,
+    help_hotkey_valid: bool,
+    last_valid_help_hotkey: String,
     index_paths: Vec<String>,
     index_input: String,
     debug_logging: bool,
@@ -58,6 +62,18 @@ impl SettingsEditor {
         } else {
             String::new()
         };
+        let help_hotkey = settings.help_hotkey.clone().unwrap_or_default();
+        let help_hotkey_enabled = settings.help_hotkey.is_some();
+        let help_hotkey_valid = if help_hotkey_enabled {
+            parse_hotkey(&help_hotkey).is_some()
+        } else {
+            true
+        };
+        let last_valid_help_hotkey = if help_hotkey_valid {
+            help_hotkey.clone()
+        } else {
+            String::new()
+        };
         Self {
             hotkey,
             hotkey_valid,
@@ -66,6 +82,10 @@ impl SettingsEditor {
             quit_hotkey,
             quit_hotkey_valid,
             last_valid_quit_hotkey,
+            help_hotkey_enabled,
+            help_hotkey,
+            help_hotkey_valid,
+            last_valid_help_hotkey,
             index_paths: settings.index_paths.clone().unwrap_or_default(),
             index_input: String::new(),
             debug_logging: settings.debug_logging,
@@ -99,6 +119,11 @@ impl SettingsEditor {
                 None
             } else {
                 Some(self.quit_hotkey.clone())
+            },
+            help_hotkey: if !self.help_hotkey_enabled || self.help_hotkey.trim().is_empty() {
+                None
+            } else {
+                Some(self.help_hotkey.clone())
             },
             index_paths: if self.index_paths.is_empty() {
                 None
@@ -162,6 +187,28 @@ impl SettingsEditor {
                         }
                     }
                     let color = if self.quit_hotkey_valid {
+                        egui::Color32::GREEN
+                    } else {
+                        egui::Color32::RED
+                    };
+                    ui.add(egui::Label::new(
+                        egui::RichText::new("●").color(color),
+                    ));
+                });
+            }
+
+            ui.checkbox(&mut self.help_hotkey_enabled, "Enable help hotkey");
+            if self.help_hotkey_enabled {
+                ui.horizontal(|ui| {
+                    ui.label("Help hotkey");
+                    let resp = ui.text_edit_singleline(&mut self.help_hotkey);
+                    if resp.changed() {
+                        self.help_hotkey_valid = parse_hotkey(&self.help_hotkey).is_some();
+                        if self.help_hotkey_valid {
+                            self.last_valid_help_hotkey = self.help_hotkey.clone();
+                        }
+                    }
+                    let color = if self.help_hotkey_valid {
                         egui::Color32::GREEN
                     } else {
                         egui::Color32::RED
@@ -289,10 +336,23 @@ impl SettingsEditor {
                             options: ToastOptions::default().duration_in_seconds(3.0),
                         });
                     }
+                } else if self.help_hotkey_enabled && parse_hotkey(&self.help_hotkey).is_none() {
+                    self.help_hotkey = self.last_valid_help_hotkey.clone();
+                    self.help_hotkey_valid = true;
+                    if app.enable_toasts {
+                        app.add_toast(Toast {
+                            text: "Failed to save settings: help hotkey is invalid".into(),
+                            kind: ToastKind::Error,
+                            options: ToastOptions::default().duration_in_seconds(3.0),
+                        });
+                    }
                 } else {
                     self.last_valid_hotkey = self.hotkey.clone();
                     if self.quit_hotkey_enabled {
                         self.last_valid_quit_hotkey = self.quit_hotkey.clone();
+                    }
+                    if self.help_hotkey_enabled {
+                        self.last_valid_help_hotkey = self.help_hotkey.clone();
                     }
                     match Settings::load(&app.settings_path) {
                         Ok(current) => {
@@ -314,6 +374,9 @@ impl SettingsEditor {
                                     new_settings.static_pos,
                                     new_settings.static_size,
                                 );
+                                app.hotkey_str = new_settings.hotkey.clone();
+                                app.quit_hotkey_str = new_settings.quit_hotkey.clone();
+                                app.help_hotkey_str = new_settings.help_hotkey.clone();
                                 app.query_scale = new_settings.query_scale.unwrap_or(1.0).min(5.0);
                                 app.list_scale = new_settings.list_scale.unwrap_or(1.0).min(5.0);
                                 app.history_limit = new_settings.history_limit;

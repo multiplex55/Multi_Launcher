@@ -31,7 +31,7 @@ use crate::plugins::clipboard::ClipboardPlugin;
 use crate::settings::Settings;
 
 use eframe::egui;
-use std::sync::{Arc, atomic::AtomicBool, Mutex, mpsc::{Sender, channel}};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}, Mutex, mpsc::{Sender, channel}};
 use std::thread;
 use once_cell::sync::Lazy;
 
@@ -53,6 +53,7 @@ fn spawn_gui(
     thread::JoinHandle<()>,
     Arc<AtomicBool>,
     Arc<AtomicBool>,
+    Arc<AtomicBool>,
     Arc<Mutex<Option<egui::Context>>>,
 ) {
     let actions_for_window = actions.clone();
@@ -70,8 +71,10 @@ fn spawn_gui(
     let enabled_capabilities = settings.enabled_capabilities.clone();
     let visible_flag = Arc::new(AtomicBool::new(true));
     let restore_flag = Arc::new(AtomicBool::new(false));
+    let help_flag = Arc::new(AtomicBool::new(false));
     let flag_clone = visible_flag.clone();
     let restore_clone = restore_flag.clone();
+    let help_clone = help_flag.clone();
     let ctx_handle = Arc::new(Mutex::new(None));
     let ctx_clone = ctx_handle.clone();
 
@@ -113,12 +116,13 @@ fn spawn_gui(
                     enabled_capabilities,
                     flag_clone,
                     restore_clone,
+                    help_clone,
                 ))
             }),
         );
     });
 
-    (handle, visible_flag, restore_flag, ctx_handle)
+    (handle, visible_flag, restore_flag, help_flag, ctx_handle)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -140,10 +144,14 @@ fn main() -> anyhow::Result<()> {
     tracing::debug!(?hotkey, "configuring hotkeys");
     let mut trigger = Arc::new(HotkeyTrigger::new(hotkey));
     let mut quit_trigger = settings.quit_hotkey().map(|hk| Arc::new(HotkeyTrigger::new(hk)));
+    let mut help_trigger = settings.help_hotkey().map(|hk| Arc::new(HotkeyTrigger::new(hk)));
 
     let mut watched = vec![trigger.clone()];
     if let Some(qt) = &quit_trigger {
         watched.push(qt.clone());
+    }
+    if let Some(ht) = &help_trigger {
+        watched.push(ht.clone());
     }
 
     let mut listener = HotkeyTrigger::start_listener(watched, "main");
@@ -151,7 +159,7 @@ fn main() -> anyhow::Result<()> {
 
     // `visibility` holds whether the window is currently restored (true) or
     // minimized (false).
-    let (handle, visibility, restore_flag, ctx) =
+    let (handle, visibility, restore_flag, help_flag, ctx) =
         spawn_gui(
             actions.clone(),
             custom_len,
@@ -184,15 +192,30 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        if let Some(ht) = &help_trigger {
+            if ht.take() {
+                help_flag.store(true, Ordering::SeqCst);
+                if let Ok(guard) = ctx.lock() {
+                    if let Some(c) = &*guard {
+                        c.request_repaint();
+                    }
+                }
+            }
+        }
+
 
         if let Ok(new_settings) = restart_rx.try_recv() {
             listener.stop();
             settings = new_settings.clone();
             trigger = Arc::new(HotkeyTrigger::new(settings.hotkey()));
             quit_trigger = settings.quit_hotkey().map(|hk| Arc::new(HotkeyTrigger::new(hk)));
+            help_trigger = settings.help_hotkey().map(|hk| Arc::new(HotkeyTrigger::new(hk)));
             let mut watched = vec![trigger.clone()];
             if let Some(qt) = &quit_trigger {
                 watched.push(qt.clone());
+            }
+            if let Some(ht) = &help_trigger {
+                watched.push(ht.clone());
             }
             listener = HotkeyTrigger::start_listener(watched, "main");
         }

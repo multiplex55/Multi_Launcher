@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     pub hotkey: Option<String>,
     pub quit_hotkey: Option<String>,
+    /// Hotkey to show the quick help overlay. If `None`, the overlay is disabled.
+    pub help_hotkey: Option<String>,
     pub index_paths: Option<Vec<String>>,
     pub plugin_dirs: Option<Vec<String>>,
     /// List of plugin names which should be enabled. If `None`, all loaded
@@ -76,6 +78,7 @@ impl Default for Settings {
         Self {
             hotkey: Some("F2".into()),
             quit_hotkey: None,
+            help_hotkey: Some("F1".into()),
             index_paths: None,
             plugin_dirs: None,
             enabled_plugins: None,
@@ -139,6 +142,22 @@ impl Settings {
                 None => {
                     tracing::warn!(
                         "provided quit_hotkey string '{}' is invalid; ignoring",
+                        hotkey
+                    );
+                }
+            }
+        }
+        None
+    }
+
+    /// Parse the help overlay hotkey if configured.
+    pub fn help_hotkey(&self) -> Option<Hotkey> {
+        if let Some(hotkey) = &self.help_hotkey {
+            match parse_hotkey(hotkey) {
+                Some(k) => return Some(k),
+                None => {
+                    tracing::warn!(
+                        "provided help_hotkey string '{}' is invalid; ignoring",
                         hotkey
                     );
                 }
