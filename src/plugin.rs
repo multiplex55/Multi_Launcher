@@ -8,6 +8,7 @@ use crate::plugins::runescape::RunescapeSearchPlugin;
 use crate::plugins::history::HistoryPlugin;
 use crate::plugins::folders::FoldersPlugin;
 use crate::plugins::system::SystemPlugin;
+use crate::plugins::help::HelpPlugin;
 
 pub trait Plugin: Send + Sync {
     /// Return actions based on the query string
@@ -52,6 +53,7 @@ impl PluginManager {
         self.register(Box::new(SystemPlugin));
         self.register(Box::new(ShellPlugin));
         self.register(Box::new(HistoryPlugin));
+        self.register(Box::new(HelpPlugin));
         for dir in dirs {
             tracing::debug!("loading plugins from {dir}");
             let _ = self.load_dir(dir);

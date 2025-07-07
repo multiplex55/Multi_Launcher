@@ -16,6 +16,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use crate::visibility::apply_visibility;
 use std::collections::HashMap;
+use crate::help_window::HelpWindow;
 
 fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
@@ -71,6 +72,7 @@ pub struct LauncherApp {
     toasts: egui_toast::Toasts,
     enable_toasts: bool,
     alias_dialog: crate::alias_dialog::AliasDialog,
+    help_window: crate::help_window::HelpWindow,
     pub query_scale: f32,
     pub list_scale: f32,
 }
@@ -185,6 +187,7 @@ impl LauncherApp {
             toasts,
             enable_toasts,
             alias_dialog: crate::alias_dialog::AliasDialog::default(),
+            help_window: HelpWindow::default(),
             query_scale,
             list_scale,
         };
@@ -293,6 +296,9 @@ impl LauncherApp {
         registered_hotkeys.clear();
     }
 
+    #[cfg(not(target_os = "windows"))]
+    pub fn unregister_all_hotkeys(&self) {}
+
 }
 
 impl eframe::App for LauncherApp {
@@ -349,6 +355,11 @@ impl eframe::App for LauncherApp {
                         self.show_settings = !self.show_settings;
                     }
                 });
+                ui.menu_button("Help", |ui| {
+                    if ui.button("Command List").clicked() {
+                        self.help_window.open = true;
+                    }
+                });
             });
         });
 
@@ -402,7 +413,9 @@ impl eframe::App for LauncherApp {
                         let current = self.query.clone();
                         let mut refresh = false;
                         let mut set_focus = false;
-                        if let Err(e) = launch_action(&a) {
+                        if a.action == "help:show" {
+                            self.help_window.open = true;
+                        } else if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
                             if self.enable_toasts {
                                 self.toasts.add(Toast {
@@ -419,9 +432,11 @@ impl eframe::App for LauncherApp {
                                     options: ToastOptions::default().duration_in_seconds(3.0),
                                 });
                             }
-                            let _ = history::append_history(HistoryEntry { query: current, action: a.clone() });
-                            let count = self.usage.entry(a.action.clone()).or_insert(0);
-                            *count += 1;
+                            if a.action != "help:show" {
+                                let _ = history::append_history(HistoryEntry { query: current, action: a.clone() });
+                                let count = self.usage.entry(a.action.clone()).or_insert(0);
+                                *count += 1;
+                            }
                             if a.action.starts_with("bookmark:add:") {
                                 self.query.clear();
                                 refresh = true;
@@ -495,7 +510,9 @@ impl eframe::App for LauncherApp {
                     if resp.clicked() {
                         let a = a.clone();
                         let current = self.query.clone();
-                        if let Err(e) = launch_action(&a) {
+                        if a.action == "help:show" {
+                            self.help_window.open = true;
+                        } else if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
                             if self.enable_toasts {
                                 self.toasts.add(Toast {
@@ -512,9 +529,11 @@ impl eframe::App for LauncherApp {
                                     options: ToastOptions::default().duration_in_seconds(3.0),
                                 });
                             }
-                            let _ = history::append_history(HistoryEntry { query: current, action: a.clone() });
-                            let count = self.usage.entry(a.action.clone()).or_insert(0);
-                            *count += 1;
+                            if a.action != "help:show" {
+                                let _ = history::append_history(HistoryEntry { query: current, action: a.clone() });
+                                let count = self.usage.entry(a.action.clone()).or_insert(0);
+                                *count += 1;
+                            }
                             if a.action.starts_with("bookmark:add:") {
                                 self.query.clear();
                                 refresh = true;
@@ -564,6 +583,9 @@ impl eframe::App for LauncherApp {
         let mut dlg = std::mem::take(&mut self.alias_dialog);
         dlg.ui(ctx, self);
         self.alias_dialog = dlg;
+        let mut help = std::mem::take(&mut self.help_window);
+        help.ui(ctx, self);
+        self.help_window = help;
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

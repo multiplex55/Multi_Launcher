@@ -86,7 +86,7 @@ running.
 ## Plugins
 
 Built-in plugins provide Google web search (`g query`), RuneScape wiki search (`rs query` or `osrs query`), an inline calculator
-(using the `=` prefix), a clipboard history (`cb`), a folder shortcut list (`f`), a shell command runner (`sh <command>`) and system commands (`sys <action>`). Valid actions are `shutdown`, `reboot`, `lock` and `logoff`. Selecting a clipboard entry copies it back to the clipboard. Additional plugins can be added by building
+(using the `=` prefix), a clipboard history (`cb`), a folder shortcut list (`f`), a shell command runner (`sh <command>`), system commands (`sys <action>`) and a command overview (`help`). Valid actions are `shutdown`, `reboot`, `lock` and `logoff`. Selecting a clipboard entry copies it back to the clipboard. Additional plugins can be added by building
 shared libraries. Each plugin crate should be compiled as a `cdylib` and export
 a `create_plugin` function returning `Box<dyn Plugin>`:
 
