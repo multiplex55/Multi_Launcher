@@ -398,8 +398,11 @@ impl eframe::App for LauncherApp {
             self.window_pos = (rect.min.x as i32, rect.min.y as i32);
         }
         let do_restore = self.restore_flag.swap(false, Ordering::SeqCst);
-        if self.help_flag.swap(false, Ordering::SeqCst) {
-            self.help_window.overlay_open = true;
+        if self.visible_flag.load(Ordering::SeqCst) && self.help_flag.swap(false, Ordering::SeqCst) {
+            self.help_window.overlay_open = !self.help_window.overlay_open;
+        } else {
+            // reset any queued toggle when window not visible
+            self.help_flag.store(false, Ordering::SeqCst);
         }
         if do_restore {
             tracing::debug!("Restoring window on restore_flag");

@@ -193,7 +193,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         if let Some(ht) = &help_trigger {
-            if ht.take() {
+            if ht.take() && visibility.load(Ordering::SeqCst) {
                 help_flag.store(true, Ordering::SeqCst);
                 if let Ok(guard) = ctx.lock() {
                     if let Some(c) = &*guard {
