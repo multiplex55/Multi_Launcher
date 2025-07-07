@@ -26,6 +26,10 @@ fn visibility_toggle_immediate_when_context_present() {
         &ctx_handle,
         &mut queued_visibility,
         (0.0, 0.0),
+        true,
+        false,
+        None,
+        None,
     );
 
     assert_eq!(visibility.load(Ordering::SeqCst), true);

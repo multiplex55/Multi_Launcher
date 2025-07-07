@@ -29,6 +29,10 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
     ctx_handle: &Arc<Mutex<Option<C>>>,
     queued_visibility: &mut Option<bool>,
     offscreen: (f32, f32),
+    follow_mouse: bool,
+    static_enabled: bool,
+    static_pos: Option<(f32, f32)>,
+    static_size: Option<(f32, f32)>,
 ) {
     if trigger.take() {
         let old = visibility.load(Ordering::SeqCst);
@@ -37,7 +41,15 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
         visibility.store(next, Ordering::SeqCst);
         if let Ok(guard) = ctx_handle.lock() {
             if let Some(c) = &*guard {
-                apply_visibility(next, c, offscreen);
+                apply_visibility(
+                    next,
+                    c,
+                    offscreen,
+                    follow_mouse,
+                    static_enabled,
+                    static_pos,
+                    static_size,
+                );
                 if next {
                     restore_flag.store(true, Ordering::SeqCst);
                 }
@@ -62,7 +74,15 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
                 let old = visibility.load(Ordering::SeqCst);
                 visibility.store(next, Ordering::SeqCst);
                 tracing::debug!(from=?old, to=?next, "visibility updated");
-                apply_visibility(next, c, offscreen);
+                apply_visibility(
+                    next,
+                    c,
+                    offscreen,
+                    follow_mouse,
+                    static_enabled,
+                    static_pos,
+                    static_size,
+                );
                 if next {
                     restore_flag.store(true, Ordering::SeqCst);
                 }
@@ -74,10 +94,27 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
 }
 
 /// Apply the current visibility state to the viewport.
-pub fn apply_visibility<C: ViewportCtx>(visible: bool, ctx: &C, offscreen: (f32, f32)) {
+pub fn apply_visibility<C: ViewportCtx>(
+    visible: bool,
+    ctx: &C,
+    offscreen: (f32, f32),
+    follow_mouse: bool,
+    static_enabled: bool,
+    static_pos: Option<(f32, f32)>,
+    static_size: Option<(f32, f32)>,
+) {
     if visible {
-        if let Some((x, y)) = crate::window_manager::current_mouse_position() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+        if static_enabled {
+            if let Some((x, y)) = static_pos {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+            }
+            if let Some((w, h)) = static_size {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+            }
+        } else if follow_mouse {
+            if let Some((x, y)) = crate::window_manager::current_mouse_position() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+            }
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));

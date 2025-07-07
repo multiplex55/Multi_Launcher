@@ -80,6 +80,10 @@ pub struct LauncherApp {
     pub history_limit: usize,
     pub fuzzy_weight: f32,
     pub usage_weight: f32,
+    pub follow_mouse: bool,
+    pub static_location_enabled: bool,
+    pub static_pos: Option<(i32, i32)>,
+    pub static_size: Option<(i32, i32)>,
 }
 
 impl LauncherApp {
@@ -93,6 +97,10 @@ impl LauncherApp {
         enable_toasts: Option<bool>,
         fuzzy_weight: Option<f32>,
         usage_weight: Option<f32>,
+        follow_mouse: Option<bool>,
+        static_enabled: Option<bool>,
+        static_pos: Option<(i32, i32)>,
+        static_size: Option<(i32, i32)>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -109,6 +117,18 @@ impl LauncherApp {
         }
         if let Some(v) = usage_weight {
             self.usage_weight = v;
+        }
+        if let Some(v) = follow_mouse {
+            self.follow_mouse = v;
+        }
+        if let Some(v) = static_enabled {
+            self.static_location_enabled = v;
+        }
+        if static_pos.is_some() {
+            self.static_pos = static_pos;
+        }
+        if static_size.is_some() {
+            self.static_size = static_size;
         }
     }
 
@@ -165,6 +185,10 @@ impl LauncherApp {
         let win_size = settings.window_size.unwrap_or((400, 220));
         let query_scale = settings.query_scale.unwrap_or(1.0).min(5.0);
         let list_scale = settings.list_scale.unwrap_or(1.0).min(5.0);
+        let static_pos = settings.static_pos;
+        let static_size = settings.static_size;
+        let follow_mouse = settings.follow_mouse;
+        let static_enabled = settings.static_location_enabled;
 
         let settings_editor = SettingsEditor::new(&settings);
         let plugin_editor = PluginEditor::new(&settings);
@@ -208,10 +232,22 @@ impl LauncherApp {
             history_limit: settings.history_limit,
             fuzzy_weight: settings.fuzzy_weight,
             usage_weight: settings.usage_weight,
+            follow_mouse,
+            static_location_enabled: static_enabled,
+            static_pos,
+            static_size,
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
-        apply_visibility(initial_visible, ctx, offscreen_pos);
+        apply_visibility(
+            initial_visible,
+            ctx,
+            offscreen_pos,
+            follow_mouse,
+            static_enabled,
+            static_pos.map(|(x, y)| (x as f32, y as f32)),
+            static_size.map(|(w, h)| (w as f32, h as f32)),
+        );
 
         #[cfg(target_os = "windows")]
         {
@@ -347,7 +383,15 @@ impl eframe::App for LauncherApp {
         let do_restore = self.restore_flag.swap(false, Ordering::SeqCst);
         if do_restore {
             tracing::debug!("Restoring window on restore_flag");
-            apply_visibility(true, ctx, self.offscreen_pos);
+            apply_visibility(
+                true,
+                ctx,
+                self.offscreen_pos,
+                self.follow_mouse,
+                self.static_location_enabled,
+                self.static_pos.map(|(x, y)| (x as f32, y as f32)),
+                self.static_size.map(|(w, h)| (w as f32, h as f32)),
+            );
             #[cfg(target_os = "windows")]
             if let Some(hwnd) = crate::window_manager::get_hwnd(frame) {
                 crate::window_manager::force_restore_and_foreground(hwnd);
@@ -358,7 +402,15 @@ impl eframe::App for LauncherApp {
         let just_became_visible = !self.last_visible && should_be_visible;
         if self.last_visible != should_be_visible {
             tracing::debug!("gui thread -> visible: {}", should_be_visible);
-            apply_visibility(should_be_visible, ctx, self.offscreen_pos);
+            apply_visibility(
+                should_be_visible,
+                ctx,
+                self.offscreen_pos,
+                self.follow_mouse,
+                self.static_location_enabled,
+                self.static_pos.map(|(x, y)| (x as f32, y as f32)),
+                self.static_size.map(|(w, h)| (w as f32, h as f32)),
+            );
             self.last_visible = should_be_visible;
         }
 

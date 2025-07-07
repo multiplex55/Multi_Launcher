@@ -112,6 +112,10 @@ impl PluginEditor {
                         Some(s.enable_toasts),
                         Some(s.fuzzy_weight),
                         Some(s.usage_weight),
+                        Some(s.follow_mouse),
+                        Some(s.static_location_enabled),
+                        s.static_pos,
+                        s.static_size,
                     );
 
                     app.plugins.reload_from_dirs(&self.plugin_dirs);

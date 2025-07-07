@@ -66,7 +66,11 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
   "window_size": [400, 220],
   "query_scale": 1.0,
   "list_scale": 1.0,
-  "history_limit": 100
+  "history_limit": 100,
+  "follow_mouse": true,
+  "static_location_enabled": false,
+  "static_pos": [0, 0],
+  "static_size": [400, 220]
 }
 ```
 
@@ -87,6 +91,12 @@ off-screen. The default is `[2000, 2000]`.
 `window_size` stores the size of the launcher window when it was last closed.
 The window is restored to this size on the next start. The default is
 `[400, 220]` if the value is missing.
+
+When `follow_mouse` is `true` the window appears at the current cursor
+location whenever it becomes visible. To keep the launcher at a specific
+position instead, set `follow_mouse` to `false` and enable
+`static_location_enabled`. Provide the desired coordinates in `static_pos`
+and optionally a fixed size via `static_size`.
 
 `query_scale` and `list_scale` control the size of the search field and the results list separately. Values around `1.0` keep the default look while higher numbers enlarge the respective element up to five times.
 

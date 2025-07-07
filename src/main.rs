@@ -207,6 +207,10 @@ fn main() -> anyhow::Result<()> {
                 let (x, y) = settings.offscreen_pos.unwrap_or((2000, 2000));
                 (x as f32, y as f32)
             },
+            settings.follow_mouse,
+            settings.static_location_enabled,
+            settings.static_pos.map(|(x, y)| (x as f32, y as f32)),
+            settings.static_size.map(|(w, h)| (w as f32, h as f32)),
         );
 
         std::thread::sleep(std::time::Duration::from_millis(50));
