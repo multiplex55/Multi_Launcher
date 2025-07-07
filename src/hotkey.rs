@@ -1,8 +1,4 @@
 use rdev::{EventType, Key};
-#[cfg(not(target_os = "windows"))]
-use rdev::listen;
-#[cfg(feature = "unstable_grab")]
-use rdev::{grab, Event};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::thread;
 use std::time::Duration;
@@ -180,87 +176,6 @@ impl HotkeyTrigger {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
-    pub fn start_listener(triggers: Vec<Arc<HotkeyTrigger>>, label: &'static str) -> HotkeyListener {
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let stop_clone = stop_flag.clone();
-        let watch_keys: Vec<Key> = triggers.iter().map(|t| t.key).collect();
-        let need_ctrl: Vec<bool> = triggers.iter().map(|t| t.ctrl).collect();
-        let need_shift: Vec<bool> = triggers.iter().map(|t| t.shift).collect();
-        let need_alt: Vec<bool> = triggers.iter().map(|t| t.alt).collect();
-        thread::spawn(move || {
-            while !stop_clone.load(Ordering::SeqCst) {
-                let open_listeners: Vec<_> = triggers.iter().map(|t| t.open.clone()).collect();
-                let mut watch_pressed = vec![false; triggers.len()];
-                let mut triggered = vec![false; triggers.len()];
-                let mut ctrl_pressed = false;
-                let mut shift_pressed = false;
-                let mut alt_pressed = false;
-                let watch_keys = watch_keys.clone();
-                let need_ctrl = need_ctrl.clone();
-                let need_shift = need_shift.clone();
-                let need_alt = need_alt.clone();
-
-                let result = listen(move |event| {
-                    match event.event_type {
-                        EventType::KeyPress(k) => {
-                            match k {
-                                Key::ControlLeft | Key::ControlRight => ctrl_pressed = true,
-                                Key::ShiftLeft | Key::ShiftRight => shift_pressed = true,
-                                Key::Alt | Key::AltGr => alt_pressed = true,
-                                _ => {}
-                            }
-                            for (i, wk) in watch_keys.iter().enumerate() {
-                                if k == *wk {
-                                    watch_pressed[i] = true;
-                                }
-                            }
-                        }
-                        EventType::KeyRelease(k) => {
-                            match k {
-                                Key::ControlLeft | Key::ControlRight => ctrl_pressed = false,
-                                Key::ShiftLeft | Key::ShiftRight => shift_pressed = false,
-                                Key::Alt | Key::AltGr => alt_pressed = false,
-                                _ => {}
-                            }
-                            for (i, wk) in watch_keys.iter().enumerate() {
-                                if k == *wk {
-                                    watch_pressed[i] = false;
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-
-                    for i in 0..watch_keys.len() {
-                        let combo = watch_pressed[i]
-                            && (!need_ctrl[i] || ctrl_pressed)
-                            && (!need_shift[i] || shift_pressed)
-                            && (!need_alt[i] || alt_pressed);
-                        if combo {
-                            if !triggered[i] {
-                                triggered[i] = true;
-                                if let Ok(mut flag) = open_listeners[i].lock() {
-                                    *flag = true;
-                                }
-                            }
-                        } else {
-                            triggered[i] = false;
-                        }
-                    }
-                });
-
-                match result {
-                    Ok(()) => tracing::warn!(%label, "Hotkey listener exited unexpectedly. Restarting shortly"),
-                    Err(e) => tracing::warn!(%label, "Hotkey listener failed: {:?}. Retrying shortly", e),
-                }
-
-                thread::sleep(Duration::from_millis(500));
-            }
-        });
-
-        HotkeyListener { stop: stop_flag }
-    }
 
     #[cfg(target_os = "windows")]
     pub fn start_listener(triggers: Vec<Arc<HotkeyTrigger>>, _label: &'static str) -> HotkeyListener {

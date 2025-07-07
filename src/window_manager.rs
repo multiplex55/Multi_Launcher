@@ -142,58 +142,8 @@ pub fn current_mouse_position() -> Option<(f32, f32)> {
         }
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        use std::ptr;
-        use x11::xlib;
-        unsafe {
-            let display = xlib::XOpenDisplay(ptr::null());
-            if display.is_null() {
-                return Some((0.0, 0.0));
-            }
-            let root = xlib::XDefaultRootWindow(display);
-            let mut root_ret = 0;
-            let mut child_ret = 0;
-            let mut root_x = 0;
-            let mut root_y = 0;
-            let mut win_x = 0;
-            let mut win_y = 0;
-            let mut mask = 0;
-            let status = xlib::XQueryPointer(
-                display,
-                root,
-                &mut root_ret,
-                &mut child_ret,
-                &mut root_x,
-                &mut root_y,
-                &mut win_x,
-                &mut win_y,
-                &mut mask,
-            );
-            xlib::XCloseDisplay(display);
-            if status == 0 {
-                Some((0.0, 0.0))
-            } else {
-                Some((root_x as f32, root_y as f32))
-            }
-        }
-    }
 
-    #[cfg(target_os = "macos")]
-    {
-        use core_graphics::event::{CGEvent, CGEventSource};
-        use core_graphics::event_source::CGEventSourceStateID;
-        let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok();
-        if let Some(source) = source {
-            if let Ok(event) = CGEvent::new(source) {
-                let loc = event.location();
-                return Some((loc.x as f32, loc.y as f32));
-            }
-        }
-        Some((0.0, 0.0))
-    }
-
-    #[cfg(not(any(target_os = "windows", unix)))]
+    #[cfg(not(target_os = "windows"))]
     {
         Some((0.0, 0.0))
     }

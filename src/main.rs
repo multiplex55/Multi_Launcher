@@ -85,11 +85,6 @@ fn spawn_gui(
                     use winit::platform::windows::EventLoopBuilderExtWindows;
                     builder.with_any_thread(true);
                 }
-                #[cfg(target_os = "linux")]
-                {
-                    winit::platform::x11::EventLoopBuilderExtX11::with_any_thread(builder, true);
-                    winit::platform::wayland::EventLoopBuilderExtWayland::with_any_thread(builder, true);
-                }
             })),
             ..Default::default()
         };

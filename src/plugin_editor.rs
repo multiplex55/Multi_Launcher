@@ -2,6 +2,7 @@ use crate::settings::Settings;
 use crate::plugin::PluginManager;
 use crate::gui::LauncherApp;
 use eframe::egui;
+#[cfg(target_os = "windows")]
 use rfd::FileDialog;
 use std::collections::HashMap;
 
@@ -103,6 +104,7 @@ impl PluginEditor {
                 ui.horizontal(|ui| {
                     ui.text_edit_singleline(&mut self.plugin_input);
                     if ui.button("Browse").clicked() {
+                        #[cfg(target_os = "windows")]
                         if let Some(dir) = FileDialog::new().pick_folder() {
                             self.plugin_input = dir.display().to_string();
                         }
