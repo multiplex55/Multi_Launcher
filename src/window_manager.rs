@@ -150,6 +150,39 @@ pub fn current_mouse_position() -> Option<(f32, f32)> {
 }
 
 #[cfg(target_os = "windows")]
+/// Move the window to the currently active virtual desktop if needed.
+pub fn ensure_current_desktop(hwnd: windows::Win32::Foundation::HWND) {
+    use windows::core::{Interface, GUID};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        if let Ok(manager) = CoCreateInstance::<IVirtualDesktopManager>(
+            &VirtualDesktopManager,
+            None,
+            CLSCTX_INPROC_SERVER,
+        ) {
+            let mut on_current = false.into();
+            if manager
+                .IsWindowOnCurrentVirtualDesktop(hwnd, &mut on_current)
+                .is_ok()
+                && !on_current.as_bool()
+            {
+                let mut id = GUID::default();
+                let fg = GetForegroundWindow();
+                if manager.GetWindowDesktopId(fg, &mut id).is_ok() {
+                    let _ = manager.MoveWindowToDesktop(hwnd, &id);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 /// On Windows, restore the window and bring it to the foreground.
@@ -161,6 +194,7 @@ pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
     };
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     unsafe {
+        ensure_current_desktop(hwnd);
         let fg_hwnd = GetForegroundWindow();
         let fg_thread = GetWindowThreadProcessId(fg_hwnd, None);
         let current_thread = GetCurrentThreadId();
