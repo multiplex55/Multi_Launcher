@@ -5,3 +5,4 @@ pub mod runescape;
 pub mod history;
 pub mod folders;
 pub mod system;
+pub mod help;
