@@ -114,6 +114,11 @@ impl Plugin for FoldersPlugin {
                 .filter(|f| {
                     self.matcher.fuzzy_match(&f.label, filter).is_some()
                         || self.matcher.fuzzy_match(&f.path, filter).is_some()
+                        || f
+                            .alias
+                            .as_ref()
+                            .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
+                            .unwrap_or(false)
                 })
                 .map(|f| Action {
                     label: format!("Remove folder {} ({})", f.label, f.path),
@@ -133,6 +138,11 @@ impl Plugin for FoldersPlugin {
             .filter(|f| {
                 self.matcher.fuzzy_match(&f.label, filter).is_some()
                     || self.matcher.fuzzy_match(&f.path, filter).is_some()
+                    || f
+                        .alias
+                        .as_ref()
+                        .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
+                        .unwrap_or(false)
             })
             .map(|f| {
                 let label = f.alias.clone().unwrap_or_else(|| f.label.clone());
