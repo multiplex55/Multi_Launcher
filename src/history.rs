@@ -61,3 +61,12 @@ pub fn get_history() -> VecDeque<HistoryEntry> {
     HISTORY.lock().unwrap().clone()
 }
 
+/// Clear all history entries and persist the empty list to `history.json`.
+pub fn clear_history() -> anyhow::Result<()> {
+    {
+        let mut h = HISTORY.lock().unwrap();
+        h.clear();
+    }
+    save_history()
+}
+

@@ -90,6 +90,10 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         remove_folder(FOLDERS_FILE, path)?;
         return Ok(());
     }
+    if action.action == "history:clear" {
+        history::clear_history()?;
+        return Ok(());
+    }
     if let Some(idx) = action.action.strip_prefix("history:") {
         if let Ok(i) = idx.parse::<usize>() {
             if let Some(entry) = history::get_history().get(i).cloned() {

@@ -35,3 +35,6 @@ rdev = { git = "https://github.com/Narsil/rdev", rev = "c14f2dc5c8100a96c5d7e301
 
 [features]
 unstable_grab = []
+
+[dev-dependencies]
+tempfile = "3"
