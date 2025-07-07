@@ -152,6 +152,42 @@ pub fn current_mouse_position() -> Option<(f32, f32)> {
 #[cfg(target_os = "windows")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
+/// Ensure the given window resides on the active virtual desktop.
+///
+/// This uses the `IVirtualDesktopManager` COM interface to check if `hwnd`
+/// already belongs to the current desktop. If not, it is moved to the desktop
+/// of the foreground window.
+#[cfg(target_os = "windows")]
+pub fn move_to_current_desktop(hwnd: windows::Win32::Foundation::HWND) {
+    use windows::core::GUID;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        if let Ok(vdm) =
+            CoCreateInstance::<_, IVirtualDesktopManager>(&VirtualDesktopManager, None, CLSCTX_ALL)
+        {
+            let mut on_current = false.into();
+            if vdm
+                .IsWindowOnCurrentVirtualDesktop(hwnd, &mut on_current)
+                .is_ok()
+                && !on_current.as_bool()
+            {
+                let mut desktop = GUID::default();
+                let fg = GetForegroundWindow();
+                if vdm.GetWindowDesktopId(fg, &mut desktop).is_ok() {
+                    let _ = vdm.MoveWindowToDesktop(hwnd, &desktop);
+                }
+            }
+        }
+        CoUninitialize();
+    }
+}
+
 /// On Windows, restore the window and bring it to the foreground.
 #[cfg(target_os = "windows")]
 pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
@@ -161,6 +197,7 @@ pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
     };
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     unsafe {
+        move_to_current_desktop(hwnd);
         let fg_hwnd = GetForegroundWindow();
         let fg_thread = GetWindowThreadProcessId(fg_hwnd, None);
         let current_thread = GetCurrentThreadId();
