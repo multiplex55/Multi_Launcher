@@ -16,6 +16,7 @@ pub struct SettingsEditor {
     offscreen_y: i32,
     window_w: i32,
     window_h: i32,
+    ui_scale: f32,
 }
 
 impl SettingsEditor {
@@ -31,6 +32,7 @@ impl SettingsEditor {
             offscreen_y: settings.offscreen_pos.unwrap_or((2000, 2000)).1,
             window_w: settings.window_size.unwrap_or((400, 220)).0,
             window_h: settings.window_size.unwrap_or((400, 220)).1,
+            ui_scale: settings.ui_scale.unwrap_or(1.0),
         }
     }
 
@@ -58,6 +60,7 @@ impl SettingsEditor {
             enable_toasts: self.show_toasts,
             offscreen_pos: Some((self.offscreen_x, self.offscreen_y)),
             window_size: Some((self.window_w, self.window_h)),
+            ui_scale: Some(self.ui_scale),
         }
     }
 
@@ -89,6 +92,11 @@ impl SettingsEditor {
             });
 
             ui.checkbox(&mut self.show_toasts, "Enable toast notifications");
+
+            ui.horizontal(|ui| {
+                ui.label("UI scale");
+                ui.add(egui::Slider::new(&mut self.ui_scale, 0.5..=2.0).text(""));
+            });
 
             ui.horizontal(|ui| {
                 ui.label("Off-screen X");
@@ -142,6 +150,7 @@ impl SettingsEditor {
                                 new_settings.offscreen_pos,
                                 Some(new_settings.enable_toasts),
                             );
+                            ctx.set_pixels_per_point(new_settings.ui_scale.unwrap_or(1.0));
                             crate::request_hotkey_restart(new_settings);
                         }
                     }

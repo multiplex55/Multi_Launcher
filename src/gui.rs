@@ -129,6 +129,8 @@ impl LauncherApp {
             (x as f32, y as f32)
         };
         let win_size = settings.window_size.unwrap_or((400, 220));
+        let scale = settings.ui_scale.unwrap_or(1.0);
+        ctx.set_pixels_per_point(scale);
 
         let settings_editor = SettingsEditor::new(&settings);
         let plugin_editor = PluginEditor::new(&settings);

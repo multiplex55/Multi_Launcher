@@ -26,11 +26,16 @@ pub struct Settings {
     #[serde(default)]
     pub window_size: Option<(i32, i32)>,
     /// Enable toast notifications in the UI.
-    #[serde(default = "default_toasts")] 
+    #[serde(default = "default_toasts")]
     pub enable_toasts: bool,
+    /// Global UI scale factor applied to egui widgets. Defaults to `1.0`.
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: Option<f32>,
 }
 
 fn default_toasts() -> bool { true }
+
+fn default_ui_scale() -> Option<f32> { Some(1.0) }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -45,6 +50,7 @@ impl Default for Settings {
             offscreen_pos: Some((2000, 2000)),
             window_size: Some((400, 220)),
             enable_toasts: true,
+            ui_scale: Some(1.0),
         }
     }
 }
