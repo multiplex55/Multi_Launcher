@@ -19,6 +19,8 @@ pub struct SettingsEditor {
     query_scale: f32,
     list_scale: f32,
     history_limit: usize,
+    fuzzy_weight: f32,
+    usage_weight: f32,
 }
 
 impl SettingsEditor {
@@ -37,6 +39,8 @@ impl SettingsEditor {
             query_scale: settings.query_scale.unwrap_or(1.0),
             list_scale: settings.list_scale.unwrap_or(1.0),
             history_limit: settings.history_limit,
+            fuzzy_weight: settings.fuzzy_weight,
+            usage_weight: settings.usage_weight,
         }
     }
 
@@ -67,6 +71,8 @@ impl SettingsEditor {
             query_scale: Some(self.query_scale),
             list_scale: Some(self.list_scale),
             history_limit: self.history_limit,
+            fuzzy_weight: self.fuzzy_weight,
+            usage_weight: self.usage_weight,
         }
     }
 
@@ -106,6 +112,14 @@ impl SettingsEditor {
             ui.horizontal(|ui| {
                 ui.label("List scale");
                 ui.add(egui::Slider::new(&mut self.list_scale, 0.5..=5.0).text(""));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Fuzzy weight");
+                ui.add(egui::Slider::new(&mut self.fuzzy_weight, 0.0..=5.0).text(""));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Usage weight");
+                ui.add(egui::Slider::new(&mut self.usage_weight, 0.0..=5.0).text(""));
             });
             ui.horizontal(|ui| {
                 ui.label("History limit");
@@ -163,6 +177,8 @@ impl SettingsEditor {
                                 new_settings.enabled_capabilities.clone(),
                                 new_settings.offscreen_pos,
                                 Some(new_settings.enable_toasts),
+                                Some(new_settings.fuzzy_weight),
+                                Some(new_settings.usage_weight),
                             );
                             app.query_scale = new_settings.query_scale.unwrap_or(1.0).min(5.0);
                             app.list_scale = new_settings.list_scale.unwrap_or(1.0).min(5.0);

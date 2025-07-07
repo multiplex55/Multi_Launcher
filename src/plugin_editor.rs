@@ -110,6 +110,8 @@ impl PluginEditor {
                         s.enabled_capabilities.clone(),
                         s.offscreen_pos,
                         Some(s.enable_toasts),
+                        Some(s.fuzzy_weight),
+                        Some(s.usage_weight),
                     );
 
                     app.plugins.reload_from_dirs(&self.plugin_dirs);
