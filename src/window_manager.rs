@@ -152,6 +152,11 @@ pub fn current_mouse_position() -> Option<(f32, f32)> {
 #[cfg(target_os = "windows")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED};
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
+
 /// On Windows, restore the window and bring it to the foreground.
 #[cfg(target_os = "windows")]
 pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
@@ -167,6 +172,8 @@ pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
 
         tracing::debug!("Forcing window restore and foreground");
         ShowWindowAsync(hwnd, SW_RESTORE);
+
+        ensure_on_current_desktop(hwnd);
 
         let _ = AttachThreadInput(fg_thread, current_thread, true);
         let fg_success = SetForegroundWindow(hwnd).as_bool();
@@ -188,5 +195,34 @@ pub fn get_hwnd(frame: &eframe::Frame) -> Option<windows::Win32::Foundation::HWN
         }
     } else {
         None
+    }
+}
+
+/// If the given window is on a different virtual desktop, move it to the
+/// current one using [`IVirtualDesktopManager`].
+#[cfg(target_os = "windows")]
+pub fn ensure_on_current_desktop(hwnd: windows::Win32::Foundation::HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    unsafe {
+        if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() {
+            let manager: windows::core::Result<IVirtualDesktopManager> =
+                CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_ALL);
+            if let Ok(manager) = manager {
+                let mut on_current = windows::Win32::Foundation::BOOL::default();
+                if manager
+                    .IsWindowOnCurrentVirtualDesktop(hwnd, &mut on_current)
+                    .is_ok()
+                    && !on_current.as_bool()
+                {
+                    let mut desktop_id = windows::core::GUID::zeroed();
+                    let fg = GetForegroundWindow();
+                    if manager.GetWindowDesktopId(fg, &mut desktop_id).is_ok() {
+                        let _ = manager.MoveWindowToDesktop(hwnd, &desktop_id);
+                    }
+                }
+            }
+            CoUninitialize();
+        }
     }
 }

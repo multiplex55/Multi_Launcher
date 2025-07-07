@@ -100,6 +100,9 @@ and optionally a fixed size via `static_size`. The **Settings** window now
 includes a *Snapshot* button to capture the current window position and size
 for these fields.
 
+On Windows the window will also move from other virtual desktops to the
+current one whenever it becomes visible.
+
 `query_scale` and `list_scale` control the size of the search field and the results list separately. Values around `1.0` keep the default look while higher numbers enlarge the respective element up to five times.
 
 If you choose `CapsLock` as the hotkey, the launcher suppresses the normal
