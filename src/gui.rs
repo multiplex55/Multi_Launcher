@@ -71,7 +71,7 @@ pub struct LauncherApp {
     pub window_pos: (i32, i32),
     focus_query: bool,
     toasts: egui_toast::Toasts,
-    enable_toasts: bool,
+    pub enable_toasts: bool,
     alias_dialog: crate::alias_dialog::AliasDialog,
     help_window: crate::help_window::HelpWindow,
     pub query_scale: f32,
@@ -88,6 +88,9 @@ pub struct LauncherApp {
 }
 
 impl LauncherApp {
+    pub fn add_toast(&mut self, toast: Toast) {
+        self.toasts.add(toast);
+    }
     pub fn update_paths(
         &mut self,
         plugin_dirs: Option<Vec<String>>,

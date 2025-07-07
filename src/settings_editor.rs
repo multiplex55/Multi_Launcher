@@ -1,6 +1,7 @@
 use crate::settings::Settings;
 use crate::gui::LauncherApp;
 use eframe::egui;
+use egui_toast::{Toast, ToastKind, ToastOptions};
 #[cfg(target_os = "windows")]
 use rfd::FileDialog;
 
@@ -227,6 +228,13 @@ impl SettingsEditor {
                             app.list_scale = new_settings.list_scale.unwrap_or(1.0).min(5.0);
                             app.history_limit = new_settings.history_limit;
                             crate::request_hotkey_restart(new_settings);
+                            if app.enable_toasts {
+                                app.add_toast(Toast {
+                                    text: "Settings saved".into(),
+                                    kind: ToastKind::Success,
+                                    options: ToastOptions::default().duration_in_seconds(3.0),
+                                });
+                            }
                         }
                     }
                     Err(e) => app.error = Some(format!("Failed to read settings: {e}")),
