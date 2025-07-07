@@ -28,14 +28,17 @@ pub struct Settings {
     /// Enable toast notifications in the UI.
     #[serde(default = "default_toasts")]
     pub enable_toasts: bool,
-    /// Global UI scale factor applied to egui widgets. Defaults to `1.0`.
-    #[serde(default = "default_ui_scale")]
-    pub ui_scale: Option<f32>,
+    /// Scale factor for the search box. Defaults to `1.0`.
+    #[serde(default = "default_scale")]
+    pub query_scale: Option<f32>,
+    /// Scale factor for the action list. Defaults to `1.0`.
+    #[serde(default = "default_scale")]
+    pub list_scale: Option<f32>,
 }
 
 fn default_toasts() -> bool { true }
 
-fn default_ui_scale() -> Option<f32> { Some(1.0) }
+fn default_scale() -> Option<f32> { Some(1.0) }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -50,7 +53,8 @@ impl Default for Settings {
             offscreen_pos: Some((2000, 2000)),
             window_size: Some((400, 220)),
             enable_toasts: true,
-            ui_scale: Some(1.0),
+            query_scale: Some(1.0),
+            list_scale: Some(1.0),
         }
     }
 }

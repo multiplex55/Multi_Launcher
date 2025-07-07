@@ -53,7 +53,8 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
   "debug_logging": false,
   "offscreen_pos": [2000, 2000],
   "window_size": [400, 220],
-  "ui_scale": 1.0
+  "query_scale": 1.0,
+  "list_scale": 1.0
 }
 ```
 
@@ -75,7 +76,7 @@ off-screen. The default is `[2000, 2000]`.
 The window is restored to this size on the next start. The default is
 `[400, 220]` if the value is missing.
 
-`ui_scale` adjusts the size of the query field and the action list. Values around `1.0` keep the default look. Higher values enlarge those widgets only. The default is `1.0` when the field is omitted.
+`query_scale` and `list_scale` control the size of the search field and the results list separately. Values around `1.0` keep the default look while higher numbers enlarge the respective element up to five times.
 
 If you choose `CapsLock` as the hotkey, the launcher suppresses the normal
 CapsLock toggle **when compiled with the `unstable_grab` feature enabled**.
