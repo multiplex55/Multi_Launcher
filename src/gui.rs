@@ -67,7 +67,8 @@ pub struct LauncherApp {
     restore_flag: Arc<AtomicBool>,
     last_visible: bool,
     offscreen_pos: (f32, f32),
-    window_size: (i32, i32),
+    pub window_size: (i32, i32),
+    pub window_pos: (i32, i32),
     focus_query: bool,
     toasts: egui_toast::Toasts,
     enable_toasts: bool,
@@ -221,6 +222,7 @@ impl LauncherApp {
             last_visible: initial_visible,
             offscreen_pos,
             window_size: win_size,
+            window_pos: (0, 0),
             focus_query: false,
             toasts,
             enable_toasts,
@@ -379,6 +381,9 @@ impl eframe::App for LauncherApp {
         }
         if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
             self.window_size = (rect.width() as i32, rect.height() as i32);
+        }
+        if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+            self.window_pos = (rect.min.x as i32, rect.min.y as i32);
         }
         let do_restore = self.restore_flag.swap(false, Ordering::SeqCst);
         if do_restore {

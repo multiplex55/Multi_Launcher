@@ -96,7 +96,9 @@ When `follow_mouse` is `true` the window appears at the current cursor
 location whenever it becomes visible. To keep the launcher at a specific
 position instead, set `follow_mouse` to `false` and enable
 `static_location_enabled`. Provide the desired coordinates in `static_pos`
-and optionally a fixed size via `static_size`.
+and optionally a fixed size via `static_size`. The **Settings** window now
+includes a *Snapshot* button to capture the current window position and size
+for these fields.
 
 `query_scale` and `list_scale` control the size of the search field and the results list separately. Values around `1.0` keep the default look while higher numbers enlarge the respective element up to five times.
 
