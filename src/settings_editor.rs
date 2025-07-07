@@ -1,5 +1,6 @@
 use crate::settings::Settings;
 use crate::gui::LauncherApp;
+use crate::hotkey::parse_hotkey;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 #[cfg(target_os = "windows")]
@@ -8,6 +9,7 @@ use rfd::FileDialog;
 #[derive(Default)]
 pub struct SettingsEditor {
     hotkey: String,
+    hotkey_valid: bool,
     quit_hotkey: String,
     index_paths: Vec<String>,
     index_input: String,
@@ -32,8 +34,11 @@ pub struct SettingsEditor {
 
 impl SettingsEditor {
     pub fn new(settings: &Settings) -> Self {
+        let hotkey = settings.hotkey.clone().unwrap_or_default();
+        let hotkey_valid = parse_hotkey(&hotkey).is_some();
         Self {
-            hotkey: settings.hotkey.clone().unwrap_or_default(),
+            hotkey,
+            hotkey_valid,
             quit_hotkey: settings.quit_hotkey.clone().unwrap_or_default(),
             index_paths: settings.index_paths.clone().unwrap_or_default(),
             index_input: String::new(),
@@ -100,7 +105,18 @@ impl SettingsEditor {
             .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Launcher hotkey");
-                ui.text_edit_singleline(&mut self.hotkey);
+                let resp = ui.text_edit_singleline(&mut self.hotkey);
+                if resp.changed() {
+                    self.hotkey_valid = parse_hotkey(&self.hotkey).is_some();
+                }
+                let color = if self.hotkey_valid {
+                    egui::Color32::GREEN
+                } else {
+                    egui::Color32::RED
+                };
+                ui.add(egui::Label::new(
+                    egui::RichText::new("●").color(color),
+                ));
             });
             ui.horizontal(|ui| {
                 ui.label("Quit hotkey");
