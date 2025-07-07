@@ -11,6 +11,14 @@ impl Plugin for HistoryPlugin {
         if !query.starts_with("hi") {
             return Vec::new();
         }
+        if query.trim() == "hi clear" {
+            return vec![Action {
+                label: "Clear history".into(),
+                desc: "History".into(),
+                action: "history:clear".into(),
+                args: None,
+            }];
+        }
         let filter = query.strip_prefix("hi").unwrap_or("").trim();
         get_history()
             .into_iter()
