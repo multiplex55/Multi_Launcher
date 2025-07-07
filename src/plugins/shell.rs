@@ -22,7 +22,7 @@ impl Plugin for ShellPlugin {
     }
 
     fn description(&self) -> &str {
-        "Run arbitrary shell commands"
+        "Run arbitrary shell commands (prefix: `sh`)"
     }
 
     fn capabilities(&self) -> &[&str] {

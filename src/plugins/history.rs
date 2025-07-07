@@ -30,7 +30,7 @@ impl Plugin for HistoryPlugin {
     }
 
     fn description(&self) -> &str {
-        "Search previously executed queries"
+        "Search previously executed queries (prefix: `hi`)"
     }
 
     fn capabilities(&self) -> &[&str] {
