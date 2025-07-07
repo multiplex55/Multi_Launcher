@@ -75,6 +75,8 @@ pub struct LauncherApp {
     help_window: crate::help_window::HelpWindow,
     pub query_scale: f32,
     pub list_scale: f32,
+    /// Number of user defined commands at the start of `actions`.
+    pub custom_len: usize,
 }
 
 impl LauncherApp {
@@ -102,6 +104,7 @@ impl LauncherApp {
     pub fn new(
         ctx: &egui::Context,
         actions: Vec<Action>,
+        custom_len: usize,
         plugins: PluginManager,
         actions_path: String,
         settings_path: String,
@@ -190,6 +193,7 @@ impl LauncherApp {
             help_window: HelpWindow::default(),
             query_scale,
             list_scale,
+            custom_len,
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -367,10 +371,12 @@ impl eframe::App for LauncherApp {
             match ev {
                 WatchEvent::Actions => {
                     if let Ok(mut acts) = load_actions(&self.actions_path) {
+                        let custom_len = acts.len();
                         if let Some(paths) = &self.index_paths {
                             acts.extend(indexer::index_paths(paths));
                         }
                         self.actions = acts;
+                        self.custom_len = custom_len;
                         self.search();
                         tracing::info!("actions reloaded");
                     }
@@ -493,17 +499,30 @@ impl eframe::App for LauncherApp {
                         a.label.clone()
                     };
                     let mut resp = ui.selectable_label(self.selected == Some(idx), text);
+                    let mut menu_resp = resp.on_hover_text(&a.action);
+                    let custom_idx = self
+                        .actions
+                        .iter()
+                        .take(self.custom_len)
+                        .position(|act| act.action == a.action && act.label == a.label);
                     if custom.contains(&a.action) && !a.action.starts_with("folder:") {
-                        resp = resp.on_hover_text(&a.action);
-                        resp.clone().context_menu(|ui| {
+                        menu_resp.clone().context_menu(|ui| {
                             if ui.button("Set Alias").clicked() {
                                 self.alias_dialog.open(&a.action);
                                 ui.close_menu();
                             }
                         });
-                    } else {
-                        resp = resp.on_hover_text(&a.action);
                     }
+                    if let Some(idx_act) = custom_idx {
+                        menu_resp.clone().context_menu(|ui| {
+                            if ui.button("Edit Command").clicked() {
+                                self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                                self.show_editor = true;
+                                ui.close_menu();
+                            }
+                        });
+                    }
+                    resp = menu_resp;
                     if self.selected == Some(idx) {
                         resp.scroll_to_me(Some(egui::Align::Center));
                     }

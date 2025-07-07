@@ -123,8 +123,10 @@ application you can manage this list through **Edit Commands**. Open the
 launcher with the configured hotkey and choose *Edit Commands* from the menu.
 Use the **New Command** button to open the *Add Command* dialog where you enter
 a label, description and the executable path. The **Browse** button lets you
-select the file interactively. Commands can also be removed from the list. All
-changes are written to `actions.json` immediately.
+select the file interactively. Existing entries can be edited via the **Edit**
+button or by right clicking a command in the results list and choosing *Edit
+Command*. Commands can also be removed from the list. All changes are written to
+`actions.json` immediately.
 
 ## Packaging
 

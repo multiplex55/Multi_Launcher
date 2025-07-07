@@ -24,6 +24,11 @@ impl Default for ActionsEditor {
 }
 
 impl ActionsEditor {
+    /// Open the dialog for editing an existing command.
+    pub fn open_edit(&mut self, idx: usize, act: &crate::actions::Action) {
+        self.dialog.open_edit(idx, act);
+    }
+
     /// Render the command editor window.
     ///
     /// * `ctx` - Egui context used for drawing the editor UI.
@@ -38,7 +43,7 @@ impl ActionsEditor {
                 ui.label("Search");
                 ui.text_edit_singleline(&mut self.search);
                 if ui.button("New Command").clicked() {
-                    self.dialog.open = true;
+                    self.dialog.open_add();
                 }
             });
 
@@ -59,6 +64,9 @@ impl ActionsEditor {
                     }
                     ui.horizontal(|ui| {
                         ui.label(format!("{} : {} -> {}", act.label, act.desc, act.action));
+                        if ui.button("Edit").clicked() {
+                            self.dialog.open_edit(idx, act);
+                        }
                         if ui.button("Remove").clicked() {
                             remove = Some(idx);
                         }
@@ -68,8 +76,11 @@ impl ActionsEditor {
 
             if let Some(i) = remove {
                 app.actions.remove(i);
+                if i < app.custom_len {
+                    app.custom_len -= 1;
+                }
                 app.search();
-                if let Err(e) = save_actions(&app.actions_path, &app.actions) {
+                if let Err(e) = save_actions(&app.actions_path, &app.actions[..app.custom_len]) {
                     app.error = Some(format!("Failed to save: {e}"));
                 }
             }

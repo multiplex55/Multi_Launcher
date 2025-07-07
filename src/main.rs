@@ -45,6 +45,7 @@ pub fn request_hotkey_restart(settings: Settings) {
 
 fn spawn_gui(
     actions: Vec<Action>,
+    custom_len: usize,
     settings: Settings,
     settings_path: String,
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
@@ -55,6 +56,7 @@ fn spawn_gui(
     Arc<Mutex<Option<egui::Context>>>,
 ) {
     let actions_for_window = actions.clone();
+    let custom_len_for_window = custom_len;
     let mut plugins = PluginManager::new();
     let empty_dirs = Vec::new();
     let dirs = settings.plugin_dirs.as_ref().unwrap_or(&empty_dirs);
@@ -100,6 +102,7 @@ fn spawn_gui(
                 Box::new(LauncherApp::new(
                     &cc.egui_ctx,
                     actions_for_window,
+                    custom_len_for_window,
                     plugins,
                     actions_path,
                     settings_path_for_window,
@@ -123,6 +126,7 @@ fn main() -> anyhow::Result<()> {
     logging::init(settings.debug_logging);
     tracing::debug!(?settings, "settings loaded");
     let mut actions = load_actions("actions.json").unwrap_or_default();
+    let custom_len = actions.len();
     tracing::debug!("{} actions loaded", actions.len());
 
     let (restart_tx, restart_rx) = channel::<Settings>();
@@ -150,6 +154,7 @@ fn main() -> anyhow::Result<()> {
     let (handle, visibility, restore_flag, ctx) =
         spawn_gui(
             actions.clone(),
+            custom_len,
             settings.clone(),
             "settings.json".to_string(),
             settings.enabled_capabilities.clone(),
