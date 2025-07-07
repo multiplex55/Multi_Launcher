@@ -187,6 +187,8 @@ Afterwards bundle the binary for distribution using a Windows packaging tool
 such as `cargo wix`.
 When compiled this way the executable is built with `windows_subsystem = "windows"`, which prevents an extra console window from appearing.
 
+On Windows the launcher also checks which virtual desktop contains its window whenever it becomes visible. If the window lives on another desktop it is moved to the currently active one before restoring and focusing it.
+
 ## Troubleshooting
 
 When diagnosing hotkey issues it can be helpful to enable info level logging:
