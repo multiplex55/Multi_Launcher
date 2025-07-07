@@ -21,6 +21,20 @@ pub struct AddActionDialog {
     show_args: bool,
     /// Additional arguments to pass when launching.
     args: String,
+    /// Current dialog mode (add or edit existing command).
+    mode: DialogMode,
+}
+
+/// Mode of the action dialog.
+enum DialogMode {
+    /// Add a new command when confirmed.
+    Add,
+    /// Edit the command at the given index when confirmed.
+    Edit(usize),
+}
+
+impl Default for DialogMode {
+    fn default() -> Self { DialogMode::Add }
 }
 
 impl Default for AddActionDialog {
@@ -32,11 +46,34 @@ impl Default for AddActionDialog {
             path: String::new(),
             show_args: false,
             args: String::new(),
+            mode: DialogMode::Add,
         }
     }
 }
 
 impl AddActionDialog {
+    /// Start the dialog for creating a new command.
+    pub fn open_add(&mut self) {
+        self.open = true;
+        self.label.clear();
+        self.desc.clear();
+        self.path.clear();
+        self.args.clear();
+        self.show_args = false;
+        self.mode = DialogMode::Add;
+    }
+
+    /// Start editing an existing command at `idx` with the given values.
+    pub fn open_edit(&mut self, idx: usize, act: &Action) {
+        self.open = true;
+        self.label = act.label.clone();
+        self.desc = act.desc.clone();
+        self.path = act.action.clone();
+        self.args = act.args.clone().unwrap_or_default();
+        self.show_args = act.args.is_some();
+        self.mode = DialogMode::Edit(idx);
+    }
+
     /// Draw the "Add Command" dialog and update `app` with any new action.
     ///
     /// * `ctx` - Egui context used to render the window.
@@ -47,7 +84,11 @@ impl AddActionDialog {
             return;
         }
         let mut should_close = false;
-        egui::Window::new("Add Command")
+        let title = match self.mode {
+            DialogMode::Add => "Add Command",
+            DialogMode::Edit(_) => "Edit Command",
+        };
+        egui::Window::new(title)
             .open(&mut self.open)
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
@@ -80,21 +121,42 @@ impl AddActionDialog {
                         }
                     });
                     ui.horizontal(|ui| {
-                        if ui.button("Add").clicked() {
+                        let button = match self.mode {
+                            DialogMode::Add => "Add",
+                            DialogMode::Edit(_) => "Save",
+                        };
+                        if ui.button(button).clicked() {
                             use std::path::Path;
                             if self.path.is_empty() || !Path::new(&self.path).exists() {
                                 app.error = Some("Path does not exist".into());
                             } else {
-                                app.actions.push(Action {
-                                    label: self.label.clone(),
-                                    desc: self.desc.clone(),
-                                    action: self.path.clone(),
-                                    args: if self.show_args && !self.args.trim().is_empty() {
-                                        Some(self.args.clone())
-                                    } else {
-                                        None
-                                    },
-                                });
+                                match self.mode {
+                                    DialogMode::Add => {
+                                        app.actions.push(Action {
+                                            label: self.label.clone(),
+                                            desc: self.desc.clone(),
+                                            action: self.path.clone(),
+                                            args: if self.show_args && !self.args.trim().is_empty() {
+                                                Some(self.args.clone())
+                                            } else {
+                                                None
+                                            },
+                                        });
+                                        app.custom_len += 1;
+                                    }
+                                    DialogMode::Edit(idx) => {
+                                        if let Some(act) = app.actions.get_mut(idx) {
+                                            act.label = self.label.clone();
+                                            act.desc = self.desc.clone();
+                                            act.action = self.path.clone();
+                                            act.args = if self.show_args && !self.args.trim().is_empty() {
+                                                Some(self.args.clone())
+                                            } else {
+                                                None
+                                            };
+                                        }
+                                    }
+                                }
                                 self.label.clear();
                                 self.desc.clear();
                                 self.path.clear();
@@ -102,7 +164,7 @@ impl AddActionDialog {
                                 self.show_args = false;
                                 should_close = true;
                                 app.search();
-                                if let Err(e) = save_actions(&app.actions_path, &app.actions) {
+                                if let Err(e) = save_actions(&app.actions_path, &app.actions[..app.custom_len]) {
                                     app.error = Some(format!("Failed to save: {e}"));
                                 }
                             }

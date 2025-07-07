@@ -6,9 +6,11 @@ use std::sync::{Arc, atomic::AtomicBool};
 use eframe::egui;
 
 fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
+    let custom_len = actions.len();
     LauncherApp::new(
         ctx,
         actions,
+        custom_len,
         PluginManager::new(),
         "actions.json".into(),
         "settings.json".into(),
