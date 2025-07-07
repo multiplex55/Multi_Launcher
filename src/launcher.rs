@@ -4,6 +4,7 @@ use crate::plugins::folders::{append_folder, remove_folder, FOLDERS_FILE};
 use crate::history;
 use arboard::Clipboard;
 use std::path::Path;
+use shlex;
 
 fn system_command(action: &str) -> Option<std::process::Command> {
     #[cfg(target_os = "windows")]
@@ -104,16 +105,22 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     }
     let path = Path::new(&action.action);
 
-    // If it's an .exe, launch it directly
-    if path
+    // If it's an .exe or we have additional args, launch it directly
+    let is_exe = path
         .extension()
         .map(|e| e.eq_ignore_ascii_case("exe"))
-        .unwrap_or(false)
-    {
-        return std::process::Command::new(path)
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| e.into());
+        .unwrap_or(false);
+
+    if is_exe || action.args.is_some() {
+        let mut command = std::process::Command::new(path);
+        if let Some(arg_str) = &action.args {
+            if let Some(list) = shlex::split(arg_str) {
+                command.args(list);
+            } else {
+                command.args(arg_str.split_whitespace());
+            }
+        }
+        return command.spawn().map(|_| ()).map_err(|e| e.into());
     }
 
     open::that(&action.action).map_err(|e| e.into())

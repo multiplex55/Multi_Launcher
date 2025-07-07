@@ -2,7 +2,8 @@
     {
         "label": "chrome",
         "desc": "Launch Chrome",
-        "action": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+        "action": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "args": "--new-window"
     }
 ]
 

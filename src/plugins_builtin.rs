@@ -11,6 +11,7 @@ impl Plugin for WebSearchPlugin {
                 label: format!("Search Google for {q}"),
                 desc: "Web search".into(),
                 action: format!("https://www.google.com/search?q={}", q),
+                args: None,
             }]
         } else {
             Vec::new()
@@ -41,6 +42,7 @@ impl Plugin for CalculatorPlugin {
                     label: format!("{} = {}", expr, v),
                     desc: "Calculator".into(),
                     action: format!("calc:{}", v),
+                    args: None,
                 }],
                 Err(_) => Vec::new(),
             }

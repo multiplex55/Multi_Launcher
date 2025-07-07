@@ -11,6 +11,7 @@ impl Plugin for ShellPlugin {
                     label: format!("Run `{}`", cmd),
                     desc: "Shell".into(),
                     action: format!("shell:{}", cmd),
+                    args: None,
                 }];
             }
         }

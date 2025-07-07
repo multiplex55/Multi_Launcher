@@ -102,6 +102,7 @@ impl Plugin for FoldersPlugin {
                     label: format!("Add folder {path}"),
                     desc: "Folder".into(),
                     action: format!("folder:add:{path}"),
+                    args: None,
                 }];
             }
         }
@@ -124,6 +125,7 @@ impl Plugin for FoldersPlugin {
                     label: format!("Remove folder {} ({})", f.label, f.path),
                     desc: f.path.clone(),
                     action: format!("folder:remove:{}", f.path),
+                    args: None,
                 })
                 .collect();
         }
@@ -150,6 +152,7 @@ impl Plugin for FoldersPlugin {
                     label,
                     desc: f.path.clone(),
                     action: f.path,
+                    args: None,
                 }
             })
             .collect()
