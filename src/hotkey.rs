@@ -1,4 +1,98 @@
+#[cfg(target_os = "windows")]
 use rdev::{EventType, Key};
+
+#[cfg(not(target_os = "windows"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    Space,
+    Tab,
+    Return,
+    Escape,
+    Delete,
+    Backspace,
+    CapsLock,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    LeftArrow,
+    RightArrow,
+    UpArrow,
+    DownArrow,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    F13,
+    F14,
+    F15,
+    F16,
+    F17,
+    F18,
+    F19,
+    F20,
+    F21,
+    F22,
+    F23,
+    F24,
+    Num0,
+    Num1,
+    Num2,
+    Num3,
+    Num4,
+    Num5,
+    Num6,
+    Num7,
+    Num8,
+    Num9,
+    KeyA,
+    KeyB,
+    KeyC,
+    KeyD,
+    KeyE,
+    KeyF,
+    KeyG,
+    KeyH,
+    KeyI,
+    KeyJ,
+    KeyK,
+    KeyL,
+    KeyM,
+    KeyN,
+    KeyO,
+    KeyP,
+    KeyQ,
+    KeyR,
+    KeyS,
+    KeyT,
+    KeyU,
+    KeyV,
+    KeyW,
+    KeyX,
+    KeyY,
+    KeyZ,
+    ControlLeft,
+    ControlRight,
+    ShiftLeft,
+    ShiftRight,
+    Alt,
+    AltGr,
+}
+
+#[cfg(not(target_os = "windows"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventType {
+    KeyPress(Key),
+    KeyRelease(Key),
+}
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::thread;
 use std::time::Duration;
@@ -299,6 +393,11 @@ impl HotkeyTrigger {
         });
 
         HotkeyListener { stop: stop_flag }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub fn start_listener(_triggers: Vec<Arc<HotkeyTrigger>>, _label: &'static str) -> HotkeyListener {
+        HotkeyListener { stop: Arc::new(AtomicBool::new(false)) }
     }
 
     pub fn take(&self) -> bool {

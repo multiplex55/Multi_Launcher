@@ -1,4 +1,4 @@
-use rdev::Key;
+use crate::hotkey::Key;
 
 use crate::hotkey::{parse_hotkey, Hotkey};
 use serde::{Deserialize, Serialize};

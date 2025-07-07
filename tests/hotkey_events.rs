@@ -1,6 +1,6 @@
 use multi_launcher::hotkey::{parse_hotkey, HotkeyTrigger, process_test_events};
 use multi_launcher::visibility::handle_visibility_trigger;
-use rdev::{EventType, Key};
+use multi_launcher::hotkey::{EventType, Key};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 
 #[path = "mock_ctx.rs"]
