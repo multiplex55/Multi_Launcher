@@ -65,7 +65,8 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
   "offscreen_pos": [2000, 2000],
   "window_size": [400, 220],
   "query_scale": 1.0,
-  "list_scale": 1.0
+  "list_scale": 1.0,
+  "history_limit": 100
 }
 ```
 
