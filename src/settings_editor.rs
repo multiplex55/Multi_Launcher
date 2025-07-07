@@ -150,7 +150,7 @@ impl SettingsEditor {
                                 new_settings.offscreen_pos,
                                 Some(new_settings.enable_toasts),
                             );
-                            ctx.set_pixels_per_point(new_settings.ui_scale.unwrap_or(1.0));
+                            app.ui_scale = new_settings.ui_scale.unwrap_or(1.0);
                             crate::request_hotkey_restart(new_settings);
                         }
                     }

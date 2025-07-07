@@ -55,6 +55,7 @@ pub struct LauncherApp {
     toasts: egui_toast::Toasts,
     enable_toasts: bool,
     alias_dialog: crate::alias_dialog::AliasDialog,
+    pub ui_scale: f32,
 }
 
 impl LauncherApp {
@@ -130,7 +131,6 @@ impl LauncherApp {
         };
         let win_size = settings.window_size.unwrap_or((400, 220));
         let scale = settings.ui_scale.unwrap_or(1.0);
-        ctx.set_pixels_per_point(scale);
 
         let settings_editor = SettingsEditor::new(&settings);
         let plugin_editor = PluginEditor::new(&settings);
@@ -167,6 +167,7 @@ impl LauncherApp {
             toasts,
             enable_toasts,
             alias_dialog: crate::alias_dialog::AliasDialog::default(),
+            ui_scale: scale,
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -317,6 +318,7 @@ impl eframe::App for LauncherApp {
                     });
                     if ui.button("Close Application").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        #[cfg(target_os = "windows")]
                         self.unregister_all_hotkeys();
                         self.visible_flag.store(false, Ordering::SeqCst);
                         self.last_visible = false;
@@ -353,32 +355,43 @@ impl eframe::App for LauncherApp {
                 ui.colored_label(Color32::RED, err);
             }
 
-            let input = ui.text_edit_singleline(&mut self.query);
-            if just_became_visible || self.focus_query {
-                input.request_focus();
-                self.focus_query = false;
-            }
-            if input.changed() {
-                self.search();
-            }
+            ui.scope(|ui| {
+                if (self.ui_scale - 1.0).abs() > f32::EPSILON {
+                    let mut style: egui::Style = (*ctx.style()).clone();
+                    style.spacing.item_spacing *= self.ui_scale;
+                    style.spacing.interact_size *= self.ui_scale;
+                    for font in style.text_styles.values_mut() {
+                        font.size *= self.ui_scale;
+                    }
+                    ui.set_style(style);
+                }
 
-            if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-                self.handle_key(egui::Key::ArrowDown);
-            }
+                let input = ui.text_edit_singleline(&mut self.query);
+                if just_became_visible || self.focus_query {
+                    input.request_focus();
+                    self.focus_query = false;
+                }
+                if input.changed() {
+                    self.search();
+                }
 
-            if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-                self.handle_key(egui::Key::ArrowUp);
-            }
+                if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                    self.handle_key(egui::Key::ArrowDown);
+                }
 
-            let mut launch_idx: Option<usize> = None;
-            if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-                launch_idx = self.handle_key(egui::Key::Enter);
-            }
+                if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                    self.handle_key(egui::Key::ArrowUp);
+                }
 
-            if let Some(i) = launch_idx {
-                if let Some(a) = self.results.get(i) {
-                    let a = a.clone();
-                    let current = self.query.clone();
+                let mut launch_idx: Option<usize> = None;
+                if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    launch_idx = self.handle_key(egui::Key::Enter);
+                }
+
+                if let Some(i) = launch_idx {
+                    if let Some(a) = self.results.get(i) {
+                        let a = a.clone();
+                        let current = self.query.clone();
                     let mut refresh = false;
                     let mut set_focus = false;
                     if let Err(e) = launch_action(&a) {
@@ -424,14 +437,14 @@ impl eframe::App for LauncherApp {
                         self.focus_input();
                     }
                 }
-            }
+                    }
 
-            let area_height = ui.available_height();
-            ScrollArea::vertical().max_height(area_height).show(ui, |ui| {
-                let mut refresh = false;
-                let mut set_focus = false;
-                let alias_list = crate::plugins::folders::load_folders(crate::plugins::folders::FOLDERS_FILE)
-                    .unwrap_or_default();
+                let area_height = ui.available_height();
+                ScrollArea::vertical().max_height(area_height).show(ui, |ui| {
+                    let mut refresh = false;
+                    let mut set_focus = false;
+                    let alias_list = crate::plugins::folders::load_folders(crate::plugins::folders::FOLDERS_FILE)
+                        .unwrap_or_default();
                 let custom = alias_list
                     .iter()
                     .map(|f| f.path.clone())
@@ -517,6 +530,7 @@ impl eframe::App for LauncherApp {
                     if set_focus {
                         self.focus_input();
                     }
+                });
             });
         });
         let show_editor = self.show_editor;
@@ -543,6 +557,7 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        #[cfg(target_os = "windows")]
         self.unregister_all_hotkeys();
         self.visible_flag.store(false, Ordering::SeqCst);
         self.last_visible = false;
