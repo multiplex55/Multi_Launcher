@@ -171,16 +171,11 @@ pub fn move_to_current_desktop(hwnd: windows::Win32::Foundation::HWND) {
         if let Ok(vdm) =
             CoCreateInstance::<_, IVirtualDesktopManager>(&VirtualDesktopManager, None, CLSCTX_ALL)
         {
-            let mut on_current = false.into();
-            if vdm
-                .IsWindowOnCurrentVirtualDesktop(hwnd, &mut on_current)
-                .is_ok()
-                && !on_current.as_bool()
-            {
-                let mut desktop = GUID::default();
-                let fg = GetForegroundWindow();
-                if vdm.GetWindowDesktopId(fg, &mut desktop).is_ok() {
-                    let _ = vdm.MoveWindowToDesktop(hwnd, &desktop);
+            if let Ok(on_current) = vdm.IsWindowOnCurrentVirtualDesktop(hwnd) {
+                if !on_current.as_bool() {
+                    if let Ok(desktop) = vdm.GetWindowDesktopId(GetForegroundWindow()) {
+                        let _ = vdm.MoveWindowToDesktop(hwnd, &desktop);
+                    }
                 }
             }
         }
