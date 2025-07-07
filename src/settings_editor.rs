@@ -1,5 +1,6 @@
 use crate::settings::Settings;
 use crate::gui::LauncherApp;
+use crate::hotkey::parse_hotkey;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 #[cfg(target_os = "windows")]
@@ -8,6 +9,8 @@ use rfd::FileDialog;
 #[derive(Default)]
 pub struct SettingsEditor {
     hotkey: String,
+    hotkey_valid: bool,
+    last_valid_hotkey: String,
     quit_hotkey: String,
     index_paths: Vec<String>,
     index_input: String,
@@ -32,8 +35,18 @@ pub struct SettingsEditor {
 
 impl SettingsEditor {
     pub fn new(settings: &Settings) -> Self {
+        let hotkey = settings.hotkey.clone().unwrap_or_default();
+        let hotkey_valid = parse_hotkey(&hotkey).is_some();
+        let default_hotkey = Settings::default().hotkey.unwrap();
+        let last_valid_hotkey = if hotkey_valid {
+            hotkey.clone()
+        } else {
+            default_hotkey.clone()
+        };
         Self {
-            hotkey: settings.hotkey.clone().unwrap_or_default(),
+            hotkey,
+            hotkey_valid,
+            last_valid_hotkey,
             quit_hotkey: settings.quit_hotkey.clone().unwrap_or_default(),
             index_paths: settings.index_paths.clone().unwrap_or_default(),
             index_input: String::new(),
@@ -100,7 +113,21 @@ impl SettingsEditor {
             .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Launcher hotkey");
-                ui.text_edit_singleline(&mut self.hotkey);
+                let resp = ui.text_edit_singleline(&mut self.hotkey);
+                if resp.changed() {
+                    self.hotkey_valid = parse_hotkey(&self.hotkey).is_some();
+                    if self.hotkey_valid {
+                        self.last_valid_hotkey = self.hotkey.clone();
+                    }
+                }
+                let color = if self.hotkey_valid {
+                    egui::Color32::GREEN
+                } else {
+                    egui::Color32::RED
+                };
+                ui.add(egui::Label::new(
+                    egui::RichText::new("●").color(color),
+                ));
             });
             ui.horizontal(|ui| {
                 ui.label("Quit hotkey");
@@ -204,40 +231,53 @@ impl SettingsEditor {
             });
 
             if ui.button("Save").clicked() {
-                match Settings::load(&app.settings_path) {
-                    Ok(current) => {
-                        let new_settings = self.to_settings(&current);
-                        if let Err(e) = new_settings.save(&app.settings_path) {
-                            app.error = Some(format!("Failed to save: {e}"));
-                        } else {
-                            app.update_paths(
-                                new_settings.plugin_dirs.clone(),
-                                new_settings.index_paths.clone(),
-                                new_settings.enabled_plugins.clone(),
-                                new_settings.enabled_capabilities.clone(),
-                                new_settings.offscreen_pos,
-                                Some(new_settings.enable_toasts),
-                                Some(new_settings.fuzzy_weight),
-                                Some(new_settings.usage_weight),
-                                Some(new_settings.follow_mouse),
-                                Some(new_settings.static_location_enabled),
-                                new_settings.static_pos,
-                                new_settings.static_size,
-                            );
-                            app.query_scale = new_settings.query_scale.unwrap_or(1.0).min(5.0);
-                            app.list_scale = new_settings.list_scale.unwrap_or(1.0).min(5.0);
-                            app.history_limit = new_settings.history_limit;
-                            crate::request_hotkey_restart(new_settings);
-                            if app.enable_toasts {
-                                app.add_toast(Toast {
-                                    text: "Settings saved".into(),
-                                    kind: ToastKind::Success,
-                                    options: ToastOptions::default().duration_in_seconds(3.0),
-                                });
+                if parse_hotkey(&self.hotkey).is_none() {
+                    self.hotkey = self.last_valid_hotkey.clone();
+                    self.hotkey_valid = true;
+                    if app.enable_toasts {
+                        app.add_toast(Toast {
+                            text: "Failed to save settings: hotkey is invalid".into(),
+                            kind: ToastKind::Error,
+                            options: ToastOptions::default().duration_in_seconds(3.0),
+                        });
+                    }
+                } else {
+                    self.last_valid_hotkey = self.hotkey.clone();
+                    match Settings::load(&app.settings_path) {
+                        Ok(current) => {
+                            let new_settings = self.to_settings(&current);
+                            if let Err(e) = new_settings.save(&app.settings_path) {
+                                app.error = Some(format!("Failed to save: {e}"));
+                            } else {
+                                app.update_paths(
+                                    new_settings.plugin_dirs.clone(),
+                                    new_settings.index_paths.clone(),
+                                    new_settings.enabled_plugins.clone(),
+                                    new_settings.enabled_capabilities.clone(),
+                                    new_settings.offscreen_pos,
+                                    Some(new_settings.enable_toasts),
+                                    Some(new_settings.fuzzy_weight),
+                                    Some(new_settings.usage_weight),
+                                    Some(new_settings.follow_mouse),
+                                    Some(new_settings.static_location_enabled),
+                                    new_settings.static_pos,
+                                    new_settings.static_size,
+                                );
+                                app.query_scale = new_settings.query_scale.unwrap_or(1.0).min(5.0);
+                                app.list_scale = new_settings.list_scale.unwrap_or(1.0).min(5.0);
+                                app.history_limit = new_settings.history_limit;
+                                crate::request_hotkey_restart(new_settings);
+                                if app.enable_toasts {
+                                    app.add_toast(Toast {
+                                        text: "Settings saved".into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default().duration_in_seconds(3.0),
+                                    });
+                                }
                             }
                         }
+                        Err(e) => app.error = Some(format!("Failed to read settings: {e}")),
                     }
-                    Err(e) => app.error = Some(format!("Failed to read settings: {e}")),
                 }
             }
         });
