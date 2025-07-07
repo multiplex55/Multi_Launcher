@@ -9,6 +9,7 @@ use crate::plugins::history::HistoryPlugin;
 use crate::plugins::folders::FoldersPlugin;
 use crate::plugins::system::SystemPlugin;
 use crate::plugins::help::HelpPlugin;
+use crate::plugins::youtube::YoutubePlugin;
 
 pub trait Plugin: Send + Sync {
     /// Return actions based on the query string
@@ -47,6 +48,7 @@ impl PluginManager {
         self.register(Box::new(WebSearchPlugin));
         self.register(Box::new(CalculatorPlugin));
         self.register(Box::new(RunescapeSearchPlugin));
+        self.register(Box::new(YoutubePlugin));
         self.register(Box::new(ClipboardPlugin::default()));
         self.register(Box::new(BookmarksPlugin::default()));
         self.register(Box::new(FoldersPlugin::default()));

@@ -101,6 +101,7 @@ Built-in plugins and their command prefixes are:
 
 - Google web search (`g rust`)
 - RuneScape Wiki search (`rs item` or `osrs item`)
+- YouTube search (`yt rust`)
 - Calculator (`= 2+2`)
 - Clipboard history (`cb`)
 - Bookmarks (`bm add <url>` or `bm rm <pattern>`)
