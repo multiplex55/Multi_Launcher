@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 mod actions;
 mod actions_editor;
 mod add_action_dialog;

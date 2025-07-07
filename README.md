@@ -127,6 +127,7 @@ changes are written to `actions.json` immediately.
 The project can be compiled for Windows using `cargo build --release`.
 Afterwards bundle the binary for distribution using a Windows packaging tool
 such as `cargo wix`.
+When compiled this way the executable is built with `windows_subsystem = "windows"`, which prevents an extra console window from appearing.
 
 ## Troubleshooting
 
