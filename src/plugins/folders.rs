@@ -160,7 +160,7 @@ impl Plugin for FoldersPlugin {
     }
 
     fn description(&self) -> &str {
-        "Search and manage favourite folders"
+        "Search and manage favourite folders (prefix: `f`)"
     }
 
     fn capabilities(&self) -> &[&str] {

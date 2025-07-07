@@ -126,7 +126,7 @@ impl Plugin for BookmarksPlugin {
     }
 
     fn description(&self) -> &str {
-        "Return bookmarked URLs"
+        "Return bookmarked URLs (prefix: `bm`)"
     }
 
     fn capabilities(&self) -> &[&str] {

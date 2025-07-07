@@ -22,7 +22,7 @@ impl Plugin for WebSearchPlugin {
     }
 
     fn description(&self) -> &str {
-        "Perform web searches using Google"
+        "Perform web searches using Google (prefix: `g`)"
     }
 
     fn capabilities(&self) -> &[&str] {
@@ -54,7 +54,7 @@ impl Plugin for CalculatorPlugin {
     }
 
     fn description(&self) -> &str {
-        "Evaluate mathematical expressions"
+        "Evaluate mathematical expressions (prefix: `=`)"
     }
 
     fn capabilities(&self) -> &[&str] {

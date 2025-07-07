@@ -33,7 +33,7 @@ impl Plugin for RunescapeSearchPlugin {
     }
 
     fn description(&self) -> &str {
-        "Search the RuneScape and Old School RuneScape wikis"
+        "Search the RuneScape and Old School RuneScape wikis (prefix: `rs`/`osrs`)"
     }
 
     fn capabilities(&self) -> &[&str] {

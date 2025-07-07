@@ -26,7 +26,7 @@ impl Plugin for SystemPlugin {
     }
 
     fn description(&self) -> &str {
-        "Execute system actions like shutdown or reboot"
+        "Execute system actions like shutdown or reboot (prefix: `sys`)"
     }
 
     fn capabilities(&self) -> &[&str] {
