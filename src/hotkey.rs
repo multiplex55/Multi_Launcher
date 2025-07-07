@@ -1,5 +1,5 @@
 #[cfg(target_os = "windows")]
-use rdev::{EventType, Key};
+pub use rdev::{EventType, Key};
 
 #[cfg(not(target_os = "windows"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
