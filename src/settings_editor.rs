@@ -11,7 +11,10 @@ pub struct SettingsEditor {
     hotkey: String,
     hotkey_valid: bool,
     last_valid_hotkey: String,
+    quit_hotkey_enabled: bool,
     quit_hotkey: String,
+    quit_hotkey_valid: bool,
+    last_valid_quit_hotkey: String,
     index_paths: Vec<String>,
     index_input: String,
     debug_logging: bool,
@@ -43,11 +46,26 @@ impl SettingsEditor {
         } else {
             default_hotkey.clone()
         };
+        let quit_hotkey = settings.quit_hotkey.clone().unwrap_or_default();
+        let quit_hotkey_enabled = settings.quit_hotkey.is_some();
+        let quit_hotkey_valid = if quit_hotkey_enabled {
+            parse_hotkey(&quit_hotkey).is_some()
+        } else {
+            true
+        };
+        let last_valid_quit_hotkey = if quit_hotkey_valid {
+            quit_hotkey.clone()
+        } else {
+            String::new()
+        };
         Self {
             hotkey,
             hotkey_valid,
             last_valid_hotkey,
-            quit_hotkey: settings.quit_hotkey.clone().unwrap_or_default(),
+            quit_hotkey_enabled,
+            quit_hotkey,
+            quit_hotkey_valid,
+            last_valid_quit_hotkey,
             index_paths: settings.index_paths.clone().unwrap_or_default(),
             index_input: String::new(),
             debug_logging: settings.debug_logging,
@@ -77,7 +95,7 @@ impl SettingsEditor {
             } else {
                 Some(self.hotkey.clone())
             },
-            quit_hotkey: if self.quit_hotkey.trim().is_empty() {
+            quit_hotkey: if !self.quit_hotkey_enabled || self.quit_hotkey.trim().is_empty() {
                 None
             } else {
                 Some(self.quit_hotkey.clone())
@@ -132,10 +150,27 @@ impl SettingsEditor {
                     egui::RichText::new("●").color(color),
                 ));
             });
-            ui.horizontal(|ui| {
-                ui.label("Quit hotkey");
-                ui.text_edit_singleline(&mut self.quit_hotkey);
-            });
+            ui.checkbox(&mut self.quit_hotkey_enabled, "Enable quit hotkey");
+            if self.quit_hotkey_enabled {
+                ui.horizontal(|ui| {
+                    ui.label("Quit hotkey");
+                    let resp = ui.text_edit_singleline(&mut self.quit_hotkey);
+                    if resp.changed() {
+                        self.quit_hotkey_valid = parse_hotkey(&self.quit_hotkey).is_some();
+                        if self.quit_hotkey_valid {
+                            self.last_valid_quit_hotkey = self.quit_hotkey.clone();
+                        }
+                    }
+                    let color = if self.quit_hotkey_valid {
+                        egui::Color32::GREEN
+                    } else {
+                        egui::Color32::RED
+                    };
+                    ui.add(egui::Label::new(
+                        egui::RichText::new("●").color(color),
+                    ));
+                });
+            }
 
             ui.horizontal(|ui| {
                 egui::ComboBox::from_label("Debug logging")
@@ -244,8 +279,21 @@ impl SettingsEditor {
                             options: ToastOptions::default().duration_in_seconds(3.0),
                         });
                     }
+                } else if self.quit_hotkey_enabled && parse_hotkey(&self.quit_hotkey).is_none() {
+                    self.quit_hotkey = self.last_valid_quit_hotkey.clone();
+                    self.quit_hotkey_valid = true;
+                    if app.enable_toasts {
+                        app.add_toast(Toast {
+                            text: "Failed to save settings: quit hotkey is invalid".into(),
+                            kind: ToastKind::Error,
+                            options: ToastOptions::default().duration_in_seconds(3.0),
+                        });
+                    }
                 } else {
                     self.last_valid_hotkey = self.hotkey.clone();
+                    if self.quit_hotkey_enabled {
+                        self.last_valid_quit_hotkey = self.quit_hotkey.clone();
+                    }
                     match Settings::load(&app.settings_path) {
                         Ok(current) => {
                             let new_settings = self.to_settings(&current);
