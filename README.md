@@ -204,3 +204,7 @@ RUST_LOG=info cargo run
 4. When the GUI finishes initialising, it should immediately apply the queued
    visibility change and the window becomes visible. A log entry confirms this.
 5. Press the hotkey again to ensure normal toggling after start-up.
+
+On Windows the launcher also checks which virtual desktop the window belongs to
+whenever it becomes visible. If it is on another desktop it is automatically
+moved to the active one before being shown.
