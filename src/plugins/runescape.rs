@@ -12,6 +12,7 @@ impl Plugin for RunescapeSearchPlugin {
                     label: format!("Search RuneScape Wiki for {q}"),
                     desc: "Web search".into(),
                     action: format!("https://runescape.wiki/?search={q}"),
+                    args: None,
                 }];
             }
         }
@@ -22,6 +23,7 @@ impl Plugin for RunescapeSearchPlugin {
                     label: format!("Search Old School RuneScape Wiki for {q}"),
                     desc: "Web search".into(),
                     action: format!("https://oldschool.runescape.wiki/?search={q}"),
+                    args: None,
                 }];
             }
         }

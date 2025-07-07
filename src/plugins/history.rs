@@ -21,6 +21,7 @@ impl Plugin for HistoryPlugin {
                 label: entry.query,
                 desc: "History".into(),
                 action: format!("history:{idx}"),
+                args: None,
             })
             .collect()
     }

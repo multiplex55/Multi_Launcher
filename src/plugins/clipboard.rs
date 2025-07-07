@@ -63,6 +63,7 @@ impl Plugin for ClipboardPlugin {
                 label: entry.clone(),
                 desc: "Clipboard".into(),
                 action: format!("clipboard:{}", entry),
+                args: None,
             })
             .collect()
     }

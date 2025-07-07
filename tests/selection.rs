@@ -26,8 +26,8 @@ fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
 fn arrow_keys_update_selection() {
     let ctx = egui::Context::default();
     let acts = vec![
-        Action { label: "one".into(), desc: "".into(), action: "one".into() },
-        Action { label: "two".into(), desc: "".into(), action: "two".into() },
+        Action { label: "one".into(), desc: "".into(), action: "one".into(), args: None },
+        Action { label: "two".into(), desc: "".into(), action: "two".into(), args: None },
     ];
     let mut app = new_app(&ctx, acts);
     app.search();
@@ -44,8 +44,8 @@ fn arrow_keys_update_selection() {
 fn enter_returns_selected_index() {
     let ctx = egui::Context::default();
     let acts = vec![
-        Action { label: "one".into(), desc: "".into(), action: "one".into() },
-        Action { label: "two".into(), desc: "".into(), action: "two".into() },
+        Action { label: "one".into(), desc: "".into(), action: "one".into(), args: None },
+        Action { label: "two".into(), desc: "".into(), action: "two".into(), args: None },
     ];
     let mut app = new_app(&ctx, acts);
     app.search();

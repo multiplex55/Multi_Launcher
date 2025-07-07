@@ -5,6 +5,8 @@ pub struct Action {
     pub label: String,
     pub desc: String,
     pub action: String, // Path to folder or exe
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<String>,
 }
 
 pub fn load_actions(path: &str) -> anyhow::Result<Vec<Action>> {

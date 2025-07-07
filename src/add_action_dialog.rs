@@ -17,6 +17,10 @@ pub struct AddActionDialog {
     desc: String,
     /// Path to the executable or file to launch.
     path: String,
+    /// Whether the arguments field is visible.
+    show_args: bool,
+    /// Additional arguments to pass when launching.
+    args: String,
 }
 
 impl Default for AddActionDialog {
@@ -26,6 +30,8 @@ impl Default for AddActionDialog {
             label: String::new(),
             desc: String::new(),
             path: String::new(),
+            show_args: false,
+            args: String::new(),
         }
     }
 }
@@ -68,6 +74,12 @@ impl AddActionDialog {
                         }
                     });
                     ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.show_args, "Add arguments");
+                        if self.show_args {
+                            ui.text_edit_singleline(&mut self.args);
+                        }
+                    });
+                    ui.horizontal(|ui| {
                         if ui.button("Add").clicked() {
                             use std::path::Path;
                             if self.path.is_empty() || !Path::new(&self.path).exists() {
@@ -77,10 +89,17 @@ impl AddActionDialog {
                                     label: self.label.clone(),
                                     desc: self.desc.clone(),
                                     action: self.path.clone(),
+                                    args: if self.show_args && !self.args.trim().is_empty() {
+                                        Some(self.args.clone())
+                                    } else {
+                                        None
+                                    },
                                 });
                                 self.label.clear();
                                 self.desc.clear();
                                 self.path.clear();
+                                self.args.clear();
+                                self.show_args = false;
                                 should_close = true;
                                 app.search();
                                 if let Err(e) = save_actions(&app.actions_path, &app.actions) {

@@ -11,6 +11,7 @@ impl Plugin for HelpPlugin {
                 label: "Show command list".into(),
                 desc: "Display available command prefixes".into(),
                 action: "help:show".into(),
+                args: None,
             }];
         }
         Vec::new()

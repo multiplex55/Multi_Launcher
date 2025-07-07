@@ -11,6 +11,7 @@ pub fn index_paths(paths: &[String]) -> Vec<Action> {
                         label: name.to_string(),
                         desc: entry.path().display().to_string(),
                         action: entry.path().display().to_string(),
+                        args: None,
                     });
                 }
             }

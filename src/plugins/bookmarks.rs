@@ -87,6 +87,7 @@ impl Plugin for BookmarksPlugin {
                     label: format!("Add bookmark {norm}"),
                     desc: "Bookmark".into(),
                     action: format!("bookmark:add:{norm}"),
+                    args: None,
                 }];
             }
         }
@@ -101,6 +102,7 @@ impl Plugin for BookmarksPlugin {
                     label: format!("Remove bookmark {url}"),
                     desc: "Bookmark".into(),
                     action: format!("bookmark:remove:{url}"),
+                    args: None,
                 })
                 .collect();
         }
@@ -117,6 +119,7 @@ impl Plugin for BookmarksPlugin {
                 label: url.clone(),
                 desc: "Bookmark".into(),
                 action: url,
+                args: None,
             })
             .collect()
     }

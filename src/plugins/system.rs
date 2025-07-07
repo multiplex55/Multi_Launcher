@@ -17,6 +17,7 @@ impl Plugin for SystemPlugin {
                 label: format!("System {}", o),
                 desc: "System".into(),
                 action: format!("system:{}", o),
+                args: None,
             })
             .collect()
     }
