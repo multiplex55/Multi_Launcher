@@ -5,10 +5,44 @@ use eframe::egui;
 pub struct HelpWindow {
     pub open: bool,
     pub show_examples: bool,
+    pub overlay_open: bool,
 }
 
 impl HelpWindow {
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+        if self.overlay_open {
+            let mut open = self.overlay_open;
+            egui::Window::new("Quick Help")
+                .open(&mut open)
+                .resizable(true)
+                .default_size((300.0, 200.0))
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.label(egui::RichText::new("Hotkeys").strong());
+                    if let Some(hk) = &app.hotkey_str {
+                        ui.label(format!("Toggle launcher: {hk}"));
+                    }
+                    if let Some(hk) = &app.quit_hotkey_str {
+                        ui.label(format!("Quit launcher: {hk}"));
+                    }
+                    if let Some(hk) = &app.help_hotkey_str {
+                        ui.label(format!("Help overlay: {hk}"));
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("Commands").strong());
+                    let mut infos = app.plugins.plugin_infos();
+                    infos.sort_by(|a, b| a.0.cmp(&b.0));
+                    let area_height = ui.available_height();
+                    egui::ScrollArea::vertical()
+                        .max_height(area_height)
+                        .show(ui, |ui| {
+                            for (name, desc, _) in &infos {
+                                ui.label(format!("{name}: {desc}"));
+                            }
+                        });
+                });
+            self.overlay_open = open;
+        }
         if !self.open {
             return;
         }
