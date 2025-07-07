@@ -4,5 +4,6 @@
     "index_paths": null,
     "plugin_dirs": null,
     "debug_logging": false,
-    "enable_toasts": true
+    "enable_toasts": true,
+    "history_limit": 100
 }

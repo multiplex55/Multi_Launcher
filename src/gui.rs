@@ -77,6 +77,7 @@ pub struct LauncherApp {
     pub list_scale: f32,
     /// Number of user defined commands at the start of `actions`.
     pub custom_len: usize,
+    pub history_limit: usize,
 }
 
 impl LauncherApp {
@@ -194,6 +195,7 @@ impl LauncherApp {
             query_scale,
             list_scale,
             custom_len,
+            history_limit: settings.history_limit,
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -439,7 +441,10 @@ impl eframe::App for LauncherApp {
                                 });
                             }
                             if a.action != "help:show" {
-                                let _ = history::append_history(HistoryEntry { query: current, action: a.clone() });
+                                let _ = history::append_history(
+                                    HistoryEntry { query: current, action: a.clone() },
+                                    self.history_limit,
+                                );
                                 let count = self.usage.entry(a.action.clone()).or_insert(0);
                                 *count += 1;
                             }
@@ -549,7 +554,10 @@ impl eframe::App for LauncherApp {
                                 });
                             }
                             if a.action != "help:show" {
-                                let _ = history::append_history(HistoryEntry { query: current, action: a.clone() });
+                                let _ = history::append_history(
+                                    HistoryEntry { query: current, action: a.clone() },
+                                    self.history_limit,
+                                );
                                 let count = self.usage.entry(a.action.clone()).or_insert(0);
                                 *count += 1;
                             }

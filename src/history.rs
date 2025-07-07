@@ -43,12 +43,13 @@ pub fn save_history() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Append an entry to the history and persist the list.
-pub fn append_history(entry: HistoryEntry) -> anyhow::Result<()> {
+/// Append an entry to the history and persist the list. The `limit` parameter
+/// specifies the maximum number of entries kept.
+pub fn append_history(entry: HistoryEntry, limit: usize) -> anyhow::Result<()> {
     {
         let mut h = HISTORY.lock().unwrap();
         h.push_front(entry);
-        while h.len() > 100 {
+        while h.len() > limit {
             h.pop_back();
         }
     }

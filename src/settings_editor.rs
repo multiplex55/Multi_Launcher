@@ -18,6 +18,7 @@ pub struct SettingsEditor {
     window_h: i32,
     query_scale: f32,
     list_scale: f32,
+    history_limit: usize,
 }
 
 impl SettingsEditor {
@@ -35,6 +36,7 @@ impl SettingsEditor {
             window_h: settings.window_size.unwrap_or((400, 220)).1,
             query_scale: settings.query_scale.unwrap_or(1.0),
             list_scale: settings.list_scale.unwrap_or(1.0),
+            history_limit: settings.history_limit,
         }
     }
 
@@ -64,6 +66,7 @@ impl SettingsEditor {
             window_size: Some((self.window_w, self.window_h)),
             query_scale: Some(self.query_scale),
             list_scale: Some(self.list_scale),
+            history_limit: self.history_limit,
         }
     }
 
@@ -103,6 +106,10 @@ impl SettingsEditor {
             ui.horizontal(|ui| {
                 ui.label("List scale");
                 ui.add(egui::Slider::new(&mut self.list_scale, 0.5..=5.0).text(""));
+            });
+            ui.horizontal(|ui| {
+                ui.label("History limit");
+                ui.add(egui::Slider::new(&mut self.history_limit, 10..=500).text(""));
             });
 
             ui.horizontal(|ui| {
@@ -159,6 +166,7 @@ impl SettingsEditor {
                             );
                             app.query_scale = new_settings.query_scale.unwrap_or(1.0).min(5.0);
                             app.list_scale = new_settings.list_scale.unwrap_or(1.0).min(5.0);
+                            app.history_limit = new_settings.history_limit;
                             crate::request_hotkey_restart(new_settings);
                         }
                     }
