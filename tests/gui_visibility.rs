@@ -24,6 +24,10 @@ fn queued_visibility_applies_when_context_available() {
         &ctx_handle,
         &mut queued_visibility,
         (0.0, 0.0),
+        true,
+        false,
+        None,
+        None,
     );
 
     assert_eq!(visibility.load(Ordering::SeqCst), true);
@@ -43,6 +47,10 @@ fn queued_visibility_applies_when_context_available() {
         &ctx_handle,
         &mut queued_visibility,
         (0.0, 0.0),
+        true,
+        false,
+        None,
+        None,
     );
 
     assert!(queued_visibility.is_none());

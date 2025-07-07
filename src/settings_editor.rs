@@ -21,6 +21,12 @@ pub struct SettingsEditor {
     history_limit: usize,
     fuzzy_weight: f32,
     usage_weight: f32,
+    follow_mouse: bool,
+    static_enabled: bool,
+    static_x: i32,
+    static_y: i32,
+    static_w: i32,
+    static_h: i32,
 }
 
 impl SettingsEditor {
@@ -41,6 +47,12 @@ impl SettingsEditor {
             history_limit: settings.history_limit,
             fuzzy_weight: settings.fuzzy_weight,
             usage_weight: settings.usage_weight,
+            follow_mouse: settings.follow_mouse,
+            static_enabled: settings.static_location_enabled,
+            static_x: settings.static_pos.unwrap_or((0, 0)).0,
+            static_y: settings.static_pos.unwrap_or((0, 0)).1,
+            static_w: settings.static_size.unwrap_or((400, 220)).0,
+            static_h: settings.static_size.unwrap_or((400, 220)).1,
         }
     }
 
@@ -73,6 +85,10 @@ impl SettingsEditor {
             history_limit: self.history_limit,
             fuzzy_weight: self.fuzzy_weight,
             usage_weight: self.usage_weight,
+            follow_mouse: self.follow_mouse,
+            static_location_enabled: self.static_enabled,
+            static_pos: Some((self.static_x, self.static_y)),
+            static_size: Some((self.static_w, self.static_h)),
         }
     }
 
@@ -133,6 +149,23 @@ impl SettingsEditor {
                 ui.add(egui::DragValue::new(&mut self.offscreen_y));
             });
 
+            ui.checkbox(&mut self.follow_mouse, "Follow mouse");
+            ui.add_enabled_ui(!self.follow_mouse, |ui| {
+                ui.checkbox(&mut self.static_enabled, "Use static position");
+            });
+            if self.static_enabled {
+                ui.horizontal(|ui| {
+                    ui.label("X");
+                    ui.add(egui::DragValue::new(&mut self.static_x));
+                    ui.label("Y");
+                    ui.add(egui::DragValue::new(&mut self.static_y));
+                    ui.label("W");
+                    ui.add(egui::DragValue::new(&mut self.static_w));
+                    ui.label("H");
+                    ui.add(egui::DragValue::new(&mut self.static_h));
+                });
+            }
+
             ui.separator();
             ui.label("Index paths:");
             let mut remove: Option<usize> = None;
@@ -179,6 +212,10 @@ impl SettingsEditor {
                                 Some(new_settings.enable_toasts),
                                 Some(new_settings.fuzzy_weight),
                                 Some(new_settings.usage_weight),
+                                Some(new_settings.follow_mouse),
+                                Some(new_settings.static_location_enabled),
+                                new_settings.static_pos,
+                                new_settings.static_size,
                             );
                             app.query_scale = new_settings.query_scale.unwrap_or(1.0).min(5.0);
                             app.list_scale = new_settings.list_scale.unwrap_or(1.0).min(5.0);

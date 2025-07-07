@@ -43,6 +43,20 @@ pub struct Settings {
     /// Maximum number of entries kept in the history list.
     #[serde(default = "default_history_limit")]
     pub history_limit: usize,
+    /// When true the window spawns at the mouse cursor each time it becomes
+    /// visible.
+    #[serde(default = "default_follow_mouse")]
+    pub follow_mouse: bool,
+    /// Enable positioning and sizing the window at a fixed location rather than
+    /// following the cursor.
+    #[serde(default)]
+    pub static_location_enabled: bool,
+    /// Position of the window when `static_location_enabled` is true.
+    #[serde(default)]
+    pub static_pos: Option<(i32, i32)>,
+    /// Size of the window when `static_location_enabled` is true.
+    #[serde(default)]
+    pub static_size: Option<(i32, i32)>,
 }
 
 fn default_toasts() -> bool { true }
@@ -54,6 +68,8 @@ fn default_history_limit() -> usize { 100 }
 fn default_fuzzy_weight() -> f32 { 1.0 }
 
 fn default_usage_weight() -> f32 { 1.0 }
+
+fn default_follow_mouse() -> bool { true }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -73,6 +89,10 @@ impl Default for Settings {
             fuzzy_weight: default_fuzzy_weight(),
             usage_weight: default_usage_weight(),
             history_limit: default_history_limit(),
+            follow_mouse: true,
+            static_location_enabled: false,
+            static_pos: None,
+            static_size: None,
         }
     }
 }
