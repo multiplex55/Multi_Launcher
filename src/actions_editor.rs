@@ -3,8 +3,14 @@ use crate::add_action_dialog::AddActionDialog;
 use crate::gui::LauncherApp;
 use eframe::egui;
 
+/// State container for the command editor window.
+///
+/// It tracks the current search filter and manages the nested
+/// [`AddActionDialog`] used when creating new commands.
 pub struct ActionsEditor {
+    /// Search text used to filter the displayed actions.
     search: String,
+    /// Dialog used for creating a new action.
     dialog: AddActionDialog,
 }
 
@@ -18,6 +24,11 @@ impl Default for ActionsEditor {
 }
 
 impl ActionsEditor {
+    /// Render the command editor window.
+    ///
+    /// * `ctx` - Egui context used for drawing the editor UI.
+    /// * `app` - Mutable reference to the application state. Actions can be
+    ///   added or removed and will be persisted when modified.
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         let mut open = app.show_editor;
         egui::Window::new("Command Editor")

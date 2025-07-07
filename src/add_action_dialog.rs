@@ -4,10 +4,18 @@ use eframe::egui;
 #[cfg(target_os = "windows")]
 use rfd::FileDialog;
 
+/// Dialog state used when adding a new user defined command.
+///
+/// The struct holds the text the user has entered as well as an `open`
+/// flag indicating if the dialog should currently be visible.
 pub struct AddActionDialog {
+    /// `true` while the dialog window is displayed.
     pub open: bool,
+    /// Command label being edited.
     label: String,
+    /// Command description being edited.
     desc: String,
+    /// Path to the executable or file to launch.
     path: String,
 }
 
@@ -23,6 +31,11 @@ impl Default for AddActionDialog {
 }
 
 impl AddActionDialog {
+    /// Draw the "Add Command" dialog and update `app` with any new action.
+    ///
+    /// * `ctx` - Egui context used to render the window.
+    /// * `app` - Application state that will receive the new action if the
+    ///   user confirms the dialog. The actions list is persisted on success.
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         if !self.open {
             return;
