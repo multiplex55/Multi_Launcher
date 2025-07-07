@@ -49,7 +49,18 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
   "quit_hotkey": "Shift+Escape",
   "index_paths": ["C:/ProgramData/Microsoft/Windows/Start Menu/Programs"],
   "plugin_dirs": ["./plugins"],
-  "enabled_plugins": ["web_search", "calculator", "clipboard", "shell", "runescape_search", "system"],
+  "enabled_plugins": [
+    "web_search",
+    "calculator",
+    "clipboard",
+    "bookmarks",
+    "folders",
+    "shell",
+    "runescape_search",
+    "system",
+    "history",
+    "help"
+  ],
   "debug_logging": false,
   "offscreen_pos": [2000, 2000],
   "window_size": [400, 220],
@@ -85,8 +96,20 @@ running.
 
 ## Plugins
 
-Built-in plugins provide Google web search (`g query`), RuneScape wiki search (`rs query` or `osrs query`), an inline calculator
-(using the `=` prefix), a clipboard history (`cb`), a folder shortcut list (`f`), a shell command runner (`sh <command>`), system commands (`sys <action>`) and a command overview (`help`). Valid actions are `shutdown`, `reboot`, `lock` and `logoff`. Selecting a clipboard entry copies it back to the clipboard. Additional plugins can be added by building
+Built-in plugins and their command prefixes are:
+
+- Google web search (`g query`)
+- RuneScape Wiki search (`rs query` or `osrs query`)
+- Calculator (`= expression`)
+- Clipboard history (`cb`)
+- Bookmarks (`bm`)
+- Folder shortcuts (`f`)
+- Shell commands (`sh <command>`)
+- System actions (`sys <action>` with `shutdown`, `reboot`, `lock` or `logoff`)
+- Search history (`hi`)
+- Command overview (`help`)
+
+Selecting a clipboard entry copies it back to the clipboard. Type `help` and press <kbd>Enter</kbd> to open the command list. Additional plugins can be added by building
 shared libraries. Each plugin crate should be compiled as a `cdylib` and export
 a `create_plugin` function returning `Box<dyn Plugin>`:
 
@@ -107,7 +130,18 @@ Example:
 
 ```json
 {
-  "enabled_plugins": ["web_search", "calculator", "clipboard", "shell", "runescape_search", "system"]
+  "enabled_plugins": [
+    "web_search",
+    "calculator",
+    "clipboard",
+    "bookmarks",
+    "folders",
+    "shell",
+    "runescape_search",
+    "system",
+    "history",
+    "help"
+  ]
 }
 ```
 The folders plugin recognises the `f` prefix. Use `f add <path>` to add a folder
@@ -115,6 +149,8 @@ shortcut and `f rm <pattern>` to remove one via fuzzy search. Custom entries can
 be aliased by right clicking them in the results list. Hovering a folder result
 shows its full path. A plugin setting "show full path always" controls whether
 the full path is displayed next to an alias or only as a tooltip.
+The bookmarks plugin uses the `bm` prefix. Use `bm add <url>` to save a link and
+`bm rm <pattern>` to remove one via fuzzy search.
 ### Security Considerations
 The shell plugin runs commands using the system shell without sanitising input. Only enable it if you trust the commands you type. Errors while spawning the process are logged.
 ## Editing Commands
@@ -122,7 +158,8 @@ The launcher stores its custom actions in `actions.json`. While running the
 application you can manage this list through **Edit Commands**. Open the
 launcher with the configured hotkey and choose *Edit Commands* from the menu.
 Use the **New Command** button to open the *Add Command* dialog where you enter
-a label, description and the executable path. The **Browse** button lets you
+a label, description and the executable path. Enable **Add arguments** to supply
+extra command line parameters. The **Browse** button lets you
 select the file interactively. Existing entries can be edited via the **Edit**
 button or by right clicking a command in the results list and choosing *Edit
 Command*. Commands can also be removed from the list. All changes are written to
