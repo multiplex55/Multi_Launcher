@@ -7,6 +7,7 @@ use crate::plugins::bookmarks::BookmarksPlugin;
 use crate::plugins::runescape::RunescapeSearchPlugin;
 use crate::plugins::history::HistoryPlugin;
 use crate::plugins::folders::FoldersPlugin;
+use crate::plugins::system::SystemPlugin;
 
 pub trait Plugin: Send + Sync {
     /// Return actions based on the query string
@@ -48,6 +49,7 @@ impl PluginManager {
         self.register(Box::new(ClipboardPlugin::default()));
         self.register(Box::new(BookmarksPlugin::default()));
         self.register(Box::new(FoldersPlugin::default()));
+        self.register(Box::new(SystemPlugin));
         self.register(Box::new(ShellPlugin));
         self.register(Box::new(HistoryPlugin));
         for dir in dirs {
