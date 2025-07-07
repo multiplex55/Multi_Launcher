@@ -146,7 +146,11 @@ impl PluginEditor {
                                     let entry =
                                         self.enabled_capabilities.entry(name.clone()).or_default();
                                     let mut cap_enabled = entry.contains(cap);
-                                    let label = format!("{}", cap);
+                                    let label = if cap == "show_full_path" {
+                                        "show full path always".to_string()
+                                    } else {
+                                        cap.to_string()
+                                    };
                                     if ui.checkbox(&mut cap_enabled, label).changed() {
                                         if cap_enabled {
                                             if !entry.contains(cap) {
