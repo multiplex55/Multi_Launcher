@@ -2,6 +2,7 @@ pub mod actions;
 pub mod actions_editor;
 pub mod add_action_dialog;
 pub mod alias_dialog;
+pub mod bookmark_alias_dialog;
 pub mod plugin_editor;
 pub mod settings_editor;
 pub mod settings;

@@ -2,8 +2,16 @@ use crate::actions::Action;
 use crate::plugin::Plugin;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use serde::{Deserialize, Serialize};
 
-const BOOKMARKS_FILE: &str = "bookmarks.json";
+pub const BOOKMARKS_FILE: &str = "bookmarks.json";
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct BookmarkEntry {
+    pub url: String,
+    #[serde(default)]
+    pub alias: Option<String>,
+}
 
 pub struct BookmarksPlugin {
     matcher: SkimMatcherV2,
@@ -36,16 +44,26 @@ fn normalize_url(url: &str) -> String {
     out
 }
 
-pub fn load_bookmarks(path: &str) -> anyhow::Result<Vec<String>> {
+pub fn load_bookmarks(path: &str) -> anyhow::Result<Vec<BookmarkEntry>> {
     let content = std::fs::read_to_string(path).unwrap_or_default();
-    if content.is_empty() {
+    if content.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let list: Vec<String> = serde_json::from_str(&content)?;
-    Ok(list)
+    // Try new format first, fall back to plain string list for backward compatibility
+    let list: Result<Vec<BookmarkEntry>, _> = serde_json::from_str(&content);
+    match list {
+        Ok(items) => Ok(items),
+        Err(_) => {
+            let list: Vec<String> = serde_json::from_str(&content)?;
+            Ok(list
+                .into_iter()
+                .map(|url| BookmarkEntry { url, alias: None })
+                .collect())
+        }
+    }
 }
 
-pub fn save_bookmarks(path: &str, bookmarks: &[String]) -> anyhow::Result<()> {
+pub fn save_bookmarks(path: &str, bookmarks: &[BookmarkEntry]) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(bookmarks)?;
     std::fs::write(path, json)?;
     Ok(())
@@ -54,8 +72,8 @@ pub fn save_bookmarks(path: &str, bookmarks: &[String]) -> anyhow::Result<()> {
 pub fn append_bookmark(path: &str, url: &str) -> anyhow::Result<()> {
     let mut list = load_bookmarks(path).unwrap_or_default();
     let fixed = normalize_url(url);
-    if !list.contains(&fixed) {
-        list.push(fixed);
+    if !list.iter().any(|b| b.url == fixed) {
+        list.push(BookmarkEntry { url: fixed, alias: None });
         save_bookmarks(path, &list)?;
     }
     Ok(())
@@ -64,8 +82,18 @@ pub fn append_bookmark(path: &str, url: &str) -> anyhow::Result<()> {
 pub fn remove_bookmark(path: &str, url: &str) -> anyhow::Result<()> {
     let mut list = load_bookmarks(path).unwrap_or_default();
     let fixed = normalize_url(url);
-    if let Some(pos) = list.iter().position(|u| u == &fixed) {
+    if let Some(pos) = list.iter().position(|b| b.url == fixed) {
         list.remove(pos);
+        save_bookmarks(path, &list)?;
+    }
+    Ok(())
+}
+
+pub fn set_alias(path: &str, url: &str, alias: &str) -> anyhow::Result<()> {
+    let mut list = load_bookmarks(path).unwrap_or_default();
+    let fixed = normalize_url(url);
+    if let Some(item) = list.iter_mut().find(|b| b.url == fixed) {
+        item.alias = if alias.is_empty() { None } else { Some(alias.to_string()) };
         save_bookmarks(path, &list)?;
     }
     Ok(())
@@ -97,11 +125,11 @@ impl Plugin for BookmarksPlugin {
             let bookmarks = load_bookmarks(BOOKMARKS_FILE).unwrap_or_default();
             return bookmarks
                 .into_iter()
-                .filter(|url| self.matcher.fuzzy_match(url, filter).is_some())
-                .map(|url| Action {
-                    label: format!("Remove bookmark {url}"),
+                .filter(|b| self.matcher.fuzzy_match(&b.url, filter).is_some())
+                .map(|b| Action {
+                    label: format!("Remove bookmark {}", b.url),
                     desc: "Bookmark".into(),
-                    action: format!("bookmark:remove:{url}"),
+                    action: format!("bookmark:remove:{}", b.url),
                     args: None,
                 })
                 .collect();
@@ -114,12 +142,20 @@ impl Plugin for BookmarksPlugin {
         let bookmarks = load_bookmarks(BOOKMARKS_FILE).unwrap_or_default();
         bookmarks
             .into_iter()
-            .filter(|url| self.matcher.fuzzy_match(url, filter).is_some())
-            .map(|url| Action {
-                label: url.clone(),
-                desc: "Bookmark".into(),
-                action: url,
-                args: None,
+            .filter(|b| self.matcher.fuzzy_match(&b.url, filter).is_some()
+                || b
+                    .alias
+                    .as_ref()
+                    .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
+                    .unwrap_or(false))
+            .map(|b| {
+                let label = b.alias.clone().unwrap_or_else(|| b.url.clone());
+                Action {
+                    label,
+                    desc: "Bookmark".into(),
+                    action: b.url,
+                    args: None,
+                }
             })
             .collect()
     }

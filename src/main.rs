@@ -3,6 +3,7 @@ mod actions;
 mod actions_editor;
 mod add_action_dialog;
 mod alias_dialog;
+mod bookmark_alias_dialog;
 mod settings_editor;
 mod plugin_editor;
 mod gui;
