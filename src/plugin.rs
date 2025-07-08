@@ -12,6 +12,7 @@ use crate::plugins::processes::ProcessesPlugin;
 use crate::plugins::help::HelpPlugin;
 use crate::plugins::youtube::YoutubePlugin;
 use crate::plugins::reddit::RedditPlugin;
+use crate::plugins::wikipedia::WikipediaPlugin;
 use crate::plugins::weather::WeatherPlugin;
 use crate::plugins::timer::TimerPlugin;
 use crate::plugins::notes::NotesPlugin;
@@ -55,6 +56,7 @@ impl PluginManager {
         self.register(Box::new(RunescapeSearchPlugin));
         self.register(Box::new(YoutubePlugin));
         self.register(Box::new(RedditPlugin));
+        self.register(Box::new(WikipediaPlugin));
         self.register(Box::new(ClipboardPlugin::default()));
         self.register(Box::new(BookmarksPlugin::default()));
         self.register(Box::new(FoldersPlugin::default()));
