@@ -51,7 +51,8 @@ impl ActionsEditor {
 
             ui.separator();
             let mut remove: Option<usize> = None;
-            egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+            // Allow horizontal scrolling to avoid clipping long command strings
+            egui::ScrollArea::both().max_height(200.0).show(ui, |ui| {
                 for (idx, act) in app.actions.iter().enumerate() {
                     if !self.search.trim().is_empty() {
                         let q = self.search.to_lowercase();
