@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use crate::help_window::HelpWindow;
 use crate::timer_help_window::TimerHelpWindow;
 use crate::timer_dialog::{TimerDialog, TimerCompletionDialog};
+use std::time::Instant;
 
 fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
@@ -46,6 +47,7 @@ pub struct LauncherApp {
     pub results: Vec<Action>,
     pub matcher: SkimMatcherV2,
     pub error: Option<String>,
+    error_time: Option<Instant>,
     pub plugins: PluginManager,
     pub selected: Option<usize>,
     pub usage: HashMap<String, u32>,
@@ -212,6 +214,7 @@ impl LauncherApp {
             results: actions,
             matcher: SkimMatcherV2::default(),
             error: None,
+            error_time: None,
             plugins,
             selected: None,
             usage: HashMap::new(),
@@ -402,6 +405,12 @@ impl eframe::App for LauncherApp {
         if self.enable_toasts {
             self.toasts.show(ctx);
         }
+        if let (Some(t), Some(_)) = (self.error_time, self.error.as_ref()) {
+            if t.elapsed().as_secs_f32() >= 3.0 {
+                self.error = None;
+                self.error_time = None;
+            }
+        }
         if self
             .enabled_capabilities
             .as_ref()
@@ -555,6 +564,7 @@ impl eframe::App for LauncherApp {
                             self.timer_dialog.open_alarm();
                         } else if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
+                            self.error_time = Some(Instant::now());
                             if self.enable_toasts {
                                 self.toasts.add(Toast {
                                     text: format!("Failed: {e}").into(),
@@ -672,6 +682,7 @@ impl eframe::App for LauncherApp {
                             self.timer_dialog.open_alarm();
                         } else if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
+                            self.error_time = Some(Instant::now());
                             if self.enable_toasts {
                                 self.toasts.add(Toast {
                                     text: format!("Failed: {e}").into(),
