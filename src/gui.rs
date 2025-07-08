@@ -77,6 +77,7 @@ pub struct LauncherApp {
     toasts: egui_toast::Toasts,
     pub enable_toasts: bool,
     alias_dialog: crate::alias_dialog::AliasDialog,
+    bookmark_alias_dialog: crate::bookmark_alias_dialog::BookmarkAliasDialog,
     help_window: crate::help_window::HelpWindow,
     timer_help: crate::timer_help_window::TimerHelpWindow,
     timer_dialog: crate::timer_dialog::TimerDialog,
@@ -243,6 +244,7 @@ impl LauncherApp {
             toasts,
             enable_toasts,
             alias_dialog: crate::alias_dialog::AliasDialog::default(),
+            bookmark_alias_dialog: crate::bookmark_alias_dialog::BookmarkAliasDialog::default(),
             help_window: HelpWindow::default(),
             timer_help: TimerHelpWindow::default(),
             timer_dialog: TimerDialog::default(),
@@ -629,6 +631,12 @@ impl eframe::App for LauncherApp {
                     .into_iter()
                     .map(|f| (f.path, f.alias))
                     .collect::<std::collections::HashMap<_, _>>();
+                let bm_list = crate::plugins::bookmarks::load_bookmarks(crate::plugins::bookmarks::BOOKMARKS_FILE)
+                    .unwrap_or_default();
+                let bm_custom = bm_list
+                    .iter()
+                    .map(|b| b.url.clone())
+                    .collect::<std::collections::HashSet<_>>();
                 let show_full = self
                     .enabled_capabilities
                     .as_ref()
@@ -654,6 +662,51 @@ impl eframe::App for LauncherApp {
                         menu_resp.clone().context_menu(|ui| {
                             if ui.button("Set Alias").clicked() {
                                 self.alias_dialog.open(&a.action);
+                                ui.close_menu();
+                            }
+                            if ui.button("Remove Folder").clicked() {
+                                if let Err(e) = crate::plugins::folders::remove_folder(
+                                    crate::plugins::folders::FOLDERS_FILE,
+                                    &a.action,
+                                ) {
+                                    self.error = Some(format!("Failed to remove folder: {e}"));
+                                } else {
+                                    refresh = true;
+                                    set_focus = true;
+                                    if self.enable_toasts {
+                                        self.toasts.add(Toast {
+                                            text: format!("Removed folder {}", a.label).into(),
+                                            kind: ToastKind::Success,
+                                            options: ToastOptions::default().duration_in_seconds(3.0),
+                                        });
+                                    }
+                                }
+                                ui.close_menu();
+                            }
+                        });
+                    } else if bm_custom.contains(&a.action) {
+                        menu_resp.clone().context_menu(|ui| {
+                            if ui.button("Set Alias").clicked() {
+                                self.bookmark_alias_dialog.open(&a.action);
+                                ui.close_menu();
+                            }
+                            if ui.button("Remove Bookmark").clicked() {
+                                if let Err(e) = crate::plugins::bookmarks::remove_bookmark(
+                                    crate::plugins::bookmarks::BOOKMARKS_FILE,
+                                    &a.action,
+                                ) {
+                                    self.error = Some(format!("Failed to remove bookmark: {e}"));
+                                } else {
+                                    refresh = true;
+                                    set_focus = true;
+                                    if self.enable_toasts {
+                                        self.toasts.add(Toast {
+                                            text: format!("Removed bookmark {}", a.label).into(),
+                                            kind: ToastKind::Success,
+                                            options: ToastOptions::default().duration_in_seconds(3.0),
+                                        });
+                                    }
+                                }
                                 ui.close_menu();
                             }
                         });
@@ -755,6 +808,9 @@ impl eframe::App for LauncherApp {
         let mut dlg = std::mem::take(&mut self.alias_dialog);
         dlg.ui(ctx, self);
         self.alias_dialog = dlg;
+        let mut bm_dlg = std::mem::take(&mut self.bookmark_alias_dialog);
+        bm_dlg.ui(ctx, self);
+        self.bookmark_alias_dialog = bm_dlg;
         let mut help = std::mem::take(&mut self.help_window);
         help.ui(ctx, self);
         self.help_window = help;
