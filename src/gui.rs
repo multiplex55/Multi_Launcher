@@ -18,6 +18,7 @@ use crate::visibility::apply_visibility;
 use std::collections::HashMap;
 use crate::help_window::HelpWindow;
 use crate::timer_help_window::TimerHelpWindow;
+use crate::timer_dialog::{TimerDialog, TimerCompletionDialog};
 
 fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
@@ -76,6 +77,8 @@ pub struct LauncherApp {
     alias_dialog: crate::alias_dialog::AliasDialog,
     help_window: crate::help_window::HelpWindow,
     timer_help: crate::timer_help_window::TimerHelpWindow,
+    timer_dialog: crate::timer_dialog::TimerDialog,
+    completion_dialog: crate::timer_dialog::TimerCompletionDialog,
     pub help_flag: Arc<AtomicBool>,
     pub hotkey_str: Option<String>,
     pub quit_hotkey_str: Option<String>,
@@ -239,6 +242,8 @@ impl LauncherApp {
             alias_dialog: crate::alias_dialog::AliasDialog::default(),
             help_window: HelpWindow::default(),
             timer_help: TimerHelpWindow::default(),
+            timer_dialog: TimerDialog::default(),
+            completion_dialog: TimerCompletionDialog::default(),
             help_flag: help_flag.clone(),
             hotkey_str: settings.hotkey.clone(),
             quit_hotkey_str: settings.quit_hotkey.clone(),
@@ -286,6 +291,17 @@ impl LauncherApp {
 
     pub fn search(&mut self) {
         let mut res: Vec<(Action, f32)> = Vec::new();
+
+        let trimmed = self.query.trim();
+        if trimmed.eq_ignore_ascii_case("timer") {
+            if !self.timer_dialog.open {
+                self.timer_dialog.open_timer();
+            }
+        } else if trimmed.eq_ignore_ascii_case("alarm") {
+            if !self.timer_dialog.open {
+                self.timer_dialog.open_alarm();
+            }
+        }
 
         if self.query.is_empty() {
             res.extend(self.actions.iter().cloned().map(|a| (a, 0.0)));
@@ -393,6 +409,17 @@ impl eframe::App for LauncherApp {
         tracing::debug!("LauncherApp::update called");
         if self.enable_toasts {
             self.toasts.show(ctx);
+        }
+        if self
+            .enabled_capabilities
+            .as_ref()
+            .and_then(|m| m.get("timer"))
+            .map(|c| c.contains(&"completion_dialog".to_string()))
+            .unwrap_or(true)
+        {
+            for msg in crate::plugins::timer::take_finished_messages() {
+                self.completion_dialog.open_message(msg);
+            }
         }
         if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
             self.window_size = (rect.width() as i32, rect.height() as i32);
@@ -723,6 +750,12 @@ impl eframe::App for LauncherApp {
         let mut timer_help = std::mem::take(&mut self.timer_help);
         timer_help.ui(ctx);
         self.timer_help = timer_help;
+        let mut timer_dlg = std::mem::take(&mut self.timer_dialog);
+        timer_dlg.ui(ctx, self);
+        self.timer_dialog = timer_dlg;
+        let mut comp = std::mem::take(&mut self.completion_dialog);
+        comp.ui(ctx);
+        self.completion_dialog = comp;
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

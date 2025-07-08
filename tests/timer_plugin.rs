@@ -59,3 +59,12 @@ fn search_list_lists_timers() {
     ACTIVE_TIMERS.lock().unwrap().clear();
 }
 
+#[test]
+fn take_finished_returns_messages() {
+    use multi_launcher::plugins::timer::{FINISHED_MESSAGES, take_finished_messages};
+    FINISHED_MESSAGES.lock().unwrap().push("done".to_string());
+    let msgs = take_finished_messages();
+    assert_eq!(msgs, vec!["done".to_string()]);
+    assert!(take_finished_messages().is_empty());
+}
+

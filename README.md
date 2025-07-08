@@ -153,7 +153,8 @@ Built-in plugins and their command prefixes are:
 - Process list (`ps`), providing "Switch to" and "Kill" actions
 - Timers and alarms (`timer 5m tea`, `alarm 07:30`). Use `timer list` to view
   remaining time. Pending alarms are saved to `alarms.json` and resume after
-  restarting the launcher.
+  restarting the launcher. A plugin setting controls pop-up dialogs when a
+  timer completes.
 - Search history (`hi`)
 - Command overview (`help`)
 

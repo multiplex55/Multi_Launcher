@@ -8,6 +8,7 @@ use std::thread;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 pub const ALARMS_FILE: &str = "alarms.json";
+pub static FINISHED_MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 pub struct TimerEntry {
     pub id: u64,
@@ -39,6 +40,13 @@ fn save_persistent_alarms_locked(timers: &Vec<TimerEntry>) {
 }
 
 pub static ACTIVE_TIMERS: Lazy<Mutex<Vec<TimerEntry>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+pub fn take_finished_messages() -> Vec<String> {
+    let mut list = FINISHED_MESSAGES.lock().unwrap();
+    let out = list.clone();
+    list.clear();
+    out
+}
 
 pub fn load_saved_alarms() {
     let content = std::fs::read_to_string(ALARMS_FILE).unwrap_or_default();
@@ -159,11 +167,13 @@ fn start_entry(duration: Duration, label: String, persist: bool, end_ts: u64) {
             thread::sleep(Duration::from_millis(100));
         }
         if !cancel.load(Ordering::SeqCst) {
-            if persist {
-                notify(&format!("Alarm triggered: {}", label));
+            let msg = if persist {
+                format!("Alarm triggered: {}", label)
             } else {
-                notify(&format!("Timer finished: {}", label));
-            }
+                format!("Timer finished: {}", label)
+            };
+            notify(&msg);
+            FINISHED_MESSAGES.lock().unwrap().push(msg);
         }
         let mut list = ACTIVE_TIMERS.lock().unwrap();
         if let Some(pos) = list.iter().position(|t| t.id == id) {
@@ -283,6 +293,6 @@ impl Plugin for TimerPlugin {
 
     fn description(&self) -> &str { "Create timers and alarms (prefix: `timer` / `alarm`)" }
 
-    fn capabilities(&self) -> &[&str] { &["search"] }
+    fn capabilities(&self) -> &[&str] { &["search", "completion_dialog"] }
 }
 
