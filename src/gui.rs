@@ -664,6 +664,25 @@ impl eframe::App for LauncherApp {
                                 self.alias_dialog.open(&a.action);
                                 ui.close_menu();
                             }
+                            if ui.button("Remove Folder").clicked() {
+                                if let Err(e) = crate::plugins::folders::remove_folder(
+                                    crate::plugins::folders::FOLDERS_FILE,
+                                    &a.action,
+                                ) {
+                                    self.error = Some(format!("Failed to remove folder: {e}"));
+                                } else {
+                                    refresh = true;
+                                    set_focus = true;
+                                    if self.enable_toasts {
+                                        self.toasts.add(Toast {
+                                            text: format!("Removed folder {}", a.label).into(),
+                                            kind: ToastKind::Success,
+                                            options: ToastOptions::default().duration_in_seconds(3.0),
+                                        });
+                                    }
+                                }
+                                ui.close_menu();
+                            }
                         });
                     } else if bm_custom.contains(&a.action) {
                         menu_resp.clone().context_menu(|ui| {
@@ -680,6 +699,13 @@ impl eframe::App for LauncherApp {
                                 } else {
                                     refresh = true;
                                     set_focus = true;
+                                    if self.enable_toasts {
+                                        self.toasts.add(Toast {
+                                            text: format!("Removed bookmark {}", a.label).into(),
+                                            kind: ToastKind::Success,
+                                            options: ToastOptions::default().duration_in_seconds(3.0),
+                                        });
+                                    }
                                 }
                                 ui.close_menu();
                             }
