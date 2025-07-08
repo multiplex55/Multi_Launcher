@@ -58,10 +58,10 @@ fn notify(msg: &str) {
     }
 }
 
-pub fn start_timer(duration: Duration) {
+pub fn start_timer_named(duration: Duration, name: Option<String>) {
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
     let cancel = Arc::new(AtomicBool::new(false));
-    let label = format!("Timer {:?}", duration);
+    let label = name.unwrap_or_else(|| format!("Timer {:?}", duration));
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
         list.push(TimerEntry { id, label: label.clone(), cancel: cancel.clone() });
@@ -82,7 +82,11 @@ pub fn start_timer(duration: Duration) {
     });
 }
 
-pub fn start_alarm(hour: u32, minute: u32) {
+pub fn start_timer(duration: Duration) {
+    start_timer_named(duration, None);
+}
+
+pub fn start_alarm_named(hour: u32, minute: u32, name: Option<String>) {
     use chrono::{Timelike, Local, Duration as ChronoDuration};
     let now = Local::now();
     let mut target = now.date_naive().and_hms_opt(hour, minute, 0).unwrap();
@@ -92,7 +96,7 @@ pub fn start_alarm(hour: u32, minute: u32) {
     let duration = (target - now.naive_local()).to_std().unwrap_or(Duration::from_secs(0));
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
     let cancel = Arc::new(AtomicBool::new(false));
-    let label = format!("Alarm {:02}:{:02}", hour, minute);
+    let label = name.unwrap_or_else(|| format!("Alarm {:02}:{:02}", hour, minute));
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
         list.push(TimerEntry { id, label: label.clone(), cancel: cancel.clone() });
@@ -113,10 +117,25 @@ pub fn start_alarm(hour: u32, minute: u32) {
     });
 }
 
+pub fn start_alarm(hour: u32, minute: u32) {
+    start_alarm_named(hour, minute, None);
+}
+
 pub struct TimerPlugin;
 
 impl Plugin for TimerPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
+        if query.starts_with("timer list") || query.starts_with("alarm list") {
+            return active_timers()
+                .into_iter()
+                .map(|(id, label)| Action {
+                    label,
+                    desc: "Timer".into(),
+                    action: format!("timer:show:{id}"),
+                    args: None,
+                })
+                .collect();
+        }
         if query.starts_with("timer cancel") {
             return active_timers()
                 .into_iter()
@@ -130,24 +149,40 @@ impl Plugin for TimerPlugin {
         }
         if let Some(arg) = query.strip_prefix("timer ") {
             let arg = arg.trim();
-            if let Some(_) = parse_duration(arg) {
-                return vec![Action {
-                    label: format!("Start timer {arg}"),
-                    desc: "Timer".into(),
-                    action: format!("timer:start:{arg}"),
-                    args: None,
-                }];
+            let mut parts = arg.splitn(2, ' ');
+            let dur_part = parts.next().unwrap_or("");
+            if parse_duration(dur_part).is_some() {
+                let name_part = parts.next();
+                let action = if let Some(name) = name_part {
+                    format!("timer:start:{dur_part}|{name}")
+                } else {
+                    format!("timer:start:{dur_part}")
+                };
+                let label = if let Some(name) = name_part {
+                    format!("Start timer {dur_part} {name}")
+                } else {
+                    format!("Start timer {dur_part}")
+                };
+                return vec![Action { label, desc: "Timer".into(), action, args: None }];
             }
         }
         if let Some(arg) = query.strip_prefix("alarm ") {
             let arg = arg.trim();
-            if parse_hhmm(arg).is_some() {
-                return vec![Action {
-                    label: format!("Set alarm {arg}"),
-                    desc: "Timer".into(),
-                    action: format!("alarm:set:{arg}"),
-                    args: None,
-                }];
+            let mut parts = arg.splitn(2, ' ');
+            let time_part = parts.next().unwrap_or("");
+            if parse_hhmm(time_part).is_some() {
+                let name_part = parts.next();
+                let action = if let Some(name) = name_part {
+                    format!("alarm:set:{time_part}|{name}")
+                } else {
+                    format!("alarm:set:{time_part}")
+                };
+                let label = if let Some(name) = name_part {
+                    format!("Set alarm {time_part} {name}")
+                } else {
+                    format!("Set alarm {time_part}")
+                };
+                return vec![Action { label, desc: "Timer".into(), action, args: None }];
             }
         }
         Vec::new()

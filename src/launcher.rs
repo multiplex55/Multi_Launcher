@@ -134,14 +134,24 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         return Ok(());
     }
     if let Some(arg) = action.action.strip_prefix("timer:start:") {
-        if let Some(dur) = timer::parse_duration(arg) {
-            timer::start_timer(dur);
+        let (dur_str, name) = arg.split_once('|').unwrap_or((arg, ""));
+        if let Some(dur) = timer::parse_duration(dur_str) {
+            if name.is_empty() {
+                timer::start_timer(dur);
+            } else {
+                timer::start_timer_named(dur, Some(name.to_string()));
+            }
         }
         return Ok(());
     }
     if let Some(arg) = action.action.strip_prefix("alarm:set:") {
-        if let Some((h, m)) = timer::parse_hhmm(arg) {
-            timer::start_alarm(h, m);
+        let (time_str, name) = arg.split_once('|').unwrap_or((arg, ""));
+        if let Some((h, m)) = timer::parse_hhmm(time_str) {
+            if name.is_empty() {
+                timer::start_alarm(h, m);
+            } else {
+                timer::start_alarm_named(h, m, Some(name.to_string()));
+            }
         }
         return Ok(());
     }
