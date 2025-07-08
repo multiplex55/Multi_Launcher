@@ -47,6 +47,10 @@ pub fn save_folders(path: &str, folders: &[FolderEntry]) -> anyhow::Result<()> {
 }
 
 pub fn append_folder(path: &str, folder: &str) -> anyhow::Result<()> {
+    if !std::path::Path::new(folder).exists() {
+        anyhow::bail!("folder does not exist: {folder}");
+    }
+
     let mut list = load_folders(path).unwrap_or_else(|_| default_folders());
     if !list.iter().any(|f| f.path == folder) {
         let label = std::path::Path::new(folder)
