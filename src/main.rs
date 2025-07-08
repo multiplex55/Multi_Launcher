@@ -20,6 +20,7 @@ mod window_manager;
 mod workspace;
 mod plugins;
 mod help_window;
+mod timer_help_window;
 
 use crate::actions::{load_actions, Action};
 use crate::gui::LauncherApp;

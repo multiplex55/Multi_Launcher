@@ -17,6 +17,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use crate::visibility::apply_visibility;
 use std::collections::HashMap;
 use crate::help_window::HelpWindow;
+use crate::timer_help_window::TimerHelpWindow;
 
 fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
@@ -74,6 +75,7 @@ pub struct LauncherApp {
     pub enable_toasts: bool,
     alias_dialog: crate::alias_dialog::AliasDialog,
     help_window: crate::help_window::HelpWindow,
+    timer_help: crate::timer_help_window::TimerHelpWindow,
     pub help_flag: Arc<AtomicBool>,
     pub hotkey_str: Option<String>,
     pub quit_hotkey_str: Option<String>,
@@ -236,6 +238,7 @@ impl LauncherApp {
             enable_toasts,
             alias_dialog: crate::alias_dialog::AliasDialog::default(),
             help_window: HelpWindow::default(),
+            timer_help: TimerHelpWindow::default(),
             help_flag: help_flag.clone(),
             hotkey_str: settings.hotkey.clone(),
             quit_hotkey_str: settings.quit_hotkey.clone(),
@@ -465,6 +468,9 @@ impl eframe::App for LauncherApp {
                 ui.menu_button("Help", |ui| {
                     if ui.button("Command List").clicked() {
                         self.help_window.open = true;
+                    }
+                    if ui.button("Timer Plugin Help").clicked() {
+                        self.timer_help.open = true;
                     }
                 });
             });
@@ -714,6 +720,9 @@ impl eframe::App for LauncherApp {
         let mut help = std::mem::take(&mut self.help_window);
         help.ui(ctx, self);
         self.help_window = help;
+        let mut timer_help = std::mem::take(&mut self.timer_help);
+        timer_help.ui(ctx);
+        self.timer_help = timer_help;
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

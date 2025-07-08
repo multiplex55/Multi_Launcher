@@ -12,6 +12,7 @@ quickly open applications or files.
 - Run shell commands without opening a terminal.
 - Perform web searches or look up documentation directly.
 - Jump to frequently used folders with the folders plugin.
+- Set timers or alarms from the launcher.
 
 
 ## Building
@@ -70,6 +71,7 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
     "runescape_search",
     "weather",
     "system",
+    "timer",
     "history",
     "help"
   ],
@@ -149,6 +151,7 @@ Built-in plugins and their command prefixes are:
 - Shell commands (`sh echo hi`)
 - System actions (`sys shutdown`)
 - Process list (`ps`), providing "Switch to" and "Kill" actions
+- Timers and alarms (`timer 5m tea`, `alarm 07:30`)
 - Search history (`hi`)
 - Command overview (`help`)
 
@@ -186,6 +189,7 @@ Example:
     "system",
     "processes",
     "weather",
+    "timer",
     "history",
     "help"
   ]
