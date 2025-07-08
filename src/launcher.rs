@@ -110,7 +110,7 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     }
     if let Some(pid) = action.action.strip_prefix("process:kill:") {
         if let Ok(pid) = pid.parse::<u32>() {
-            let mut system = sysinfo::System::new_all();
+            let mut system = System::new_all();
             if let Some(process) = system.process(sysinfo::Pid::from_u32(pid)) {
                 let _ = process.kill();
             }

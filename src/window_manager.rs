@@ -233,7 +233,10 @@ pub fn activate_process(pid: u32) {
         let target = lparam.0 as u32;
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == target && IsWindowVisible(hwnd).as_bool() && GetWindow(hwnd, GW_OWNER).0 == 0 {
+        if pid == target
+            && IsWindowVisible(hwnd).as_bool()
+            && GetWindow(hwnd, GW_OWNER).unwrap_or_default().0 == 0
+        {
             crate::window_manager::force_restore_and_foreground(hwnd);
             return BOOL(0);
         }
