@@ -12,6 +12,7 @@ use crate::plugins::processes::ProcessesPlugin;
 use crate::plugins::help::HelpPlugin;
 use crate::plugins::youtube::YoutubePlugin;
 use crate::plugins::reddit::RedditPlugin;
+use crate::plugins::weather::WeatherPlugin;
 
 pub trait Plugin: Send + Sync {
     /// Return actions based on the query string
@@ -60,6 +61,7 @@ impl PluginManager {
         self.register(Box::new(ShellPlugin));
         self.register(Box::new(HistoryPlugin));
         self.register(Box::new(HelpPlugin));
+        self.register(Box::new(WeatherPlugin));
         for dir in dirs {
             tracing::debug!("loading plugins from {dir}");
             let _ = self.load_dir(dir);

@@ -9,3 +9,4 @@ pub mod help;
 pub mod youtube;
 pub mod reddit;
 pub mod processes;
+pub mod weather;

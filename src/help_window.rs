@@ -92,6 +92,7 @@ fn example_queries(name: &str) -> Option<&'static [&'static str]> {
         "folders" => Some(&["f add C:/path", "f rm docs"]),
         "shell" => Some(&["sh echo hello"]),
         "system" => Some(&["sys shutdown"]),
+        "weather" => Some(&["weather Berlin"]),
         "history" => Some(&["hi"]),
         "help" => Some(&["help"]),
         _ => None,
