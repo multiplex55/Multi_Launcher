@@ -68,6 +68,7 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
     "folders",
     "shell",
     "runescape_search",
+    "weather",
     "system",
     "history",
     "help"
@@ -140,6 +141,7 @@ Built-in plugins and their command prefixes are:
 - RuneScape Wiki search (`rs item` or `osrs item`)
 - YouTube search (`yt rust`)
 - Reddit search (`red cats`)
+- Weather lookup (`weather Berlin`)
 - Calculator (`= 2+2`)
 - Clipboard history (`cb`)
 - Bookmarks (`bm add <url>` or `bm rm <pattern>`)
@@ -183,6 +185,7 @@ Example:
     "runescape_search",
     "system",
     "processes",
+    "weather",
     "history",
     "help"
   ]
