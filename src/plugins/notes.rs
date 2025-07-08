@@ -1,9 +1,9 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
+use chrono::{Local, TimeZone};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use serde::{Deserialize, Serialize};
-use chrono::{Local, TimeZone};
 
 pub const QUICK_NOTES_FILE: &str = "quick_notes.json";
 
@@ -30,7 +30,10 @@ pub fn save_notes(path: &str, notes: &[NoteEntry]) -> anyhow::Result<()> {
 
 pub fn append_note(path: &str, text: &str) -> anyhow::Result<()> {
     let mut list = load_notes(path).unwrap_or_default();
-    list.push(NoteEntry { ts: Local::now().timestamp() as u64, text: text.to_string() });
+    list.push(NoteEntry {
+        ts: Local::now().timestamp() as u64,
+        text: text.to_string(),
+    });
     save_notes(path, &list)
 }
 
@@ -44,7 +47,8 @@ pub fn remove_note(path: &str, index: usize) -> anyhow::Result<()> {
 }
 
 fn format_ts(ts: u64) -> String {
-    Local.timestamp_opt(ts as i64, 0)
+    Local
+        .timestamp_opt(ts as i64, 0)
         .single()
         .unwrap_or_else(|| Local.timestamp(0, 0))
         .format("%Y-%m-%d %H:%M")
@@ -57,7 +61,9 @@ pub struct NotesPlugin {
 
 impl NotesPlugin {
     pub fn new() -> Self {
-        Self { matcher: SkimMatcherV2::default() }
+        Self {
+            matcher: SkimMatcherV2::default(),
+        }
     }
 }
 
@@ -97,12 +103,8 @@ impl Plugin for NotesPlugin {
                 .collect();
         }
 
-        if query.starts_with("note list") || query.starts_with("note search") {
-            let filter = if let Some(rest) = query.strip_prefix("note list") {
-                rest.trim()
-            } else {
-                query.strip_prefix("note search").unwrap_or("").trim()
-            };
+        if let Some(rest) = query.strip_prefix("note list") {
+            let filter = rest.trim();
             let notes = load_notes(QUICK_NOTES_FILE).unwrap_or_default();
             return notes
                 .into_iter()
@@ -132,4 +134,3 @@ impl Plugin for NotesPlugin {
         &["search"]
     }
 }
-

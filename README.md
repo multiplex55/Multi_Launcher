@@ -157,6 +157,7 @@ Built-in plugins and their command prefixes are:
   restarting the launcher. A plugin setting controls pop-up dialogs when a
   timer completes.
 - Search history (`hi`)
+- Quick notes (`note add <text>`, `note list`, `note rm <pattern>`)
 - Command overview (`help`)
 
 Selecting a clipboard entry copies it back to the clipboard. Type `help` and press <kbd>Enter</kbd> to open the command list. The help window groups commands by plugin name and can optionally display example queries. Additional plugins can be added by building
