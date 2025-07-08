@@ -1,19 +1,68 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
 use once_cell::sync::Lazy;
-use std::sync::{Mutex, Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
-use std::time::{Duration, Instant};
+use serde::{Deserialize, Serialize};
+use std::sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 use std::thread;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+pub const ALARMS_FILE: &str = "alarms.json";
 
 pub struct TimerEntry {
     pub id: u64,
     pub label: String,
+    pub deadline: Instant,
     pub cancel: Arc<AtomicBool>,
+    pub persist: bool,
+    pub end_ts: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedAlarm {
+    label: String,
+    end_ts: u64,
+}
+
+fn save_persistent_alarms_locked(timers: &Vec<TimerEntry>) {
+    let list: Vec<SavedAlarm> = timers
+        .iter()
+        .filter(|t| t.persist)
+        .map(|t| SavedAlarm {
+            label: t.label.clone(),
+            end_ts: t.end_ts,
+        })
+        .collect();
+    if let Ok(json) = serde_json::to_string_pretty(&list) {
+        let _ = std::fs::write(ALARMS_FILE, json);
+    }
 }
 
 pub static ACTIVE_TIMERS: Lazy<Mutex<Vec<TimerEntry>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+pub fn load_saved_alarms() {
+    let content = std::fs::read_to_string(ALARMS_FILE).unwrap_or_default();
+    if content.is_empty() {
+        return;
+    }
+    let list: Vec<SavedAlarm> = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("failed to parse alarms file: {e}");
+            return;
+        }
+    };
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    for alarm in list {
+        if alarm.end_ts > now {
+            let dur = Duration::from_secs(alarm.end_ts - now);
+            start_entry(dur, alarm.label, true, alarm.end_ts);
+        }
+    }
+}
 
 pub fn parse_duration(input: &str) -> Option<Duration> {
     if input.len() < 2 { return None; }
@@ -39,8 +88,14 @@ pub fn parse_hhmm(input: &str) -> Option<(u32, u32)> {
     }
 }
 
-pub fn active_timers() -> Vec<(u64, String)> {
-    ACTIVE_TIMERS.lock().unwrap().iter().map(|t| (t.id, t.label.clone())).collect()
+pub fn active_timers() -> Vec<(u64, String, Duration)> {
+    let now = Instant::now();
+    ACTIVE_TIMERS
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|t| (t.id, t.label.clone(), t.deadline.saturating_duration_since(now)))
+        .collect()
 }
 
 pub fn cancel_timer(id: u64) {
@@ -48,6 +103,9 @@ pub fn cancel_timer(id: u64) {
     if let Some(pos) = timers.iter().position(|t| t.id == id) {
         let entry = timers.remove(pos);
         entry.cancel.store(true, Ordering::SeqCst);
+        if entry.persist {
+            save_persistent_alarms_locked(&timers);
+        }
     }
 }
 
@@ -58,28 +116,73 @@ fn notify(msg: &str) {
     }
 }
 
-pub fn start_timer_named(duration: Duration, name: Option<String>) {
+fn format_duration(dur: Duration) -> String {
+    let secs = dur.as_secs();
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{:02}:{:02}:{:02}", h, m, s)
+    } else {
+        format!("{:02}:{:02}", m, s)
+    }
+}
+
+fn start_entry(duration: Duration, label: String, persist: bool, end_ts: u64) {
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
     let cancel = Arc::new(AtomicBool::new(false));
-    let label = name.unwrap_or_else(|| format!("Timer {:?}", duration));
+    let deadline = Instant::now() + duration;
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
-        list.push(TimerEntry { id, label: label.clone(), cancel: cancel.clone() });
+        list.push(TimerEntry {
+            id,
+            label: label.clone(),
+            deadline,
+            cancel: cancel.clone(),
+            persist,
+            end_ts,
+        });
+        if persist {
+            save_persistent_alarms_locked(&list);
+        }
     }
     thread::spawn(move || {
         let start = Instant::now();
         loop {
             let remaining = duration.saturating_sub(start.elapsed());
-            if remaining.is_zero() { break; }
-            if cancel.load(Ordering::SeqCst) { return; }
+            if remaining.is_zero() {
+                break;
+            }
+            if cancel.load(Ordering::SeqCst) {
+                return;
+            }
             thread::sleep(Duration::from_millis(100));
         }
         if !cancel.load(Ordering::SeqCst) {
-            notify(&format!("Timer finished: {}", label));
+            if persist {
+                notify(&format!("Alarm triggered: {}", label));
+            } else {
+                notify(&format!("Timer finished: {}", label));
+            }
         }
         let mut list = ACTIVE_TIMERS.lock().unwrap();
-        if let Some(pos) = list.iter().position(|t| t.id == id) { list.remove(pos); }
+        if let Some(pos) = list.iter().position(|t| t.id == id) {
+            let removed = list.remove(pos);
+            if removed.persist {
+                save_persistent_alarms_locked(&list);
+            }
+        }
     });
+}
+
+pub fn start_timer_named(duration: Duration, name: Option<String>) {
+    let label = name.unwrap_or_else(|| format!("Timer {:?}", duration));
+    let end_ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + duration.as_secs();
+    start_entry(duration, label, false, end_ts);
 }
 
 pub fn start_timer(duration: Duration) {
@@ -87,34 +190,22 @@ pub fn start_timer(duration: Duration) {
 }
 
 pub fn start_alarm_named(hour: u32, minute: u32, name: Option<String>) {
-    use chrono::{Timelike, Local, Duration as ChronoDuration};
+    use chrono::{Duration as ChronoDuration, Local, Timelike};
     let now = Local::now();
     let mut target = now.date_naive().and_hms_opt(hour, minute, 0).unwrap();
     if target <= now.naive_local() {
         target += ChronoDuration::days(1);
     }
-    let duration = (target - now.naive_local()).to_std().unwrap_or(Duration::from_secs(0));
-    let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-    let cancel = Arc::new(AtomicBool::new(false));
+    let duration = (target - now.naive_local())
+        .to_std()
+        .unwrap_or(Duration::from_secs(0));
     let label = name.unwrap_or_else(|| format!("Alarm {:02}:{:02}", hour, minute));
-    {
-        let mut list = ACTIVE_TIMERS.lock().unwrap();
-        list.push(TimerEntry { id, label: label.clone(), cancel: cancel.clone() });
-    }
-    thread::spawn(move || {
-        let start = Instant::now();
-        loop {
-            let remaining = duration.saturating_sub(start.elapsed());
-            if remaining.is_zero() { break; }
-            if cancel.load(Ordering::SeqCst) { return; }
-            thread::sleep(Duration::from_millis(100));
-        }
-        if !cancel.load(Ordering::SeqCst) {
-            notify(&format!("Alarm triggered: {}", label));
-        }
-        let mut list = ACTIVE_TIMERS.lock().unwrap();
-        if let Some(pos) = list.iter().position(|t| t.id == id) { list.remove(pos); }
-    });
+    let end_ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + duration.as_secs();
+    start_entry(duration, label, true, end_ts);
 }
 
 pub fn start_alarm(hour: u32, minute: u32) {
@@ -128,8 +219,8 @@ impl Plugin for TimerPlugin {
         if query.starts_with("timer list") || query.starts_with("alarm list") {
             return active_timers()
                 .into_iter()
-                .map(|(id, label)| Action {
-                    label,
+                .map(|(id, label, rem)| Action {
+                    label: format!("{label} ({} left)", format_duration(rem)),
                     desc: "Timer".into(),
                     action: format!("timer:show:{id}"),
                     args: None,
@@ -139,7 +230,7 @@ impl Plugin for TimerPlugin {
         if query.starts_with("timer cancel") {
             return active_timers()
                 .into_iter()
-                .map(|(id, label)| Action {
+                .map(|(id, label, _)| Action {
                     label: format!("Cancel {label}"),
                     desc: "Timer".into(),
                     action: format!("timer:cancel:{id}"),

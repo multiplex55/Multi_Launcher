@@ -151,7 +151,9 @@ Built-in plugins and their command prefixes are:
 - Shell commands (`sh echo hi`)
 - System actions (`sys shutdown`)
 - Process list (`ps`), providing "Switch to" and "Kill" actions
-- Timers and alarms (`timer 5m tea`, `alarm 07:30`)
+- Timers and alarms (`timer 5m tea`, `alarm 07:30`). Use `timer list` to view
+  remaining time. Pending alarms are saved to `alarms.json` and resume after
+  restarting the launcher.
 - Search history (`hi`)
 - Command overview (`help`)
 

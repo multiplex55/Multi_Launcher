@@ -1,6 +1,7 @@
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::timer::{TimerPlugin, ACTIVE_TIMERS, TimerEntry};
 use std::sync::{Arc, atomic::AtomicBool};
+use std::time::{Duration, Instant, SystemTime};
 
 #[test]
 fn search_timer_returns_start_action() {
@@ -23,7 +24,14 @@ fn search_cancel_lists_timers() {
     // manually insert an active timer
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
-        list.push(TimerEntry { id: 1, label: "test".into(), cancel: Arc::new(AtomicBool::new(false)) });
+        list.push(TimerEntry {
+            id: 1,
+            label: "test".into(),
+            deadline: Instant::now() + Duration::from_secs(10),
+            cancel: Arc::new(AtomicBool::new(false)),
+            persist: false,
+            end_ts: 0,
+        });
     }
     let plugin = TimerPlugin;
     let results = plugin.search("timer cancel");
@@ -36,7 +44,14 @@ fn search_cancel_lists_timers() {
 fn search_list_lists_timers() {
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
-        list.push(TimerEntry { id: 2, label: "demo".into(), cancel: Arc::new(AtomicBool::new(false)) });
+        list.push(TimerEntry {
+            id: 2,
+            label: "demo".into(),
+            deadline: Instant::now() + Duration::from_secs(20),
+            cancel: Arc::new(AtomicBool::new(false)),
+            persist: false,
+            end_ts: 0,
+        });
     }
     let plugin = TimerPlugin;
     let results = plugin.search("timer list");

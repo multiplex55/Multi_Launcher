@@ -62,7 +62,8 @@ impl PluginManager {
         self.register(Box::new(ShellPlugin));
         self.register(Box::new(HistoryPlugin));
         self.register(Box::new(HelpPlugin));
-        self.register(Box::new(crate::plugins::timer::TimerPlugin));
+        self.register(Box::new(TimerPlugin));
+        crate::plugins::timer::load_saved_alarms();
         self.register(Box::new(WeatherPlugin));
         for dir in dirs {
             tracing::debug!("loading plugins from {dir}");
