@@ -27,6 +27,8 @@ egui-toast = "0.13"
 dirs-next = "2"
 shlex = "1.3"
 sysinfo = "0.35"
+chrono = "0.4"
+notify-rust = "4"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 rfd = { version = "0.15.3", default-features = false, features = ["common-controls-v6"] }
