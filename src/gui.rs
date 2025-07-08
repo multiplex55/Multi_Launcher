@@ -293,15 +293,7 @@ impl LauncherApp {
         let mut res: Vec<(Action, f32)> = Vec::new();
 
         let trimmed = self.query.trim();
-        if trimmed.eq_ignore_ascii_case("timer") {
-            if !self.timer_dialog.open {
-                self.timer_dialog.open_timer();
-            }
-        } else if trimmed.eq_ignore_ascii_case("alarm") {
-            if !self.timer_dialog.open {
-                self.timer_dialog.open_alarm();
-            }
-        }
+
 
         if self.query.is_empty() {
             res.extend(self.actions.iter().cloned().map(|a| (a, 0.0)));
@@ -557,6 +549,10 @@ impl eframe::App for LauncherApp {
                         let mut set_focus = false;
                         if a.action == "help:show" {
                             self.help_window.open = true;
+                        } else if a.action == "timer:dialog:timer" {
+                            self.timer_dialog.open_timer();
+                        } else if a.action == "timer:dialog:alarm" {
+                            self.timer_dialog.open_alarm();
                         } else if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
                             if self.enable_toasts {
@@ -670,6 +666,10 @@ impl eframe::App for LauncherApp {
                         let current = self.query.clone();
                         if a.action == "help:show" {
                             self.help_window.open = true;
+                        } else if a.action == "timer:dialog:timer" {
+                            self.timer_dialog.open_timer();
+                        } else if a.action == "timer:dialog:alarm" {
+                            self.timer_dialog.open_alarm();
                         } else if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
                             if self.enable_toasts {

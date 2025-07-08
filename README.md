@@ -12,7 +12,8 @@ quickly open applications or files.
 - Run shell commands without opening a terminal.
 - Perform web searches or look up documentation directly.
 - Jump to frequently used folders with the folders plugin.
-- Set timers or alarms from the launcher.
+- Set timers or alarms from the launcher. Type `timer` or `alarm` and press
+  <kbd>Enter</kbd> to open the creation dialog.
 
 
 ## Building

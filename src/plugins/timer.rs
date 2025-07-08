@@ -226,7 +226,24 @@ pub struct TimerPlugin;
 
 impl Plugin for TimerPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        if query.starts_with("timer list") || query.starts_with("alarm list") {
+        let trimmed = query.trim();
+        if trimmed.eq_ignore_ascii_case("timer") {
+            return vec![Action {
+                label: "Open timer dialog".into(),
+                desc: "Timer".into(),
+                action: "timer:dialog:timer".into(),
+                args: None,
+            }];
+        }
+        if trimmed.eq_ignore_ascii_case("alarm") {
+            return vec![Action {
+                label: "Open alarm dialog".into(),
+                desc: "Timer".into(),
+                action: "timer:dialog:alarm".into(),
+                args: None,
+            }];
+        }
+        if trimmed.starts_with("timer list") || trimmed.starts_with("alarm list") {
             return active_timers()
                 .into_iter()
                 .map(|(id, label, rem)| Action {
@@ -237,7 +254,7 @@ impl Plugin for TimerPlugin {
                 })
                 .collect();
         }
-        if query.starts_with("timer cancel") {
+        if trimmed.starts_with("timer cancel") {
             return active_timers()
                 .into_iter()
                 .map(|(id, label, _)| Action {
@@ -248,7 +265,7 @@ impl Plugin for TimerPlugin {
                 })
                 .collect();
         }
-        if let Some(arg) = query.strip_prefix("timer ") {
+        if let Some(arg) = trimmed.strip_prefix("timer ") {
             let arg = arg.trim();
             let mut parts = arg.splitn(2, ' ');
             let dur_part = parts.next().unwrap_or("");
@@ -267,7 +284,7 @@ impl Plugin for TimerPlugin {
                 return vec![Action { label, desc: "Timer".into(), action, args: None }];
             }
         }
-        if let Some(arg) = query.strip_prefix("alarm ") {
+        if let Some(arg) = trimmed.strip_prefix("alarm ") {
             let arg = arg.trim();
             let mut parts = arg.splitn(2, ' ');
             let time_part = parts.next().unwrap_or("");

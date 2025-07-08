@@ -4,6 +4,22 @@ use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Duration, Instant, SystemTime};
 
 #[test]
+fn search_timer_dialog() {
+    let plugin = TimerPlugin;
+    let results = plugin.search("timer");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "timer:dialog:timer");
+}
+
+#[test]
+fn search_alarm_dialog() {
+    let plugin = TimerPlugin;
+    let results = plugin.search("alarm");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "timer:dialog:alarm");
+}
+
+#[test]
 fn search_timer_returns_start_action() {
     let plugin = TimerPlugin;
     let results = plugin.search("timer 1s");
