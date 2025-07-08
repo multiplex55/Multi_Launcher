@@ -116,6 +116,7 @@ impl PluginEditor {
                         Some(s.static_location_enabled),
                         s.static_pos,
                         s.static_size,
+                        Some(s.hide_after_run),
                     );
 
                     app.plugins.reload_from_dirs(&self.plugin_dirs);
