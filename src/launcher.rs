@@ -2,6 +2,7 @@ use crate::actions::Action;
 use crate::plugins::bookmarks::{append_bookmark, remove_bookmark};
 use crate::plugins::folders::{append_folder, remove_folder, FOLDERS_FILE};
 use crate::history;
+use sysinfo::System;
 use arboard::Clipboard;
 use std::path::Path;
 use shlex;
@@ -104,6 +105,24 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     if let Some(cmd) = action.action.strip_prefix("system:") {
         if let Some(mut command) = system_command(cmd) {
             return command.spawn().map(|_| ()).map_err(|e| e.into());
+        }
+        return Ok(());
+    }
+    if let Some(pid) = action.action.strip_prefix("process:kill:") {
+        if let Ok(pid) = pid.parse::<u32>() {
+            let mut system = sysinfo::System::new_all();
+            if let Some(process) = system.process(sysinfo::Pid::from_u32(pid)) {
+                let _ = process.kill();
+            }
+        }
+        return Ok(());
+    }
+    if let Some(pid) = action.action.strip_prefix("process:switch:") {
+        if let Ok(pid) = pid.parse::<u32>() {
+            #[cfg(target_os = "windows")]
+            {
+                crate::window_manager::activate_process(pid);
+            }
         }
         return Ok(());
     }
