@@ -1,6 +1,7 @@
 use crate::actions::Action;
 use crate::plugins::bookmarks::{append_bookmark, remove_bookmark};
 use crate::plugins::folders::{append_folder, remove_folder, FOLDERS_FILE};
+use crate::plugins::timer;
 use crate::history;
 use sysinfo::System;
 use arboard::Clipboard;
@@ -122,6 +123,34 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
             #[cfg(target_os = "windows")]
             {
                 crate::window_manager::activate_process(pid);
+            }
+        }
+        return Ok(());
+    }
+    if let Some(id) = action.action.strip_prefix("timer:cancel:") {
+        if let Ok(id) = id.parse::<u64>() {
+            timer::cancel_timer(id);
+        }
+        return Ok(());
+    }
+    if let Some(arg) = action.action.strip_prefix("timer:start:") {
+        let (dur_str, name) = arg.split_once('|').unwrap_or((arg, ""));
+        if let Some(dur) = timer::parse_duration(dur_str) {
+            if name.is_empty() {
+                timer::start_timer(dur);
+            } else {
+                timer::start_timer_named(dur, Some(name.to_string()));
+            }
+        }
+        return Ok(());
+    }
+    if let Some(arg) = action.action.strip_prefix("alarm:set:") {
+        let (time_str, name) = arg.split_once('|').unwrap_or((arg, ""));
+        if let Some((h, m)) = timer::parse_hhmm(time_str) {
+            if name.is_empty() {
+                timer::start_alarm(h, m);
+            } else {
+                timer::start_alarm_named(h, m, Some(name.to_string()));
             }
         }
         return Ok(());
