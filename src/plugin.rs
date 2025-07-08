@@ -8,6 +8,7 @@ use crate::plugins::runescape::RunescapeSearchPlugin;
 use crate::plugins::history::HistoryPlugin;
 use crate::plugins::folders::FoldersPlugin;
 use crate::plugins::system::SystemPlugin;
+use crate::plugins::processes::ProcessesPlugin;
 use crate::plugins::help::HelpPlugin;
 use crate::plugins::youtube::YoutubePlugin;
 use crate::plugins::reddit::RedditPlugin;
@@ -55,6 +56,7 @@ impl PluginManager {
         self.register(Box::new(BookmarksPlugin::default()));
         self.register(Box::new(FoldersPlugin::default()));
         self.register(Box::new(SystemPlugin));
+        self.register(Box::new(ProcessesPlugin));
         self.register(Box::new(ShellPlugin));
         self.register(Box::new(HistoryPlugin));
         self.register(Box::new(HelpPlugin));
