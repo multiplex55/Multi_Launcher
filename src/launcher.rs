@@ -1,6 +1,7 @@
 use crate::actions::Action;
 use crate::plugins::bookmarks::{append_bookmark, remove_bookmark};
 use crate::plugins::folders::{append_folder, remove_folder, FOLDERS_FILE};
+use crate::plugins::notes::{append_note, remove_note, load_notes, QUICK_NOTES_FILE};
 use crate::plugins::timer;
 use crate::history;
 use sysinfo::System;
@@ -151,6 +152,25 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
                 timer::start_alarm(h, m);
             } else {
                 timer::start_alarm_named(h, m, Some(name.to_string()));
+            }
+        }
+        return Ok(());
+    }
+    if let Some(text) = action.action.strip_prefix("note:add:") {
+        append_note(QUICK_NOTES_FILE, text)?;
+        return Ok(());
+    }
+    if let Some(idx) = action.action.strip_prefix("note:remove:") {
+        if let Ok(i) = idx.parse::<usize>() {
+            remove_note(QUICK_NOTES_FILE, i)?;
+        }
+        return Ok(());
+    }
+    if let Some(idx) = action.action.strip_prefix("note:copy:") {
+        if let Ok(i) = idx.parse::<usize>() {
+            if let Some(entry) = load_notes(QUICK_NOTES_FILE)?.get(i).cloned() {
+                let mut cb = Clipboard::new()?;
+                cb.set_text(entry.text)?;
             }
         }
         return Ok(());

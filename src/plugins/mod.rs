@@ -10,4 +10,5 @@ pub mod youtube;
 pub mod reddit;
 pub mod processes;
 pub mod weather;
+pub mod notes;
 pub mod timer;
