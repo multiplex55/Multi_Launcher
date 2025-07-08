@@ -671,6 +671,18 @@ impl eframe::App for LauncherApp {
                                 self.bookmark_alias_dialog.open(&a.action);
                                 ui.close_menu();
                             }
+                            if ui.button("Remove Bookmark").clicked() {
+                                if let Err(e) = crate::plugins::bookmarks::remove_bookmark(
+                                    crate::plugins::bookmarks::BOOKMARKS_FILE,
+                                    &a.action,
+                                ) {
+                                    self.error = Some(format!("Failed to remove bookmark: {e}"));
+                                } else {
+                                    refresh = true;
+                                    set_focus = true;
+                                }
+                                ui.close_menu();
+                            }
                         });
                     }
                     if let Some(idx_act) = custom_idx {
