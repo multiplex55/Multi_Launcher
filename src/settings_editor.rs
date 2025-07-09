@@ -38,6 +38,7 @@ pub struct SettingsEditor {
     static_y: i32,
     static_w: i32,
     static_h: i32,
+    hide_after_run: bool,
 }
 
 impl SettingsEditor {
@@ -105,6 +106,7 @@ impl SettingsEditor {
             static_y: settings.static_pos.unwrap_or((0, 0)).1,
             static_w: settings.static_size.unwrap_or((400, 220)).0,
             static_h: settings.static_size.unwrap_or((400, 220)).1,
+            hide_after_run: settings.hide_after_run,
         }
     }
 
@@ -146,6 +148,7 @@ impl SettingsEditor {
             static_location_enabled: self.static_enabled,
             static_pos: Some((self.static_x, self.static_y)),
             static_size: Some((self.static_w, self.static_h)),
+            hide_after_run: self.hide_after_run,
         }
     }
 
@@ -233,6 +236,7 @@ impl SettingsEditor {
             });
 
             ui.checkbox(&mut self.show_toasts, "Enable toast notifications");
+            ui.checkbox(&mut self.hide_after_run, "Hide window after running action");
 
             ui.horizontal(|ui| {
                 ui.label("Query scale");
@@ -373,6 +377,7 @@ impl SettingsEditor {
                                     Some(new_settings.static_location_enabled),
                                     new_settings.static_pos,
                                     new_settings.static_size,
+                                    Some(new_settings.hide_after_run),
                                 );
                                 app.hotkey_str = new_settings.hotkey.clone();
                                 app.quit_hotkey_str = new_settings.quit_hotkey.clone();

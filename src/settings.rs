@@ -59,6 +59,9 @@ pub struct Settings {
     /// Size of the window when `static_location_enabled` is true.
     #[serde(default)]
     pub static_size: Option<(i32, i32)>,
+    /// Hide the main window automatically after successfully launching an action.
+    #[serde(default)]
+    pub hide_after_run: bool,
 }
 
 fn default_toasts() -> bool { true }
@@ -96,6 +99,7 @@ impl Default for Settings {
             static_location_enabled: false,
             static_pos: None,
             static_size: None,
+            hide_after_run: false,
         }
     }
 }

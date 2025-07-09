@@ -97,6 +97,7 @@ pub struct LauncherApp {
     pub static_location_enabled: bool,
     pub static_pos: Option<(i32, i32)>,
     pub static_size: Option<(i32, i32)>,
+    pub hide_after_run: bool,
 }
 
 impl LauncherApp {
@@ -117,6 +118,7 @@ impl LauncherApp {
         static_enabled: Option<bool>,
         static_pos: Option<(i32, i32)>,
         static_size: Option<(i32, i32)>,
+        hide_after_run: Option<bool>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -145,6 +147,9 @@ impl LauncherApp {
         }
         if static_size.is_some() {
             self.static_size = static_size;
+        }
+        if let Some(v) = hide_after_run {
+            self.hide_after_run = v;
         }
     }
 
@@ -263,6 +268,7 @@ impl LauncherApp {
             static_location_enabled: static_enabled,
             static_pos,
             static_size,
+            hide_after_run: settings.hide_after_run,
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -605,6 +611,15 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                                 set_focus = true;
                             }
+                            if self.hide_after_run
+                                && !a.action.starts_with("bookmark:add:")
+                                && !a.action.starts_with("bookmark:remove:")
+                                && !a.action.starts_with("folder:add:")
+                                && !a.action.starts_with("folder:remove:")
+                                && !a.action.starts_with("calc:")
+                            {
+                                self.visible_flag.store(false, Ordering::SeqCst);
+                            }
                         }
                         if refresh {
                             self.search();
@@ -773,6 +788,15 @@ impl eframe::App for LauncherApp {
                             } else if a.action.starts_with("folder:remove:") {
                                 refresh = true;
                                 set_focus = true;
+                            }
+                            if self.hide_after_run
+                                && !a.action.starts_with("bookmark:add:")
+                                && !a.action.starts_with("bookmark:remove:")
+                                && !a.action.starts_with("folder:add:")
+                                && !a.action.starts_with("folder:remove:")
+                                && !a.action.starts_with("calc:")
+                            {
+                                self.visible_flag.store(false, Ordering::SeqCst);
                             }
                         }
                         self.selected = Some(idx);
