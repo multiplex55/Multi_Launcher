@@ -82,6 +82,7 @@ pub struct LauncherApp {
     timer_help: crate::timer_help_window::TimerHelpWindow,
     timer_dialog: crate::timer_dialog::TimerDialog,
     completion_dialog: crate::timer_dialog::TimerCompletionDialog,
+    shell_cmd_dialog: crate::shell_cmd_dialog::ShellCmdDialog,
     pub help_flag: Arc<AtomicBool>,
     pub hotkey_str: Option<String>,
     pub quit_hotkey_str: Option<String>,
@@ -254,6 +255,7 @@ impl LauncherApp {
             timer_help: TimerHelpWindow::default(),
             timer_dialog: TimerDialog::default(),
             completion_dialog: TimerCompletionDialog::default(),
+            shell_cmd_dialog: crate::shell_cmd_dialog::ShellCmdDialog::default(),
             help_flag: help_flag.clone(),
             hotkey_str: settings.hotkey.clone(),
             quit_hotkey_str: settings.quit_hotkey.clone(),
@@ -570,6 +572,8 @@ impl eframe::App for LauncherApp {
                             self.timer_dialog.open_timer();
                         } else if a.action == "timer:dialog:alarm" {
                             self.timer_dialog.open_alarm();
+                        } else if a.action == "shell:dialog" {
+                            self.shell_cmd_dialog.open();
                         } else if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
                             self.error_time = Some(Instant::now());
@@ -748,6 +752,8 @@ impl eframe::App for LauncherApp {
                             self.timer_dialog.open_timer();
                         } else if a.action == "timer:dialog:alarm" {
                             self.timer_dialog.open_alarm();
+                        } else if a.action == "shell:dialog" {
+                            self.shell_cmd_dialog.open();
                         } else if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
                             self.error_time = Some(Instant::now());
@@ -847,6 +853,9 @@ impl eframe::App for LauncherApp {
         let mut comp = std::mem::take(&mut self.completion_dialog);
         comp.ui(ctx);
         self.completion_dialog = comp;
+        let mut shell_dlg = std::mem::take(&mut self.shell_cmd_dialog);
+        shell_dlg.ui(ctx, self);
+        self.shell_cmd_dialog = shell_dlg;
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

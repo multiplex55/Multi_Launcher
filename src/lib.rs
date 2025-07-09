@@ -18,6 +18,7 @@ pub mod visibility;
 pub mod help_window;
 pub mod timer_help_window;
 pub mod timer_dialog;
+pub mod shell_cmd_dialog;
 
 pub mod window_manager;
 pub mod workspace;
