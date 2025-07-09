@@ -24,6 +24,7 @@ mod help_window;
 mod timer_help_window;
 mod timer_dialog;
 mod shell_cmd_dialog;
+mod snippet_dialog;
 
 use crate::actions::{load_actions, Action};
 use crate::gui::LauncherApp;
