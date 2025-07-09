@@ -28,33 +28,55 @@ fn new_app_with_settings(ctx: &egui::Context, actions: Vec<Action>, settings: Se
     visible)
 }
 
-#[test]
-fn hide_after_run_updates_visibility() {
+fn run_action(action: &str) -> bool {
     let ctx = egui::Context::default();
-    let actions = vec![Action { label: "clear".into(), desc: "".into(), action: "history:clear".into(), args: None }];
+    let actions = vec![Action { label: "test".into(), desc: "".into(), action: action.into(), args: None }];
     let (mut app, flag) = new_app_with_settings(&ctx, actions, Settings::default());
     app.update_paths(
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(true),
+        None, None, None, None, None, None, None, None, None, None, None, None, Some(true),
     );
-    assert!(app.hide_after_run);
-    assert!(flag.load(Ordering::SeqCst));
+    flag.store(true, Ordering::SeqCst);
     let a = app.results[0].clone();
     if multi_launcher::launcher::launch_action(&a).is_ok() {
-        if app.hide_after_run {
+        if app.hide_after_run
+            && !a.action.starts_with("bookmark:add:")
+            && !a.action.starts_with("bookmark:remove:")
+            && !a.action.starts_with("folder:add:")
+            && !a.action.starts_with("folder:remove:")
+            && !a.action.starts_with("calc:")
+        {
             flag.store(false, Ordering::SeqCst);
         }
     }
-    assert!(!flag.load(Ordering::SeqCst));
+    !flag.load(Ordering::SeqCst)
+}
+
+#[test]
+fn hide_after_run_updates_visibility() {
+    assert!(run_action("history:clear"));
+}
+
+#[test]
+fn hide_after_run_not_for_bookmark_add() {
+    assert!(!run_action("bookmark:add:https://example.com"));
+}
+
+#[test]
+fn hide_after_run_not_for_bookmark_remove() {
+    assert!(!run_action("bookmark:remove:https://example.com"));
+}
+
+#[test]
+fn hide_after_run_not_for_folder_add() {
+    assert!(!run_action("folder:add:/tmp"));
+}
+
+#[test]
+fn hide_after_run_not_for_folder_remove() {
+    assert!(!run_action("folder:remove:/tmp"));
+}
+
+#[test]
+fn hide_after_run_not_for_calc_copy() {
+    assert!(!run_action("calc:1+2"));
 }

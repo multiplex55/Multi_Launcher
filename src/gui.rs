@@ -611,7 +611,13 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                                 set_focus = true;
                             }
-                            if self.hide_after_run {
+                            if self.hide_after_run
+                                && !a.action.starts_with("bookmark:add:")
+                                && !a.action.starts_with("bookmark:remove:")
+                                && !a.action.starts_with("folder:add:")
+                                && !a.action.starts_with("folder:remove:")
+                                && !a.action.starts_with("calc:")
+                            {
                                 self.visible_flag.store(false, Ordering::SeqCst);
                             }
                         }
@@ -783,7 +789,13 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                                 set_focus = true;
                             }
-                            if self.hide_after_run {
+                            if self.hide_after_run
+                                && !a.action.starts_with("bookmark:add:")
+                                && !a.action.starts_with("bookmark:remove:")
+                                && !a.action.starts_with("folder:add:")
+                                && !a.action.starts_with("folder:remove:")
+                                && !a.action.starts_with("calc:")
+                            {
                                 self.visible_flag.store(false, Ordering::SeqCst);
                             }
                         }
