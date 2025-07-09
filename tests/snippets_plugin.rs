@@ -36,3 +36,35 @@ fn search_returns_clipboard_action() {
     assert_eq!(results[0].action, "clipboard:hello world");
     assert_eq!(results[0].desc, "Snippet");
 }
+
+#[test]
+fn list_command_returns_entries() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let entries = vec![
+        SnippetEntry { alias: "a".into(), text: "alpha".into() },
+        SnippetEntry { alias: "b".into(), text: "beta".into() },
+    ];
+    save_snippets(SNIPPETS_FILE, &entries).unwrap();
+
+    let plugin = SnippetsPlugin::default();
+    let results = plugin.search("cs list");
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn rm_command_returns_remove_actions() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let entries = vec![SnippetEntry { alias: "todelete".into(), text: "bye".into() }];
+    save_snippets(SNIPPETS_FILE, &entries).unwrap();
+
+    let plugin = SnippetsPlugin::default();
+    let results = plugin.search("cs rm todelete");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "snippet:remove:todelete");
+}
