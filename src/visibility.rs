@@ -33,6 +33,7 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
     static_enabled: bool,
     static_pos: Option<(f32, f32)>,
     static_size: Option<(f32, f32)>,
+    window_size: (f32, f32),
 ) {
     if trigger.take() {
         let old = visibility.load(Ordering::SeqCst);
@@ -49,6 +50,7 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
                     static_enabled,
                     static_pos,
                     static_size,
+                    window_size,
                 );
                 if next {
                     restore_flag.store(true, Ordering::SeqCst);
@@ -82,6 +84,7 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
                     static_enabled,
                     static_pos,
                     static_size,
+                    window_size,
                 );
                 if next {
                     restore_flag.store(true, Ordering::SeqCst);
@@ -102,6 +105,7 @@ pub fn apply_visibility<C: ViewportCtx>(
     static_enabled: bool,
     static_pos: Option<(f32, f32)>,
     static_size: Option<(f32, f32)>,
+    window_size: (f32, f32),
 ) {
     if visible {
         if static_enabled {
@@ -113,7 +117,9 @@ pub fn apply_visibility<C: ViewportCtx>(
             }
         } else if follow_mouse {
             if let Some((x, y)) = crate::window_manager::current_mouse_position() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+                let pos_x = x - window_size.0 / 2.0;
+                let pos_y = y - window_size.1 / 2.0;
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(pos_x, pos_y)));
             }
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));

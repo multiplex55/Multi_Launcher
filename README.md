@@ -114,8 +114,8 @@ off-screen. The default is `[2000, 2000]`.
 The window is restored to this size on the next start. The default is
 `[400, 220]` if the value is missing.
 
-When `follow_mouse` is `true` the window appears at the current cursor
-location whenever it becomes visible. To keep the launcher at a specific
+When `follow_mouse` is `true` the window is centered on the mouse cursor
+whenever it becomes visible. To keep the launcher at a specific
 position instead, set `follow_mouse` to `false` and enable
 `static_location_enabled`. Provide the desired coordinates in `static_pos`
 and optionally a fixed size via `static_size`. The **Settings** window now

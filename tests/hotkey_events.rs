@@ -61,6 +61,7 @@ fn zero_key_events_toggle_visibility() {
         false,
         None,
         None,
+        (400.0, 220.0),
     );
     assert_eq!(visibility.load(Ordering::SeqCst), true);
 
@@ -76,6 +77,7 @@ fn zero_key_events_toggle_visibility() {
         false,
         None,
         None,
+        (400.0, 220.0),
     );
     assert_eq!(visibility.load(Ordering::SeqCst), false);
 }

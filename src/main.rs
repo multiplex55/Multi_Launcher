@@ -238,6 +238,10 @@ fn main() -> anyhow::Result<()> {
             settings.static_location_enabled,
             settings.static_pos.map(|(x, y)| (x as f32, y as f32)),
             settings.static_size.map(|(w, h)| (w as f32, h as f32)),
+            {
+                let (w, h) = settings.window_size.unwrap_or((400, 220));
+                (w as f32, h as f32)
+            },
         );
 
         std::thread::sleep(std::time::Duration::from_millis(50));

@@ -30,6 +30,7 @@ fn focus_when_becoming_visible() {
         false,
         None,
         None,
+        (400.0, 220.0),
     );
 
     assert_eq!(visibility.load(Ordering::SeqCst), true);
