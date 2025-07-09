@@ -8,7 +8,7 @@ use mock_ctx::MockCtx;
 #[test]
 fn offscreen_position_when_hidden() {
     let ctx = MockCtx::default();
-    apply_visibility(false, &ctx, (42.0, 84.0), true, false, None, None);
+    apply_visibility(false, &ctx, (42.0, 84.0), true, false, None, None, (400.0, 220.0));
     let cmds = ctx.commands.lock().unwrap();
     assert_eq!(cmds.len(), 1);
     match cmds[0] {

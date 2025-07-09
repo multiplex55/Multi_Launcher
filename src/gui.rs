@@ -282,6 +282,7 @@ impl LauncherApp {
             static_enabled,
             static_pos.map(|(x, y)| (x as f32, y as f32)),
             static_size.map(|(w, h)| (w as f32, h as f32)),
+            (win_size.0 as f32, win_size.1 as f32),
         );
 
         #[cfg(target_os = "windows")]
@@ -455,6 +456,7 @@ impl eframe::App for LauncherApp {
                 self.static_location_enabled,
                 self.static_pos.map(|(x, y)| (x as f32, y as f32)),
                 self.static_size.map(|(w, h)| (w as f32, h as f32)),
+                (self.window_size.0 as f32, self.window_size.1 as f32),
             );
             #[cfg(target_os = "windows")]
             if let Some(hwnd) = crate::window_manager::get_hwnd(frame) {
@@ -474,6 +476,7 @@ impl eframe::App for LauncherApp {
                 self.static_location_enabled,
                 self.static_pos.map(|(x, y)| (x as f32, y as f32)),
                 self.static_size.map(|(w, h)| (w as f32, h as f32)),
+                (self.window_size.0 as f32, self.window_size.1 as f32),
             );
             self.last_visible = should_be_visible;
         }

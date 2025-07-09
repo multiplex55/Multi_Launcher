@@ -28,6 +28,7 @@ fn queued_visibility_applies_when_context_available() {
         false,
         None,
         None,
+        (400.0, 220.0),
     );
 
     assert_eq!(visibility.load(Ordering::SeqCst), true);
@@ -51,6 +52,7 @@ fn queued_visibility_applies_when_context_available() {
         false,
         None,
         None,
+        (400.0, 220.0),
     );
 
     assert!(queued_visibility.is_none());

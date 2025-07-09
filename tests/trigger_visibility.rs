@@ -30,6 +30,7 @@ fn visibility_toggle_immediate_when_context_present() {
         false,
         None,
         None,
+        (400.0, 220.0),
     );
 
     assert_eq!(visibility.load(Ordering::SeqCst), true);
