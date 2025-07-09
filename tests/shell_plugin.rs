@@ -34,3 +34,15 @@ fn search_named_command_returns_action() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "shell:dir");
 }
+
+#[test]
+fn search_plain_sh_opens_dialog() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let plugin = ShellPlugin;
+    let results = plugin.search("sh");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "shell:dialog");
+}

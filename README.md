@@ -209,6 +209,7 @@ The bookmarks plugin uses the `bm` prefix. Use `bm add <url>` to save a link and
 `bm rm <pattern>` to remove one via fuzzy search.
 ### Security Considerations
 The shell plugin runs commands using the system shell without sanitising input. Only enable it if you trust the commands you type. Errors while spawning the process are logged.
+Type `sh` in the launcher to open the shell command editor for managing predefined commands.
 ## Editing Commands
 The launcher stores its custom actions in `actions.json`. While running the
 application you can manage this list through **Edit Commands**. Open the

@@ -34,7 +34,7 @@ impl Plugin for ShellPlugin {
         let trimmed = query.trim();
         if trimmed.eq_ignore_ascii_case("sh") {
             return vec![Action {
-                label: "Edit shell commands".into(),
+                label: "sh: edit saved commands".into(),
                 desc: "Shell".into(),
                 action: "shell:dialog".into(),
                 args: None,
@@ -80,7 +80,7 @@ impl Plugin for ShellPlugin {
     }
 
     fn description(&self) -> &str {
-        "Run arbitrary shell commands (prefix: `sh`)"
+        "Run arbitrary shell commands (prefix: `sh`; type `sh` to edit presets)"
     }
 
     fn capabilities(&self) -> &[&str] {
