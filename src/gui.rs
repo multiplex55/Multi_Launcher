@@ -19,6 +19,8 @@ use std::collections::HashMap;
 use crate::help_window::HelpWindow;
 use crate::timer_help_window::TimerHelpWindow;
 use crate::timer_dialog::{TimerDialog, TimerCompletionDialog};
+use crate::snippet_dialog::SnippetDialog;
+use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
 use std::time::Instant;
 
 fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -83,6 +85,7 @@ pub struct LauncherApp {
     timer_dialog: crate::timer_dialog::TimerDialog,
     completion_dialog: crate::timer_dialog::TimerCompletionDialog,
     shell_cmd_dialog: crate::shell_cmd_dialog::ShellCmdDialog,
+    snippet_dialog: SnippetDialog,
     pub help_flag: Arc<AtomicBool>,
     pub hotkey_str: Option<String>,
     pub quit_hotkey_str: Option<String>,
@@ -256,6 +259,7 @@ impl LauncherApp {
             timer_dialog: TimerDialog::default(),
             completion_dialog: TimerCompletionDialog::default(),
             shell_cmd_dialog: crate::shell_cmd_dialog::ShellCmdDialog::default(),
+            snippet_dialog: SnippetDialog::default(),
             help_flag: help_flag.clone(),
             hotkey_str: settings.hotkey.clone(),
             quit_hotkey_str: settings.quit_hotkey.clone(),
@@ -577,6 +581,8 @@ impl eframe::App for LauncherApp {
                             self.timer_dialog.open_alarm();
                         } else if a.action == "shell:dialog" {
                             self.shell_cmd_dialog.open();
+                        } else if a.action == "snippet:dialog" {
+                            self.snippet_dialog.open();
                         } else if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
                             self.error_time = Some(Instant::now());
@@ -589,8 +595,13 @@ impl eframe::App for LauncherApp {
                             }
                         } else {
                             if self.enable_toasts {
+                                let msg = if a.action.starts_with("clipboard:") {
+                                    format!("Copied {}", a.label)
+                                } else {
+                                    format!("Launched {}", a.label)
+                                };
                                 self.toasts.add(Toast {
-                                    text: format!("Launched {}", a.label).into(),
+                                    text: msg.into(),
                                     kind: ToastKind::Success,
                                     options: ToastOptions::default().duration_in_seconds(3.0),
                                 });
@@ -732,6 +743,29 @@ impl eframe::App for LauncherApp {
                                 ui.close_menu();
                             }
                         });
+                    } else if a.desc == "Snippet" {
+                        menu_resp.clone().context_menu(|ui| {
+                            if ui.button("Edit Snippet").clicked() {
+                                self.snippet_dialog.open_edit(&a.label);
+                                ui.close_menu();
+                            }
+                            if ui.button("Remove Snippet").clicked() {
+                                if let Err(e) = remove_snippet(SNIPPETS_FILE, &a.label) {
+                                    self.error = Some(format!("Failed to remove snippet: {e}"));
+                                } else {
+                                    refresh = true;
+                                    set_focus = true;
+                                    if self.enable_toasts {
+                                        self.toasts.add(Toast {
+                                            text: format!("Removed snippet {}", a.label).into(),
+                                            kind: ToastKind::Success,
+                                            options: ToastOptions::default().duration_in_seconds(3.0),
+                                        });
+                                    }
+                                }
+                                ui.close_menu();
+                            }
+                        });
                     }
                     if let Some(idx_act) = custom_idx {
                         menu_resp.clone().context_menu(|ui| {
@@ -757,6 +791,8 @@ impl eframe::App for LauncherApp {
                             self.timer_dialog.open_alarm();
                         } else if a.action == "shell:dialog" {
                             self.shell_cmd_dialog.open();
+                        } else if a.action == "snippet:dialog" {
+                            self.snippet_dialog.open();
                         } else if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
                             self.error_time = Some(Instant::now());
@@ -769,8 +805,13 @@ impl eframe::App for LauncherApp {
                             }
                         } else {
                             if self.enable_toasts {
+                                let msg = if a.action.starts_with("clipboard:") {
+                                    format!("Copied {}", a.label)
+                                } else {
+                                    format!("Launched {}", a.label)
+                                };
                                 self.toasts.add(Toast {
-                                    text: format!("Launched {}", a.label).into(),
+                                    text: msg.into(),
                                     kind: ToastKind::Success,
                                     options: ToastOptions::default().duration_in_seconds(3.0),
                                 });
@@ -859,6 +900,9 @@ impl eframe::App for LauncherApp {
         let mut shell_dlg = std::mem::take(&mut self.shell_cmd_dialog);
         shell_dlg.ui(ctx, self);
         self.shell_cmd_dialog = shell_dlg;
+        let mut snip_dlg = std::mem::take(&mut self.snippet_dialog);
+        snip_dlg.ui(ctx, self);
+        self.snippet_dialog = snip_dlg;
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

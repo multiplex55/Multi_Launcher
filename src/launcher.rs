@@ -2,6 +2,7 @@ use crate::actions::Action;
 use crate::plugins::bookmarks::{append_bookmark, remove_bookmark};
 use crate::plugins::folders::{append_folder, remove_folder, FOLDERS_FILE};
 use crate::plugins::notes::{append_note, remove_note, load_notes, QUICK_NOTES_FILE};
+use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
 use crate::plugins::timer;
 use crate::history;
 use sysinfo::System;
@@ -173,6 +174,10 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
                 cb.set_text(entry.text)?;
             }
         }
+        return Ok(());
+    }
+    if let Some(alias) = action.action.strip_prefix("snippet:remove:") {
+        remove_snippet(SNIPPETS_FILE, alias)?;
         return Ok(());
     }
     let path = Path::new(&action.action);

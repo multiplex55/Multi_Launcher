@@ -16,6 +16,7 @@ use crate::plugins::wikipedia::WikipediaPlugin;
 use crate::plugins::weather::WeatherPlugin;
 use crate::plugins::timer::TimerPlugin;
 use crate::plugins::notes::NotesPlugin;
+use crate::plugins::snippets::SnippetsPlugin;
 
 pub trait Plugin: Send + Sync {
     /// Return actions based on the query string
@@ -65,6 +66,7 @@ impl PluginManager {
         self.register(Box::new(ShellPlugin));
         self.register(Box::new(HistoryPlugin));
         self.register(Box::new(NotesPlugin::default()));
+        self.register(Box::new(SnippetsPlugin::default()));
         self.register(Box::new(HelpPlugin));
         self.register(Box::new(TimerPlugin));
         crate::plugins::timer::load_saved_alarms();
