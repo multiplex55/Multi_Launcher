@@ -20,6 +20,7 @@ use crate::help_window::HelpWindow;
 use crate::timer_help_window::TimerHelpWindow;
 use crate::timer_dialog::{TimerDialog, TimerCompletionDialog};
 use crate::snippet_dialog::SnippetDialog;
+use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
 use std::time::Instant;
 
 fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -746,6 +747,22 @@ impl eframe::App for LauncherApp {
                         menu_resp.clone().context_menu(|ui| {
                             if ui.button("Edit Snippet").clicked() {
                                 self.snippet_dialog.open_edit(&a.label);
+                                ui.close_menu();
+                            }
+                            if ui.button("Remove Snippet").clicked() {
+                                if let Err(e) = remove_snippet(SNIPPETS_FILE, &a.label) {
+                                    self.error = Some(format!("Failed to remove snippet: {e}"));
+                                } else {
+                                    refresh = true;
+                                    set_focus = true;
+                                    if self.enable_toasts {
+                                        self.toasts.add(Toast {
+                                            text: format!("Removed snippet {}", a.label).into(),
+                                            kind: ToastKind::Success,
+                                            options: ToastOptions::default().duration_in_seconds(3.0),
+                                        });
+                                    }
+                                }
                                 ui.close_menu();
                             }
                         });

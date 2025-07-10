@@ -1,10 +1,14 @@
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::timer::{TimerPlugin, ACTIVE_TIMERS, TimerEntry};
-use std::sync::{Arc, atomic::AtomicBool};
+use once_cell::sync::Lazy;
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use std::time::{Duration, Instant, SystemTime};
+
+static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[test]
 fn search_timer_dialog() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let plugin = TimerPlugin;
     let results = plugin.search("timer");
     assert_eq!(results.len(), 1);
@@ -13,6 +17,7 @@ fn search_timer_dialog() {
 
 #[test]
 fn search_alarm_dialog() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let plugin = TimerPlugin;
     let results = plugin.search("alarm");
     assert_eq!(results.len(), 1);
@@ -21,6 +26,7 @@ fn search_alarm_dialog() {
 
 #[test]
 fn search_timer_returns_start_action() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let plugin = TimerPlugin;
     let results = plugin.search("timer 1s");
     assert_eq!(results.len(), 1);
@@ -29,6 +35,7 @@ fn search_timer_returns_start_action() {
 
 #[test]
 fn search_named_timer() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let plugin = TimerPlugin;
     let results = plugin.search("timer 1s tea");
     assert_eq!(results.len(), 1);
@@ -37,6 +44,7 @@ fn search_named_timer() {
 
 #[test]
 fn search_cancel_lists_timers() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     // manually insert an active timer
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
@@ -58,6 +66,7 @@ fn search_cancel_lists_timers() {
 
 #[test]
 fn search_list_lists_timers() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
         list.push(TimerEntry {
@@ -77,6 +86,7 @@ fn search_list_lists_timers() {
 
 #[test]
 fn take_finished_returns_messages() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     use multi_launcher::plugins::timer::{FINISHED_MESSAGES, take_finished_messages};
     FINISHED_MESSAGES.lock().unwrap().push("done".to_string());
     let msgs = take_finished_messages();
