@@ -53,3 +53,16 @@ fn remove_action_returns_indices() {
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].text, "second");
 }
+
+#[test]
+fn search_plain_note_opens_dialog() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let plugin = NotesPlugin::default();
+    let results = plugin.search("note");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "note:dialog");
+    assert_eq!(results[0].label, "note: edit notes");
+}

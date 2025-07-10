@@ -119,6 +119,15 @@ impl Plugin for NotesPlugin {
                 .collect();
         }
 
+        if query.trim() == "note" {
+            return vec![Action {
+                label: "note: edit notes".into(),
+                desc: "Note".into(),
+                action: "note:dialog".into(),
+                args: None,
+            }];
+        }
+
         Vec::new()
     }
 
