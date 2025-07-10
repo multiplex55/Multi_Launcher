@@ -76,7 +76,19 @@ impl NotesDialog {
                         for idx in 0..self.entries.len() {
                             let entry = self.entries[idx].clone();
                             ui.horizontal(|ui| {
-                                ui.label(entry.text.replace('\n', " "));
+                                let resp = ui.label(entry.text.replace('\n', " "));
+                                let idx_copy = idx;
+                                resp.clone().context_menu(|ui| {
+                                    if ui.button("Edit Note").clicked() {
+                                        self.edit_idx = Some(idx_copy);
+                                        self.text = entry.text.clone();
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Remove Note").clicked() {
+                                        remove = Some(idx_copy);
+                                        ui.close_menu();
+                                    }
+                                });
                                 if ui.button("Edit").clicked() {
                                     self.edit_idx = Some(idx);
                                     self.text = entry.text.clone();

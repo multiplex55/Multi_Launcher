@@ -804,6 +804,36 @@ impl eframe::App for LauncherApp {
                                 ui.close_menu();
                             }
                         });
+                    } else if a.desc == "Note" && (a.action.starts_with("note:copy:") || a.action.starts_with("note:remove:")) {
+                        let idx_str = a.action.rsplit(':').next().unwrap_or("");
+                        if let Ok(note_idx) = idx_str.parse::<usize>() {
+                            let note_label = a.label.clone();
+                            menu_resp.clone().context_menu(|ui| {
+                                if ui.button("Edit Note").clicked() {
+                                    self.notes_dialog.open_edit(note_idx);
+                                    ui.close_menu();
+                                }
+                                if ui.button("Remove Note").clicked() {
+                                    if let Err(e) = crate::plugins::notes::remove_note(
+                                        crate::plugins::notes::QUICK_NOTES_FILE,
+                                        note_idx,
+                                    ) {
+                                        self.error = Some(format!("Failed to remove note: {e}"));
+                                    } else {
+                                        refresh = true;
+                                        set_focus = true;
+                                        if self.enable_toasts {
+                                            self.toasts.add(Toast {
+                                                text: format!("Removed note {}", note_label).into(),
+                                                kind: ToastKind::Success,
+                                                options: ToastOptions::default().duration_in_seconds(3.0),
+                                            });
+                                        }
+                                    }
+                                    ui.close_menu();
+                                }
+                            });
+                        }
                     }
                     if let Some(idx_act) = custom_idx {
                         menu_resp.clone().context_menu(|ui| {
