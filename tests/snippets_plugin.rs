@@ -68,3 +68,18 @@ fn rm_command_returns_remove_actions() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "snippet:remove:todelete");
 }
+
+#[test]
+fn search_preserves_newlines() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let entries = vec![SnippetEntry { alias: "multi".into(), text: "a\nb".into() }];
+    save_snippets(SNIPPETS_FILE, &entries).unwrap();
+
+    let plugin = SnippetsPlugin::default();
+    let results = plugin.search("cs multi");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "clipboard:a\nb");
+}

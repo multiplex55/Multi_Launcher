@@ -83,17 +83,15 @@ impl SnippetDialog {
                     egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                         for idx in 0..self.entries.len() {
                             let entry = self.entries[idx].clone();
-                            let resp = ui.label(format!("{}: {}", entry.alias, entry.text.replace('\n', " ")));
-                            resp.context_menu(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("{}: {}", entry.alias, entry.text.replace('\n', " ")));
                                 if ui.button("Edit").clicked() {
                                     self.edit_idx = Some(idx);
                                     self.alias = entry.alias.clone();
                                     self.text = entry.text.clone();
-                                    ui.close_menu();
                                 }
                                 if ui.button("Remove").clicked() {
                                     remove = Some(idx);
-                                    ui.close_menu();
                                 }
                             });
                         }
