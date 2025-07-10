@@ -83,6 +83,8 @@ pub enum Key {
     ControlRight,
     ShiftLeft,
     ShiftRight,
+    MetaLeft,
+    MetaRight,
     Alt,
     AltGr,
 }
@@ -103,6 +105,7 @@ pub struct Hotkey {
     pub ctrl: bool,
     pub shift: bool,
     pub alt: bool,
+    pub win: bool,
 }
 
 impl Default for Hotkey {
@@ -112,6 +115,7 @@ impl Default for Hotkey {
             ctrl: false,
             shift: false,
             alt: false,
+            win: false,
         }
     }
 }
@@ -121,6 +125,7 @@ pub fn parse_hotkey(s: &str) -> Option<Hotkey> {
     let mut ctrl = false;
     let mut shift = false;
     let mut alt = false;
+    let mut win = false;
     let mut key: Option<Key> = None;
 
     for part in s.split('+') {
@@ -129,6 +134,7 @@ pub fn parse_hotkey(s: &str) -> Option<Hotkey> {
             "CTRL" | "CONTROL" => ctrl = true,
             "SHIFT" => shift = true,
             "ALT" => alt = true,
+            "WIN" | "SUPER" => win = true,
             "" => {},
             _ => {
                 if let Some(k) = parse_key(&upper) {
@@ -145,6 +151,7 @@ pub fn parse_hotkey(s: &str) -> Option<Hotkey> {
         ctrl,
         shift,
         alt,
+        win,
     })
 }
 
@@ -253,6 +260,7 @@ pub struct HotkeyTrigger {
     pub ctrl: bool,
     pub shift: bool,
     pub alt: bool,
+    pub win: bool,
 }
 
 pub struct HotkeyListener {
@@ -267,6 +275,7 @@ impl HotkeyTrigger {
             ctrl: hotkey.ctrl,
             shift: hotkey.shift,
             alt: hotkey.alt,
+            win: hotkey.win,
         }
     }
 
@@ -275,6 +284,7 @@ impl HotkeyTrigger {
     pub fn start_listener(triggers: Vec<Arc<HotkeyTrigger>>, _label: &'static str) -> HotkeyListener {
         use windows::Win32::UI::Input::KeyboardAndMouse::{
             GetAsyncKeyState, VK_LCONTROL, VK_RCONTROL, VK_LSHIFT, VK_RSHIFT, VK_LMENU, VK_RMENU,
+            VK_LWIN, VK_RWIN,
         };
         use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
 
@@ -359,6 +369,7 @@ impl HotkeyTrigger {
         let need_ctrl: Vec<bool> = triggers.iter().map(|t| t.ctrl).collect();
         let need_shift: Vec<bool> = triggers.iter().map(|t| t.shift).collect();
         let need_alt: Vec<bool> = triggers.iter().map(|t| t.alt).collect();
+        let need_win: Vec<bool> = triggers.iter().map(|t| t.win).collect();
         thread::spawn(move || {
             unsafe {
                 let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
@@ -369,6 +380,7 @@ impl HotkeyTrigger {
                 let ctrl_pressed = is_down(VK_LCONTROL.0 as i32) || is_down(VK_RCONTROL.0 as i32);
                 let shift_pressed = is_down(VK_LSHIFT.0 as i32) || is_down(VK_RSHIFT.0 as i32);
                 let alt_pressed = is_down(VK_LMENU.0 as i32) || is_down(VK_RMENU.0 as i32);
+                let win_pressed = is_down(VK_LWIN.0 as i32) || is_down(VK_RWIN.0 as i32);
 
                 for i in 0..vk_keys.len() {
                     if let Some(vk) = vk_keys[i] {
@@ -377,13 +389,15 @@ impl HotkeyTrigger {
                             && !need_ctrl[i]
                             && !need_shift[i]
                             && !need_alt[i]
+                            && !need_win[i]
                         {
-                            key_down && !ctrl_pressed && !shift_pressed && !alt_pressed
+                            key_down && !ctrl_pressed && !shift_pressed && !alt_pressed && !win_pressed
                         } else {
                             key_down
                                 && (!need_ctrl[i] || ctrl_pressed)
                                 && (!need_shift[i] || shift_pressed)
                                 && (!need_alt[i] || alt_pressed)
+                                && (!need_win[i] || win_pressed)
                         };
                         if combo {
                             if !triggered[i] {
@@ -434,12 +448,14 @@ pub fn process_test_events(triggers: &[Arc<HotkeyTrigger>], events: &[EventType]
     let need_ctrl: Vec<bool> = triggers.iter().map(|t| t.ctrl).collect();
     let need_shift: Vec<bool> = triggers.iter().map(|t| t.shift).collect();
     let need_alt: Vec<bool> = triggers.iter().map(|t| t.alt).collect();
+    let need_win: Vec<bool> = triggers.iter().map(|t| t.win).collect();
 
     let mut watch_pressed = vec![false; triggers.len()];
     let mut triggered = vec![false; triggers.len()];
     let mut ctrl_pressed = false;
     let mut shift_pressed = false;
     let mut alt_pressed = false;
+    let mut win_pressed = false;
 
     for event in events {
         match *event {
@@ -448,6 +464,7 @@ pub fn process_test_events(triggers: &[Arc<HotkeyTrigger>], events: &[EventType]
                     Key::ControlLeft | Key::ControlRight => ctrl_pressed = true,
                     Key::ShiftLeft | Key::ShiftRight => shift_pressed = true,
                     Key::Alt | Key::AltGr => alt_pressed = true,
+                    Key::MetaLeft | Key::MetaRight => win_pressed = true,
                     _ => {}
                 }
                 for (i, wk) in watch_keys.iter().enumerate() {
@@ -461,6 +478,7 @@ pub fn process_test_events(triggers: &[Arc<HotkeyTrigger>], events: &[EventType]
                     Key::ControlLeft | Key::ControlRight => ctrl_pressed = false,
                     Key::ShiftLeft | Key::ShiftRight => shift_pressed = false,
                     Key::Alt | Key::AltGr => alt_pressed = false,
+                    Key::MetaLeft | Key::MetaRight => win_pressed = false,
                     _ => {}
                 }
                 for (i, wk) in watch_keys.iter().enumerate() {
@@ -477,13 +495,15 @@ pub fn process_test_events(triggers: &[Arc<HotkeyTrigger>], events: &[EventType]
                 && !need_ctrl[i]
                 && !need_shift[i]
                 && !need_alt[i]
+                && !need_win[i]
             {
-                watch_pressed[i] && !ctrl_pressed && !shift_pressed && !alt_pressed
+                watch_pressed[i] && !ctrl_pressed && !shift_pressed && !alt_pressed && !win_pressed
             } else {
                 watch_pressed[i]
                     && (!need_ctrl[i] || ctrl_pressed)
                     && (!need_shift[i] || shift_pressed)
                     && (!need_alt[i] || alt_pressed)
+                    && (!need_win[i] || win_pressed)
             };
             if combo {
                 if !triggered[i] {
