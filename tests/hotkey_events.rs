@@ -99,3 +99,21 @@ fn shift_capslock_does_not_trigger() {
 
     assert!(!trigger.take());
 }
+
+#[test]
+fn win_modifier_triggers() {
+    let hotkey = parse_hotkey("Win+F2").unwrap();
+    let trigger = Arc::new(HotkeyTrigger::new(hotkey));
+
+    let triggers = vec![trigger.clone()];
+    let events = vec![
+        EventType::KeyPress(Key::MetaLeft),
+        EventType::KeyPress(Key::F2),
+        EventType::KeyRelease(Key::F2),
+        EventType::KeyRelease(Key::MetaLeft),
+    ];
+
+    process_test_events(&triggers, &events);
+
+    assert!(trigger.take());
+}

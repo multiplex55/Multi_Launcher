@@ -136,6 +136,7 @@ impl Settings {
             ctrl: false,
             shift: false,
             alt: false,
+            win: false,
         }
     }
 
