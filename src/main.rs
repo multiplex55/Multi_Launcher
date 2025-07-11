@@ -27,6 +27,7 @@ mod shell_cmd_dialog;
 mod snippet_dialog;
 mod notes_dialog;
 mod volume_dialog;
+mod brightness_dialog;
 
 use crate::actions::{load_actions, Action};
 use crate::gui::LauncherApp;

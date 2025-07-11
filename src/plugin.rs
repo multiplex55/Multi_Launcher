@@ -18,6 +18,7 @@ use crate::plugins::timer::TimerPlugin;
 use crate::plugins::notes::NotesPlugin;
 use crate::plugins::snippets::SnippetsPlugin;
 use crate::plugins::volume::VolumePlugin;
+use crate::plugins::brightness::BrightnessPlugin;
 
 pub trait Plugin: Send + Sync {
     /// Return actions based on the query string
@@ -69,6 +70,7 @@ impl PluginManager {
         self.register(Box::new(NotesPlugin::default()));
         self.register(Box::new(SnippetsPlugin::default()));
         self.register(Box::new(VolumePlugin));
+        self.register(Box::new(BrightnessPlugin));
         self.register(Box::new(HelpPlugin));
         self.register(Box::new(TimerPlugin));
         crate::plugins::timer::load_saved_alarms();

@@ -75,6 +75,24 @@ fn mute_active_window() {
 #[cfg(not(target_os = "windows"))]
 fn mute_active_window() {}
 
+#[cfg(target_os = "windows")]
+fn set_display_brightness(percent: u32) {
+    use std::process::Command;
+    let _ = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1,{})",
+                percent
+            ),
+        ])
+        .spawn();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_display_brightness(_percent: u32) {}
+
 fn system_command(action: &str) -> Option<std::process::Command> {
     #[cfg(target_os = "windows")]
     {
@@ -243,6 +261,13 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     }
     if let Some(alias) = action.action.strip_prefix("snippet:remove:") {
         remove_snippet(SNIPPETS_FILE, alias)?;
+        return Ok(());
+    }
+    if let Some(val) = action.action.strip_prefix("brightness:set:") {
+        if let Ok(v) = val.parse::<u32>() {
+            #[cfg(target_os = "windows")]
+            set_display_brightness(v);
+        }
         return Ok(());
     }
     if let Some(val) = action.action.strip_prefix("volume:set:") {
