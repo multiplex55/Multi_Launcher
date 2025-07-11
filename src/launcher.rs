@@ -10,6 +10,68 @@ use arboard::Clipboard;
 use std::path::Path;
 use shlex;
 
+#[cfg(target_os = "windows")]
+fn set_system_volume(percent: u32) {
+    use windows::core::Interface;
+    use windows::Win32::Media::Audio::{IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eRender, eMultimedia};
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED};
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        if let Ok(enm) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+            if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
+                if let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, std::ptr::null()) {
+                    let _ = vol.SetMasterVolumeLevelScalar(percent as f32 / 100.0, std::ptr::null());
+                }
+            }
+        }
+        CoUninitialize();
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_system_volume(_percent: u32) {}
+
+#[cfg(target_os = "windows")]
+fn mute_active_window() {
+    use windows::core::Interface;
+    use windows::Win32::Media::Audio::{IAudioSessionManager2, IAudioSessionEnumerator, IAudioSessionControl2, IMMDeviceEnumerator, MMDeviceEnumerator, eRender, eMultimedia};
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        if let Ok(enm) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+            if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
+                if let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, std::ptr::null()) {
+                    if let Ok(list) = manager.GetSessionEnumerator() {
+                        let count = list.GetCount().unwrap_or(0);
+                        for i in 0..count {
+                            if let Ok(ctrl) = list.GetSession(i) {
+                                if let Ok(c2) = ctrl.cast::<IAudioSessionControl2>() {
+                                    if let Ok(session_pid) = c2.GetProcessId() {
+                                        if session_pid == pid {
+                                            let _ = c2.SetMute(true.into(), std::ptr::null());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        CoUninitialize();
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn mute_active_window() {}
+
 fn system_command(action: &str) -> Option<std::process::Command> {
     #[cfg(target_os = "windows")]
     {
@@ -178,6 +240,18 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     }
     if let Some(alias) = action.action.strip_prefix("snippet:remove:") {
         remove_snippet(SNIPPETS_FILE, alias)?;
+        return Ok(());
+    }
+    if let Some(val) = action.action.strip_prefix("volume:set:") {
+        if let Ok(v) = val.parse::<u32>() {
+            #[cfg(target_os = "windows")]
+            set_system_volume(v);
+        }
+        return Ok(());
+    }
+    if action.action == "volume:mute_active" {
+        #[cfg(target_os = "windows")]
+        mute_active_window();
         return Ok(());
     }
     let path = Path::new(&action.action);
