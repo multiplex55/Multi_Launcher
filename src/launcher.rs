@@ -12,7 +12,6 @@ use shlex;
 
 #[cfg(target_os = "windows")]
 fn set_system_volume(percent: u32) {
-    use windows::core::Interface;
     use windows::Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator, eRender, eMultimedia};
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED};
@@ -36,7 +35,7 @@ fn set_system_volume(_percent: u32) {}
 #[cfg(target_os = "windows")]
 fn mute_active_window() {
     use windows::core::Interface;
-    use windows::Win32::Media::Audio::{IAudioSessionManager2, IAudioSessionEnumerator, IAudioSessionControl2, ISimpleAudioVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eRender, eMultimedia};
+    use windows::Win32::Media::Audio::{IAudioSessionManager2, IAudioSessionControl2, ISimpleAudioVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eRender, eMultimedia};
     use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED};
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
@@ -74,6 +73,43 @@ fn mute_active_window() {
 
 #[cfg(not(target_os = "windows"))]
 fn mute_active_window() {}
+
+#[cfg(target_os = "windows")]
+fn set_display_brightness(percent: u32) {
+    use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
+    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
+    use windows::Win32::Devices::Display::{
+        DestroyPhysicalMonitors, GetNumberOfPhysicalMonitorsFromHMONITOR,
+        GetPhysicalMonitorsFromHMONITOR, PHYSICAL_MONITOR, SetMonitorBrightness,
+    };
+
+    unsafe extern "system" fn enum_monitors(hmonitor: HMONITOR, _hdc: HDC, _rect: *mut RECT, lparam: LPARAM) -> BOOL {
+        let percent = lparam.0 as u32;
+        let mut count: u32 = 0;
+        if GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count).is_ok() {
+            let mut monitors = vec![PHYSICAL_MONITOR::default(); count as usize];
+            if GetPhysicalMonitorsFromHMONITOR(hmonitor, &mut monitors).is_ok() {
+                for m in &monitors {
+                    let _ = SetMonitorBrightness(m.hPhysicalMonitor, percent);
+                }
+                let _ = DestroyPhysicalMonitors(&monitors);
+            }
+        }
+        true.into()
+    }
+
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            HDC(std::ptr::null_mut()),
+            None,
+            Some(enum_monitors),
+            LPARAM(percent as isize),
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_display_brightness(_percent: u32) {}
 
 fn system_command(action: &str) -> Option<std::process::Command> {
     #[cfg(target_os = "windows")]
@@ -178,7 +214,7 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     }
     if let Some(pid) = action.action.strip_prefix("process:kill:") {
         if let Ok(pid) = pid.parse::<u32>() {
-            let mut system = System::new_all();
+            let system = System::new_all();
             if let Some(process) = system.process(sysinfo::Pid::from_u32(pid)) {
                 let _ = process.kill();
             }
@@ -243,6 +279,13 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     }
     if let Some(alias) = action.action.strip_prefix("snippet:remove:") {
         remove_snippet(SNIPPETS_FILE, alias)?;
+        return Ok(());
+    }
+    if let Some(val) = action.action.strip_prefix("brightness:set:") {
+        if let Ok(v) = val.parse::<u32>() {
+            #[cfg(target_os = "windows")]
+            set_display_brightness(v);
+        }
         return Ok(());
     }
     if let Some(val) = action.action.strip_prefix("volume:set:") {

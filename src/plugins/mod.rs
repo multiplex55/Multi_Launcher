@@ -15,3 +15,4 @@ pub mod notes;
 pub mod timer;
 pub mod snippets;
 pub mod volume;
+pub mod brightness;

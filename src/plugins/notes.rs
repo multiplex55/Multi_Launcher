@@ -50,7 +50,7 @@ fn format_ts(ts: u64) -> String {
     Local
         .timestamp_opt(ts as i64, 0)
         .single()
-        .unwrap_or_else(|| Local.timestamp(0, 0))
+        .unwrap_or_else(|| Local.timestamp_opt(0, 0).single().unwrap())
         .format("%Y-%m-%d %H:%M")
         .to_string()
 }

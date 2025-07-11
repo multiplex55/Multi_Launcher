@@ -159,7 +159,6 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 /// of the foreground window.
 #[cfg(target_os = "windows")]
 pub fn move_to_current_desktop(hwnd: windows::Win32::Foundation::HWND) {
-    use windows::core::GUID;
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
     };

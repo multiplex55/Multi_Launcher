@@ -22,6 +22,7 @@ pub mod shell_cmd_dialog;
 pub mod snippet_dialog;
 pub mod notes_dialog;
 pub mod volume_dialog;
+pub mod brightness_dialog;
 
 pub mod window_manager;
 pub mod workspace;

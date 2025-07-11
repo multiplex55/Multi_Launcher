@@ -21,7 +21,6 @@ use crate::timer_help_window::TimerHelpWindow;
 use crate::timer_dialog::{TimerDialog, TimerCompletionDialog};
 use crate::snippet_dialog::SnippetDialog;
 use crate::notes_dialog::NotesDialog;
-use crate::volume_dialog::VolumeDialog;
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
 use std::time::Instant;
 
@@ -90,6 +89,7 @@ pub struct LauncherApp {
     snippet_dialog: SnippetDialog,
     notes_dialog: NotesDialog,
     volume_dialog: crate::volume_dialog::VolumeDialog,
+    brightness_dialog: crate::brightness_dialog::BrightnessDialog,
     pub help_flag: Arc<AtomicBool>,
     pub hotkey_str: Option<String>,
     pub quit_hotkey_str: Option<String>,
@@ -266,6 +266,7 @@ impl LauncherApp {
             snippet_dialog: SnippetDialog::default(),
             notes_dialog: NotesDialog::default(),
             volume_dialog: crate::volume_dialog::VolumeDialog::default(),
+            brightness_dialog: crate::brightness_dialog::BrightnessDialog::default(),
             help_flag: help_flag.clone(),
             hotkey_str: settings.hotkey.clone(),
             quit_hotkey_str: settings.quit_hotkey.clone(),
@@ -626,6 +627,8 @@ impl eframe::App for LauncherApp {
                             self.snippet_dialog.open();
                         } else if a.action == "volume:dialog" {
                             self.volume_dialog.open();
+                        } else if a.action == "brightness:dialog" {
+                            self.brightness_dialog.open();
                         } else if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
                             self.error_time = Some(Instant::now());
@@ -728,7 +731,7 @@ impl eframe::App for LauncherApp {
                         a.label.clone()
                     };
                     let mut resp = ui.selectable_label(self.selected == Some(idx), text);
-                    let mut menu_resp = resp.on_hover_text(&a.action);
+                    let menu_resp = resp.on_hover_text(&a.action);
                     let custom_idx = self
                         .actions
                         .iter()
@@ -870,6 +873,8 @@ impl eframe::App for LauncherApp {
                             self.snippet_dialog.open();
                         } else if a.action == "volume:dialog" {
                             self.volume_dialog.open();
+                        } else if a.action == "brightness:dialog" {
+                            self.brightness_dialog.open();
                         } else if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
                             self.error_time = Some(Instant::now());
@@ -986,6 +991,9 @@ impl eframe::App for LauncherApp {
         let mut vol_dlg = std::mem::take(&mut self.volume_dialog);
         vol_dlg.ui(ctx, self);
         self.volume_dialog = vol_dlg;
+        let mut bright_dlg = std::mem::take(&mut self.brightness_dialog);
+        bright_dlg.ui(ctx, self);
+        self.brightness_dialog = bright_dlg;
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
