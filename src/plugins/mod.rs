@@ -14,3 +14,4 @@ pub mod weather;
 pub mod notes;
 pub mod timer;
 pub mod snippets;
+pub mod volume;

@@ -21,6 +21,7 @@ use crate::timer_help_window::TimerHelpWindow;
 use crate::timer_dialog::{TimerDialog, TimerCompletionDialog};
 use crate::snippet_dialog::SnippetDialog;
 use crate::notes_dialog::NotesDialog;
+use crate::volume_dialog::VolumeDialog;
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
 use std::time::Instant;
 
@@ -88,6 +89,7 @@ pub struct LauncherApp {
     shell_cmd_dialog: crate::shell_cmd_dialog::ShellCmdDialog,
     snippet_dialog: SnippetDialog,
     notes_dialog: NotesDialog,
+    volume_dialog: crate::volume_dialog::VolumeDialog,
     pub help_flag: Arc<AtomicBool>,
     pub hotkey_str: Option<String>,
     pub quit_hotkey_str: Option<String>,
@@ -263,6 +265,7 @@ impl LauncherApp {
             shell_cmd_dialog: crate::shell_cmd_dialog::ShellCmdDialog::default(),
             snippet_dialog: SnippetDialog::default(),
             notes_dialog: NotesDialog::default(),
+            volume_dialog: crate::volume_dialog::VolumeDialog::default(),
             help_flag: help_flag.clone(),
             hotkey_str: settings.hotkey.clone(),
             quit_hotkey_str: settings.quit_hotkey.clone(),
@@ -621,6 +624,8 @@ impl eframe::App for LauncherApp {
                             self.notes_dialog.open();
                         } else if a.action == "snippet:dialog" {
                             self.snippet_dialog.open();
+                        } else if a.action == "volume:dialog" {
+                            self.volume_dialog.open();
                         } else if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
                             self.error_time = Some(Instant::now());
@@ -863,6 +868,8 @@ impl eframe::App for LauncherApp {
                             self.notes_dialog.open();
                         } else if a.action == "snippet:dialog" {
                             self.snippet_dialog.open();
+                        } else if a.action == "volume:dialog" {
+                            self.volume_dialog.open();
                         } else if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
                             self.error_time = Some(Instant::now());
@@ -976,6 +983,9 @@ impl eframe::App for LauncherApp {
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
         notes_dlg.ui(ctx, self);
         self.notes_dialog = notes_dlg;
+        let mut vol_dlg = std::mem::take(&mut self.volume_dialog);
+        vol_dlg.ui(ctx, self);
+        self.volume_dialog = vol_dlg;
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
