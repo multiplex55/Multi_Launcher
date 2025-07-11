@@ -88,7 +88,7 @@ fn example_queries(name: &str) -> Option<&'static [&'static str]> {
         "reddit" => Some(&["red cats"]),
         "calculator" => Some(&["= 1+2"]),
         "clipboard" => Some(&["cb"]),
-        "bookmarks" => Some(&["bm add https://example.com", "bm list"]),
+        "bookmarks" => Some(&["bm add https://example.com", "bm rm", "bm list"]),
         "folders" => Some(&["f add C:/path", "f rm docs"]),
         "shell" => Some(&["sh", "sh echo hello"]),
         "system" => Some(&["sys shutdown"]),

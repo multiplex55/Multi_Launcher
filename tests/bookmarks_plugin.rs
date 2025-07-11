@@ -78,3 +78,26 @@ fn bm_list_returns_bookmarks() {
     assert!(results.iter().any(|a| a.action == "https://rust-lang.org"));
 }
 
+#[test]
+fn bm_rm_lists_bookmarks_without_filter() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let entries = vec![
+        BookmarkEntry { url: "https://example.com".into(), alias: Some("ex".into()) },
+        BookmarkEntry { url: "https://rust-lang.org".into(), alias: None },
+    ];
+    save_bookmarks(BOOKMARKS_FILE, &entries).unwrap();
+
+    let plugin = BookmarksPlugin::default();
+    let results = plugin.search("bm rm");
+    assert_eq!(results.len(), 2);
+    assert!(results
+        .iter()
+        .any(|a| a.action == "bookmark:remove:https://example.com"));
+    assert!(results
+        .iter()
+        .any(|a| a.action == "bookmark:remove:https://rust-lang.org"));
+}
+

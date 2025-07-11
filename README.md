@@ -147,7 +147,7 @@ Built-in plugins and their command prefixes are:
 - Weather lookup (`weather Berlin`)
 - Calculator (`= 2+2`)
 - Clipboard history (`cb`)
-- Bookmarks (`bm add <url>`, `bm rm <pattern>` or `bm list`)
+- Bookmarks (`bm add <url>`, `bm rm [pattern]` or `bm list`)
 - Folder shortcuts (`f`, `f add <path>`, `f rm <pattern>`)
 - Shell commands (`sh echo hi`)
 - System actions (`sys shutdown`)
@@ -206,8 +206,9 @@ be aliased by right clicking them in the results list. Hovering a folder result
 shows its full path. A plugin setting "show full path always" controls whether
 the full path is displayed next to an alias or only as a tooltip.
 The bookmarks plugin uses the `bm` prefix. Use `bm add <url>` to save a link,
-`bm rm <pattern>` to remove one via fuzzy search or `bm list` to show all
-bookmarks. Searching with `bm <term>` matches both URLs and aliases.
+`bm rm` to list and remove bookmarks (optionally filtering with a pattern) or
+`bm list` to show all bookmarks. Searching with `bm <term>` matches both URLs
+and aliases.
 ### Security Considerations
 The shell plugin runs commands using the system shell without sanitising input. Only enable it if you trust the commands you type. Errors while spawning the process are logged.
 Type `sh` in the launcher to open the shell command editor for managing predefined commands.

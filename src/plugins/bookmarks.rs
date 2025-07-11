@@ -129,12 +129,19 @@ impl Plugin for BookmarksPlugin {
                 }];
             }
         }
-        if let Some(pattern) = trimmed.strip_prefix("bm rm ") {
-            let filter = pattern.trim();
+        if let Some(rest) = trimmed.strip_prefix("bm rm") {
+            let filter = rest.trim();
             let bookmarks = load_bookmarks(BOOKMARKS_FILE).unwrap_or_default();
             return bookmarks
                 .into_iter()
-                .filter(|b| self.matcher.fuzzy_match(&b.url, filter).is_some())
+                .filter(|b| {
+                    self.matcher.fuzzy_match(&b.url, filter).is_some()
+                        || b
+                            .alias
+                            .as_ref()
+                            .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
+                            .unwrap_or(false)
+                })
                 .map(|b| Action {
                     label: format!("Remove bookmark {}", b.url),
                     desc: "Bookmark".into(),
