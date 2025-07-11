@@ -107,7 +107,17 @@ impl Default for BookmarksPlugin {
 
 impl Plugin for BookmarksPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        if let Some(url) = query.strip_prefix("bm add ") {
+        let trimmed = query.trim();
+        if trimmed.eq_ignore_ascii_case("bm") || trimmed.eq_ignore_ascii_case("bm add") {
+            return vec![Action {
+                label: "bm: add bookmark".into(),
+                desc: "Bookmark".into(),
+                action: "bookmark:dialog".into(),
+                args: None,
+            }];
+        }
+
+        if let Some(url) = trimmed.strip_prefix("bm add ") {
             let url = url.trim();
             if !url.is_empty() {
                 let norm = normalize_url(url);
@@ -119,8 +129,7 @@ impl Plugin for BookmarksPlugin {
                 }];
             }
         }
-
-        if let Some(pattern) = query.strip_prefix("bm rm ") {
+        if let Some(pattern) = trimmed.strip_prefix("bm rm ") {
             let filter = pattern.trim();
             let bookmarks = load_bookmarks(BOOKMARKS_FILE).unwrap_or_default();
             return bookmarks
@@ -134,11 +143,10 @@ impl Plugin for BookmarksPlugin {
                 })
                 .collect();
         }
-
-        if !query.starts_with("bm") {
+        if !trimmed.starts_with("bm") {
             return Vec::new();
         }
-        let filter = query.strip_prefix("bm").unwrap_or("").trim();
+        let filter = trimmed.strip_prefix("bm").unwrap_or("").trim();
         let bookmarks = load_bookmarks(BOOKMARKS_FILE).unwrap_or_default();
         bookmarks
             .into_iter()

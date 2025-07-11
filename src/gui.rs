@@ -21,6 +21,7 @@ use crate::timer_help_window::TimerHelpWindow;
 use crate::timer_dialog::{TimerDialog, TimerCompletionDialog};
 use crate::snippet_dialog::SnippetDialog;
 use crate::notes_dialog::NotesDialog;
+use crate::add_bookmark_dialog::AddBookmarkDialog;
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
 use std::time::Instant;
 
@@ -81,6 +82,7 @@ pub struct LauncherApp {
     pub enable_toasts: bool,
     alias_dialog: crate::alias_dialog::AliasDialog,
     bookmark_alias_dialog: crate::bookmark_alias_dialog::BookmarkAliasDialog,
+    add_bookmark_dialog: crate::add_bookmark_dialog::AddBookmarkDialog,
     help_window: crate::help_window::HelpWindow,
     timer_help: crate::timer_help_window::TimerHelpWindow,
     timer_dialog: crate::timer_dialog::TimerDialog,
@@ -258,6 +260,7 @@ impl LauncherApp {
             enable_toasts,
             alias_dialog: crate::alias_dialog::AliasDialog::default(),
             bookmark_alias_dialog: crate::bookmark_alias_dialog::BookmarkAliasDialog::default(),
+            add_bookmark_dialog: crate::add_bookmark_dialog::AddBookmarkDialog::default(),
             help_window: HelpWindow::default(),
             timer_help: TimerHelpWindow::default(),
             timer_dialog: TimerDialog::default(),
@@ -623,6 +626,8 @@ impl eframe::App for LauncherApp {
                             self.shell_cmd_dialog.open();
                         } else if a.action == "note:dialog" {
                             self.notes_dialog.open();
+                        } else if a.action == "bookmark:dialog" {
+                            self.add_bookmark_dialog.open();
                         } else if a.action == "snippet:dialog" {
                             self.snippet_dialog.open();
                         } else if a.action == "volume:dialog" {
@@ -869,6 +874,8 @@ impl eframe::App for LauncherApp {
                             self.shell_cmd_dialog.open();
                         } else if a.action == "note:dialog" {
                             self.notes_dialog.open();
+                        } else if a.action == "bookmark:dialog" {
+                            self.add_bookmark_dialog.open();
                         } else if a.action == "snippet:dialog" {
                             self.snippet_dialog.open();
                         } else if a.action == "volume:dialog" {
@@ -967,6 +974,9 @@ impl eframe::App for LauncherApp {
         let mut bm_dlg = std::mem::take(&mut self.bookmark_alias_dialog);
         bm_dlg.ui(ctx, self);
         self.bookmark_alias_dialog = bm_dlg;
+        let mut add_bm_dlg = std::mem::take(&mut self.add_bookmark_dialog);
+        add_bm_dlg.ui(ctx, self);
+        self.add_bookmark_dialog = add_bm_dlg;
         let mut help = std::mem::take(&mut self.help_window);
         help.ui(ctx, self);
         self.help_window = help;
