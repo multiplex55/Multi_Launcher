@@ -1,6 +1,7 @@
 use crate::gui::LauncherApp;
 use crate::plugins::bookmarks::{append_bookmark, set_alias, BOOKMARKS_FILE};
 use eframe::egui;
+use egui_toast::{Toast, ToastKind, ToastOptions};
 
 pub struct AddBookmarkDialog {
     pub open: bool,
@@ -46,6 +47,13 @@ impl AddBookmarkDialog {
                                 app.error = Some(format!("Failed to save alias: {e}"));
                             } else {
                                 close = true;
+                                if app.enable_toasts {
+                                    app.add_toast(Toast {
+                                        text: format!("Saved bookmark {}", self.url).into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default().duration_in_seconds(3.0),
+                                    });
+                                }
                                 app.search();
                                 app.focus_input();
                             }

@@ -143,6 +143,30 @@ impl Plugin for BookmarksPlugin {
                 })
                 .collect();
         }
+        if let Some(rest) = trimmed.strip_prefix("bm list") {
+            let filter = rest.trim();
+            let bookmarks = load_bookmarks(BOOKMARKS_FILE).unwrap_or_default();
+            return bookmarks
+                .into_iter()
+                .filter(|b| {
+                    self.matcher.fuzzy_match(&b.url, filter).is_some()
+                        || b
+                            .alias
+                            .as_ref()
+                            .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
+                            .unwrap_or(false)
+                })
+                .map(|b| {
+                    let label = b.alias.clone().unwrap_or_else(|| b.url.clone());
+                    Action {
+                        label,
+                        desc: "Bookmark".into(),
+                        action: b.url,
+                        args: None,
+                    }
+                })
+                .collect();
+        }
         if !trimmed.starts_with("bm") {
             return Vec::new();
         }
