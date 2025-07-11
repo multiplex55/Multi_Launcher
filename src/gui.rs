@@ -606,7 +606,9 @@ impl eframe::App for LauncherApp {
                 }
 
                 let mut launch_idx: Option<usize> = None;
-                if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if ctx.input(|i| i.key_pressed(egui::Key::Enter))
+                    && !self.bookmark_alias_dialog.open
+                {
                     launch_idx = self.handle_key(egui::Key::Enter);
                 }
 
