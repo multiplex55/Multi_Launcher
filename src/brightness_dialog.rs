@@ -12,7 +12,7 @@ pub struct BrightnessDialog {
 impl BrightnessDialog {
     pub fn open(&mut self) {
         self.open = true;
-        self.value = 50;
+        self.value = get_main_display_brightness().unwrap_or(50);
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
@@ -41,4 +41,59 @@ impl BrightnessDialog {
             });
         if close { self.open = false; }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn get_main_display_brightness() -> Option<u8> {
+    use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
+    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
+    use windows::Win32::Devices::Display::{
+        DestroyPhysicalMonitors, GetNumberOfPhysicalMonitorsFromHMONITOR,
+        GetPhysicalMonitorsFromHMONITOR, GetMonitorBrightness, PHYSICAL_MONITOR,
+    };
+
+    unsafe extern "system" fn enum_monitors(
+        hmonitor: HMONITOR,
+        _hdc: HDC,
+        _rect: *mut RECT,
+        lparam: LPARAM,
+    ) -> BOOL {
+        let percent_ptr = lparam.0 as *mut u32;
+        let mut count: u32 = 0;
+        if GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count).is_ok() {
+            let mut monitors = vec![PHYSICAL_MONITOR::default(); count as usize];
+            if GetPhysicalMonitorsFromHMONITOR(hmonitor, &mut monitors).is_ok() {
+                if let Some(m) = monitors.first() {
+                    let mut min = 0u32;
+                    let mut cur = 0u32;
+                    let mut max = 0u32;
+                    if GetMonitorBrightness(m.hPhysicalMonitor, &mut min, &mut cur, &mut max).is_ok() {
+                        if max > min {
+                            *percent_ptr = ((cur - min) * 100 / (max - min)) as u32;
+                        } else {
+                            *percent_ptr = 0;
+                        }
+                    }
+                }
+                let _ = DestroyPhysicalMonitors(&monitors);
+            }
+        }
+        false.into()
+    }
+
+    let mut percent: u32 = 50;
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            HDC(std::ptr::null_mut()),
+            None,
+            Some(enum_monitors),
+            LPARAM(&mut percent as *mut u32 as isize),
+        );
+    }
+    Some(percent as u8)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_main_display_brightness() -> Option<u8> {
+    None
 }
