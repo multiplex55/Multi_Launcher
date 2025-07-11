@@ -39,6 +39,19 @@ impl BookmarkAliasDialog {
             .show(ctx, |ui| {
                 ui.label(&self.url);
                 ui.text_edit_singleline(&mut self.alias);
+
+                if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if let Err(e) = set_alias(BOOKMARKS_FILE, &self.url, &self.alias) {
+                        app.error = Some(format!("Failed to save alias: {e}"));
+                    } else {
+                        close = true;
+                        app.search();
+                        app.focus_input();
+                    }
+                    let modifiers = ctx.input(|i| i.modifiers);
+                    ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+                }
+
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
                         if let Err(e) = set_alias(BOOKMARKS_FILE, &self.url, &self.alias) {
