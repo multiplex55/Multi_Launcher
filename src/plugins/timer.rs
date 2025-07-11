@@ -200,7 +200,7 @@ pub fn start_timer(duration: Duration) {
 }
 
 pub fn start_alarm_named(hour: u32, minute: u32, name: Option<String>) {
-    use chrono::{Duration as ChronoDuration, Local, Timelike};
+    use chrono::{Duration as ChronoDuration, Local};
     let now = Local::now();
     let mut target = now.date_naive().and_hms_opt(hour, minute, 0).unwrap();
     if target <= now.naive_local() {

@@ -21,7 +21,6 @@ use crate::timer_help_window::TimerHelpWindow;
 use crate::timer_dialog::{TimerDialog, TimerCompletionDialog};
 use crate::snippet_dialog::SnippetDialog;
 use crate::notes_dialog::NotesDialog;
-use crate::volume_dialog::VolumeDialog;
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
 use std::time::Instant;
 
@@ -732,7 +731,7 @@ impl eframe::App for LauncherApp {
                         a.label.clone()
                     };
                     let mut resp = ui.selectable_label(self.selected == Some(idx), text);
-                    let mut menu_resp = resp.on_hover_text(&a.action);
+                    let menu_resp = resp.on_hover_text(&a.action);
                     let custom_idx = self
                         .actions
                         .iter()

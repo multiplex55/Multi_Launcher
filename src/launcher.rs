@@ -12,7 +12,6 @@ use shlex;
 
 #[cfg(target_os = "windows")]
 fn set_system_volume(percent: u32) {
-    use windows::core::Interface;
     use windows::Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator, eRender, eMultimedia};
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED};
@@ -36,7 +35,7 @@ fn set_system_volume(_percent: u32) {}
 #[cfg(target_os = "windows")]
 fn mute_active_window() {
     use windows::core::Interface;
-    use windows::Win32::Media::Audio::{IAudioSessionManager2, IAudioSessionEnumerator, IAudioSessionControl2, ISimpleAudioVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eRender, eMultimedia};
+    use windows::Win32::Media::Audio::{IAudioSessionManager2, IAudioSessionControl2, ISimpleAudioVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eRender, eMultimedia};
     use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED};
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
@@ -215,7 +214,7 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     }
     if let Some(pid) = action.action.strip_prefix("process:kill:") {
         if let Ok(pid) = pid.parse::<u32>() {
-            let mut system = System::new_all();
+            let system = System::new_all();
             if let Some(process) = system.process(sysinfo::Pid::from_u32(pid)) {
                 let _ = process.kill();
             }

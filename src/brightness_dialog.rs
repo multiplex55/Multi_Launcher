@@ -67,7 +67,7 @@ fn get_main_display_brightness() -> Option<u8> {
                     let mut min = 0u32;
                     let mut cur = 0u32;
                     let mut max = 0u32;
-                    if GetMonitorBrightness(m.hPhysicalMonitor, &mut min, &mut cur, &mut max).is_ok() {
+                    if GetMonitorBrightness(m.hPhysicalMonitor, &mut min, &mut cur, &mut max).as_bool() {
                         if max > min {
                             *percent_ptr = ((cur - min) * 100 / (max - min)) as u32;
                         } else {

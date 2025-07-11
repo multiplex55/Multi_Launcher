@@ -84,7 +84,7 @@ impl TimerDialog {
                     }
                 });
             });
-        if (close) { open_val = false; }
+        if close { open_val = false; }
         self.open = open_val;
     }
 }
