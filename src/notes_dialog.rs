@@ -72,7 +72,7 @@ impl NotesDialog {
                     });
                 } else {
                     let mut remove: Option<usize> = None;
-                    egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    egui::ScrollArea::both().max_height(200.0).show(ui, |ui| {
                         for idx in 0..self.entries.len() {
                             let entry = self.entries[idx].clone();
                             ui.horizontal(|ui| {
