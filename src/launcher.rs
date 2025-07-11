@@ -79,25 +79,33 @@ fn mute_active_window() {}
 fn set_display_brightness(percent: u32) {
     use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
-    use windows::Win32::Devices::Display::{DestroyPhysicalMonitors, GetNumberOfPhysicalMonitorsFromHMONITOR, GetPhysicalMonitorsFromHMONITOR, PHYSICAL_MONITOR, SetMonitorBrightness};
+    use windows::Win32::Devices::Display::{
+        DestroyPhysicalMonitors, GetNumberOfPhysicalMonitorsFromHMONITOR,
+        GetPhysicalMonitorsFromHMONITOR, PHYSICAL_MONITOR, SetMonitorBrightness,
+    };
 
     unsafe extern "system" fn enum_monitors(hmonitor: HMONITOR, _hdc: HDC, _rect: *mut RECT, lparam: LPARAM) -> BOOL {
         let percent = lparam.0 as u32;
         let mut count: u32 = 0;
-        if GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count).as_bool() {
+        if GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count).is_ok() {
             let mut monitors = vec![PHYSICAL_MONITOR::default(); count as usize];
-            if GetPhysicalMonitorsFromHMONITOR(hmonitor, count, monitors.as_mut_ptr()).as_bool() {
+            if GetPhysicalMonitorsFromHMONITOR(hmonitor, &mut monitors).is_ok() {
                 for m in &monitors {
                     let _ = SetMonitorBrightness(m.hPhysicalMonitor, percent);
                 }
-                let _ = DestroyPhysicalMonitors(count, monitors.as_ptr());
+                let _ = DestroyPhysicalMonitors(&monitors);
             }
         }
         true.into()
     }
 
     unsafe {
-        let _ = EnumDisplayMonitors(HDC(0), std::ptr::null_mut(), Some(enum_monitors), LPARAM(percent as isize));
+        let _ = EnumDisplayMonitors(
+            HDC(std::ptr::null_mut()),
+            None,
+            Some(enum_monitors),
+            LPARAM(percent as isize),
+        );
     }
 }
 
