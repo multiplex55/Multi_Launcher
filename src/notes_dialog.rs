@@ -48,6 +48,9 @@ impl NotesDialog {
         egui::Window::new("Quick Notes")
             .open(&mut self.open)
             .resizable(true)
+            .default_size((360.0, 240.0))
+            .min_width(200.0)
+            .min_height(150.0)
             .show(ctx, |ui| {
                 if let Some(idx) = self.edit_idx {
                     ui.label("Text");
@@ -80,7 +83,10 @@ impl NotesDialog {
                     });
                 } else {
                     let mut remove: Option<usize> = None;
-                    egui::ScrollArea::both().max_height(200.0).show(ui, |ui| {
+                    let area_height = ui.available_height();
+                    egui::ScrollArea::both()
+                        .max_height(area_height)
+                        .show(ui, |ui| {
                         for idx in 0..self.entries.len() {
                             let entry = self.entries[idx].clone();
                             ui.horizontal(|ui| {
