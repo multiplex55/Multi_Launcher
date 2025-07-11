@@ -47,17 +47,25 @@ impl NotesDialog {
         let mut save_now = false;
         egui::Window::new("Quick Notes")
             .open(&mut self.open)
+            .resizable(true)
             .show(ctx, |ui| {
                 if let Some(idx) = self.edit_idx {
                     ui.label("Text");
-                    ui.text_edit_multiline(&mut self.text);
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.text)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(10),
+                    );
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.text.trim().is_empty() {
                                 app.error = Some("Text required".into());
                             } else {
                                 if idx == self.entries.len() {
-                                    self.entries.push(NoteEntry { ts: Local::now().timestamp() as u64, text: self.text.clone() });
+                                    self.entries.push(NoteEntry {
+                                        ts: Local::now().timestamp() as u64,
+                                        text: self.text.clone(),
+                                    });
                                 } else if let Some(e) = self.entries.get_mut(idx) {
                                     e.text = self.text.clone();
                                 }
@@ -120,4 +128,3 @@ impl NotesDialog {
         }
     }
 }
-
