@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 use std::thread;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+pub static ALARMS_LOADED: AtomicBool = AtomicBool::new(false);
 pub const ALARMS_FILE: &str = "alarms.json";
 pub static FINISHED_MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
@@ -41,6 +42,10 @@ fn save_persistent_alarms_locked(timers: &Vec<TimerEntry>) {
 
 pub static ACTIVE_TIMERS: Lazy<Mutex<Vec<TimerEntry>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
+pub fn reset_alarms_loaded() {
+    ALARMS_LOADED.store(false, Ordering::SeqCst);
+}
+
 pub fn take_finished_messages() -> Vec<String> {
     let mut list = FINISHED_MESSAGES.lock().unwrap();
     let out = list.clone();
@@ -49,6 +54,9 @@ pub fn take_finished_messages() -> Vec<String> {
 }
 
 pub fn load_saved_alarms() {
+    if ALARMS_LOADED.load(Ordering::SeqCst) {
+        return;
+    }
     let content = std::fs::read_to_string(ALARMS_FILE).unwrap_or_default();
     if content.is_empty() {
         return;
@@ -70,6 +78,7 @@ pub fn load_saved_alarms() {
             start_entry(dur, alarm.label, true, alarm.end_ts);
         }
     }
+    ALARMS_LOADED.store(true, Ordering::SeqCst);
 }
 
 pub fn parse_duration(input: &str) -> Option<Duration> {

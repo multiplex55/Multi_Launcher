@@ -53,7 +53,7 @@ impl PluginManager {
     }
 
     /// Rebuild the plugin list, keeping previously loaded libraries alive.
-    pub fn reload_from_dirs(&mut self, dirs: &[String]) {
+    pub fn reload_from_dirs(&mut self, dirs: &[String], reset_alarm: bool) {
         self.clear_plugins();
         self.register(Box::new(WebSearchPlugin));
         self.register(Box::new(CalculatorPlugin));
@@ -75,6 +75,9 @@ impl PluginManager {
         self.register(Box::new(BrightnessPlugin));
         self.register(Box::new(HelpPlugin));
         self.register(Box::new(TimerPlugin));
+        if reset_alarm {
+            crate::plugins::timer::reset_alarms_loaded();
+        }
         crate::plugins::timer::load_saved_alarms();
         self.register(Box::new(WeatherPlugin));
         for dir in dirs {

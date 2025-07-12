@@ -72,7 +72,7 @@ fn spawn_gui(
     let mut plugins = PluginManager::new();
     let empty_dirs = Vec::new();
     let dirs = settings.plugin_dirs.as_ref().unwrap_or(&empty_dirs);
-    plugins.reload_from_dirs(dirs);
+    plugins.reload_from_dirs(dirs, true);
 
     let actions_path = "actions.json".to_string();
     let settings_path_for_window = settings_path.clone();
