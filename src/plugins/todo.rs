@@ -9,6 +9,7 @@ pub const TODO_FILE: &str = "todo.json";
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TodoEntry {
     pub text: String,
+    pub done: bool,
 }
 
 pub fn load_todos(path: &str) -> anyhow::Result<Vec<TodoEntry>> {
@@ -30,6 +31,7 @@ pub fn append_todo(path: &str, text: &str) -> anyhow::Result<()> {
     let mut list = load_todos(path).unwrap_or_default();
     list.push(TodoEntry {
         text: text.to_string(),
+        done: false,
     });
     save_todos(path, &list)
 }
@@ -38,6 +40,25 @@ pub fn remove_todo(path: &str, index: usize) -> anyhow::Result<()> {
     let mut list = load_todos(path).unwrap_or_default();
     if index < list.len() {
         list.remove(index);
+        save_todos(path, &list)?;
+    }
+    Ok(())
+}
+
+pub fn mark_done(path: &str, index: usize) -> anyhow::Result<()> {
+    let mut list = load_todos(path).unwrap_or_default();
+    if let Some(entry) = list.get_mut(index) {
+        entry.done = true;
+        save_todos(path, &list)?;
+    }
+    Ok(())
+}
+
+pub fn clear_done(path: &str) -> anyhow::Result<()> {
+    let mut list = load_todos(path).unwrap_or_default();
+    let orig_len = list.len();
+    list.retain(|e| !e.done);
+    if list.len() != orig_len {
         save_todos(path, &list)?;
     }
     Ok(())
@@ -63,7 +84,27 @@ impl Default for TodoPlugin {
 
 impl Plugin for TodoPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        if let Some(text) = query.strip_prefix("todo add ") {
+        let trimmed = query.trim();
+
+        if trimmed.eq("todo") {
+            return vec![Action {
+                label: "todo: edit todos".into(),
+                desc: "Todo".into(),
+                action: "todo:dialog".into(),
+                args: None,
+            }];
+        }
+
+        if trimmed.eq("todo clear") {
+            return vec![Action {
+                label: "Clear completed todos".into(),
+                desc: "Todo".into(),
+                action: "todo:clear".into(),
+                args: None,
+            }];
+        }
+
+        if let Some(text) = trimmed.strip_prefix("todo add ") {
             let text = text.trim();
             if !text.is_empty() {
                 return vec![Action {
@@ -75,7 +116,7 @@ impl Plugin for TodoPlugin {
             }
         }
 
-        if let Some(pattern) = query.strip_prefix("todo rm ") {
+        if let Some(pattern) = trimmed.strip_prefix("todo rm ") {
             let filter = pattern.trim();
             let todos = load_todos(TODO_FILE).unwrap_or_default();
             return todos
@@ -91,7 +132,7 @@ impl Plugin for TodoPlugin {
                 .collect();
         }
 
-        if let Some(rest) = query.strip_prefix("todo list") {
+        if let Some(rest) = trimmed.strip_prefix("todo list") {
             let filter = rest.trim();
             let todos = load_todos(TODO_FILE).unwrap_or_default();
             return todos
@@ -99,9 +140,9 @@ impl Plugin for TodoPlugin {
                 .enumerate()
                 .filter(|(_, t)| self.matcher.fuzzy_match(&t.text, filter).is_some())
                 .map(|(idx, t)| Action {
-                    label: t.text,
+                    label: format!("{} {}", if t.done { "[x]" } else { "[ ]" }, t.text),
                     desc: "Todo".into(),
-                    action: format!("todo:item:{idx}"),
+                    action: format!("todo:done:{idx}"),
                     args: None,
                 })
                 .collect();

@@ -27,7 +27,7 @@ fn list_returns_saved_items() {
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo list");
     assert_eq!(results.len(), 2);
-    assert!(results.iter().all(|a| a.action.starts_with("todo:item:")));
+    assert!(results.iter().all(|a| a.action.starts_with("todo:done:")));
 }
 
 #[test]
@@ -54,4 +54,14 @@ fn remove_action_deletes_entry() {
     let todos = load_todos(TODO_FILE).unwrap();
     assert_eq!(todos.len(), 1);
     assert_eq!(todos[0].text, "keep");
+}
+
+#[test]
+fn search_plain_todo_opens_dialog() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let plugin = TodoPlugin::default();
+    let results = plugin.search("todo");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "todo:dialog");
+    assert_eq!(results[0].label, "todo: edit todos");
 }

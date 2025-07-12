@@ -277,6 +277,26 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         }
         return Ok(());
     }
+    if let Some(text) = action.action.strip_prefix("todo:add:") {
+        crate::plugins::todo::append_todo(crate::plugins::todo::TODO_FILE, text)?;
+        return Ok(());
+    }
+    if let Some(idx) = action.action.strip_prefix("todo:remove:") {
+        if let Ok(i) = idx.parse::<usize>() {
+            crate::plugins::todo::remove_todo(crate::plugins::todo::TODO_FILE, i)?;
+        }
+        return Ok(());
+    }
+    if let Some(idx) = action.action.strip_prefix("todo:done:") {
+        if let Ok(i) = idx.parse::<usize>() {
+            crate::plugins::todo::mark_done(crate::plugins::todo::TODO_FILE, i)?;
+        }
+        return Ok(());
+    }
+    if action.action == "todo:clear" {
+        crate::plugins::todo::clear_done(crate::plugins::todo::TODO_FILE)?;
+        return Ok(());
+    }
     if let Some(alias) = action.action.strip_prefix("snippet:remove:") {
         remove_snippet(SNIPPETS_FILE, alias)?;
         return Ok(());
