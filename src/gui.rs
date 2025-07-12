@@ -688,6 +688,18 @@ impl eframe::App for LauncherApp {
                             } else if a.action.starts_with("folder:remove:") {
                                 refresh = true;
                                 set_focus = true;
+                            } else if a.action.starts_with("todo:add:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("todo:remove:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("todo:done:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action == "todo:clear" {
+                                refresh = true;
+                                set_focus = true;
                             }
                             if self.hide_after_run
                                 && !a.action.starts_with("bookmark:add:")
@@ -936,6 +948,18 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                                 set_focus = true;
                             } else if a.action.starts_with("folder:remove:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("todo:add:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("todo:remove:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("todo:done:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action == "todo:clear" {
                                 refresh = true;
                                 set_focus = true;
                             }

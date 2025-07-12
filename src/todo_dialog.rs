@@ -36,23 +36,6 @@ impl TodoDialog {
             .min_width(200.0)
             .min_height(150.0)
             .show(ctx, |ui| {
-                let mut remove: Option<usize> = None;
-                let area_height = ui.available_height();
-                egui::ScrollArea::both().max_height(area_height).show(ui, |ui| {
-                    for idx in 0..self.entries.len() {
-                        ui.horizontal(|ui| {
-                            let entry = &mut self.entries[idx];
-                            ui.checkbox(&mut entry.done, "");
-                            ui.label(entry.text.replace('\n', " "));
-                            if ui.button("Remove").clicked() { remove = Some(idx); }
-                        });
-                    }
-                });
-                if let Some(idx) = remove {
-                    self.entries.remove(idx);
-                    save_now = true;
-                }
-                ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("New");
                     ui.text_edit_singleline(&mut self.text);
@@ -71,6 +54,25 @@ impl TodoDialog {
                     }
                     if ui.button("Close").clicked() { close = true; }
                 });
+                ui.separator();
+                let mut remove: Option<usize> = None;
+                let area_height = ui.available_height();
+                egui::ScrollArea::both().max_height(area_height).show(ui, |ui| {
+                    for idx in 0..self.entries.len() {
+                        ui.horizontal(|ui| {
+                            let entry = &mut self.entries[idx];
+                            if ui.checkbox(&mut entry.done, "").changed() {
+                                save_now = true;
+                            }
+                            ui.label(entry.text.replace('\n', " "));
+                            if ui.button("Remove").clicked() { remove = Some(idx); }
+                        });
+                    }
+                });
+                if let Some(idx) = remove {
+                    self.entries.remove(idx);
+                    save_now = true;
+                }
             });
         if save_now { self.save(app); }
         if close { self.open = false; }
