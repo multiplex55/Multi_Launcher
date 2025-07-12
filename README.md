@@ -65,6 +65,7 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
   "enabled_plugins": [
     "web_search",
     "calculator",
+    "unit_convert",
     "clipboard",
     "bookmarks",
     "folders",
@@ -148,6 +149,7 @@ Built-in plugins and their command prefixes are:
 - Reddit search (`red cats`)
 - Weather lookup (`weather Berlin`)
 - Calculator (`= 2+2`)
+- Unit conversions (`conv 10 km to mi`)
 - Clipboard history (`cb`) - entries persist in `clipboard_history.json`. Use `cb list` to show all entries or `cb clear` to wipe them. Right-click items to edit or delete.
 - Bookmarks (`bm add <url>`, `bm rm [pattern]` or `bm list`)
 - Folder shortcuts (`f`, `f add <path>`, `f rm <pattern>`)
