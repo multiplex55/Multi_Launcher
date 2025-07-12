@@ -41,23 +41,32 @@ impl ClipboardDialog {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
-        if !self.open { return; }
+        if !self.open {
+            return;
+        }
         let mut close = false;
         let mut save_now = false;
         egui::Window::new("Clipboard History")
             .open(&mut self.open)
             .resizable(true)
             .default_size((360.0, 240.0))
-            .min_width(200.0)
-            .min_height(150.0)
+            .min_width(100.0)
+            .min_height(100.0)
             .show(ctx, |ui| {
                 if let Some(idx) = self.edit_idx {
                     ui.label("Text");
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.text)
-                            .desired_rows(5)
-                            .desired_width(f32::INFINITY),
-                    );
+
+                    // Wrap in a scroll area with a fixed height
+                    egui::ScrollArea::vertical()
+                        .max_height(150.0) // or whatever height you want
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.text)
+                                    .desired_rows(1)
+                                    .desired_width(f32::INFINITY),
+                            );
+                        });
+
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.text.trim().is_empty() {
@@ -78,41 +87,49 @@ impl ClipboardDialog {
                 } else {
                     let mut remove: Option<usize> = None;
                     let area_height = ui.available_height();
-                    egui::ScrollArea::both().max_height(area_height).show(ui, |ui| {
-                        for idx in 0..self.entries.len() {
-                            let entry = self.entries[idx].clone();
-                            ui.horizontal(|ui| {
-                                let resp = ui.label(entry.replace('\n', " "));
-                                let idx_copy = idx;
-                                resp.clone().context_menu(|ui| {
-                                    if ui.button("Edit Entry").clicked() {
-                                        self.edit_idx = Some(idx_copy);
-                                        self.text = self.entries[idx_copy].clone();
-                                        ui.close_menu();
+                    egui::ScrollArea::both()
+                        .max_height(area_height)
+                        .show(ui, |ui| {
+                            for idx in 0..self.entries.len() {
+                                let entry = self.entries[idx].clone();
+                                ui.horizontal(|ui| {
+                                    let resp = ui.label(entry.replace('\n', " "));
+                                    let idx_copy = idx;
+                                    resp.clone().context_menu(|ui| {
+                                        if ui.button("Edit Entry").clicked() {
+                                            self.edit_idx = Some(idx_copy);
+                                            self.text = self.entries[idx_copy].clone();
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Remove Entry").clicked() {
+                                            remove = Some(idx_copy);
+                                            ui.close_menu();
+                                        }
+                                    });
+                                    if ui.button("Edit").clicked() {
+                                        self.edit_idx = Some(idx);
+                                        self.text = entry.clone();
                                     }
-                                    if ui.button("Remove Entry").clicked() {
-                                        remove = Some(idx_copy);
-                                        ui.close_menu();
+                                    if ui.button("Remove").clicked() {
+                                        remove = Some(idx);
                                     }
                                 });
-                                if ui.button("Edit").clicked() {
-                                    self.edit_idx = Some(idx);
-                                    self.text = entry.clone();
-                                }
-                                if ui.button("Remove").clicked() {
-                                    remove = Some(idx);
-                                }
-                            });
-                        }
-                    });
+                            }
+                        });
                     if let Some(idx) = remove {
                         self.entries.remove(idx);
                         save_now = true;
                     }
-                    if ui.button("Close").clicked() { close = true; }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
                 }
             });
-        if save_now { self.save(app); }
-        if close { self.open = false; }
+        if save_now {
+            self.save(app);
+        }
+        if close {
+            self.open = false;
+        }
     }
 }
