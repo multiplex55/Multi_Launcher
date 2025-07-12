@@ -23,6 +23,7 @@ use crate::snippet_dialog::SnippetDialog;
 use crate::notes_dialog::NotesDialog;
 use crate::add_bookmark_dialog::AddBookmarkDialog;
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
+use crate::usage::{self, USAGE_FILE};
 use std::time::Instant;
 
 fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -233,7 +234,7 @@ impl LauncherApp {
             error_time: None,
             plugins,
             selected: None,
-            usage: HashMap::new(),
+            usage: usage::load_usage(USAGE_FILE).unwrap_or_default(),
             registered_hotkeys: Mutex::new(HashMap::new()),
             show_editor: false,
             show_settings: false,
@@ -1017,6 +1018,7 @@ impl eframe::App for LauncherApp {
             settings.window_size = Some(self.window_size);
             let _ = settings.save(&self.settings_path);
         }
+        let _ = usage::save_usage(USAGE_FILE, &self.usage);
         #[cfg(not(test))]
         std::process::exit(0);
     }
