@@ -54,11 +54,15 @@ impl NotesDialog {
             .show(ctx, |ui| {
                 if let Some(idx) = self.edit_idx {
                     ui.label("Text");
-                    ui.add(
+                    let resp = ui.add(
                         egui::TextEdit::multiline(&mut self.text)
                             .desired_width(f32::INFINITY)
                             .desired_rows(10),
                     );
+                    if resp.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        let modifiers = ctx.input(|i| i.modifiers);
+                        ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+                    }
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.text.trim().is_empty() {
