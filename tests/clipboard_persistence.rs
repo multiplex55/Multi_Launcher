@@ -18,12 +18,12 @@ fn history_survives_instances() {
     save_history(CLIPBOARD_FILE, &list).unwrap();
 
     let plugin1 = ClipboardPlugin::new(20);
-    let results1 = plugin1.search("cb");
+    let results1 = plugin1.search("cb first");
     assert_eq!(results1.len(), 1);
     assert_eq!(results1[0].label, "first");
 
     let plugin2 = ClipboardPlugin::new(20);
-    let results2 = plugin2.search("cb");
+    let results2 = plugin2.search("cb first");
     assert_eq!(results2.len(), 1);
     assert_eq!(results2[0].label, "first");
 }

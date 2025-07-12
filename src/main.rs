@@ -29,6 +29,7 @@ mod shell_cmd_dialog;
 mod snippet_dialog;
 mod notes_dialog;
 mod todo_dialog;
+mod clipboard_dialog;
 mod volume_dialog;
 mod brightness_dialog;
 

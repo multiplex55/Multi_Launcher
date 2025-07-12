@@ -169,9 +169,26 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         // Shell commands are only supported on Windows
         return Ok(());
     }
-    if let Some(text) = action.action.strip_prefix("clipboard:") {
+    if let Some(rest) = action.action.strip_prefix("clipboard:") {
+        if rest == "clear" {
+            crate::plugins::clipboard::clear_history_file(crate::plugins::clipboard::CLIPBOARD_FILE)?;
+            return Ok(());
+        }
+        if let Some(idx_str) = rest.strip_prefix("copy:") {
+            if let Ok(i) = idx_str.parse::<usize>() {
+                if let Some(entry) = crate::plugins::clipboard::load_history(crate::plugins::clipboard::CLIPBOARD_FILE)
+                    .unwrap_or_default()
+                    .get(i)
+                    .cloned()
+                {
+                    let mut cb = Clipboard::new()?;
+                    cb.set_text(entry)?;
+                }
+            }
+            return Ok(());
+        }
         let mut cb = Clipboard::new()?;
-        cb.set_text(text.to_string())?;
+        cb.set_text(rest.to_string())?;
         return Ok(());
     }
     if let Some(value) = action.action.strip_prefix("calc:") {
