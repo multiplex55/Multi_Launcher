@@ -1,5 +1,5 @@
 use multi_launcher::plugin::Plugin;
-use multi_launcher::plugins::todo::{append_todo, load_todos, remove_todo, TodoPlugin, TODO_FILE};
+use multi_launcher::plugins::todo::{append_todo, load_todos, remove_todo, mark_done, TodoPlugin, TODO_FILE};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use tempfile::tempdir;
@@ -64,4 +64,21 @@ fn search_plain_todo_opens_dialog() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "todo:dialog");
     assert_eq!(results[0].label, "todo: edit todos");
+}
+
+#[test]
+fn mark_done_toggles_status() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    append_todo(TODO_FILE, "task").unwrap();
+
+    mark_done(TODO_FILE, 0).unwrap();
+    let todos = load_todos(TODO_FILE).unwrap();
+    assert!(todos[0].done);
+
+    mark_done(TODO_FILE, 0).unwrap();
+    let todos = load_todos(TODO_FILE).unwrap();
+    assert!(!todos[0].done);
 }

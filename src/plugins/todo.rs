@@ -45,10 +45,11 @@ pub fn remove_todo(path: &str, index: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Toggle completion status of the todo at the given index.
 pub fn mark_done(path: &str, index: usize) -> anyhow::Result<()> {
     let mut list = load_todos(path).unwrap_or_default();
     if let Some(entry) = list.get_mut(index) {
-        entry.done = true;
+        entry.done = !entry.done;
         save_todos(path, &list)?;
     }
     Ok(())
