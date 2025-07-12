@@ -16,6 +16,7 @@ use crate::plugins::wikipedia::WikipediaPlugin;
 use crate::plugins::weather::WeatherPlugin;
 use crate::plugins::timer::TimerPlugin;
 use crate::plugins::notes::NotesPlugin;
+use crate::plugins::todo::TodoPlugin;
 use crate::plugins::snippets::SnippetsPlugin;
 use crate::plugins::volume::VolumePlugin;
 use crate::plugins::brightness::BrightnessPlugin;
@@ -68,6 +69,7 @@ impl PluginManager {
         self.register(Box::new(ShellPlugin));
         self.register(Box::new(HistoryPlugin));
         self.register(Box::new(NotesPlugin::default()));
+        self.register(Box::new(TodoPlugin::default()));
         self.register(Box::new(SnippetsPlugin::default()));
         self.register(Box::new(VolumePlugin));
         self.register(Box::new(BrightnessPlugin));

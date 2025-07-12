@@ -21,6 +21,7 @@ use crate::timer_help_window::TimerHelpWindow;
 use crate::timer_dialog::{TimerDialog, TimerCompletionDialog};
 use crate::snippet_dialog::SnippetDialog;
 use crate::notes_dialog::NotesDialog;
+use crate::todo_dialog::TodoDialog;
 use crate::add_bookmark_dialog::AddBookmarkDialog;
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
 use crate::usage::{self, USAGE_FILE};
@@ -91,6 +92,7 @@ pub struct LauncherApp {
     shell_cmd_dialog: crate::shell_cmd_dialog::ShellCmdDialog,
     snippet_dialog: SnippetDialog,
     notes_dialog: NotesDialog,
+    todo_dialog: TodoDialog,
     volume_dialog: crate::volume_dialog::VolumeDialog,
     brightness_dialog: crate::brightness_dialog::BrightnessDialog,
     pub help_flag: Arc<AtomicBool>,
@@ -269,6 +271,7 @@ impl LauncherApp {
             shell_cmd_dialog: crate::shell_cmd_dialog::ShellCmdDialog::default(),
             snippet_dialog: SnippetDialog::default(),
             notes_dialog: NotesDialog::default(),
+            todo_dialog: TodoDialog::default(),
             volume_dialog: crate::volume_dialog::VolumeDialog::default(),
             brightness_dialog: crate::brightness_dialog::BrightnessDialog::default(),
             help_flag: help_flag.clone(),
@@ -634,6 +637,8 @@ impl eframe::App for LauncherApp {
                             self.add_bookmark_dialog.open();
                         } else if a.action == "snippet:dialog" {
                             self.snippet_dialog.open();
+                        } else if a.action == "todo:dialog" {
+                            self.todo_dialog.open();
                         } else if a.action == "volume:dialog" {
                             self.volume_dialog.open();
                         } else if a.action == "brightness:dialog" {
@@ -681,6 +686,18 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                                 set_focus = true;
                             } else if a.action.starts_with("folder:remove:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("todo:add:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("todo:remove:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("todo:done:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action == "todo:clear" {
                                 refresh = true;
                                 set_focus = true;
                             }
@@ -882,6 +899,8 @@ impl eframe::App for LauncherApp {
                             self.add_bookmark_dialog.open();
                         } else if a.action == "snippet:dialog" {
                             self.snippet_dialog.open();
+                        } else if a.action == "todo:dialog" {
+                            self.todo_dialog.open();
                         } else if a.action == "volume:dialog" {
                             self.volume_dialog.open();
                         } else if a.action == "brightness:dialog" {
@@ -929,6 +948,18 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                                 set_focus = true;
                             } else if a.action.starts_with("folder:remove:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("todo:add:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("todo:remove:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("todo:done:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action == "todo:clear" {
                                 refresh = true;
                                 set_focus = true;
                             }
@@ -1002,6 +1033,9 @@ impl eframe::App for LauncherApp {
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
         notes_dlg.ui(ctx, self);
         self.notes_dialog = notes_dlg;
+        let mut todo_dlg = std::mem::take(&mut self.todo_dialog);
+        todo_dlg.ui(ctx, self);
+        self.todo_dialog = todo_dlg;
         let mut vol_dlg = std::mem::take(&mut self.volume_dialog);
         vol_dlg.ui(ctx, self);
         self.volume_dialog = vol_dlg;

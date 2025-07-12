@@ -12,6 +12,7 @@ pub mod wikipedia;
 pub mod processes;
 pub mod weather;
 pub mod notes;
+pub mod todo;
 pub mod timer;
 pub mod snippets;
 pub mod volume;
