@@ -5,18 +5,59 @@ pub struct UnitConvertPlugin;
 
 fn convert(value: f64, from: &str, to: &str) -> Option<f64> {
     match (from, to) {
+        // Length
         ("km", "mi") => Some(value * 0.621_371),
         ("mi", "km") => Some(value / 0.621_371),
         ("m", "ft") => Some(value * 3.280_84),
         ("ft", "m") => Some(value / 3.280_84),
-        ("kg", "lb") => Some(value * 2.204_62),
-        ("lb", "kg") => Some(value / 2.204_62),
-        ("c", "f") => Some(value * 9.0 / 5.0 + 32.0),
-        ("f", "c") => Some((value - 32.0) * 5.0 / 9.0),
+        ("cm", "in") => Some(value / 2.54),
+        ("in", "cm") => Some(value * 2.54),
+        ("mm", "in") => Some(value / 25.4),
+        ("in", "mm") => Some(value * 25.4),
         ("nm", "ft") => Some(value * 6076.12),
         ("ft", "nm") => Some(value / 6076.12),
         ("nm", "mi") => Some(value * 1.150_78),
         ("mi", "nm") => Some(value / 1.150_78),
+
+        // Weight / Mass
+        ("kg", "lb") => Some(value * 2.204_62),
+        ("lb", "kg") => Some(value / 2.204_62),
+        ("g", "oz") => Some(value / 28.3495),
+        ("oz", "g") => Some(value * 28.3495),
+        ("g", "kg") => Some(value / 1000.0),
+        ("kg", "g") => Some(value * 1000.0),
+
+        // Temperature
+        ("c", "f") => Some(value * 9.0 / 5.0 + 32.0),
+        ("f", "c") => Some((value - 32.0) * 5.0 / 9.0),
+        ("c", "k") => Some(value + 273.15),
+        ("k", "c") => Some(value - 273.15),
+        ("f", "k") => Some((value - 32.0) * 5.0 / 9.0 + 273.15),
+        ("k", "f") => Some((value - 273.15) * 9.0 / 5.0 + 32.0),
+
+        // Volume
+        ("l", "gal") => Some(value / 3.785_41),
+        ("gal", "l") => Some(value * 3.785_41),
+        ("ml", "oz") => Some(value / 29.5735),
+        ("oz", "ml") => Some(value * 29.5735),
+
+        // Area
+        ("sq_m", "sq_ft") => Some(value * 10.7639),
+        ("sq_ft", "sq_m") => Some(value / 10.7639),
+        ("ha", "ac") => Some(value * 2.47105),
+        ("ac", "ha") => Some(value / 2.47105),
+
+        // Speed
+        ("kph", "mph") => Some(value * 0.621_371),
+        ("mph", "kph") => Some(value / 0.621_371),
+        ("mps", "fps") => Some(value * 3.280_84),
+        ("fps", "mps") => Some(value / 3.280_84),
+
+        // Pressure
+        ("atm", "pa") => Some(value * 101_325.0),
+        ("pa", "atm") => Some(value / 101_325.0),
+        ("bar", "psi") => Some(value * 14.5038),
+        ("psi", "bar") => Some(value / 14.5038),
         _ => None,
     }
 }
