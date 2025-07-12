@@ -104,6 +104,7 @@ pub struct LauncherApp {
     /// Number of user defined commands at the start of `actions`.
     pub custom_len: usize,
     pub history_limit: usize,
+    pub clipboard_limit: usize,
     pub fuzzy_weight: f32,
     pub usage_weight: f32,
     pub follow_mouse: bool,
@@ -282,6 +283,7 @@ impl LauncherApp {
             list_scale,
             custom_len,
             history_limit: settings.history_limit,
+            clipboard_limit: settings.clipboard_limit,
             fuzzy_weight: settings.fuzzy_weight,
             usage_weight: settings.usage_weight,
             follow_mouse,

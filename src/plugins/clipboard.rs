@@ -3,15 +3,35 @@ use crate::plugin::Plugin;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+pub const CLIPBOARD_FILE: &str = "clipboard_history.json";
+
+pub fn load_history(path: &str) -> anyhow::Result<VecDeque<String>> {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    if content.trim().is_empty() {
+        return Ok(VecDeque::new());
+    }
+    let list: Vec<String> = serde_json::from_str(&content)?;
+    Ok(list.into())
+}
+
+pub fn save_history(path: &str, history: &VecDeque<String>) -> anyhow::Result<()> {
+    let list: Vec<String> = history.iter().cloned().collect();
+    let json = serde_json::to_string_pretty(&list)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
 pub struct ClipboardPlugin {
     history: Arc<Mutex<VecDeque<String>>>,
     max_entries: usize,
+    path: String,
 }
 
 impl ClipboardPlugin {
     pub fn new(max_entries: usize) -> Self {
-        let history = Arc::new(Mutex::new(VecDeque::new()));
-        Self { history, max_entries }
+        let hist = load_history(CLIPBOARD_FILE).unwrap_or_default();
+        let history = Arc::new(Mutex::new(hist));
+        Self { history, max_entries, path: CLIPBOARD_FILE.into() }
     }
 
     fn update_history(&self) {
@@ -33,6 +53,7 @@ impl ClipboardPlugin {
                     while h.len() > self.max_entries {
                         h.pop_back();
                     }
+                    let _ = save_history(&self.path, &h);
                 }
             }
             Err(e) => {
