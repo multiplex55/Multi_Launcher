@@ -15,6 +15,7 @@ pub mod indexer;
 pub mod logging;
 pub mod hotkey;
 pub mod history;
+pub mod usage;
 pub mod visibility;
 pub mod help_window;
 pub mod timer_help_window;

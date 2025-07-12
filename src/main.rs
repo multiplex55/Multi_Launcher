@@ -10,6 +10,7 @@ mod plugin_editor;
 mod gui;
 mod hotkey;
 mod history;
+mod usage;
 mod launcher;
 mod plugin;
 mod plugins_builtin;
