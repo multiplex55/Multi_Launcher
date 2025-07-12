@@ -9,7 +9,7 @@ fn new_app_with_plugins(ctx: &egui::Context, actions: Vec<Action>) -> LauncherAp
     let custom_len = actions.len();
     let mut plugins = PluginManager::new();
     let dirs: Vec<String> = Vec::new();
-    plugins.reload_from_dirs(&dirs);
+    plugins.reload_from_dirs(&dirs, false);
     LauncherApp::new(
         ctx,
         actions,

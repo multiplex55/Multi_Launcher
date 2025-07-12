@@ -1,8 +1,12 @@
 use multi_launcher::plugin::Plugin;
-use multi_launcher::plugins::timer::{TimerPlugin, ACTIVE_TIMERS, TimerEntry};
+use multi_launcher::plugins::timer::{
+    TimerPlugin, ACTIVE_TIMERS, TimerEntry, ALARMS_FILE, load_saved_alarms,
+    reset_alarms_loaded, cancel_timer,
+};
 use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use std::time::{Duration, Instant, SystemTime};
+use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -92,5 +96,40 @@ fn take_finished_returns_messages() {
     let msgs = take_finished_messages();
     assert_eq!(msgs, vec!["done".to_string()]);
     assert!(take_finished_messages().is_empty());
+}
+
+#[test]
+fn load_saved_alarms_is_idempotent() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let json = format!("[{{\"label\":\"demo\",\"end_ts\":{}}}]", now + 3600);
+    std::fs::write(ALARMS_FILE, json).unwrap();
+
+    reset_alarms_loaded();
+    ACTIVE_TIMERS.lock().unwrap().clear();
+
+    load_saved_alarms();
+    let first = ACTIVE_TIMERS.lock().unwrap().len();
+    load_saved_alarms();
+    let second = ACTIVE_TIMERS.lock().unwrap().len();
+
+    assert_eq!(first, 1);
+    assert_eq!(second, 1);
+
+    let ids: Vec<u64> = ACTIVE_TIMERS
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|t| t.id)
+        .collect();
+    for id in ids {
+        cancel_timer(id);
+    }
 }
 
