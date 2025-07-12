@@ -53,7 +53,11 @@ impl ClipboardDialog {
             .show(ctx, |ui| {
                 if let Some(idx) = self.edit_idx {
                     ui.label("Text");
-                    ui.text_edit_multiline(&mut self.text);
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.text)
+                            .desired_rows(5)
+                            .desired_width(f32::INFINITY),
+                    );
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.text.trim().is_empty() {

@@ -103,6 +103,20 @@ impl Plugin for ClipboardPlugin {
             }];
         }
 
+        if trimmed == "cb list" {
+            let history = self.update_history();
+            return history
+                .iter()
+                .enumerate()
+                .map(|(idx, entry)| Action {
+                    label: entry.clone(),
+                    desc: "Clipboard".into(),
+                    action: format!("clipboard:copy:{idx}"),
+                    args: None,
+                })
+                .collect();
+        }
+
         let filter = query.strip_prefix("cb").unwrap_or("").trim();
         let history = self.update_history();
         history

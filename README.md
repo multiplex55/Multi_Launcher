@@ -148,7 +148,7 @@ Built-in plugins and their command prefixes are:
 - Reddit search (`red cats`)
 - Weather lookup (`weather Berlin`)
 - Calculator (`= 2+2`)
-- Clipboard history (`cb`) - entries persist in `clipboard_history.json`. Use `cb clear` to wipe all entries and right-click items to edit or delete them.
+- Clipboard history (`cb`) - entries persist in `clipboard_history.json`. Use `cb list` to show all entries or `cb clear` to wipe them. Right-click items to edit or delete.
 - Bookmarks (`bm add <url>`, `bm rm [pattern]` or `bm list`)
 - Folder shortcuts (`f`, `f add <path>`, `f rm <pattern>`)
 - Shell commands (`sh echo hi`)

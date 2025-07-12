@@ -27,3 +27,21 @@ fn history_survives_instances() {
     assert_eq!(results2.len(), 1);
     assert_eq!(results2[0].label, "first");
 }
+
+#[test]
+fn cb_list_returns_all_entries() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let mut list = VecDeque::new();
+    list.push_back("alpha".into());
+    list.push_back("beta".into());
+    save_history(CLIPBOARD_FILE, &list).unwrap();
+
+    let plugin = ClipboardPlugin::new(20);
+    let results = plugin.search("cb list");
+    assert_eq!(results.len(), 2);
+    assert!(results[0].action.starts_with("clipboard:copy:"));
+    assert!(results[1].action.starts_with("clipboard:copy:"));
+}
