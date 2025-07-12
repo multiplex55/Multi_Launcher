@@ -49,7 +49,7 @@ impl PluginEditor {
 
     fn gather_available(plugin_dirs: &[String]) -> Vec<(String, String, Vec<String>)> {
         let mut pm = PluginManager::new();
-        pm.reload_from_dirs(plugin_dirs, false);
+        pm.reload_from_dirs(plugin_dirs, Settings::default().clipboard_limit, false);
         pm.plugin_infos()
     }
 
@@ -119,7 +119,7 @@ impl PluginEditor {
                         Some(s.hide_after_run),
                     );
 
-                    app.plugins.reload_from_dirs(&self.plugin_dirs, false);
+                    app.plugins.reload_from_dirs(&self.plugin_dirs, app.clipboard_limit, false);
                     tracing::debug!(available=?app.plugins.plugin_names(), "plugins reloaded");
                     self.available = Self::gather_available(&self.plugin_dirs);
                     app.search();

@@ -22,6 +22,7 @@ use crate::timer_dialog::{TimerDialog, TimerCompletionDialog};
 use crate::snippet_dialog::SnippetDialog;
 use crate::notes_dialog::NotesDialog;
 use crate::todo_dialog::TodoDialog;
+use crate::clipboard_dialog::ClipboardDialog;
 use crate::add_bookmark_dialog::AddBookmarkDialog;
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
 use crate::usage::{self, USAGE_FILE};
@@ -93,6 +94,7 @@ pub struct LauncherApp {
     snippet_dialog: SnippetDialog,
     notes_dialog: NotesDialog,
     todo_dialog: TodoDialog,
+    clipboard_dialog: ClipboardDialog,
     volume_dialog: crate::volume_dialog::VolumeDialog,
     brightness_dialog: crate::brightness_dialog::BrightnessDialog,
     pub help_flag: Arc<AtomicBool>,
@@ -104,6 +106,7 @@ pub struct LauncherApp {
     /// Number of user defined commands at the start of `actions`.
     pub custom_len: usize,
     pub history_limit: usize,
+    pub clipboard_limit: usize,
     pub fuzzy_weight: f32,
     pub usage_weight: f32,
     pub follow_mouse: bool,
@@ -272,6 +275,7 @@ impl LauncherApp {
             snippet_dialog: SnippetDialog::default(),
             notes_dialog: NotesDialog::default(),
             todo_dialog: TodoDialog::default(),
+            clipboard_dialog: ClipboardDialog::default(),
             volume_dialog: crate::volume_dialog::VolumeDialog::default(),
             brightness_dialog: crate::brightness_dialog::BrightnessDialog::default(),
             help_flag: help_flag.clone(),
@@ -282,6 +286,7 @@ impl LauncherApp {
             list_scale,
             custom_len,
             history_limit: settings.history_limit,
+            clipboard_limit: settings.clipboard_limit,
             fuzzy_weight: settings.fuzzy_weight,
             usage_weight: settings.usage_weight,
             follow_mouse,
@@ -639,6 +644,8 @@ impl eframe::App for LauncherApp {
                             self.snippet_dialog.open();
                         } else if a.action == "todo:dialog" {
                             self.todo_dialog.open();
+                        } else if a.action == "clipboard:dialog" {
+                            self.clipboard_dialog.open();
                         } else if a.action == "volume:dialog" {
                             self.volume_dialog.open();
                         } else if a.action == "brightness:dialog" {
@@ -868,6 +875,36 @@ impl eframe::App for LauncherApp {
                                 }
                             });
                         }
+                    } else if a.desc == "Clipboard" && a.action.starts_with("clipboard:copy:") {
+                        let idx_str = a.action.rsplit(':').next().unwrap_or("");
+                        if let Ok(cb_idx) = idx_str.parse::<usize>() {
+                            let cb_label = a.label.clone();
+                            menu_resp.clone().context_menu(|ui| {
+                                if ui.button("Edit Entry").clicked() {
+                                    self.clipboard_dialog.open_edit(cb_idx);
+                                    ui.close_menu();
+                                }
+                                if ui.button("Remove Entry").clicked() {
+                                    if let Err(e) = crate::plugins::clipboard::remove_entry(
+                                        crate::plugins::clipboard::CLIPBOARD_FILE,
+                                        cb_idx,
+                                    ) {
+                                        self.error = Some(format!("Failed to remove entry: {e}"));
+                                    } else {
+                                        refresh = true;
+                                        set_focus = true;
+                                        if self.enable_toasts {
+                                            self.toasts.add(Toast {
+                                                text: format!("Removed entry {}", cb_label).into(),
+                                                kind: ToastKind::Success,
+                                                options: ToastOptions::default().duration_in_seconds(3.0),
+                                            });
+                                        }
+                                    }
+                                    ui.close_menu();
+                                }
+                            });
+                        }
                     }
                     if let Some(idx_act) = custom_idx {
                         menu_resp.clone().context_menu(|ui| {
@@ -901,6 +938,8 @@ impl eframe::App for LauncherApp {
                             self.snippet_dialog.open();
                         } else if a.action == "todo:dialog" {
                             self.todo_dialog.open();
+                        } else if a.action == "clipboard:dialog" {
+                            self.clipboard_dialog.open();
                         } else if a.action == "volume:dialog" {
                             self.volume_dialog.open();
                         } else if a.action == "brightness:dialog" {
@@ -1036,6 +1075,9 @@ impl eframe::App for LauncherApp {
         let mut todo_dlg = std::mem::take(&mut self.todo_dialog);
         todo_dlg.ui(ctx, self);
         self.todo_dialog = todo_dlg;
+        let mut cb_dlg = std::mem::take(&mut self.clipboard_dialog);
+        cb_dlg.ui(ctx, self);
+        self.clipboard_dialog = cb_dlg;
         let mut vol_dlg = std::mem::take(&mut self.volume_dialog);
         vol_dlg.ui(ctx, self);
         self.volume_dialog = vol_dlg;

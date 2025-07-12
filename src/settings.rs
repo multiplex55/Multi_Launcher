@@ -45,6 +45,8 @@ pub struct Settings {
     /// Maximum number of entries kept in the history list.
     #[serde(default = "default_history_limit")]
     pub history_limit: usize,
+    #[serde(default = "default_clipboard_limit")]
+    pub clipboard_limit: usize,
     /// When true the window spawns at the mouse cursor each time it becomes
     /// visible.
     #[serde(default = "default_follow_mouse")]
@@ -69,6 +71,8 @@ fn default_toasts() -> bool { true }
 fn default_scale() -> Option<f32> { Some(1.0) }
 
 fn default_history_limit() -> usize { 100 }
+
+fn default_clipboard_limit() -> usize { 20 }
 
 fn default_fuzzy_weight() -> f32 { 1.0 }
 
@@ -95,6 +99,7 @@ impl Default for Settings {
             fuzzy_weight: default_fuzzy_weight(),
             usage_weight: default_usage_weight(),
             history_limit: default_history_limit(),
+            clipboard_limit: default_clipboard_limit(),
             follow_mouse: true,
             static_location_enabled: false,
             static_pos: None,

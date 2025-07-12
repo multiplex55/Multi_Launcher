@@ -86,6 +86,7 @@ default hotkey is `F2`. To use a different key, set the `hotkey` value in
   "query_scale": 1.0,
   "list_scale": 1.0,
   "history_limit": 100,
+  "clipboard_limit": 20,
   "follow_mouse": true,
   "static_location_enabled": false,
   "static_pos": [0, 0],
@@ -126,6 +127,7 @@ for these fields.
 `enable_toasts` controls short pop-up notifications when saving settings or commands. Set it to `false` to disable these messages.
 `fuzzy_weight` and `usage_weight` adjust how results are ranked. The fuzzy weight multiplies the match score while the usage weight favours frequently launched actions.
 `history_limit` defines how many entries the history plugin keeps.
+`clipboard_limit` sets how many clipboard entries are persisted for the clipboard plugin.
 `enabled_capabilities` maps plugin names to capability identifiers so features can be toggled individually. The folders plugin, for example, exposes `show_full_path`.
 
 
@@ -146,7 +148,7 @@ Built-in plugins and their command prefixes are:
 - Reddit search (`red cats`)
 - Weather lookup (`weather Berlin`)
 - Calculator (`= 2+2`)
-- Clipboard history (`cb`)
+- Clipboard history (`cb`) - entries persist in `clipboard_history.json`. Use `cb list` to show all entries or `cb clear` to wipe them. Right-click items to edit or delete.
 - Bookmarks (`bm add <url>`, `bm rm [pattern]` or `bm list`)
 - Folder shortcuts (`f`, `f add <path>`, `f rm <pattern>`)
 - Shell commands (`sh echo hi`)

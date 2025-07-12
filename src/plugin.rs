@@ -53,7 +53,7 @@ impl PluginManager {
     }
 
     /// Rebuild the plugin list, keeping previously loaded libraries alive.
-    pub fn reload_from_dirs(&mut self, dirs: &[String], reset_alarm: bool) {
+    pub fn reload_from_dirs(&mut self, dirs: &[String], clipboard_limit: usize, reset_alarm: bool) {
         self.clear_plugins();
         self.register(Box::new(WebSearchPlugin));
         self.register(Box::new(CalculatorPlugin));
@@ -61,7 +61,7 @@ impl PluginManager {
         self.register(Box::new(YoutubePlugin));
         self.register(Box::new(RedditPlugin));
         self.register(Box::new(WikipediaPlugin));
-        self.register(Box::new(ClipboardPlugin::default()));
+        self.register(Box::new(ClipboardPlugin::new(clipboard_limit)));
         self.register(Box::new(BookmarksPlugin::default()));
         self.register(Box::new(FoldersPlugin::default()));
         self.register(Box::new(SystemPlugin));
