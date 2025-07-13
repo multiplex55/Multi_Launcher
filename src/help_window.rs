@@ -93,6 +93,7 @@ fn example_queries(name: &str) -> Option<&'static [&'static str]> {
         "folders" => Some(&["f add C:/path", "f rm docs"]),
         "shell" => Some(&["sh", "sh echo hello"]),
         "system" => Some(&["sys shutdown"]),
+        "sysinfo" => Some(&["info", "info cpu", "info cpu list 5"]),
         "weather" => Some(&["weather Berlin"]),
         "history" => Some(&["hi"]),
         "timer" => Some(&["timer 10s break", "timer list", "alarm 07:30"]),

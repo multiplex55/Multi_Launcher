@@ -49,12 +49,14 @@ impl CpuListDialog {
                         .partial_cmp(&a.cpu_usage())
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
+                let cpu_count = self.system.cpus().len() as f32;
                 for p in procs.into_iter().take(self.count) {
-                    ui.label(format!(
-                        "{:.1}% - {}",
-                        p.cpu_usage(),
-                        p.name().to_string_lossy()
-                    ));
+                    let usage = if cpu_count > 0.0 {
+                        p.cpu_usage() / cpu_count
+                    } else {
+                        0.0
+                    };
+                    ui.label(format!("{usage:.1}% - {}", p.name().to_string_lossy()));
                 }
                 if ui.button("Close").clicked() {
                     close = true;
