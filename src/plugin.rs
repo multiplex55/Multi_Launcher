@@ -23,6 +23,7 @@ use crate::plugins::todo::TodoPlugin;
 use crate::plugins::snippets::SnippetsPlugin;
 use crate::plugins::recycle::RecyclePlugin;
 use crate::plugins::tempfile::TempfilePlugin;
+use crate::plugins::asciiart::AsciiArtPlugin;
 #[cfg(target_os = "windows")]
 use crate::plugins::volume::VolumePlugin;
 #[cfg(target_os = "windows")]
@@ -83,6 +84,7 @@ impl PluginManager {
         self.register(Box::new(SnippetsPlugin::default()));
         self.register(Box::new(RecyclePlugin));
         self.register(Box::new(TempfilePlugin));
+        self.register(Box::new(AsciiArtPlugin::default()));
         #[cfg(target_os = "windows")]
         {
             self.register(Box::new(VolumePlugin));
