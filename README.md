@@ -61,9 +61,10 @@ grab the key.
 
 ## Settings
 
-Create a `settings.json` next to the binary to customise the launcher. The
-default hotkey is `F2`. To use a different key, set the `hotkey` value in
-`settings.json` as shown below:
+Multi Launcher automatically creates a `settings.json` file next to the binary
+on first run. Edit this file or open the **Settings** window to customise the
+launcher. The default hotkey is `F2`. To use a different key, set the `hotkey`
+value as shown below:
 
 ```json
 {
@@ -261,9 +262,11 @@ memory and disk usage or `info cpu` for a single metric.
 The shell plugin runs commands using the system shell without sanitising input. Only enable it if you trust the commands you type. Errors while spawning the process are logged.
 Type `sh` in the launcher to open the shell command editor for managing predefined commands.
 ## Editing Commands
-The launcher stores its custom actions in `actions.json`. While running the
-application you can manage this list through **Edit Commands**. Open the
-launcher with the configured hotkey and choose *Edit Commands* from the menu.
+The launcher stores its custom actions in `actions.json` next to the
+executable. This file is created automatically the first time you save a
+command. While running the application you can manage this list through
+**Edit Commands**. Open the launcher with the configured hotkey and choose
+*Edit Commands* from the menu.
 Use the **New Command** button to open the *Add Command* dialog where you enter
 a label, description and the executable path. Enable **Add arguments** to supply
 extra command line parameters. The **Browse** button lets you
