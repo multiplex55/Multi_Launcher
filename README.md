@@ -14,6 +14,8 @@ quickly open applications or files.
 - Jump to frequently used folders with the folders plugin.
 - Set timers or alarms from the launcher. Type `timer` or `alarm` and press
   <kbd>Enter</kbd> to open the creation dialog.
+- Keep track of quick todo items or notes.
+- Insert saved text snippets without opening a file.
 
 
 ## Building
@@ -141,33 +143,60 @@ window.
 
 ## Plugins
 
+```mermaid
+flowchart LR
+    A[Hotkey pressed] --> B(Show launcher)
+    B --> C{User query}
+    C --> D[Plugin manager searches]
+    D --> E[Display results]
+    E --> F[Run action]
+```
+
+```mermaid
+graph TD
+    S[Startup] --> B1[Register built-in plugins]
+    S --> B2[Load plugin_dirs]
+    B2 --> L[Load dynamic plugins]
+    B1 --> PM[Plugin manager ready]
+    L --> PM
+```
+
 Built-in plugins and their command prefixes are:
 
 - Google web search (`g rust`)
-- RuneScape Wiki search (`rs item` or `osrs item`)
-- YouTube search (`yt rust`)
-- Reddit search (`red cats`)
-- Weather lookup (`weather Berlin`)
 - Calculator (`= 2+2`)
 - Unit conversions (`conv 10 km to mi`)
 - Drop rate calculator (`drop 1/128 128`)
+- RuneScape Wiki search (`rs item` or `osrs item`)
+- YouTube search (`yt rust`)
+- Reddit search (`red cats`)
+- Wikipedia search (`wiki rust`)
 - Clipboard history (`cb`) - entries persist in `clipboard_history.json`. Use `cb list` to show all entries or `cb clear` to wipe them. Right-click items to edit or delete.
 - Bookmarks (`bm add <url>`, `bm rm [pattern]` or `bm list`)
 - Folder shortcuts (`f`, `f add <path>`, `f rm <pattern>`)
-- Shell commands (`sh echo hi`)
 - System actions (`sys shutdown`)
 - Process list (`ps`), providing "Switch to" and "Kill" actions
 - System information (`info`, `info cpu`, `info mem`, `info disk`)
+- Shell commands (`sh echo hi`)
+- Search history (`hi`)
+- Quick notes (`note add <text>`, `note list`, `note rm <pattern>`)
+- Todo items (`todo add <task>`, `todo list`, `todo rm <pattern>`, `todo clear`)
+- Text snippets (`cs`, `cs list`, `cs rm`)
+- Recycle Bin cleanup (`rec`)
+- Temporary files (`tmp`, `tmp new`, `tmp open`, `tmp clear`, `tmp list`, `tmp rm`)
+- ASCII art (`ascii text`)
+- Volume control (`vol 50`) *(Windows only)*
+- Brightness control (`bright 50`) *(Windows only)*
+- Command overview (`help`)
 - Timers and alarms (`timer 5m tea`, `alarm 07:30`). Use `timer list` to view
   remaining time. Pending alarms are saved to `alarms.json` and resume after
   restarting the launcher. A plugin setting controls pop-up dialogs when a
   timer completes.
-- Search history (`hi`)
-- Quick notes (`note add <text>`, `note list`, `note rm <pattern>`)
-- Temporary files (`tmp`, `tmp new`, `tmp open`, `tmp clear`, `tmp list`, `tmp rm`)
-- Recycle Bin cleanup (`rec`)
-- ASCII art (`ascii text`)
-- Command overview (`help`)
+- Weather lookup (`weather Berlin`)
+
+On Windows the optional `vol` and `bright` plugins allow changing system volume
+and display brightness. These plugins are stubbed on other platforms and simply
+return no results.
 
 Selecting a clipboard entry copies it back to the clipboard. Type `help` and press <kbd>Enter</kbd> to open the command list. The help window groups commands by plugin name and can optionally display example queries. Additional plugins can be added by building
 shared libraries. Each plugin crate should be compiled as a `cdylib` and export
