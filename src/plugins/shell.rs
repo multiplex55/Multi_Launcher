@@ -12,6 +12,7 @@ pub struct ShellCmdEntry {
     pub args: String,
 }
 
+/// Load saved shell commands from `path`.
 pub fn load_shell_cmds(path: &str) -> anyhow::Result<Vec<ShellCmdEntry>> {
     let content = std::fs::read_to_string(path).unwrap_or_default();
     if content.trim().is_empty() {
@@ -21,6 +22,7 @@ pub fn load_shell_cmds(path: &str) -> anyhow::Result<Vec<ShellCmdEntry>> {
     Ok(list)
 }
 
+/// Save the list of shell command entries to `path`.
 pub fn save_shell_cmds(path: &str, cmds: &[ShellCmdEntry]) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(cmds)?;
     std::fs::write(path, json)?;

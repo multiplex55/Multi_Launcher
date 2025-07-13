@@ -4,6 +4,9 @@ use std::collections::VecDeque;
 
 pub const CLIPBOARD_FILE: &str = "clipboard_history.json";
 
+/// Load clipboard history from `path`.
+///
+/// Returns an empty queue when the file is missing or empty.
 pub fn load_history(path: &str) -> anyhow::Result<VecDeque<String>> {
     let content = std::fs::read_to_string(path).unwrap_or_default();
     if content.trim().is_empty() {
@@ -13,6 +16,7 @@ pub fn load_history(path: &str) -> anyhow::Result<VecDeque<String>> {
     Ok(list.into())
 }
 
+/// Save the clipboard `history` to `path`.
 pub fn save_history(path: &str, history: &VecDeque<String>) -> anyhow::Result<()> {
     let list: Vec<String> = history.iter().cloned().collect();
     let json = serde_json::to_string_pretty(&list)?;
@@ -20,6 +24,7 @@ pub fn save_history(path: &str, history: &VecDeque<String>) -> anyhow::Result<()
     Ok(())
 }
 
+/// Remove the history entry at `index` from the file at `path`.
 pub fn remove_entry(path: &str, index: usize) -> anyhow::Result<()> {
     let mut history = load_history(path).unwrap_or_default();
     if index < history.len() {
@@ -29,6 +34,7 @@ pub fn remove_entry(path: &str, index: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Replace the entry at `index` with `text` in the history file at `path`.
 pub fn set_entry(path: &str, index: usize, text: &str) -> anyhow::Result<()> {
     let mut history = load_history(path).unwrap_or_default();
     if index < history.len() {
@@ -38,6 +44,7 @@ pub fn set_entry(path: &str, index: usize, text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Clear the clipboard history file at `path`.
 pub fn clear_history_file(path: &str) -> anyhow::Result<()> {
     save_history(path, &VecDeque::new())
 }
@@ -48,6 +55,7 @@ pub struct ClipboardPlugin {
 }
 
 impl ClipboardPlugin {
+    /// Create a new plugin keeping up to `max_entries` in history.
     pub fn new(max_entries: usize) -> Self {
         Self { max_entries, path: CLIPBOARD_FILE.into() }
     }

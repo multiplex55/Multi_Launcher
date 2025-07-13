@@ -14,6 +14,7 @@ pub struct FolderEntry {
     pub alias: Option<String>,
 }
 
+/// Return a set of default commonly used folders.
 pub fn default_folders() -> Vec<FolderEntry> {
     let mut out = Vec::new();
     if let Some(p) = dirs_next::home_dir() {
@@ -31,6 +32,7 @@ pub fn default_folders() -> Vec<FolderEntry> {
     out
 }
 
+/// Load folder entries from `path` or return the defaults if the file is empty.
 pub fn load_folders(path: &str) -> anyhow::Result<Vec<FolderEntry>> {
     let content = std::fs::read_to_string(path).unwrap_or_default();
     if content.is_empty() {
@@ -40,12 +42,16 @@ pub fn load_folders(path: &str) -> anyhow::Result<Vec<FolderEntry>> {
     Ok(list)
 }
 
+/// Save `folders` to `path` in JSON format.
 pub fn save_folders(path: &str, folders: &[FolderEntry]) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(folders)?;
     std::fs::write(path, json)?;
     Ok(())
 }
 
+/// Append a folder path to the list stored at `path`.
+///
+/// Returns an error if the folder does not exist.
 pub fn append_folder(path: &str, folder: &str) -> anyhow::Result<()> {
     if !std::path::Path::new(folder).exists() {
         anyhow::bail!("folder does not exist: {folder}");
@@ -63,6 +69,7 @@ pub fn append_folder(path: &str, folder: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Remove a folder entry matching `folder` from the file at `path`.
 pub fn remove_folder(path: &str, folder: &str) -> anyhow::Result<()> {
     let mut list = load_folders(path).unwrap_or_else(|_| default_folders());
     if let Some(pos) = list.iter().position(|f| f.path == folder) {
@@ -72,6 +79,7 @@ pub fn remove_folder(path: &str, folder: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Set or clear the alias for a folder entry.
 pub fn set_alias(path: &str, folder: &str, alias: &str) -> anyhow::Result<()> {
     let mut list = load_folders(path).unwrap_or_else(|_| default_folders());
     if let Some(item) = list.iter_mut().find(|f| f.path == folder) {
@@ -86,6 +94,7 @@ pub struct FoldersPlugin {
 }
 
 impl FoldersPlugin {
+    /// Create a new folders plugin.
     pub fn new() -> Self {
         Self { matcher: SkimMatcherV2::default() }
     }

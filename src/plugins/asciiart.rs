@@ -7,6 +7,7 @@ pub struct AsciiArtPlugin {
 }
 
 impl AsciiArtPlugin {
+    /// Create a new plugin instance with the bundled standard font.
     pub fn new() -> Self {
         Self { font: FIGfont::standard().unwrap() }
     }

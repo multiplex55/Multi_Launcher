@@ -28,7 +28,7 @@ fn ensure_dir() -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// Create a new temporary file and return its path.
+/// Create a new unnamed temporary file and return its path.
 pub fn create_file() -> anyhow::Result<PathBuf> {
     let dir = ensure_dir()?;
     let mut idx = 0;
@@ -42,8 +42,8 @@ pub fn create_file() -> anyhow::Result<PathBuf> {
     }
 }
 
-/// Create a new temp file with a specific alias and contents. The filename is
-/// prefixed with `temp_` and suffixed with a number if needed.
+/// Create a new temp file with a specific `alias` and initial `contents`.
+/// The filename is prefixed with `temp_` and suffixed with a number if needed.
 pub fn create_named_file(alias: &str, contents: &str) -> anyhow::Result<PathBuf> {
     validate_alias(alias)?;
     let dir = ensure_dir()?;
@@ -64,6 +64,8 @@ pub fn create_named_file(alias: &str, contents: &str) -> anyhow::Result<PathBuf>
 }
 
 /// Remove a specific file inside the storage directory.
+///
+/// Does nothing if the file does not exist.
 pub fn remove_file(path: &Path) -> anyhow::Result<()> {
     if path.exists() && path.is_file() {
         fs::remove_file(path)?;
@@ -71,7 +73,7 @@ pub fn remove_file(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Rename a temp file to use the provided alias.
+/// Rename a temp file to use the provided `alias`.
 /// The resulting file name will always start with `temp_`.
 pub fn set_alias(path: &Path, alias: &str) -> anyhow::Result<PathBuf> {
     validate_alias(alias)?;

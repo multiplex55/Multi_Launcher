@@ -42,10 +42,12 @@ fn save_persistent_alarms_locked(timers: &Vec<TimerEntry>) {
 
 pub static ACTIVE_TIMERS: Lazy<Mutex<Vec<TimerEntry>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
+/// Reset the flag tracking whether saved alarms have been loaded.
 pub fn reset_alarms_loaded() {
     ALARMS_LOADED.store(false, Ordering::SeqCst);
 }
 
+/// Retrieve and clear finished timer/alarm notifications.
 pub fn take_finished_messages() -> Vec<String> {
     let mut list = FINISHED_MESSAGES.lock().unwrap();
     let out = list.clone();
@@ -53,6 +55,7 @@ pub fn take_finished_messages() -> Vec<String> {
     out
 }
 
+/// Load persisted alarms from the alarms file if not already loaded.
 pub fn load_saved_alarms() {
     if ALARMS_LOADED.load(Ordering::SeqCst) {
         return;
@@ -81,6 +84,7 @@ pub fn load_saved_alarms() {
     ALARMS_LOADED.store(true, Ordering::SeqCst);
 }
 
+/// Parse a duration string like "5m" or "10s".
 pub fn parse_duration(input: &str) -> Option<Duration> {
     if input.len() < 2 { return None; }
     let (num_str, unit) = input.split_at(input.len()-1);
@@ -93,6 +97,7 @@ pub fn parse_duration(input: &str) -> Option<Duration> {
     }
 }
 
+/// Parse a time of day in `HH:MM` format.
 pub fn parse_hhmm(input: &str) -> Option<(u32, u32)> {
     let parts: Vec<&str> = input.split(':').collect();
     if parts.len() != 2 { return None; }
@@ -105,6 +110,7 @@ pub fn parse_hhmm(input: &str) -> Option<(u32, u32)> {
     }
 }
 
+/// Return a list of active timers with remaining time.
 pub fn active_timers() -> Vec<(u64, String, Duration)> {
     let now = Instant::now();
     ACTIVE_TIMERS
@@ -115,6 +121,7 @@ pub fn active_timers() -> Vec<(u64, String, Duration)> {
         .collect()
 }
 
+/// Cancel the timer with the given `id` if it exists.
 pub fn cancel_timer(id: u64) {
     let mut timers = ACTIVE_TIMERS.lock().unwrap();
     if let Some(pos) = timers.iter().position(|t| t.id == id) {
@@ -194,6 +201,7 @@ fn start_entry(duration: Duration, label: String, persist: bool, end_ts: u64) {
     });
 }
 
+/// Start a timer that lasts `duration` with an optional `name`.
 pub fn start_timer_named(duration: Duration, name: Option<String>) {
     let label = name.unwrap_or_else(|| format!("Timer {:?}", duration));
     let end_ts = SystemTime::now()
@@ -204,10 +212,12 @@ pub fn start_timer_named(duration: Duration, name: Option<String>) {
     start_entry(duration, label, false, end_ts);
 }
 
+/// Start an unnamed timer that lasts `duration`.
 pub fn start_timer(duration: Duration) {
     start_timer_named(duration, None);
 }
 
+/// Set an alarm for the specified time with an optional `name`.
 pub fn start_alarm_named(hour: u32, minute: u32, name: Option<String>) {
     use chrono::{Duration as ChronoDuration, Local};
     let now = Local::now();
@@ -227,6 +237,7 @@ pub fn start_alarm_named(hour: u32, minute: u32, name: Option<String>) {
     start_entry(duration, label, true, end_ts);
 }
 
+/// Convenience wrapper for [`start_alarm_named`] without a name.
 pub fn start_alarm(hour: u32, minute: u32) {
     start_alarm_named(hour, minute, None);
 }
