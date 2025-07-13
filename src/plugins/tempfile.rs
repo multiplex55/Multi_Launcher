@@ -3,6 +3,20 @@ use crate::plugin::Plugin;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
+fn validate_alias(alias: &str) -> anyhow::Result<&str> {
+    if alias.is_empty() {
+        anyhow::bail!("alias cannot be empty");
+    }
+    #[cfg(windows)]
+    let invalid = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
+    #[cfg(not(windows))]
+    let invalid = ['\\', '/'];
+    if alias.chars().any(|c| invalid.contains(&c)) {
+        anyhow::bail!("alias contains invalid characters");
+    }
+    Ok(alias)
+}
+
 /// Return the directory used to store temporary files.
 pub fn storage_dir() -> PathBuf {
     std::env::temp_dir().join("multi_launcher_tmp")
@@ -31,6 +45,7 @@ pub fn create_file() -> anyhow::Result<PathBuf> {
 /// Create a new temp file with a specific alias and contents. The filename is
 /// prefixed with `temp_` and suffixed with a number if needed.
 pub fn create_named_file(alias: &str, contents: &str) -> anyhow::Result<PathBuf> {
+    validate_alias(alias)?;
     let dir = ensure_dir()?;
     let mut idx = 0;
     loop {
@@ -59,6 +74,7 @@ pub fn remove_file(path: &Path) -> anyhow::Result<()> {
 /// Rename a temp file to use the provided alias.
 /// The resulting file name will always start with `temp_`.
 pub fn set_alias(path: &Path, alias: &str) -> anyhow::Result<PathBuf> {
+    validate_alias(alias)?;
     let dir = ensure_dir()?;
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("txt");
     let new_name = format!("temp_{}.{}", alias, ext);

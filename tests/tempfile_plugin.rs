@@ -1,6 +1,7 @@
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::tempfile::{
-    clear_files, create_file, list_files, remove_file, set_alias, TempfilePlugin,
+    clear_files, create_file, create_named_file, list_files, remove_file, set_alias,
+    TempfilePlugin,
 };
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
@@ -97,4 +98,30 @@ fn set_alias_renames_file() {
         .to_string_lossy()
         .starts_with("temp_alias"));
     remove_file(&new).unwrap();
+}
+
+#[test]
+fn create_named_file_rejects_invalid_alias() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_var("TMPDIR", dir.path());
+    #[cfg(windows)]
+    std::env::set_var("TEMP", dir.path());
+
+    let res = create_named_file("bad/alias", "hi");
+    assert!(res.is_err());
+}
+
+#[test]
+fn set_alias_rejects_invalid_alias() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_var("TMPDIR", dir.path());
+    #[cfg(windows)]
+    std::env::set_var("TEMP", dir.path());
+
+    let file = create_file().unwrap();
+    let res = set_alias(&file, "bad/alias");
+    assert!(res.is_err());
+    remove_file(&file).unwrap();
 }
