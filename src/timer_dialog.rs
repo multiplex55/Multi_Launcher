@@ -74,6 +74,7 @@ impl TimerDialog {
                                 if let Some((h,m)) = parse_hhmm(&self.time) {
                                     start_alarm_named(h, m, if self.label.is_empty(){None}else{Some(self.label.clone())});
                                     close = true;
+                                } else {
                                     app.error = Some("Invalid time".into());
                                 }
                             }
