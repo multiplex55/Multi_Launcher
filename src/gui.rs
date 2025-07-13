@@ -71,7 +71,8 @@ pub struct LauncherApp {
     pub settings_editor: SettingsEditor,
     pub plugin_editor: PluginEditor,
     pub settings_path: String,
-    #[allow(dead_code)]
+    /// Hold watchers so the `RecommendedWatcher` instances remain active.
+    #[allow(dead_code)] // required to keep watchers alive
     watchers: Vec<RecommendedWatcher>,
     rx: Receiver<WatchEvent>,
     plugin_dirs: Option<Vec<String>>,
