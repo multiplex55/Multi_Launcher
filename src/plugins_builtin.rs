@@ -37,7 +37,7 @@ impl Plugin for CalculatorPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         if query.starts_with("=") {
             let expr = &query[1..];
-            match meval::eval_str(expr) {
+            match exmex::eval_str::<f64>(expr) {
                 Ok(v) => vec![Action {
                     label: format!("{} = {}", expr, v),
                     desc: "Calculator".into(),
