@@ -96,12 +96,15 @@ fn spawn_gui(
 
     let handle = thread::spawn(move || {
         let (w, h) = settings.window_size.unwrap_or((400, 220));
+        let icon_bytes = include_bytes!("../Resources/Green_MultiLauncher.png");
+        let icon = eframe::icon_data::from_png_bytes(icon_bytes).unwrap_or_default();
         let native_options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([w as f32, h as f32])
                 .with_min_inner_size([320.0, 160.0])
                 .with_always_on_top()
-                .with_visible(true),
+                .with_visible(true)
+                .with_icon(icon),
             event_loop_builder: Some(Box::new(|_builder| {
                 #[cfg(target_os = "windows")]
                 {
