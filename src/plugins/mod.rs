@@ -19,4 +19,5 @@ pub mod snippets;
 pub mod volume;
 pub mod brightness;
 pub mod unit_convert;
+pub mod dropcalc;
 pub mod recycle;

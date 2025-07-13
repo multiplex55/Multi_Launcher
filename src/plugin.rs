@@ -2,6 +2,7 @@ use crate::actions::Action;
 use libloading::Library;
 use crate::plugins_builtin::{WebSearchPlugin, CalculatorPlugin};
 use crate::plugins::unit_convert::UnitConvertPlugin;
+use crate::plugins::dropcalc::DropCalcPlugin;
 use crate::plugins::clipboard::ClipboardPlugin;
 use crate::plugins::shell::ShellPlugin;
 use crate::plugins::bookmarks::BookmarksPlugin;
@@ -63,6 +64,7 @@ impl PluginManager {
         self.register(Box::new(WebSearchPlugin));
         self.register(Box::new(CalculatorPlugin));
         self.register(Box::new(UnitConvertPlugin));
+        self.register(Box::new(DropCalcPlugin));
         self.register(Box::new(RunescapeSearchPlugin));
         self.register(Box::new(YoutubePlugin));
         self.register(Box::new(RedditPlugin));

@@ -150,6 +150,7 @@ Built-in plugins and their command prefixes are:
 - Weather lookup (`weather Berlin`)
 - Calculator (`= 2+2`)
 - Unit conversions (`conv 10 km to mi`)
+- Drop rate calculator (`drop 1/128 128`)
 - Clipboard history (`cb`) - entries persist in `clipboard_history.json`. Use `cb list` to show all entries or `cb clear` to wipe them. Right-click items to edit or delete.
 - Bookmarks (`bm add <url>`, `bm rm [pattern]` or `bm list`)
 - Folder shortcuts (`f`, `f add <path>`, `f rm <pattern>`)
