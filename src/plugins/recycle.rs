@@ -1,0 +1,37 @@
+use crate::actions::Action;
+use crate::plugin::Plugin;
+
+pub struct RecyclePlugin;
+
+impl Plugin for RecyclePlugin {
+    #[cfg(target_os = "windows")]
+    fn search(&self, query: &str) -> Vec<Action> {
+        if query.trim_start().starts_with("rec") {
+            return vec![Action {
+                label: "Clean Recycle Bin".into(),
+                desc: "Recycle Bin".into(),
+                action: "recycle:clean".into(),
+                args: None,
+            }];
+        }
+        Vec::new()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn search(&self, _query: &str) -> Vec<Action> {
+        Vec::new()
+    }
+
+    fn name(&self) -> &str {
+        "recycle"
+    }
+
+    fn description(&self) -> &str {
+        "Empty the recycle bin (prefix: `rec`)"
+    }
+
+    fn capabilities(&self) -> &[&str] {
+        &["search"]
+    }
+}
+
