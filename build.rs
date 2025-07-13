@@ -1,6 +1,7 @@
 #[cfg(target_os = "windows")]
 fn main() {
-    embed_resource::compile("Resources/windows.rc");
+    // no custom macros are passed to the resource compiler
+    embed_resource::compile("Resources/windows.rc", &[]);
 }
 
 #[cfg(not(target_os = "windows"))]
