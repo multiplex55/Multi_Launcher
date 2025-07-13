@@ -133,12 +133,16 @@ pub fn cancel_timer(id: u64) {
     }
 }
 
+#[cfg(feature = "notify")]
 fn notify(msg: &str) {
-    #[allow(unused)]
-    {
-        let _ = notify_rust::Notification::new().summary("Multi Launcher").body(msg).show();
-    }
+    let _ = notify_rust::Notification::new()
+        .summary("Multi Launcher")
+        .body(msg)
+        .show();
 }
+
+#[cfg(not(feature = "notify"))]
+fn notify(_msg: &str) {}
 
 fn format_duration(dur: Duration) -> String {
     let secs = dur.as_secs();
