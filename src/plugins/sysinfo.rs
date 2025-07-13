@@ -31,7 +31,7 @@ impl SysInfoPlugin {
     }
 
     fn disk_action() -> Action {
-        let mut disks = Disks::new_with_refreshed_list();
+        let disks = Disks::new_with_refreshed_list();
         let mut total = 0u64;
         let mut avail = 0u64;
         for d in disks.list() {

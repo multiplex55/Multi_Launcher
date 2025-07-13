@@ -23,7 +23,6 @@ use crate::snippet_dialog::SnippetDialog;
 use crate::notes_dialog::NotesDialog;
 use crate::todo_dialog::TodoDialog;
 use crate::clipboard_dialog::ClipboardDialog;
-use crate::add_bookmark_dialog::AddBookmarkDialog;
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
 use crate::usage::{self, USAGE_FILE};
 use std::time::Instant;
