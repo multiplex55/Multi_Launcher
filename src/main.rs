@@ -25,6 +25,8 @@ mod settings;
 mod settings_editor;
 mod shell_cmd_dialog;
 mod snippet_dialog;
+mod tempfile_alias_dialog;
+mod tempfile_dialog;
 mod timer_dialog;
 mod timer_help_window;
 mod todo_dialog;

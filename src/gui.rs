@@ -13,6 +13,7 @@ use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
 use crate::settings::Settings;
 use crate::settings_editor::SettingsEditor;
 use crate::snippet_dialog::SnippetDialog;
+use crate::tempfile_dialog::TempfileDialog;
 use crate::timer_dialog::{TimerCompletionDialog, TimerDialog};
 use crate::timer_help_window::TimerHelpWindow;
 use crate::todo_dialog::TodoDialog;
@@ -88,6 +89,8 @@ pub struct LauncherApp {
     pub enable_toasts: bool,
     alias_dialog: crate::alias_dialog::AliasDialog,
     bookmark_alias_dialog: crate::bookmark_alias_dialog::BookmarkAliasDialog,
+    tempfile_alias_dialog: crate::tempfile_alias_dialog::TempfileAliasDialog,
+    tempfile_dialog: TempfileDialog,
     add_bookmark_dialog: crate::add_bookmark_dialog::AddBookmarkDialog,
     help_window: crate::help_window::HelpWindow,
     timer_help: crate::timer_help_window::TimerHelpWindow,
@@ -272,6 +275,8 @@ impl LauncherApp {
             enable_toasts,
             alias_dialog: crate::alias_dialog::AliasDialog::default(),
             bookmark_alias_dialog: crate::bookmark_alias_dialog::BookmarkAliasDialog::default(),
+            tempfile_alias_dialog: crate::tempfile_alias_dialog::TempfileAliasDialog::default(),
+            tempfile_dialog: TempfileDialog::default(),
             add_bookmark_dialog: crate::add_bookmark_dialog::AddBookmarkDialog::default(),
             help_window: HelpWindow::default(),
             timer_help: TimerHelpWindow::default(),
@@ -620,6 +625,8 @@ impl eframe::App for LauncherApp {
                 let mut launch_idx: Option<usize> = None;
                 if ctx.input(|i| i.key_pressed(egui::Key::Enter))
                     && !self.bookmark_alias_dialog.open
+                    && !self.tempfile_alias_dialog.open
+                    && !self.tempfile_dialog.open
                     && !self.notes_dialog.open
                 {
                     launch_idx = self.handle_key(egui::Key::Enter);
@@ -649,6 +656,8 @@ impl eframe::App for LauncherApp {
                             self.todo_dialog.open();
                         } else if a.action == "clipboard:dialog" {
                             self.clipboard_dialog.open();
+                        } else if a.action == "tempfile:dialog" {
+                            self.tempfile_dialog.open();
                         } else if a.action == "volume:dialog" {
                             self.volume_dialog.open();
                         } else if a.action == "brightness:dialog" {
@@ -872,6 +881,35 @@ impl eframe::App for LauncherApp {
                                         ui.close_menu();
                                     }
                                 });
+                            } else if a.desc == "Tempfile" && !a.action.starts_with("tempfile:") {
+                                let file_path = a.action.clone();
+                                menu_resp.clone().context_menu(|ui| {
+                                    if ui.button("Set Alias").clicked() {
+                                        self.tempfile_alias_dialog.open(&file_path);
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Delete File").clicked() {
+                                        if let Err(e) = crate::plugins::tempfile::remove_file(
+                                            std::path::Path::new(&file_path),
+                                        ) {
+                                            self.error =
+                                                Some(format!("Failed to delete file: {e}"));
+                                        } else {
+                                            refresh = true;
+                                            set_focus = true;
+                                            if self.enable_toasts {
+                                                self.toasts.add(Toast {
+                                                    text: format!("Removed file {}", a.label)
+                                                        .into(),
+                                                    kind: ToastKind::Success,
+                                                    options: ToastOptions::default()
+                                                        .duration_in_seconds(3.0),
+                                                });
+                                            }
+                                        }
+                                        ui.close_menu();
+                                    }
+                                });
                             } else if a.desc == "Note"
                                 && (a.action.starts_with("note:copy:")
                                     || a.action.starts_with("note:remove:"))
@@ -981,6 +1019,8 @@ impl eframe::App for LauncherApp {
                                     self.todo_dialog.open();
                                 } else if a.action == "clipboard:dialog" {
                                     self.clipboard_dialog.open();
+                                } else if a.action == "tempfile:dialog" {
+                                    self.tempfile_dialog.open();
                                 } else if a.action == "volume:dialog" {
                                     self.volume_dialog.open();
                                 } else if a.action == "brightness:dialog" {
@@ -1100,6 +1140,12 @@ impl eframe::App for LauncherApp {
         let mut bm_dlg = std::mem::take(&mut self.bookmark_alias_dialog);
         bm_dlg.ui(ctx, self);
         self.bookmark_alias_dialog = bm_dlg;
+        let mut tf_dlg = std::mem::take(&mut self.tempfile_alias_dialog);
+        tf_dlg.ui(ctx, self);
+        self.tempfile_alias_dialog = tf_dlg;
+        let mut create_tf = std::mem::take(&mut self.tempfile_dialog);
+        create_tf.ui(ctx, self);
+        self.tempfile_dialog = create_tf;
         let mut add_bm_dlg = std::mem::take(&mut self.add_bookmark_dialog);
         add_bm_dlg.ui(ctx, self);
         self.add_bookmark_dialog = add_bm_dlg;

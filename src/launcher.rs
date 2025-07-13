@@ -353,6 +353,21 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         clean_recycle_bin();
         return Ok(());
     }
+    if action.action == "tempfile:new" {
+        let path = crate::plugins::tempfile::create_file()?;
+        open::that(&path)?;
+        return Ok(());
+    }
+    if action.action == "tempfile:open" {
+        let dir = crate::plugins::tempfile::storage_dir();
+        std::fs::create_dir_all(&dir)?;
+        open::that(dir)?;
+        return Ok(());
+    }
+    if action.action == "tempfile:clear" {
+        crate::plugins::tempfile::clear_files()?;
+        return Ok(());
+    }
     let path = Path::new(&action.action);
 
     // If it's an .exe or we have additional args, launch it directly

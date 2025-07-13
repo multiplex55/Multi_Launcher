@@ -21,3 +21,4 @@ pub mod brightness;
 pub mod unit_convert;
 pub mod dropcalc;
 pub mod recycle;
+pub mod tempfile;
