@@ -39,9 +39,7 @@ mod workspace;
 use crate::actions::{load_actions, Action};
 use crate::gui::LauncherApp;
 use crate::hotkey::HotkeyTrigger;
-use crate::plugin::{Plugin, PluginManager};
-use crate::plugins::clipboard::ClipboardPlugin;
-use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
+use crate::plugin::PluginManager;
 use crate::settings::Settings;
 use crate::visibility::handle_visibility_trigger;
 
@@ -87,7 +85,6 @@ fn spawn_gui(
     let plugin_dirs = settings.plugin_dirs.clone();
     let index_paths = settings.index_paths.clone();
     let enabled_plugins = settings.enabled_plugins.clone();
-    let enabled_capabilities = settings.enabled_capabilities.clone();
     let visible_flag = Arc::new(AtomicBool::new(true));
     let restore_flag = Arc::new(AtomicBool::new(false));
     let help_flag = Arc::new(AtomicBool::new(false));
@@ -105,11 +102,11 @@ fn spawn_gui(
                 .with_min_inner_size([320.0, 160.0])
                 .with_always_on_top()
                 .with_visible(true),
-            event_loop_builder: Some(Box::new(|builder| {
+            event_loop_builder: Some(Box::new(|_builder| {
                 #[cfg(target_os = "windows")]
                 {
                     use winit::platform::windows::EventLoopBuilderExtWindows;
-                    builder.with_any_thread(true);
+                    _builder.with_any_thread(true);
                 }
             })),
             ..Default::default()

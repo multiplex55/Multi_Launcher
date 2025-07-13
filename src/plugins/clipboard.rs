@@ -34,15 +34,6 @@ pub fn remove_entry(path: &str, index: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Replace the entry at `index` with `text` in the history file at `path`.
-pub fn set_entry(path: &str, index: usize, text: &str) -> anyhow::Result<()> {
-    let mut history = load_history(path).unwrap_or_default();
-    if index < history.len() {
-        history[index] = text.to_string();
-        save_history(path, &history)?;
-    }
-    Ok(())
-}
 
 /// Clear the clipboard history file at `path`.
 pub fn clear_history_file(path: &str) -> anyhow::Result<()> {

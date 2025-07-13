@@ -26,14 +26,6 @@ fn load_history_internal() -> anyhow::Result<VecDeque<HistoryEntry>> {
     Ok(list.into())
 }
 
-/// Load history from `history.json` into the global HISTORY list.
-pub fn load_history() -> anyhow::Result<()> {
-    let hist = load_history_internal()?;
-    let mut h = HISTORY.lock().unwrap();
-    *h = hist;
-    Ok(())
-}
-
 /// Save the current HISTORY list to `history.json`.
 pub fn save_history() -> anyhow::Result<()> {
     let h = HISTORY.lock().unwrap();

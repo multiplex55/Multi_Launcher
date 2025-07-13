@@ -29,8 +29,6 @@ fn set_system_volume(percent: u32) {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-fn set_system_volume(_percent: u32) {}
 
 #[cfg(target_os = "windows")]
 fn mute_active_window() {
@@ -71,8 +69,6 @@ fn mute_active_window() {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-fn mute_active_window() {}
 
 #[cfg(target_os = "windows")]
 fn set_display_brightness(percent: u32) {
@@ -108,8 +104,6 @@ fn set_display_brightness(percent: u32) {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-fn set_display_brightness(_percent: u32) {}
 
 #[cfg(target_os = "windows")]
 fn clean_recycle_bin() {
@@ -119,8 +113,6 @@ fn clean_recycle_bin() {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-fn clean_recycle_bin() {}
 
 fn system_command(action: &str) -> Option<std::process::Command> {
     #[cfg(target_os = "windows")]
@@ -250,10 +242,10 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         return Ok(());
     }
     if let Some(pid) = action.action.strip_prefix("process:switch:") {
-        if let Ok(pid) = pid.parse::<u32>() {
+        if let Ok(_pid) = pid.parse::<u32>() {
             #[cfg(target_os = "windows")]
             {
-                crate::window_manager::activate_process(pid);
+                crate::window_manager::activate_process(_pid);
             }
         }
         return Ok(());
@@ -330,16 +322,16 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         return Ok(());
     }
     if let Some(val) = action.action.strip_prefix("brightness:set:") {
-        if let Ok(v) = val.parse::<u32>() {
+        if let Ok(_v) = val.parse::<u32>() {
             #[cfg(target_os = "windows")]
-            set_display_brightness(v);
+            set_display_brightness(_v);
         }
         return Ok(());
     }
     if let Some(val) = action.action.strip_prefix("volume:set:") {
-        if let Ok(v) = val.parse::<u32>() {
+        if let Ok(_v) = val.parse::<u32>() {
             #[cfg(target_os = "windows")]
-            set_system_volume(v);
+            set_system_volume(_v);
         }
         return Ok(());
     }

@@ -28,8 +28,10 @@ use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc,
 };
+#[cfg(target_os = "windows")]
+use std::sync::Mutex;
 use std::time::Instant;
 
 fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -62,6 +64,7 @@ pub struct LauncherApp {
     pub plugins: PluginManager,
     pub selected: Option<usize>,
     pub usage: HashMap<String, u32>,
+    #[cfg(target_os = "windows")]
     pub registered_hotkeys: Mutex<HashMap<String, usize>>,
     pub show_editor: bool,
     pub show_settings: bool,
@@ -250,6 +253,7 @@ impl LauncherApp {
             plugins,
             selected: None,
             usage: usage::load_usage(USAGE_FILE).unwrap_or_default(),
+            #[cfg(target_os = "windows")]
             registered_hotkeys: Mutex::new(HashMap::new()),
             show_editor: false,
             show_settings: false,
@@ -473,7 +477,7 @@ impl LauncherApp {
 }
 
 impl eframe::App for LauncherApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use egui::*;
 
         tracing::debug!("LauncherApp::update called");
@@ -524,7 +528,7 @@ impl eframe::App for LauncherApp {
                 (self.window_size.0 as f32, self.window_size.1 as f32),
             );
             #[cfg(target_os = "windows")]
-            if let Some(hwnd) = crate::window_manager::get_hwnd(frame) {
+            if let Some(hwnd) = crate::window_manager::get_hwnd(_frame) {
                 crate::window_manager::force_restore_and_foreground(hwnd);
             }
         }

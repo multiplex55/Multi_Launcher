@@ -4,14 +4,17 @@ use std::sync::Mutex;
 static MOCK_MOUSE_POSITION: Lazy<Mutex<Option<Option<(f32, f32)>>>> =
     Lazy::new(|| Mutex::new(None));
 
+#[cfg(test)]
 pub fn set_mock_mouse_position(pos: Option<(f32, f32)>) {
     *MOCK_MOUSE_POSITION.lock().unwrap() = Some(pos);
 }
 
+#[cfg(test)]
 pub fn clear_mock_mouse_position() {
     *MOCK_MOUSE_POSITION.lock().unwrap() = None;
 }
 
+#[cfg(any(test, target_os = "windows"))]
 pub fn virtual_key_from_string(key: &str) -> Option<u32> {
     match key.to_uppercase().as_str() {
         "F1" => Some(0x70),
@@ -214,7 +217,7 @@ pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
         let current_thread = GetCurrentThreadId();
 
         tracing::debug!("Forcing window restore and foreground");
-        ShowWindowAsync(hwnd, SW_RESTORE);
+        let _ = ShowWindowAsync(hwnd, SW_RESTORE);
 
         let _ = AttachThreadInput(fg_thread, current_thread, true);
         let fg_success = SetForegroundWindow(hwnd).as_bool();
@@ -260,6 +263,6 @@ pub fn activate_process(pid: u32) {
     }
 
     unsafe {
-        EnumWindows(Some(enum_cb), LPARAM(pid as isize));
+        let _ = EnumWindows(Some(enum_cb), LPARAM(pid as isize));
     }
 }

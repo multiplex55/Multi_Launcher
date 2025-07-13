@@ -114,19 +114,6 @@ impl PluginManager {
         self.plugins.iter().map(|p| p.name().to_string()).collect()
     }
 
-    /// Return the capabilities for all plugins.
-    pub fn plugin_capabilities(&self) -> Vec<(String, Vec<String>)> {
-        self.plugins
-            .iter()
-            .map(|p| {
-                (
-                    p.name().to_string(),
-                    p.capabilities().iter().map(|c| c.to_string()).collect(),
-                )
-            })
-            .collect()
-    }
-
     /// Return names, descriptions and capabilities for all plugins.
     pub fn plugin_infos(&self) -> Vec<(String, String, Vec<String>)> {
         self.plugins
@@ -167,55 +154,6 @@ impl PluginManager {
             }
         }
         Ok(())
-    }
-
-    /// Load plugins from a directory, enabling only those whose names are
-    /// present in `enabled` when provided.
-    pub fn load_dir_filtered(
-        &mut self,
-        path: &str,
-        enabled: Option<&Vec<String>>,
-    ) -> anyhow::Result<()> {
-        use std::ffi::OsStr;
-
-        let ext = "dll";
-
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
-            if !file_type.is_file() {
-                continue;
-            }
-            if entry.path().extension() != Some(OsStr::new(ext)) {
-                continue;
-            }
-
-            unsafe {
-                let lib = Library::new(entry.path())?;
-                let constructor: libloading::Symbol<unsafe extern "C" fn() -> Box<dyn Plugin>> =
-                    lib.get(b"create_plugin")?;
-                let plugin = constructor();
-                let name = plugin.name().to_string();
-                if let Some(list) = enabled {
-                    if !list.contains(&name) {
-                        tracing::debug!("skipping disabled plugin {name}");
-                        continue;
-                    }
-                }
-                self.plugins.push(plugin);
-                self.libs.push(lib);
-                tracing::debug!("loaded plugin {name}");
-            }
-        }
-        Ok(())
-    }
-
-    pub fn search(&self, query: &str) -> Vec<Action> {
-        let mut actions = Vec::new();
-        for p in &self.plugins {
-            actions.extend(p.search(query));
-        }
-        actions
     }
 
     /// Search with plugin and capability filters.
