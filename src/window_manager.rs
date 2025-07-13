@@ -217,7 +217,7 @@ pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
         let current_thread = GetCurrentThreadId();
 
         tracing::debug!("Forcing window restore and foreground");
-        ShowWindowAsync(hwnd, SW_RESTORE);
+        let _ = ShowWindowAsync(hwnd, SW_RESTORE);
 
         let _ = AttachThreadInput(fg_thread, current_thread, true);
         let fg_success = SetForegroundWindow(hwnd).as_bool();
@@ -263,6 +263,6 @@ pub fn activate_process(pid: u32) {
     }
 
     unsafe {
-        EnumWindows(Some(enum_cb), LPARAM(pid as isize));
+        let _ = EnumWindows(Some(enum_cb), LPARAM(pid as isize));
     }
 }

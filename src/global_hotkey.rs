@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_ALT,
-    MOD_SHIFT, MOD_WIN,
+    RegisterHotKey, HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_ALT, MOD_SHIFT, MOD_WIN,
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -72,21 +71,5 @@ impl Hotkey {
     }
 
 
-    #[cfg(target_os = "windows")]
-    pub fn unregister(&self, app: &crate::gui::LauncherApp) -> bool {
-        if let Some(id) = self.id {
-            unsafe {
-                if UnregisterHotKey(None, id).is_ok() {
-                    let mut registered_hotkeys = app.registered_hotkeys.lock().unwrap();
-                    registered_hotkeys.remove(&self.key_sequence);
-                    info!("Unregistered hotkey '{}'.", self.key_sequence);
-                    return true;
-                } else {
-                    warn!("Failed to unregister hotkey '{}'.", self.key_sequence);
-                }
-            }
-        }
-        false
-    }
 
 }
