@@ -2,50 +2,55 @@
 mod actions;
 mod actions_editor;
 mod add_action_dialog;
+mod add_bookmark_dialog;
 mod alias_dialog;
 mod bookmark_alias_dialog;
-mod add_bookmark_dialog;
-mod settings_editor;
-mod plugin_editor;
-mod gui;
-mod hotkey;
-mod history;
-mod usage;
-mod launcher;
-mod plugin;
-mod plugins_builtin;
-mod indexer;
-mod settings;
-mod logging;
-mod visibility;
+mod brightness_dialog;
+mod clipboard_dialog;
+mod cpu_list_dialog;
 mod global_hotkey;
-mod window_manager;
-mod workspace;
-mod plugins;
+mod gui;
 mod help_window;
-mod timer_help_window;
-mod timer_dialog;
+mod history;
+mod hotkey;
+mod indexer;
+mod launcher;
+mod logging;
+mod notes_dialog;
+mod plugin;
+mod plugin_editor;
+mod plugins;
+mod plugins_builtin;
+mod settings;
+mod settings_editor;
 mod shell_cmd_dialog;
 mod snippet_dialog;
-mod notes_dialog;
+mod timer_dialog;
+mod timer_help_window;
 mod todo_dialog;
-mod clipboard_dialog;
+mod usage;
+mod visibility;
 mod volume_dialog;
-mod brightness_dialog;
+mod window_manager;
+mod workspace;
 
 use crate::actions::{load_actions, Action};
 use crate::gui::LauncherApp;
 use crate::hotkey::HotkeyTrigger;
-use crate::visibility::handle_visibility_trigger;
-use crate::plugin::{PluginManager, Plugin};
-use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
+use crate::plugin::{Plugin, PluginManager};
 use crate::plugins::clipboard::ClipboardPlugin;
+use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::Settings;
+use crate::visibility::handle_visibility_trigger;
 
 use eframe::egui;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}, Mutex, mpsc::{Sender, channel}};
-use std::thread;
 use once_cell::sync::Lazy;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc::{channel, Sender},
+    Arc, Mutex,
+};
+use std::thread;
 
 static RESTART_TX: Lazy<Mutex<Option<Sender<Settings>>>> = Lazy::new(|| Mutex::new(None));
 
@@ -155,8 +160,12 @@ fn main() -> anyhow::Result<()> {
     let hotkey = settings.hotkey();
     tracing::debug!(?hotkey, "configuring hotkeys");
     let mut trigger = Arc::new(HotkeyTrigger::new(hotkey));
-    let mut quit_trigger = settings.quit_hotkey().map(|hk| Arc::new(HotkeyTrigger::new(hk)));
-    let mut help_trigger = settings.help_hotkey().map(|hk| Arc::new(HotkeyTrigger::new(hk)));
+    let mut quit_trigger = settings
+        .quit_hotkey()
+        .map(|hk| Arc::new(HotkeyTrigger::new(hk)));
+    let mut help_trigger = settings
+        .help_hotkey()
+        .map(|hk| Arc::new(HotkeyTrigger::new(hk)));
 
     let mut watched = vec![trigger.clone()];
     if let Some(qt) = &quit_trigger {
@@ -168,17 +177,15 @@ fn main() -> anyhow::Result<()> {
 
     let mut listener = HotkeyTrigger::start_listener(watched, "main");
 
-
     // `visibility` holds whether the window is currently restored (true) or
     // minimized (false).
-    let (handle, visibility, restore_flag, help_flag, ctx) =
-        spawn_gui(
-            actions.clone(),
-            custom_len,
-            settings.clone(),
-            "settings.json".to_string(),
-            settings.enabled_capabilities.clone(),
-        );
+    let (handle, visibility, restore_flag, help_flag, ctx) = spawn_gui(
+        actions.clone(),
+        custom_len,
+        settings.clone(),
+        "settings.json".to_string(),
+        settings.enabled_capabilities.clone(),
+    );
     let mut queued_visibility: Option<bool> = None;
 
     loop {
@@ -215,13 +222,16 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-
         if let Ok(new_settings) = restart_rx.try_recv() {
             listener.stop();
             settings = new_settings.clone();
             trigger = Arc::new(HotkeyTrigger::new(settings.hotkey()));
-            quit_trigger = settings.quit_hotkey().map(|hk| Arc::new(HotkeyTrigger::new(hk)));
-            help_trigger = settings.help_hotkey().map(|hk| Arc::new(HotkeyTrigger::new(hk)));
+            quit_trigger = settings
+                .quit_hotkey()
+                .map(|hk| Arc::new(HotkeyTrigger::new(hk)));
+            help_trigger = settings
+                .help_hotkey()
+                .map(|hk| Arc::new(HotkeyTrigger::new(hk)));
             let mut watched = vec![trigger.clone()];
             if let Some(qt) = &quit_trigger {
                 watched.push(qt.clone());
