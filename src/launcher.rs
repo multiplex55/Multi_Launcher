@@ -111,6 +111,17 @@ fn set_display_brightness(percent: u32) {
 #[cfg(not(target_os = "windows"))]
 fn set_display_brightness(_percent: u32) {}
 
+#[cfg(target_os = "windows")]
+fn clean_recycle_bin() {
+    use windows::Win32::UI::Shell::{SHEmptyRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND};
+    unsafe {
+        let _ = SHEmptyRecycleBinW(None, None, SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clean_recycle_bin() {}
+
 fn system_command(action: &str) -> Option<std::process::Command> {
     #[cfg(target_os = "windows")]
     {
@@ -335,6 +346,11 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     if action.action == "volume:mute_active" {
         #[cfg(target_os = "windows")]
         mute_active_window();
+        return Ok(());
+    }
+    if action.action == "recycle:clean" {
+        #[cfg(target_os = "windows")]
+        clean_recycle_bin();
         return Ok(());
     }
     let path = Path::new(&action.action);
