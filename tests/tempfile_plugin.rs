@@ -1,5 +1,7 @@
 use multi_launcher::plugin::Plugin;
-use multi_launcher::plugins::tempfile::{clear_files, create_file, list_files, TempfilePlugin};
+use multi_launcher::plugins::tempfile::{
+    clear_files, create_file, list_files, remove_file, set_alias, TempfilePlugin,
+};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use tempfile::tempdir;
@@ -52,4 +54,38 @@ fn list_returns_existing_files() {
     assert!(results.iter().all(|a| a.args.is_none()));
 
     clear_files().unwrap();
+}
+
+#[test]
+fn rm_lists_files_for_deletion() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_var("TMPDIR", dir.path());
+    #[cfg(windows)]
+    std::env::set_var("TEMP", dir.path());
+
+    let file = create_file().unwrap();
+    let plugin = TempfilePlugin;
+    let results = plugin.search("tmp rm");
+    assert_eq!(results.len(), 1);
+    assert!(results[0].action.starts_with("tempfile:remove:"));
+    remove_file(&file).unwrap();
+}
+
+#[test]
+fn set_alias_renames_file() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_var("TMPDIR", dir.path());
+    #[cfg(windows)]
+    std::env::set_var("TEMP", dir.path());
+
+    let file = create_file().unwrap();
+    let new = set_alias(&file, "alias").unwrap();
+    assert!(new
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("temp_alias"));
+    remove_file(&new).unwrap();
 }

@@ -28,6 +28,25 @@ pub fn create_file() -> anyhow::Result<PathBuf> {
     }
 }
 
+/// Remove a specific file inside the storage directory.
+pub fn remove_file(path: &Path) -> anyhow::Result<()> {
+    if path.exists() && path.is_file() {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+/// Rename a temp file to use the provided alias.
+/// The resulting file name will always start with `temp_`.
+pub fn set_alias(path: &Path, alias: &str) -> anyhow::Result<PathBuf> {
+    let dir = ensure_dir()?;
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("txt");
+    let new_name = format!("temp_{}.{}", alias, ext);
+    let new_path = dir.join(new_name);
+    fs::rename(path, &new_path)?;
+    Ok(new_path)
+}
+
 /// Remove all files inside the storage directory.
 pub fn clear_files() -> anyhow::Result<()> {
     let dir = ensure_dir()?;
@@ -81,6 +100,50 @@ impl Plugin for TempfilePlugin {
                 action: "tempfile:clear".into(),
                 args: None,
             }];
+        }
+        if let Some(filter) = trimmed.strip_prefix("tmp rm") {
+            let filter = filter.trim();
+            let files = list_files().unwrap_or_default();
+            return files
+                .into_iter()
+                .filter(|p| {
+                    filter.is_empty()
+                        || p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n.contains(filter))
+                            .unwrap_or(false)
+                })
+                .map(|p| Action {
+                    label: format!("Remove {}", p.file_name().unwrap().to_string_lossy()),
+                    desc: "Tempfile".into(),
+                    action: format!("tempfile:remove:{}", p.to_string_lossy()),
+                    args: None,
+                })
+                .collect();
+        }
+        if let Some(rest) = trimmed.strip_prefix("tmp alias") {
+            let mut parts = rest.trim().splitn(2, ' ');
+            if let (Some(file), Some(alias)) = (parts.next(), parts.next()) {
+                let file = file.trim();
+                let alias = alias.trim();
+                if !file.is_empty() && !alias.is_empty() {
+                    let files = list_files().unwrap_or_default();
+                    for p in files {
+                        if p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n == file)
+                            .unwrap_or(false)
+                        {
+                            return vec![Action {
+                                label: format!("Set alias {} -> {}", file, alias),
+                                desc: "Tempfile".into(),
+                                action: format!("tempfile:alias:{}|{}", p.to_string_lossy(), alias),
+                                args: None,
+                            }];
+                        }
+                    }
+                }
+            }
         }
         if let Some(filter) = trimmed.strip_prefix("tmp list") {
             let filter = filter.trim();
