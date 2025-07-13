@@ -487,7 +487,6 @@ pub fn process_test_events(triggers: &[Arc<HotkeyTrigger>], events: &[EventType]
                     }
                 }
             }
-            _ => {}
         }
 
         for i in 0..watch_keys.len() {
