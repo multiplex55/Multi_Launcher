@@ -9,6 +9,15 @@ use tempfile::tempdir;
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[test]
+fn search_tmp_returns_dialog() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let plugin = TempfilePlugin;
+    let results = plugin.search("tmp");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "tempfile:dialog");
+}
+
+#[test]
 fn search_new_returns_action() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let plugin = TempfilePlugin;

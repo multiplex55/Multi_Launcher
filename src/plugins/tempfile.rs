@@ -28,6 +28,26 @@ pub fn create_file() -> anyhow::Result<PathBuf> {
     }
 }
 
+/// Create a new temp file with a specific alias and contents. The filename is
+/// prefixed with `temp_` and suffixed with a number if needed.
+pub fn create_named_file(alias: &str, contents: &str) -> anyhow::Result<PathBuf> {
+    let dir = ensure_dir()?;
+    let mut idx = 0;
+    loop {
+        let name = if idx == 0 {
+            format!("temp_{alias}.txt")
+        } else {
+            format!("temp_{alias}_{idx}.txt")
+        };
+        let path = dir.join(name);
+        if !path.exists() {
+            fs::write(&path, contents)?;
+            return Ok(path);
+        }
+        idx += 1;
+    }
+}
+
 /// Remove a specific file inside the storage directory.
 pub fn remove_file(path: &Path) -> anyhow::Result<()> {
     if path.exists() && path.is_file() {
@@ -77,6 +97,14 @@ pub struct TempfilePlugin;
 impl Plugin for TempfilePlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
+        if trimmed == "tmp" {
+            return vec![Action {
+                label: "tmp: create".into(),
+                desc: "Tempfile".into(),
+                action: "tempfile:dialog".into(),
+                args: None,
+            }];
+        }
         if trimmed == "tmp new" {
             return vec![Action {
                 label: "Create temp file".into(),

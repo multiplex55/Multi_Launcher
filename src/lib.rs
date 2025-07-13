@@ -23,6 +23,7 @@ pub mod settings_editor;
 pub mod shell_cmd_dialog;
 pub mod snippet_dialog;
 pub mod tempfile_alias_dialog;
+pub mod tempfile_dialog;
 pub mod timer_dialog;
 pub mod timer_help_window;
 pub mod todo_dialog;
