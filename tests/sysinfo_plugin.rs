@@ -28,3 +28,11 @@ fn search_disk_returns_action() {
     let results = plugin.search("info disk");
     assert_eq!(results.len(), 1);
 }
+
+#[test]
+fn search_cpu_list_returns_action() {
+    let plugin = SysInfoPlugin;
+    let results = plugin.search("info cpu list 5");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "sysinfo:cpu_list:5");
+}
