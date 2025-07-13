@@ -1,6 +1,8 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
 
+use exmex::eval_str;
+
 pub struct WebSearchPlugin;
 
 impl Plugin for WebSearchPlugin {
@@ -37,7 +39,7 @@ impl Plugin for CalculatorPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         if query.starts_with("=") {
             let expr = &query[1..];
-            match meval::eval_str(expr) {
+            match eval_str::<f64>(expr) {
                 Ok(v) => vec![Action {
                     label: format!("{} = {}", expr, v),
                     desc: "Calculator".into(),
