@@ -4,6 +4,7 @@ use crate::plugin::Plugin;
 pub struct VolumePlugin;
 
 impl Plugin for VolumePlugin {
+    #[cfg(target_os = "windows")]
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
         if trimmed.eq_ignore_ascii_case("vol") {
@@ -35,6 +36,11 @@ impl Plugin for VolumePlugin {
                 }
             }
         }
+        Vec::new()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn search(&self, _query: &str) -> Vec<Action> {
         Vec::new()
     }
 

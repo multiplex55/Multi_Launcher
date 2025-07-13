@@ -5,30 +5,46 @@ use multi_launcher::plugins::volume::VolumePlugin;
 fn search_set_zero() {
     let plugin = VolumePlugin;
     let results = plugin.search("vol 0");
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].action, "volume:set:0");
+    if cfg!(target_os = "windows") {
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].action, "volume:set:0");
+    } else {
+        assert!(results.is_empty());
+    }
 }
 
 #[test]
 fn search_set_fifty() {
     let plugin = VolumePlugin;
     let results = plugin.search("vol 50");
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].action, "volume:set:50");
+    if cfg!(target_os = "windows") {
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].action, "volume:set:50");
+    } else {
+        assert!(results.is_empty());
+    }
 }
 
 #[test]
 fn search_mute_active() {
     let plugin = VolumePlugin;
     let results = plugin.search("vol ma");
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].action, "volume:mute_active");
+    if cfg!(target_os = "windows") {
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].action, "volume:mute_active");
+    } else {
+        assert!(results.is_empty());
+    }
 }
 
 #[test]
 fn search_plain_vol() {
     let plugin = VolumePlugin;
     let results = plugin.search("vol");
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].action, "volume:dialog");
+    if cfg!(target_os = "windows") {
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].action, "volume:dialog");
+    } else {
+        assert!(results.is_empty());
+    }
 }

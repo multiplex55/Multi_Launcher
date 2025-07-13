@@ -19,7 +19,9 @@ use crate::plugins::timer::TimerPlugin;
 use crate::plugins::notes::NotesPlugin;
 use crate::plugins::todo::TodoPlugin;
 use crate::plugins::snippets::SnippetsPlugin;
+#[cfg(target_os = "windows")]
 use crate::plugins::volume::VolumePlugin;
+#[cfg(target_os = "windows")]
 use crate::plugins::brightness::BrightnessPlugin;
 
 pub trait Plugin: Send + Sync {
@@ -73,8 +75,11 @@ impl PluginManager {
         self.register(Box::new(NotesPlugin::default()));
         self.register(Box::new(TodoPlugin::default()));
         self.register(Box::new(SnippetsPlugin::default()));
-        self.register(Box::new(VolumePlugin));
-        self.register(Box::new(BrightnessPlugin));
+        #[cfg(target_os = "windows")]
+        {
+            self.register(Box::new(VolumePlugin));
+            self.register(Box::new(BrightnessPlugin));
+        }
         self.register(Box::new(HelpPlugin));
         self.register(Box::new(TimerPlugin));
         if reset_alarm {
