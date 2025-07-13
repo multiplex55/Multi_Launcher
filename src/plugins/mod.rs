@@ -10,6 +10,7 @@ pub mod youtube;
 pub mod reddit;
 pub mod wikipedia;
 pub mod processes;
+pub mod sysinfo;
 pub mod weather;
 pub mod notes;
 pub mod todo;
