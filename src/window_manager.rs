@@ -14,7 +14,7 @@ pub fn clear_mock_mouse_position() {
     *MOCK_MOUSE_POSITION.lock().unwrap() = None;
 }
 
-#[cfg(test)]
+#[cfg(any(test, target_os = "windows"))]
 pub fn virtual_key_from_string(key: &str) -> Option<u32> {
     match key.to_uppercase().as_str() {
         "F1" => Some(0x70),
