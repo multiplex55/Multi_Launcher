@@ -669,7 +669,9 @@ impl eframe::App for LauncherApp {
                             }
                         } else {
                             if self.enable_toasts {
-                                let msg = if a.action.starts_with("clipboard:") {
+                                let msg = if a.action == "recycle:clean" {
+                                    "Emptied Recycle Bin".to_string()
+                                } else if a.action.starts_with("clipboard:") {
                                     format!("Copied {}", a.label)
                                 } else {
                                     format!("Launched {}", a.label)
@@ -1000,7 +1002,9 @@ impl eframe::App for LauncherApp {
                                     }
                                 } else {
                                     if self.enable_toasts {
-                                        let msg = if a.action.starts_with("clipboard:") {
+                                        let msg = if a.action == "recycle:clean" {
+                                            "Emptied Recycle Bin".to_string()
+                                        } else if a.action.starts_with("clipboard:") {
                                             format!("Copied {}", a.label)
                                         } else {
                                             format!("Launched {}", a.label)
