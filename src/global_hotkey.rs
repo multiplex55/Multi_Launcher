@@ -1,4 +1,6 @@
+#[cfg(target_os = "windows")]
 use crate::workspace::is_valid_key_combo;
+#[cfg(target_os = "windows")]
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -11,6 +13,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Hotkey {
     pub key_sequence: String,
+    #[cfg(target_os = "windows")]
     #[serde(skip)]
     pub id: Option<i32>,
 }
@@ -22,6 +25,7 @@ impl fmt::Display for Hotkey {
 }
 
 impl Hotkey {
+    #[cfg(target_os = "windows")]
     pub fn new(key_sequence: &str) -> Result<Self, String> {
         if is_valid_key_combo(key_sequence) {
             Ok(Self {

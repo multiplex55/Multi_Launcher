@@ -89,14 +89,16 @@ pub enum Key {
     AltGr,
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventType {
     KeyPress(Key),
     KeyRelease(Key),
 }
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+#[cfg(target_os = "windows")]
 use std::thread;
+#[cfg(target_os = "windows")]
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy)]
@@ -256,11 +258,11 @@ fn parse_key(upper: &str) -> Option<Key> {
 // Shared signal to open launcher
 pub struct HotkeyTrigger {
     pub open: Arc<Mutex<bool>>,
-    pub key: Key,
-    pub ctrl: bool,
-    pub shift: bool,
-    pub alt: bool,
-    pub win: bool,
+    pub _key: Key,
+    pub _ctrl: bool,
+    pub _shift: bool,
+    pub _alt: bool,
+    pub _win: bool,
 }
 
 pub struct HotkeyListener {
@@ -271,11 +273,11 @@ impl HotkeyTrigger {
     pub fn new(hotkey: Hotkey) -> Self {
         Self {
             open: Arc::new(Mutex::new(false)),
-            key: hotkey.key,
-            ctrl: hotkey.ctrl,
-            shift: hotkey.shift,
-            alt: hotkey.alt,
-            win: hotkey.win,
+            _key: hotkey.key,
+            _ctrl: hotkey.ctrl,
+            _shift: hotkey.shift,
+            _alt: hotkey.alt,
+            _win: hotkey.win,
         }
     }
 
@@ -364,12 +366,12 @@ impl HotkeyTrigger {
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_clone = stop_flag.clone();
-        let vk_keys: Vec<_> = triggers.iter().map(|t| vk_from_key(t.key)).collect();
-        let watch_keys: Vec<Key> = triggers.iter().map(|t| t.key).collect();
-        let need_ctrl: Vec<bool> = triggers.iter().map(|t| t.ctrl).collect();
-        let need_shift: Vec<bool> = triggers.iter().map(|t| t.shift).collect();
-        let need_alt: Vec<bool> = triggers.iter().map(|t| t.alt).collect();
-        let need_win: Vec<bool> = triggers.iter().map(|t| t.win).collect();
+        let vk_keys: Vec<_> = triggers.iter().map(|t| vk_from_key(t._key)).collect();
+        let watch_keys: Vec<Key> = triggers.iter().map(|t| t._key).collect();
+        let need_ctrl: Vec<bool> = triggers.iter().map(|t| t._ctrl).collect();
+        let need_shift: Vec<bool> = triggers.iter().map(|t| t._shift).collect();
+        let need_alt: Vec<bool> = triggers.iter().map(|t| t._alt).collect();
+        let need_win: Vec<bool> = triggers.iter().map(|t| t._win).collect();
         thread::spawn(move || {
             unsafe {
                 let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
@@ -442,13 +444,14 @@ impl HotkeyListener {
     }
 }
 
+#[cfg(test)]
 pub fn process_test_events(triggers: &[Arc<HotkeyTrigger>], events: &[EventType]) {
     let open_listeners: Vec<_> = triggers.iter().map(|t| t.open.clone()).collect();
-    let watch_keys: Vec<Key> = triggers.iter().map(|t| t.key).collect();
-    let need_ctrl: Vec<bool> = triggers.iter().map(|t| t.ctrl).collect();
-    let need_shift: Vec<bool> = triggers.iter().map(|t| t.shift).collect();
-    let need_alt: Vec<bool> = triggers.iter().map(|t| t.alt).collect();
-    let need_win: Vec<bool> = triggers.iter().map(|t| t.win).collect();
+    let watch_keys: Vec<Key> = triggers.iter().map(|t| t._key).collect();
+    let need_ctrl: Vec<bool> = triggers.iter().map(|t| t._ctrl).collect();
+    let need_shift: Vec<bool> = triggers.iter().map(|t| t._shift).collect();
+    let need_alt: Vec<bool> = triggers.iter().map(|t| t._alt).collect();
+    let need_win: Vec<bool> = triggers.iter().map(|t| t._win).collect();
 
     let mut watch_pressed = vec![false; triggers.len()];
     let mut triggered = vec![false; triggers.len()];
@@ -487,7 +490,6 @@ pub fn process_test_events(triggers: &[Arc<HotkeyTrigger>], events: &[EventType]
                     }
                 }
             }
-            _ => {}
         }
 
         for i in 0..watch_keys.len() {

@@ -4,14 +4,17 @@ use std::sync::Mutex;
 static MOCK_MOUSE_POSITION: Lazy<Mutex<Option<Option<(f32, f32)>>>> =
     Lazy::new(|| Mutex::new(None));
 
+#[cfg(test)]
 pub fn set_mock_mouse_position(pos: Option<(f32, f32)>) {
     *MOCK_MOUSE_POSITION.lock().unwrap() = Some(pos);
 }
 
+#[cfg(test)]
 pub fn clear_mock_mouse_position() {
     *MOCK_MOUSE_POSITION.lock().unwrap() = None;
 }
 
+#[cfg(test)]
 pub fn virtual_key_from_string(key: &str) -> Option<u32> {
     match key.to_uppercase().as_str() {
         "F1" => Some(0x70),

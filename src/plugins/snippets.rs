@@ -29,23 +29,6 @@ pub fn save_snippets(path: &str, snippets: &[SnippetEntry]) -> anyhow::Result<()
     Ok(())
 }
 
-/// Add a new snippet with `alias` and `text`.
-pub fn add_snippet(path: &str, alias: &str, text: &str) -> anyhow::Result<()> {
-    let mut list = load_snippets(path).unwrap_or_default();
-    list.push(SnippetEntry { alias: alias.to_string(), text: text.to_string() });
-    save_snippets(path, &list)
-}
-
-/// Update an existing snippet or insert a new one.
-pub fn set_snippet(path: &str, alias: &str, text: &str) -> anyhow::Result<()> {
-    let mut list = load_snippets(path).unwrap_or_default();
-    if let Some(entry) = list.iter_mut().find(|e| e.alias == alias) {
-        entry.text = text.to_string();
-    } else {
-        list.push(SnippetEntry { alias: alias.to_string(), text: text.to_string() });
-    }
-    save_snippets(path, &list)
-}
 
 /// Remove the snippet identified by `alias`.
 pub fn remove_snippet(path: &str, alias: &str) -> anyhow::Result<()> {
