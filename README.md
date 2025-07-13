@@ -164,6 +164,7 @@ Built-in plugins and their command prefixes are:
   timer completes.
 - Search history (`hi`)
 - Quick notes (`note add <text>`, `note list`, `note rm <pattern>`)
+- Temporary files (`tmp new`, `tmp open`, `tmp clear`, `tmp list`)
 - Recycle Bin cleanup (`rec`)
 - Command overview (`help`)
 
