@@ -18,6 +18,7 @@ pub struct BookmarksPlugin {
 }
 
 impl BookmarksPlugin {
+    /// Construct a new `BookmarksPlugin` with a fuzzy matcher.
     pub fn new() -> Self {
         Self { matcher: SkimMatcherV2::default() }
     }
@@ -44,6 +45,9 @@ fn normalize_url(url: &str) -> String {
     out
 }
 
+/// Load bookmarks from `path`.
+///
+/// Returns an empty list if the file does not exist or is empty.
 pub fn load_bookmarks(path: &str) -> anyhow::Result<Vec<BookmarkEntry>> {
     let content = std::fs::read_to_string(path).unwrap_or_default();
     if content.trim().is_empty() {
@@ -63,12 +67,16 @@ pub fn load_bookmarks(path: &str) -> anyhow::Result<Vec<BookmarkEntry>> {
     }
 }
 
+/// Save the provided `bookmarks` to `path` in JSON format.
 pub fn save_bookmarks(path: &str, bookmarks: &[BookmarkEntry]) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(bookmarks)?;
     std::fs::write(path, json)?;
     Ok(())
 }
 
+/// Append a new bookmark `url` to the file at `path`.
+///
+/// The URL is normalized and duplicates are ignored.
 pub fn append_bookmark(path: &str, url: &str) -> anyhow::Result<()> {
     let mut list = load_bookmarks(path).unwrap_or_default();
     let fixed = normalize_url(url);
@@ -79,6 +87,7 @@ pub fn append_bookmark(path: &str, url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Remove the bookmark matching `url` from the file at `path`.
 pub fn remove_bookmark(path: &str, url: &str) -> anyhow::Result<()> {
     let mut list = load_bookmarks(path).unwrap_or_default();
     let fixed = normalize_url(url);
@@ -89,6 +98,9 @@ pub fn remove_bookmark(path: &str, url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Set or clear the alias of a bookmark.
+///
+/// Passing an empty `alias` removes the existing alias.
 pub fn set_alias(path: &str, url: &str, alias: &str) -> anyhow::Result<()> {
     let mut list = load_bookmarks(path).unwrap_or_default();
     let fixed = normalize_url(url);

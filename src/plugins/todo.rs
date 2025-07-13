@@ -12,6 +12,7 @@ pub struct TodoEntry {
     pub done: bool,
 }
 
+/// Load todo entries from `path`.
 pub fn load_todos(path: &str) -> anyhow::Result<Vec<TodoEntry>> {
     let content = std::fs::read_to_string(path).unwrap_or_default();
     if content.trim().is_empty() {
@@ -21,12 +22,14 @@ pub fn load_todos(path: &str) -> anyhow::Result<Vec<TodoEntry>> {
     Ok(list)
 }
 
+/// Save `todos` to `path` as JSON.
 pub fn save_todos(path: &str, todos: &[TodoEntry]) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(todos)?;
     std::fs::write(path, json)?;
     Ok(())
 }
 
+/// Append a new todo entry with `text`.
 pub fn append_todo(path: &str, text: &str) -> anyhow::Result<()> {
     let mut list = load_todos(path).unwrap_or_default();
     list.push(TodoEntry {
@@ -36,6 +39,7 @@ pub fn append_todo(path: &str, text: &str) -> anyhow::Result<()> {
     save_todos(path, &list)
 }
 
+/// Remove the todo at `index` from the list stored at `path`.
 pub fn remove_todo(path: &str, index: usize) -> anyhow::Result<()> {
     let mut list = load_todos(path).unwrap_or_default();
     if index < list.len() {
@@ -45,7 +49,7 @@ pub fn remove_todo(path: &str, index: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Toggle completion status of the todo at the given index.
+/// Toggle completion status of the todo at `index` in `path`.
 pub fn mark_done(path: &str, index: usize) -> anyhow::Result<()> {
     let mut list = load_todos(path).unwrap_or_default();
     if let Some(entry) = list.get_mut(index) {
@@ -55,6 +59,7 @@ pub fn mark_done(path: &str, index: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Remove all completed todos from `path`.
 pub fn clear_done(path: &str) -> anyhow::Result<()> {
     let mut list = load_todos(path).unwrap_or_default();
     let orig_len = list.len();
@@ -70,6 +75,7 @@ pub struct TodoPlugin {
 }
 
 impl TodoPlugin {
+    /// Create a new todo plugin with a fuzzy matcher.
     pub fn new() -> Self {
         Self {
             matcher: SkimMatcherV2::default(),

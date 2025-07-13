@@ -13,6 +13,7 @@ pub struct NoteEntry {
     pub text: String,
 }
 
+/// Load notes from `path`.
 pub fn load_notes(path: &str) -> anyhow::Result<Vec<NoteEntry>> {
     let content = std::fs::read_to_string(path).unwrap_or_default();
     if content.trim().is_empty() {
@@ -22,12 +23,14 @@ pub fn load_notes(path: &str) -> anyhow::Result<Vec<NoteEntry>> {
     Ok(list)
 }
 
+/// Save `notes` to `path` in JSON format.
 pub fn save_notes(path: &str, notes: &[NoteEntry]) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(notes)?;
     std::fs::write(path, json)?;
     Ok(())
 }
 
+/// Append a note with the provided `text` and current timestamp.
 pub fn append_note(path: &str, text: &str) -> anyhow::Result<()> {
     let mut list = load_notes(path).unwrap_or_default();
     list.push(NoteEntry {
@@ -37,6 +40,7 @@ pub fn append_note(path: &str, text: &str) -> anyhow::Result<()> {
     save_notes(path, &list)
 }
 
+/// Remove the note at `index` from `path`.
 pub fn remove_note(path: &str, index: usize) -> anyhow::Result<()> {
     let mut list = load_notes(path).unwrap_or_default();
     if index < list.len() {
@@ -60,6 +64,7 @@ pub struct NotesPlugin {
 }
 
 impl NotesPlugin {
+    /// Create a new notes plugin with a fuzzy matcher.
     pub fn new() -> Self {
         Self {
             matcher: SkimMatcherV2::default(),
