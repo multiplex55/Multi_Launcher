@@ -156,6 +156,7 @@ Built-in plugins and their command prefixes are:
 - Shell commands (`sh echo hi`)
 - System actions (`sys shutdown`)
 - Process list (`ps`), providing "Switch to" and "Kill" actions
+- System information (`info`, `info cpu`, `info mem`, `info disk`)
 - Timers and alarms (`timer 5m tea`, `alarm 07:30`). Use `timer list` to view
   remaining time. Pending alarms are saved to `alarms.json` and resume after
   restarting the launcher. A plugin setting controls pop-up dialogs when a
@@ -213,6 +214,8 @@ The bookmarks plugin uses the `bm` prefix. Use `bm add <url>` to save a link,
 `bm rm` to list and remove bookmarks (optionally filtering with a pattern) or
 `bm list` to show all bookmarks. Searching with `bm <term>` matches both URLs
 and aliases.
+The system information plugin uses the `info` prefix. Type `info` to show CPU,
+memory and disk usage or `info cpu` for a single metric.
 ### Security Considerations
 The shell plugin runs commands using the system shell without sanitising input. Only enable it if you trust the commands you type. Errors while spawning the process are logged.
 Type `sh` in the launcher to open the shell command editor for managing predefined commands.
