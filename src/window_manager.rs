@@ -1,3 +1,17 @@
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
+
+static MOCK_MOUSE_POSITION: Lazy<Mutex<Option<Option<(f32, f32)>>>> =
+    Lazy::new(|| Mutex::new(None));
+
+pub fn set_mock_mouse_position(pos: Option<(f32, f32)>) {
+    *MOCK_MOUSE_POSITION.lock().unwrap() = Some(pos);
+}
+
+pub fn clear_mock_mouse_position() {
+    *MOCK_MOUSE_POSITION.lock().unwrap() = None;
+}
+
 pub fn virtual_key_from_string(key: &str) -> Option<u32> {
     match key.to_uppercase().as_str() {
         "F1" => Some(0x70),
@@ -130,6 +144,10 @@ pub fn virtual_key_from_string(key: &str) -> Option<u32> {
 
 /// Return the current mouse position in screen coordinates.
 pub fn current_mouse_position() -> Option<(f32, f32)> {
+    if let Some(pos) = *MOCK_MOUSE_POSITION.lock().unwrap() {
+        return pos;
+    }
+
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::Foundation::POINT;
@@ -138,10 +156,9 @@ pub fn current_mouse_position() -> Option<(f32, f32)> {
         if unsafe { GetCursorPos(&mut pt).is_ok() } {
             Some((pt.x as f32, pt.y as f32))
         } else {
-            Some((0.0, 0.0))
+            None
         }
     }
-
 
     #[cfg(not(target_os = "windows"))]
     {
@@ -185,11 +202,11 @@ pub fn move_to_current_desktop(hwnd: windows::Win32::Foundation::HWND) {
 /// On Windows, restore the window and bring it to the foreground.
 #[cfg(target_os = "windows")]
 pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        ShowWindowAsync, SetForegroundWindow, SW_RESTORE, GetForegroundWindow,
-        GetWindowThreadProcessId,
-    };
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow, ShowWindowAsync,
+        SW_RESTORE,
+    };
     unsafe {
         move_to_current_desktop(hwnd);
         let fg_hwnd = GetForegroundWindow();
@@ -213,7 +230,7 @@ pub fn get_hwnd(frame: &eframe::Frame) -> Option<windows::Win32::Foundation::HWN
     if let Ok(handle) = frame.window_handle() {
         match handle.as_raw() {
             RawWindowHandle::Win32(h) => Some(windows::Win32::Foundation::HWND(
-                h.hwnd.get() as *mut core::ffi::c_void,
+                h.hwnd.get() as *mut core::ffi::c_void
             )),
             _ => None,
         }
