@@ -10,9 +10,18 @@ static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 fn search_add_returns_action() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let plugin = TodoPlugin::default();
-    let results = plugin.search("todo add task");
+    let results = plugin.search("todo add task   ");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "todo:add:task");
+}
+
+#[test]
+fn search_add_without_text_opens_dialog() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let plugin = TodoPlugin::default();
+    let results = plugin.search("todo add");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "todo:dialog");
 }
 
 #[test]
