@@ -59,6 +59,9 @@ fn search_cancel_lists_timers() {
             cancel: Arc::new(AtomicBool::new(false)),
             persist: false,
             end_ts: 0,
+            start_ts: 0,
+            paused: false,
+            remaining: Duration::from_secs(10),
         });
     }
     let plugin = TimerPlugin;
@@ -80,11 +83,37 @@ fn search_list_lists_timers() {
             cancel: Arc::new(AtomicBool::new(false)),
             persist: false,
             end_ts: 0,
+            start_ts: 0,
+            paused: false,
+            remaining: Duration::from_secs(20),
         });
     }
     let plugin = TimerPlugin;
     let results = plugin.search("timer list");
     assert!(results.iter().any(|a| a.action.starts_with("timer:show:")));
+    ACTIVE_TIMERS.lock().unwrap().clear();
+}
+
+#[test]
+fn search_rm_lists_timers() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    {
+        let mut list = ACTIVE_TIMERS.lock().unwrap();
+        list.push(TimerEntry {
+            id: 3,
+            label: "remove".into(),
+            deadline: Instant::now() + Duration::from_secs(30),
+            cancel: Arc::new(AtomicBool::new(false)),
+            persist: false,
+            end_ts: 0,
+            start_ts: 0,
+            paused: false,
+            remaining: Duration::from_secs(30),
+        });
+    }
+    let plugin = TimerPlugin;
+    let results = plugin.search("timer rm");
+    assert!(results.iter().any(|a| a.action.starts_with("timer:cancel:")));
     ACTIVE_TIMERS.lock().unwrap().clear();
 }
 
@@ -131,5 +160,23 @@ fn load_saved_alarms_is_idempotent() {
     for id in ids {
         cancel_timer(id);
     }
+}
+
+#[test]
+fn parse_duration_colon_formats() {
+    use multi_launcher::plugins::timer::parse_duration;
+    let d = parse_duration("1:02").unwrap();
+    assert_eq!(d, Duration::from_secs(62));
+    let d = parse_duration("1:02:03").unwrap();
+    assert_eq!(d, Duration::from_secs(3723));
+}
+
+#[test]
+fn search_timer_hms_format() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let plugin = TimerPlugin;
+    let results = plugin.search("timer 1:30");
+    assert_eq!(results.len(), 1);
+    assert!(results[0].action.starts_with("timer:start:1:30"));
 }
 

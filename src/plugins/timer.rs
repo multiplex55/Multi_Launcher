@@ -18,12 +18,17 @@ pub struct TimerEntry {
     pub cancel: Arc<AtomicBool>,
     pub persist: bool,
     pub end_ts: u64,
+    pub start_ts: u64,
+    pub paused: bool,
+    pub remaining: Duration,
 }
 
 #[derive(Serialize, Deserialize)]
 struct SavedAlarm {
     label: String,
     end_ts: u64,
+    #[serde(default)]
+    start_ts: u64,
 }
 
 fn save_persistent_alarms_locked(timers: &Vec<TimerEntry>) {
@@ -33,6 +38,7 @@ fn save_persistent_alarms_locked(timers: &Vec<TimerEntry>) {
         .map(|t| SavedAlarm {
             label: t.label.clone(),
             end_ts: t.end_ts,
+            start_ts: t.start_ts,
         })
         .collect();
     if let Ok(json) = serde_json::to_string_pretty(&list) {
@@ -78,14 +84,40 @@ pub fn load_saved_alarms() {
     for alarm in list {
         if alarm.end_ts > now {
             let dur = Duration::from_secs(alarm.end_ts - now);
-            start_entry(dur, alarm.label, true, alarm.end_ts);
+            let start_ts = if alarm.start_ts > 0 {
+                alarm.start_ts
+            } else {
+                alarm.end_ts - dur.as_secs()
+            };
+            start_entry(dur, alarm.label, true, start_ts, alarm.end_ts);
         }
     }
     ALARMS_LOADED.store(true, Ordering::SeqCst);
 }
 
-/// Parse a duration string like "5m" or "10s".
+/// Parse a duration string.
+///
+/// Supports `Ns`, `Nm`, `Nh` as well as `hh:mm:ss` and `mm:ss` formats.
 pub fn parse_duration(input: &str) -> Option<Duration> {
+    if input.contains(':') {
+        let parts: Vec<&str> = input.split(':').collect();
+        if parts.len() == 2 || parts.len() == 3 {
+            let mut nums = parts.iter().map(|p| p.parse::<u64>().ok());
+            let (h, m, s) = if parts.len() == 3 {
+                (nums.next()?, nums.next()?, nums.next()?)
+            } else {
+                (Some(0), nums.next()?, nums.next()?)
+            };
+            let (h, m, s) = (h?, m?, s?);
+            if m < 60 && s < 60 {
+                return Some(Duration::from_secs(h * 3600 + m * 60 + s));
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
     if input.len() < 2 { return None; }
     let (num_str, unit) = input.split_at(input.len()-1);
     let value: u64 = num_str.parse().ok()?;
@@ -111,14 +143,27 @@ pub fn parse_hhmm(input: &str) -> Option<(u32, u32)> {
 }
 
 /// Return a list of active timers with remaining time.
-pub fn active_timers() -> Vec<(u64, String, Duration)> {
+pub fn active_timers() -> Vec<(u64, String, Duration, u64)> {
     let now = Instant::now();
     ACTIVE_TIMERS
         .lock()
         .unwrap()
         .iter()
-        .map(|t| (t.id, t.label.clone(), t.deadline.saturating_duration_since(now)))
+        .map(|t| {
+            let remaining = if t.paused {
+                t.remaining
+            } else {
+                t.deadline.saturating_duration_since(now)
+            };
+            (t.id, t.label.clone(), remaining, t.start_ts)
+        })
         .collect()
+}
+
+/// Get the start timestamp of the timer with `id`.
+pub fn timer_start_ts(id: u64) -> Option<u64> {
+    let timers = ACTIVE_TIMERS.lock().unwrap();
+    timers.iter().find(|t| t.id == id).map(|t| t.start_ts)
 }
 
 /// Cancel the timer with the given `id` if it exists.
@@ -129,6 +174,41 @@ pub fn cancel_timer(id: u64) {
         entry.cancel.store(true, Ordering::SeqCst);
         if entry.persist {
             save_persistent_alarms_locked(&timers);
+        }
+    }
+}
+
+/// Pause the timer with the given `id` if it exists.
+pub fn pause_timer(id: u64) {
+    let mut timers = ACTIVE_TIMERS.lock().unwrap();
+    if let Some(t) = timers.iter_mut().find(|t| t.id == id) {
+        if !t.paused {
+            t.remaining = t.deadline.saturating_duration_since(Instant::now());
+            t.paused = true;
+            t.cancel.store(true, Ordering::SeqCst);
+            if t.persist {
+                save_persistent_alarms_locked(&timers);
+            }
+        }
+    }
+}
+
+/// Resume the timer with the given `id` if it is paused.
+pub fn resume_timer(id: u64) {
+    let mut timers = ACTIVE_TIMERS.lock().unwrap();
+    if let Some(t) = timers.iter_mut().find(|t| t.id == id) {
+        if t.paused {
+            t.paused = false;
+            t.cancel = Arc::new(AtomicBool::new(false));
+            t.deadline = Instant::now() + t.remaining;
+            let cancel = t.cancel.clone();
+            let duration = t.remaining;
+            let label = t.label.clone();
+            let persist = t.persist;
+            spawn_timer_thread(id, label, duration, cancel, persist);
+            if persist {
+                save_persistent_alarms_locked(&timers);
+            }
         }
     }
 }
@@ -156,24 +236,23 @@ fn format_duration(dur: Duration) -> String {
     }
 }
 
-fn start_entry(duration: Duration, label: String, persist: bool, end_ts: u64) {
-    let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-    let cancel = Arc::new(AtomicBool::new(false));
-    let deadline = Instant::now() + duration;
-    {
-        let mut list = ACTIVE_TIMERS.lock().unwrap();
-        list.push(TimerEntry {
-            id,
-            label: label.clone(),
-            deadline,
-            cancel: cancel.clone(),
-            persist,
-            end_ts,
-        });
-        if persist {
-            save_persistent_alarms_locked(&list);
-        }
-    }
+pub fn format_ts(ts: u64) -> String {
+    use chrono::{Local, TimeZone};
+    Local
+        .timestamp_opt(ts as i64, 0)
+        .single()
+        .unwrap_or_else(|| Local.timestamp_opt(0, 0).single().unwrap())
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
+}
+
+fn spawn_timer_thread(
+    id: u64,
+    label: String,
+    duration: Duration,
+    cancel: Arc<AtomicBool>,
+    persist: bool,
+) {
     thread::spawn(move || {
         let start = Instant::now();
         loop {
@@ -205,15 +284,39 @@ fn start_entry(duration: Duration, label: String, persist: bool, end_ts: u64) {
     });
 }
 
+fn start_entry(duration: Duration, label: String, persist: bool, start_ts: u64, end_ts: u64) {
+    let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let deadline = Instant::now() + duration;
+    {
+        let mut list = ACTIVE_TIMERS.lock().unwrap();
+        list.push(TimerEntry {
+            id,
+            label: label.clone(),
+            deadline,
+            cancel: cancel.clone(),
+            persist,
+            end_ts,
+            start_ts,
+            paused: false,
+            remaining: duration,
+        });
+        if persist {
+            save_persistent_alarms_locked(&list);
+        }
+    }
+    spawn_timer_thread(id, label, duration, cancel, persist);
+}
+
 /// Start a timer that lasts `duration` with an optional `name`.
 pub fn start_timer_named(duration: Duration, name: Option<String>) {
     let label = name.unwrap_or_else(|| format!("Timer {:?}", duration));
-    let end_ts = SystemTime::now()
+    let start_ts = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
-        .as_secs()
-        + duration.as_secs();
-    start_entry(duration, label, false, end_ts);
+        .as_secs();
+    let end_ts = start_ts + duration.as_secs();
+    start_entry(duration, label, false, start_ts, end_ts);
 }
 
 /// Start an unnamed timer that lasts `duration`.
@@ -233,12 +336,12 @@ pub fn start_alarm_named(hour: u32, minute: u32, name: Option<String>) {
         .to_std()
         .unwrap_or(Duration::from_secs(0));
     let label = name.unwrap_or_else(|| format!("Alarm {:02}:{:02}", hour, minute));
-    let end_ts = SystemTime::now()
+    let start_ts = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
-        .as_secs()
-        + duration.as_secs();
-    start_entry(duration, label, true, end_ts);
+        .as_secs();
+    let end_ts = start_ts + duration.as_secs();
+    start_entry(duration, label, true, start_ts, end_ts);
 }
 
 /// Convenience wrapper for [`start_alarm_named`] without a name.
@@ -270,7 +373,7 @@ impl Plugin for TimerPlugin {
         if trimmed.starts_with("timer list") || trimmed.starts_with("alarm list") {
             return active_timers()
                 .into_iter()
-                .map(|(id, label, rem)| Action {
+                .map(|(id, label, rem, _start)| Action {
                     label: format!("{label} ({} left)", format_duration(rem)),
                     desc: "Timer".into(),
                     action: format!("timer:show:{id}"),
@@ -281,8 +384,19 @@ impl Plugin for TimerPlugin {
         if trimmed.starts_with("timer cancel") {
             return active_timers()
                 .into_iter()
-                .map(|(id, label, _)| Action {
+                .map(|(id, label, _rem, _start)| Action {
                     label: format!("Cancel {label}"),
+                    desc: "Timer".into(),
+                    action: format!("timer:cancel:{id}"),
+                    args: None,
+                })
+                .collect();
+        }
+        if trimmed.starts_with("timer rm") {
+            return active_timers()
+                .into_iter()
+                .map(|(id, label, rem, _start)| Action {
+                    label: format!("Remove {label} ({} left)", format_duration(rem)),
                     desc: "Timer".into(),
                     action: format!("timer:cancel:{id}"),
                     args: None,

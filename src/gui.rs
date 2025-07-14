@@ -125,6 +125,9 @@ pub struct LauncherApp {
     pub static_pos: Option<(i32, i32)>,
     pub static_size: Option<(i32, i32)>,
     pub hide_after_run: bool,
+    pub timer_refresh: f32,
+    pub disable_timer_updates: bool,
+    last_timer_update: Instant,
 }
 
 impl LauncherApp {
@@ -146,6 +149,8 @@ impl LauncherApp {
         static_pos: Option<(i32, i32)>,
         static_size: Option<(i32, i32)>,
         hide_after_run: Option<bool>,
+        timer_refresh: Option<f32>,
+        disable_timer_updates: Option<bool>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -177,6 +182,12 @@ impl LauncherApp {
         }
         if let Some(v) = hide_after_run {
             self.hide_after_run = v;
+        }
+        if let Some(v) = timer_refresh {
+            self.timer_refresh = v;
+        }
+        if let Some(v) = disable_timer_updates {
+            self.disable_timer_updates = v;
         }
     }
 
@@ -311,6 +322,9 @@ impl LauncherApp {
             static_pos,
             static_size,
             hide_after_run: settings.hide_after_run,
+            timer_refresh: settings.timer_refresh,
+            disable_timer_updates: settings.disable_timer_updates,
+            last_timer_update: Instant::now(),
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -603,6 +617,15 @@ impl eframe::App for LauncherApp {
             }
         }
 
+        let trimmed = self.query.trim();
+        if (trimmed.starts_with("timer list") || trimmed.starts_with("alarm list"))
+            && !self.disable_timer_updates
+            && self.last_timer_update.elapsed().as_secs_f32() >= self.timer_refresh
+        {
+            self.search();
+            self.last_timer_update = Instant::now();
+        }
+
         CentralPanel::default().show(ctx, |ui| {
             ui.heading("🚀 LNCHR");
             if let Some(err) = &self.error {
@@ -699,7 +722,7 @@ impl eframe::App for LauncherApp {
                             if a.action != "help:show" {
                                 let _ = history::append_history(
                                     HistoryEntry {
-                                        query: current,
+                                        query: current.clone(),
                                         action: a.clone(),
                                     },
                                     self.history_limit,
@@ -737,6 +760,11 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                                 set_focus = true;
                             } else if a.action.starts_with("tempfile:alias:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("timer:cancel:")
+                                && current.starts_with("timer rm")
+                            {
                                 refresh = true;
                                 set_focus = true;
                             }
@@ -803,7 +831,20 @@ impl eframe::App for LauncherApp {
                                 a.label.clone()
                             };
                             let mut resp = ui.selectable_label(self.selected == Some(idx), text);
-                            let menu_resp = resp.on_hover_text(&a.action);
+                            let tooltip = if a.desc == "Timer" && a.action.starts_with("timer:show:") {
+                                if let Ok(id) = a.action[11..].parse::<u64>() {
+                                    if let Some(ts) = crate::plugins::timer::timer_start_ts(id) {
+                                        format!("Started {}", crate::plugins::timer::format_ts(ts))
+                                    } else {
+                                        a.action.clone()
+                                    }
+                                } else {
+                                    a.action.clone()
+                                }
+                            } else {
+                                a.action.clone()
+                            };
+                            let menu_resp = resp.on_hover_text(tooltip);
                             let custom_idx = self
                                 .actions
                                 .iter()
@@ -867,6 +908,28 @@ impl eframe::App for LauncherApp {
                                         ui.close_menu();
                                     }
                                 });
+                            } else if a.desc == "Timer" && a.action.starts_with("timer:show:") {
+                                if let Ok(id) = a.action[11..].parse::<u64>() {
+                                    let query = self.query.trim().to_string();
+                                    menu_resp.clone().context_menu(|ui| {
+                                        if ui.button("Pause Timer").clicked() {
+                                            crate::plugins::timer::pause_timer(id);
+                                            if query.starts_with("timer list") {
+                                                refresh = true;
+                                                set_focus = true;
+                                            }
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Remove Timer").clicked() {
+                                            crate::plugins::timer::cancel_timer(id);
+                                            if query.starts_with("timer list") {
+                                                refresh = true;
+                                                set_focus = true;
+                                            }
+                                            ui.close_menu();
+                                        }
+                                    });
+                                }
                             } else if a.desc == "Snippet" {
                                 menu_resp.clone().context_menu(|ui| {
                                     if ui.button("Edit Snippet").clicked() {

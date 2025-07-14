@@ -43,7 +43,7 @@ impl TimerDialog {
                 match self.mode {
                     Mode::Timer => {
                         ui.horizontal(|ui| {
-                            ui.label("Duration (Ns/Nm/Nh)");
+                            ui.label("Duration (Ns/Nm/Nh or hh:mm:ss)");
                             ui.text_edit_singleline(&mut self.duration);
                         });
                     }
