@@ -84,8 +84,29 @@ pub fn load_saved_alarms() {
     ALARMS_LOADED.store(true, Ordering::SeqCst);
 }
 
-/// Parse a duration string like "5m" or "10s".
+/// Parse a duration string.
+///
+/// Supports `Ns`, `Nm`, `Nh` as well as `hh:mm:ss` and `mm:ss` formats.
 pub fn parse_duration(input: &str) -> Option<Duration> {
+    if input.contains(':') {
+        let parts: Vec<&str> = input.split(':').collect();
+        if parts.len() == 2 || parts.len() == 3 {
+            let mut nums = parts.iter().map(|p| p.parse::<u64>().ok());
+            let (h, m, s) = if parts.len() == 3 {
+                (nums.next()?, nums.next()?, nums.next()?)
+            } else {
+                (Some(0), nums.next()?, nums.next()?)
+            };
+            let (h, m, s) = (h?, m?, s?);
+            if m < 60 && s < 60 {
+                return Some(Duration::from_secs(h * 3600 + m * 60 + s));
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
     if input.len() < 2 { return None; }
     let (num_str, unit) = input.split_at(input.len()-1);
     let value: u64 = num_str.parse().ok()?;

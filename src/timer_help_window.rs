@@ -21,7 +21,11 @@ impl TimerHelpWindow {
                 ui.label("Create a timer: use 'timer <duration> [name]'. Examples:");
                 ui.monospace("timer 10s tea");
                 ui.monospace("timer 5m");
-                ui.label("Supported units are seconds (s), minutes (m) and hours (h).");
+                ui.monospace("timer 1:30");
+                ui.label(
+                    "Supported units are seconds (s), minutes (m) and hours (h). \
+You can also use hh:mm:ss or mm:ss notation.",
+                );
                 ui.separator();
                 ui.label("Set an alarm: use 'alarm <HH:MM> [name]'. Example:");
                 ui.monospace("alarm 07:30 wake up");
@@ -34,4 +38,3 @@ impl TimerHelpWindow {
         self.open = open;
     }
 }
-
