@@ -1,7 +1,6 @@
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::tempfile::{
-    clear_files, create_file, create_named_file, list_files, remove_file, set_alias,
-    TempfilePlugin,
+    clear_files, create_file, create_named_file, list_files, remove_file, set_alias, TempfilePlugin,
 };
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
@@ -49,10 +48,7 @@ fn search_clear_returns_action() {
 fn list_returns_existing_files() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
-    // override temp dir for this test
-    std::env::set_var("TMPDIR", dir.path());
-    #[cfg(windows)]
-    std::env::set_var("TEMP", dir.path());
+    std::env::set_current_dir(dir.path()).unwrap();
 
     let _ = create_file();
     let _ = create_file();
@@ -70,9 +66,7 @@ fn list_returns_existing_files() {
 fn rm_lists_files_for_deletion() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
-    std::env::set_var("TMPDIR", dir.path());
-    #[cfg(windows)]
-    std::env::set_var("TEMP", dir.path());
+    std::env::set_current_dir(dir.path()).unwrap();
 
     let file = create_file().unwrap();
     let plugin = TempfilePlugin;
@@ -86,9 +80,7 @@ fn rm_lists_files_for_deletion() {
 fn set_alias_renames_file() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
-    std::env::set_var("TMPDIR", dir.path());
-    #[cfg(windows)]
-    std::env::set_var("TEMP", dir.path());
+    std::env::set_current_dir(dir.path()).unwrap();
 
     let file = create_file().unwrap();
     let new = set_alias(&file, "alias").unwrap();
@@ -104,9 +96,7 @@ fn set_alias_renames_file() {
 fn create_named_file_rejects_invalid_alias() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
-    std::env::set_var("TMPDIR", dir.path());
-    #[cfg(windows)]
-    std::env::set_var("TEMP", dir.path());
+    std::env::set_current_dir(dir.path()).unwrap();
 
     let res = create_named_file("bad/alias", "hi");
     assert!(res.is_err());
@@ -116,9 +106,7 @@ fn create_named_file_rejects_invalid_alias() {
 fn set_alias_rejects_invalid_alias() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
-    std::env::set_var("TMPDIR", dir.path());
-    #[cfg(windows)]
-    std::env::set_var("TEMP", dir.path());
+    std::env::set_current_dir(dir.path()).unwrap();
 
     let file = create_file().unwrap();
     let res = set_alias(&file, "bad/alias");

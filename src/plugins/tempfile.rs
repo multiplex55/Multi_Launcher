@@ -19,7 +19,11 @@ fn validate_alias(alias: &str) -> anyhow::Result<&str> {
 
 /// Return the directory used to store temporary files.
 pub fn storage_dir() -> PathBuf {
-    std::env::temp_dir().join("multi_launcher_tmp")
+    let base = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("multi_launcher_tmp")
 }
 
 fn ensure_dir() -> std::io::Result<PathBuf> {
