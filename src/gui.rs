@@ -722,7 +722,7 @@ impl eframe::App for LauncherApp {
                             if a.action != "help:show" {
                                 let _ = history::append_history(
                                     HistoryEntry {
-                                        query: current,
+                                        query: current.clone(),
                                         action: a.clone(),
                                     },
                                     self.history_limit,
@@ -760,6 +760,11 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                                 set_focus = true;
                             } else if a.action.starts_with("tempfile:alias:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("timer:cancel:")
+                                && current.starts_with("timer rm")
+                            {
                                 refresh = true;
                                 set_focus = true;
                             }
@@ -905,13 +910,22 @@ impl eframe::App for LauncherApp {
                                 });
                             } else if a.desc == "Timer" && a.action.starts_with("timer:show:") {
                                 if let Ok(id) = a.action[11..].parse::<u64>() {
+                                    let query = self.query.trim().to_string();
                                     menu_resp.clone().context_menu(|ui| {
                                         if ui.button("Pause Timer").clicked() {
                                             crate::plugins::timer::pause_timer(id);
+                                            if query.starts_with("timer list") {
+                                                refresh = true;
+                                                set_focus = true;
+                                            }
                                             ui.close_menu();
                                         }
                                         if ui.button("Remove Timer").clicked() {
                                             crate::plugins::timer::cancel_timer(id);
+                                            if query.starts_with("timer list") {
+                                                refresh = true;
+                                                set_focus = true;
+                                            }
                                             ui.close_menu();
                                         }
                                     });
