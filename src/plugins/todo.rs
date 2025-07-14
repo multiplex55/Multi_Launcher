@@ -111,6 +111,15 @@ impl Plugin for TodoPlugin {
             }];
         }
 
+        if trimmed.eq("todo add") {
+            return vec![Action {
+                label: "todo: edit todos".into(),
+                desc: "Todo".into(),
+                action: "todo:dialog".into(),
+                args: None,
+            }];
+        }
+
         if let Some(text) = trimmed.strip_prefix("todo add ") {
             let text = text.trim();
             if !text.is_empty() {
