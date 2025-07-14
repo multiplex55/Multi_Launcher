@@ -198,9 +198,9 @@ Built-in plugins and their command prefixes are:
 - Brightness control (`bright 50`) *(Windows only)*
 - Command overview (`help`)
 - Timers and alarms (`timer 5m tea`, `timer 1:30`, `alarm 07:30`). Use `timer list` to view
-  remaining time. Pending alarms are saved to `alarms.json` and resume after
-  restarting the launcher. A plugin setting controls pop-up dialogs when a
-  timer completes.
+   remaining time or `timer rm` to remove timers. Pending alarms are saved to `alarms.json` and resume after
+   restarting the launcher. A plugin setting controls pop-up dialogs when a
+   timer completes.
 - Weather lookup (`weather Berlin`)
 
 On Windows the optional `vol` and `bright` plugins allow changing system volume

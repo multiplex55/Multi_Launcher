@@ -34,6 +34,7 @@ You can also use hh:mm:ss or mm:ss notation.",
                 ui.monospace("timer list  # show active timers");
                 ui.monospace("alarm list  # show active alarms");
                 ui.monospace("timer cancel  # cancel timers/alarms");
+                ui.monospace("timer rm  # remove timers");
             });
         self.open = open;
     }

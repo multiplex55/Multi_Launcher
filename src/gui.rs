@@ -826,7 +826,20 @@ impl eframe::App for LauncherApp {
                                 a.label.clone()
                             };
                             let mut resp = ui.selectable_label(self.selected == Some(idx), text);
-                            let menu_resp = resp.on_hover_text(&a.action);
+                            let tooltip = if a.desc == "Timer" && a.action.starts_with("timer:show:") {
+                                if let Ok(id) = a.action[11..].parse::<u64>() {
+                                    if let Some(ts) = crate::plugins::timer::timer_start_ts(id) {
+                                        format!("Started {}", crate::plugins::timer::format_ts(ts))
+                                    } else {
+                                        a.action.clone()
+                                    }
+                                } else {
+                                    a.action.clone()
+                                }
+                            } else {
+                                a.action.clone()
+                            };
+                            let menu_resp = resp.on_hover_text(tooltip);
                             let custom_idx = self
                                 .actions
                                 .iter()
@@ -890,6 +903,19 @@ impl eframe::App for LauncherApp {
                                         ui.close_menu();
                                     }
                                 });
+                            } else if a.desc == "Timer" && a.action.starts_with("timer:show:") {
+                                if let Ok(id) = a.action[11..].parse::<u64>() {
+                                    menu_resp.clone().context_menu(|ui| {
+                                        if ui.button("Pause Timer").clicked() {
+                                            crate::plugins::timer::pause_timer(id);
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Remove Timer").clicked() {
+                                            crate::plugins::timer::cancel_timer(id);
+                                            ui.close_menu();
+                                        }
+                                    });
+                                }
                             } else if a.desc == "Snippet" {
                                 menu_resp.clone().context_menu(|ui| {
                                     if ui.button("Edit Snippet").clicked() {
