@@ -2,6 +2,7 @@ use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::tempfile::{
     clear_files, create_file, create_named_file, list_files, remove_file, set_alias, TempfilePlugin,
 };
+use multi_launcher::{actions::Action, launcher::launch_action};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use tempfile::tempdir;
@@ -83,6 +84,23 @@ fn rm_lists_files_for_deletion() {
     assert_eq!(results.len(), 1);
     assert!(results[0].action.starts_with("tempfile:remove:"));
     remove_file(&file).unwrap();
+}
+
+#[test]
+fn launch_action_remove_deletes_file() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let file = create_file().unwrap();
+    let action = Action {
+        label: "".into(),
+        desc: "".into(),
+        action: format!("tempfile:remove:{}", file.to_string_lossy()),
+        args: None,
+    };
+    launch_action(&action).unwrap();
+    assert!(!file.exists());
 }
 
 #[test]

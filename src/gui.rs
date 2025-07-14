@@ -26,12 +26,12 @@ use fuzzy_matcher::FuzzyMatcher;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver};
+#[cfg(target_os = "windows")]
+use std::sync::Mutex;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-#[cfg(target_os = "windows")]
-use std::sync::Mutex;
 use std::time::Instant;
 
 fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -733,6 +733,12 @@ impl eframe::App for LauncherApp {
                             } else if a.action == "todo:clear" {
                                 refresh = true;
                                 set_focus = true;
+                            } else if a.action.starts_with("tempfile:remove:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("tempfile:alias:") {
+                                refresh = true;
+                                set_focus = true;
                             }
                             if self.hide_after_run
                                 && !a.action.starts_with("bookmark:add:")
@@ -1096,6 +1102,12 @@ impl eframe::App for LauncherApp {
                                         refresh = true;
                                         set_focus = true;
                                     } else if a.action == "todo:clear" {
+                                        refresh = true;
+                                        set_focus = true;
+                                    } else if a.action.starts_with("tempfile:remove:") {
+                                        refresh = true;
+                                        set_focus = true;
+                                    } else if a.action.starts_with("tempfile:alias:") {
                                         refresh = true;
                                         set_focus = true;
                                     }
