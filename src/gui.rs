@@ -746,6 +746,7 @@ impl eframe::App for LauncherApp {
                                 && !a.action.starts_with("folder:add:")
                                 && !a.action.starts_with("folder:remove:")
                                 && !a.action.starts_with("calc:")
+                                && !a.action.starts_with("todo:done:")
                             {
                                 self.visible_flag.store(false, Ordering::SeqCst);
                             }
@@ -1117,6 +1118,7 @@ impl eframe::App for LauncherApp {
                                         && !a.action.starts_with("folder:add:")
                                         && !a.action.starts_with("folder:remove:")
                                         && !a.action.starts_with("calc:")
+                                        && !a.action.starts_with("todo:done:")
                                     {
                                         self.visible_flag.store(false, Ordering::SeqCst);
                                     }
