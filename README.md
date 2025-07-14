@@ -192,7 +192,7 @@ Built-in plugins and their command prefixes are:
 - Todo items (`todo add <task>`, `todo list`, `todo rm <pattern>`, `todo clear`)
 - Text snippets (`cs`, `cs list`, `cs rm`)
 - Recycle Bin cleanup (`rec`)
-- Temporary files (`tmp`, `tmp new`, `tmp open`, `tmp clear`, `tmp list`, `tmp rm`)
+- Temporary files (`tmp`, `tmp new [name]`, `tmp open`, `tmp clear`, `tmp list`, `tmp rm`)
 - ASCII art (`ascii text`)
 - Volume control (`vol 50`) *(Windows only)*
 - Brightness control (`bright 50`) *(Windows only)*

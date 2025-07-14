@@ -127,7 +127,17 @@ impl Plugin for TempfilePlugin {
                 args: None,
             }];
         }
-        if trimmed == "tmp new" {
+        if let Some(alias) = trimmed.strip_prefix("tmp new ") {
+            let alias = alias.trim();
+            if !alias.is_empty() && validate_alias(alias).is_ok() {
+                return vec![Action {
+                    label: format!("Create temp file {alias}"),
+                    desc: "Tempfile".into(),
+                    action: format!("tempfile:new:{alias}"),
+                    args: None,
+                }];
+            }
+        } else if trimmed == "tmp new" {
             return vec![Action {
                 label: "Create temp file".into(),
                 desc: "Tempfile".into(),

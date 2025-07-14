@@ -1,27 +1,34 @@
 use crate::actions::Action;
+use crate::history;
 use crate::plugins::bookmarks::{append_bookmark, remove_bookmark};
 use crate::plugins::folders::{append_folder, remove_folder, FOLDERS_FILE};
-use crate::plugins::notes::{append_note, remove_note, load_notes, QUICK_NOTES_FILE};
+use crate::plugins::notes::{append_note, load_notes, remove_note, QUICK_NOTES_FILE};
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
 use crate::plugins::timer;
-use crate::history;
-use sysinfo::System;
 use arboard::Clipboard;
-use std::path::Path;
 use shlex;
+use std::path::Path;
+use sysinfo::System;
 
 #[cfg(target_os = "windows")]
 fn set_system_volume(percent: u32) {
-    use windows::Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator, eRender, eMultimedia};
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
-    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED};
+    use windows::Win32::Media::Audio::{
+        eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
+    };
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+    };
 
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        if let Ok(enm) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+        if let Ok(enm) =
+            CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+        {
             if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
                 if let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
-                    let _ = vol.SetMasterVolumeLevelScalar(percent as f32 / 100.0, std::ptr::null());
+                    let _ =
+                        vol.SetMasterVolumeLevelScalar(percent as f32 / 100.0, std::ptr::null());
                 }
             }
         }
@@ -29,12 +36,16 @@ fn set_system_volume(percent: u32) {
     }
 }
 
-
 #[cfg(target_os = "windows")]
 fn mute_active_window() {
     use windows::core::Interface;
-    use windows::Win32::Media::Audio::{IAudioSessionManager2, IAudioSessionControl2, ISimpleAudioVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eRender, eMultimedia};
-    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED};
+    use windows::Win32::Media::Audio::{
+        eMultimedia, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator,
+        ISimpleAudioVolume, MMDeviceEnumerator,
+    };
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
     unsafe {
@@ -42,7 +53,9 @@ fn mute_active_window() {
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        if let Ok(enm) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+        if let Ok(enm) =
+            CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+        {
             if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
                 if let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
                     if let Ok(list) = manager.GetSessionEnumerator() {
@@ -69,17 +82,21 @@ fn mute_active_window() {
     }
 }
 
-
 #[cfg(target_os = "windows")]
 fn set_display_brightness(percent: u32) {
-    use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
-    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
     use windows::Win32::Devices::Display::{
         DestroyPhysicalMonitors, GetNumberOfPhysicalMonitorsFromHMONITOR,
-        GetPhysicalMonitorsFromHMONITOR, PHYSICAL_MONITOR, SetMonitorBrightness,
+        GetPhysicalMonitorsFromHMONITOR, SetMonitorBrightness, PHYSICAL_MONITOR,
     };
+    use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
+    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
 
-    unsafe extern "system" fn enum_monitors(hmonitor: HMONITOR, _hdc: HDC, _rect: *mut RECT, lparam: LPARAM) -> BOOL {
+    unsafe extern "system" fn enum_monitors(
+        hmonitor: HMONITOR,
+        _hdc: HDC,
+        _rect: *mut RECT,
+        lparam: LPARAM,
+    ) -> BOOL {
         let percent = lparam.0 as u32;
         let mut count: u32 = 0;
         if GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count).is_ok() {
@@ -104,15 +121,19 @@ fn set_display_brightness(percent: u32) {
     }
 }
 
-
 #[cfg(target_os = "windows")]
 fn clean_recycle_bin() {
-    use windows::Win32::UI::Shell::{SHEmptyRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND};
+    use windows::Win32::UI::Shell::{
+        SHEmptyRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND,
+    };
     unsafe {
-        let _ = SHEmptyRecycleBinW(None, None, SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND);
+        let _ = SHEmptyRecycleBinW(
+            None,
+            None,
+            SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND,
+        );
     }
 }
-
 
 fn system_command(action: &str) -> Option<std::process::Command> {
     #[cfg(target_os = "windows")]
@@ -174,15 +195,19 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     }
     if let Some(rest) = action.action.strip_prefix("clipboard:") {
         if rest == "clear" {
-            crate::plugins::clipboard::clear_history_file(crate::plugins::clipboard::CLIPBOARD_FILE)?;
+            crate::plugins::clipboard::clear_history_file(
+                crate::plugins::clipboard::CLIPBOARD_FILE,
+            )?;
             return Ok(());
         }
         if let Some(idx_str) = rest.strip_prefix("copy:") {
             if let Ok(i) = idx_str.parse::<usize>() {
-                if let Some(entry) = crate::plugins::clipboard::load_history(crate::plugins::clipboard::CLIPBOARD_FILE)
-                    .unwrap_or_default()
-                    .get(i)
-                    .cloned()
+                if let Some(entry) = crate::plugins::clipboard::load_history(
+                    crate::plugins::clipboard::CLIPBOARD_FILE,
+                )
+                .unwrap_or_default()
+                .get(i)
+                .cloned()
                 {
                     let mut cb = Clipboard::new()?;
                     cb.set_text(entry)?;
@@ -343,6 +368,11 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     if action.action == "recycle:clean" {
         #[cfg(target_os = "windows")]
         clean_recycle_bin();
+        return Ok(());
+    }
+    if let Some(alias) = action.action.strip_prefix("tempfile:new:") {
+        let path = crate::plugins::tempfile::create_named_file(alias, "")?;
+        open::that(&path)?;
         return Ok(());
     }
     if action.action == "tempfile:new" {
