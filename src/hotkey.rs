@@ -89,7 +89,7 @@ pub enum Key {
     AltGr,
 }
 
-#[cfg(all(not(target_os = "windows"), test))]
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventType {
     KeyPress(Key),
@@ -444,7 +444,7 @@ impl HotkeyListener {
     }
 }
 
-#[cfg(test)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn process_test_events(triggers: &[Arc<HotkeyTrigger>], events: &[EventType]) {
     let open_listeners: Vec<_> = triggers.iter().map(|t| t.open.clone()).collect();
     let watch_keys: Vec<Key> = triggers.iter().map(|t| t._key).collect();

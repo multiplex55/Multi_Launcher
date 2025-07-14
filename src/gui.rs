@@ -125,6 +125,9 @@ pub struct LauncherApp {
     pub static_pos: Option<(i32, i32)>,
     pub static_size: Option<(i32, i32)>,
     pub hide_after_run: bool,
+    pub timer_refresh: f32,
+    pub disable_timer_updates: bool,
+    last_timer_update: Instant,
 }
 
 impl LauncherApp {
@@ -146,6 +149,8 @@ impl LauncherApp {
         static_pos: Option<(i32, i32)>,
         static_size: Option<(i32, i32)>,
         hide_after_run: Option<bool>,
+        timer_refresh: Option<f32>,
+        disable_timer_updates: Option<bool>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -177,6 +182,12 @@ impl LauncherApp {
         }
         if let Some(v) = hide_after_run {
             self.hide_after_run = v;
+        }
+        if let Some(v) = timer_refresh {
+            self.timer_refresh = v;
+        }
+        if let Some(v) = disable_timer_updates {
+            self.disable_timer_updates = v;
         }
     }
 
@@ -311,6 +322,9 @@ impl LauncherApp {
             static_pos,
             static_size,
             hide_after_run: settings.hide_after_run,
+            timer_refresh: settings.timer_refresh,
+            disable_timer_updates: settings.disable_timer_updates,
+            last_timer_update: Instant::now(),
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -601,6 +615,15 @@ impl eframe::App for LauncherApp {
                     }
                 }
             }
+        }
+
+        let trimmed = self.query.trim();
+        if (trimmed.starts_with("timer list") || trimmed.starts_with("alarm list"))
+            && !self.disable_timer_updates
+            && self.last_timer_update.elapsed().as_secs_f32() >= self.timer_refresh
+        {
+            self.search();
+            self.last_timer_update = Instant::now();
         }
 
         CentralPanel::default().show(ctx, |ui| {

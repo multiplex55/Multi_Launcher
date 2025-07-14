@@ -4,12 +4,12 @@ use std::sync::Mutex;
 static MOCK_MOUSE_POSITION: Lazy<Mutex<Option<Option<(f32, f32)>>>> =
     Lazy::new(|| Mutex::new(None));
 
-#[cfg(test)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn set_mock_mouse_position(pos: Option<(f32, f32)>) {
     *MOCK_MOUSE_POSITION.lock().unwrap() = Some(pos);
 }
 
-#[cfg(test)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn clear_mock_mouse_position() {
     *MOCK_MOUSE_POSITION.lock().unwrap() = None;
 }
