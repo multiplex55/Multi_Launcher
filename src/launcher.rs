@@ -390,6 +390,16 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         crate::plugins::tempfile::clear_files()?;
         return Ok(());
     }
+    if let Some(path) = action.action.strip_prefix("tempfile:remove:") {
+        crate::plugins::tempfile::remove_file(Path::new(path))?;
+        return Ok(());
+    }
+    if let Some(rest) = action.action.strip_prefix("tempfile:alias:") {
+        if let Some((path, alias)) = rest.split_once('|') {
+            crate::plugins::tempfile::set_alias(Path::new(path), alias)?;
+        }
+        return Ok(());
+    }
     let path = Path::new(&action.action);
 
     // If it's an .exe or we have additional args, launch it directly
