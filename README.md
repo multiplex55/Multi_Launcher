@@ -16,7 +16,7 @@ quickly open applications or files.
 - Set timers or alarms from the launcher. Type `timer` or `alarm` and press
   <kbd>Enter</kbd> to open the creation dialog.
 - Keep track of quick todo items or notes.
-- Insert saved text snippets and add new ones with `cs add <alias> <text>`.
+- Insert saved text snippets, add new ones with `cs add <alias> <text>` or edit them with `cs edit`.
 
 
 ## Building
@@ -190,7 +190,7 @@ Built-in plugins and their command prefixes are:
 - Search history (`hi`)
 - Quick notes (`note add <text>`, `note list`, `note rm <pattern>`)
 - Todo items (`todo add <task>`, `todo list`, `todo rm <pattern>`, `todo clear`)
-- Text snippets (`cs`, `cs list`, `cs rm`, `cs add <alias> <text>`)
+- Text snippets (`cs`, `cs list`, `cs rm`, `cs add <alias> <text>`, `cs edit`)
 - Recycle Bin cleanup (`rec`)
 - Temporary files (`tmp`, `tmp new [name]`, `tmp open`, `tmp clear`, `tmp list`, `tmp rm`)
 - ASCII art (`ascii text`)

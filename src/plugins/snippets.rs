@@ -43,7 +43,6 @@ pub fn append_snippet(path: &str, alias: &str, text: &str) -> anyhow::Result<()>
     save_snippets(path, &list)
 }
 
-
 /// Remove the snippet identified by `alias`.
 pub fn remove_snippet(path: &str, alias: &str) -> anyhow::Result<()> {
     let mut list = load_snippets(path).unwrap_or_default();
@@ -61,7 +60,9 @@ pub struct SnippetsPlugin {
 impl SnippetsPlugin {
     /// Create a new snippets plugin instance.
     pub fn new() -> Self {
-        Self { matcher: SkimMatcherV2::default() }
+        Self {
+            matcher: SkimMatcherV2::default(),
+        }
     }
 }
 
@@ -115,6 +116,25 @@ impl Plugin for SnippetsPlugin {
             }
         }
 
+        if let Some(rest) = trimmed.strip_prefix("cs edit") {
+            let filter = rest.trim();
+            let list = load_snippets(SNIPPETS_FILE).unwrap_or_default();
+            return list
+                .into_iter()
+                .filter(|s| {
+                    filter.is_empty()
+                        || self.matcher.fuzzy_match(&s.alias, filter).is_some()
+                        || self.matcher.fuzzy_match(&s.text, filter).is_some()
+                })
+                .map(|s| Action {
+                    label: format!("Edit snippet {}", s.alias),
+                    desc: "Snippet".into(),
+                    action: format!("snippet:edit:{}", s.alias),
+                    args: None,
+                })
+                .collect();
+        }
+
         if let Some(rest) = trimmed.strip_prefix("cs list") {
             let filter = rest.trim();
             let list = load_snippets(SNIPPETS_FILE).unwrap_or_default();
@@ -165,4 +185,3 @@ impl Plugin for SnippetsPlugin {
         &["search"]
     }
 }
-

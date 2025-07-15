@@ -680,6 +680,8 @@ impl eframe::App for LauncherApp {
                             self.add_bookmark_dialog.open();
                         } else if a.action == "snippet:dialog" {
                             self.snippet_dialog.open();
+                        } else if let Some(alias) = a.action.strip_prefix("snippet:edit:") {
+                            self.snippet_dialog.open_edit(alias);
                         } else if a.action == "todo:dialog" {
                             self.todo_dialog.open();
                         } else if a.action == "clipboard:dialog" {
@@ -754,6 +756,9 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                                 set_focus = true;
                             } else if a.action == "todo:clear" {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("snippet:remove:") {
                                 refresh = true;
                                 set_focus = true;
                             } else if a.action.starts_with("tempfile:remove:") {
