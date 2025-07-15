@@ -29,6 +29,29 @@ pub fn save_shell_cmds(path: &str, cmds: &[ShellCmdEntry]) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Append a new saved command to `path` if the name is unique.
+pub fn append_shell_cmd(path: &str, name: &str, args: &str) -> anyhow::Result<()> {
+    let mut list = load_shell_cmds(path).unwrap_or_default();
+    if !list.iter().any(|c| c.name == name) {
+        list.push(ShellCmdEntry {
+            name: name.to_string(),
+            args: args.to_string(),
+        });
+        save_shell_cmds(path, &list)?;
+    }
+    Ok(())
+}
+
+/// Remove the command identified by `name` from `path`.
+pub fn remove_shell_cmd(path: &str, name: &str) -> anyhow::Result<()> {
+    let mut list = load_shell_cmds(path).unwrap_or_default();
+    if let Some(pos) = list.iter().position(|c| c.name == name) {
+        list.remove(pos);
+        save_shell_cmds(path, &list)?;
+    }
+    Ok(())
+}
+
 pub struct ShellPlugin;
 
 impl Plugin for ShellPlugin {
@@ -41,6 +64,61 @@ impl Plugin for ShellPlugin {
                 action: "shell:dialog".into(),
                 args: None,
             }];
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("sh add ") {
+            let mut parts = rest.trim().splitn(2, ' ');
+            let name = parts.next().unwrap_or("").trim();
+            let args = parts.next().unwrap_or("").trim();
+            if !name.is_empty() && !args.is_empty() {
+                return vec![Action {
+                    label: format!("Add shell command {name}"),
+                    desc: "Shell".into(),
+                    action: format!("shell:add:{name}|{args}"),
+                    args: None,
+                }];
+            }
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("sh rm") {
+            let filter = rest.trim();
+            if let Ok(list) = load_shell_cmds(SHELL_CMDS_FILE) {
+                let matcher = SkimMatcherV2::default();
+                return list
+                    .into_iter()
+                    .filter(|c| {
+                        filter.is_empty()
+                            || matcher.fuzzy_match(&c.name, filter).is_some()
+                            || matcher.fuzzy_match(&c.args, filter).is_some()
+                    })
+                    .map(|c| Action {
+                        label: format!("Remove shell command {}", c.name),
+                        desc: "Shell".into(),
+                        action: format!("shell:remove:{}", c.name),
+                        args: None,
+                    })
+                    .collect();
+            }
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("sh list") {
+            let filter = rest.trim();
+            if let Ok(list) = load_shell_cmds(SHELL_CMDS_FILE) {
+                let matcher = SkimMatcherV2::default();
+                return list
+                    .into_iter()
+                    .filter(|c| {
+                        matcher.fuzzy_match(&c.name, filter).is_some()
+                            || matcher.fuzzy_match(&c.args, filter).is_some()
+                    })
+                    .map(|c| Action {
+                        label: c.name,
+                        desc: "Shell".into(),
+                        action: format!("shell:{}", c.args),
+                        args: None,
+                    })
+                    .collect();
+            }
         }
 
         if let Some(cmd) = trimmed.strip_prefix("sh ") {
@@ -89,4 +167,3 @@ impl Plugin for ShellPlugin {
         &["search"]
     }
 }
-

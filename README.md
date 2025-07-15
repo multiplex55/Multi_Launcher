@@ -260,7 +260,7 @@ The system information plugin uses the `info` prefix. Type `info` to show CPU,
 memory and disk usage or `info cpu` for a single metric.
 ### Security Considerations
 The shell plugin runs commands using the system shell without sanitising input. Only enable it if you trust the commands you type. Errors while spawning the process are logged.
-Type `sh` in the launcher to open the shell command editor for managing predefined commands.
+Type `sh` in the launcher to open the shell command editor for managing predefined commands. Saved commands can also be added with `sh add <name> <command>`, removed via `sh rm <pattern>` or listed with `sh list`.
 ## Editing Commands
 The launcher stores its custom actions in `actions.json` next to the
 executable. This file is created automatically the first time you save a
