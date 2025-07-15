@@ -82,13 +82,14 @@ impl Plugin for SnippetsPlugin {
                 args: None,
             }];
         }
-        if let Some(pattern) = trimmed.strip_prefix("cs rm ") {
-            let filter = pattern.trim();
+        if let Some(rest) = trimmed.strip_prefix("cs rm") {
+            let filter = rest.trim();
             let list = load_snippets(SNIPPETS_FILE).unwrap_or_default();
             return list
                 .into_iter()
                 .filter(|s| {
-                    self.matcher.fuzzy_match(&s.alias, filter).is_some()
+                    filter.is_empty()
+                        || self.matcher.fuzzy_match(&s.alias, filter).is_some()
                         || self.matcher.fuzzy_match(&s.text, filter).is_some()
                 })
                 .map(|s| Action {

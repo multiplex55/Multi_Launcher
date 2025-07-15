@@ -16,7 +16,7 @@ quickly open applications or files.
 - Set timers or alarms from the launcher. Type `timer` or `alarm` and press
   <kbd>Enter</kbd> to open the creation dialog.
 - Keep track of quick todo items or notes.
-- Insert saved text snippets without opening a file.
+- Insert saved text snippets and add new ones with `cs add <alias> <text>`.
 
 
 ## Building
