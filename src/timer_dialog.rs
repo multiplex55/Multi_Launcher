@@ -1,6 +1,7 @@
 use crate::gui::LauncherApp;
 use crate::plugins::timer::{parse_duration, parse_hhmm, start_alarm_named, start_timer_named};
 use eframe::egui;
+use egui_toast::{Toast, ToastKind, ToastOptions};
 #[derive(Default)]
 pub struct TimerDialog {
     pub open: bool,
@@ -70,6 +71,20 @@ impl TimerDialog {
                                 ui.selectable_value(&mut self.sound_idx, idx, *name);
                             }
                         });
+                    if ui.button("Play").clicked() {
+                        let name = crate::sound::SOUND_NAMES[self.sound_idx];
+                        if name == "None" {
+                            if app.enable_toasts {
+                                app.add_toast(Toast {
+                                    text: "'None' is not a valid sound".into(),
+                                    kind: ToastKind::Error,
+                                    options: ToastOptions::default().duration_in_seconds(3.0),
+                                });
+                            }
+                        } else {
+                            crate::sound::play_sound(name);
+                        }
+                    }
                 });
                 ui.horizontal(|ui| {
                     if ui.button("Start").clicked() {
