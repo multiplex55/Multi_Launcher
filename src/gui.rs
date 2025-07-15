@@ -436,64 +436,106 @@ impl LauncherApp {
         let mut res: Vec<(Action, f32)> = Vec::new();
 
         let trimmed = self.query.trim();
+        let query_lc = self.query.to_lowercase();
+        let trimmed_lc = trimmed.to_lowercase();
 
-        if trimmed.starts_with("g ") {
+        if trimmed_lc.starts_with("g ") {
             let filter = vec!["web_search".to_string()];
-            res.extend(
-                self.plugins
-                    .search_filtered(
-                        &self.query,
-                        Some(&filter),
-                        self.enabled_capabilities.as_ref(),
-                    )
-                    .into_iter()
-                    .map(|a| {
-                        let score = if self.query.is_empty() {
-                            0.0
-                        } else {
-                            self.matcher
-                                .fuzzy_match(&a.label, &self.query)
-                                .max(self.matcher.fuzzy_match(&a.desc, &self.query))
-                                .unwrap_or(0) as f32
-                                * self.fuzzy_weight
-                        };
-                        (a, score)
-                    }),
+            let plugin_results = self.plugins.search_filtered(
+                &self.query,
+                Some(&filter),
+                self.enabled_capabilities.as_ref(),
             );
+            for a in plugin_results {
+                if self.fuzzy_weight <= 0.0 {
+                    let alias_match = self
+                        .folder_aliases
+                        .get(&a.action)
+                        .or_else(|| self.bookmark_aliases.get(&a.action))
+                        .and_then(|v| v.as_ref())
+                        .map(|s| s.to_lowercase().contains(&query_lc))
+                        .unwrap_or(false);
+                    if a.label.to_lowercase().contains(&query_lc)
+                        || a.desc.to_lowercase().contains(&query_lc)
+                        || alias_match
+                    {
+                        res.push((a, 0.0));
+                    }
+                } else {
+                    let score = if self.query.is_empty() {
+                        0.0
+                    } else {
+                        self.matcher
+                            .fuzzy_match(&a.label, &self.query)
+                            .max(self.matcher.fuzzy_match(&a.desc, &self.query))
+                            .unwrap_or(0) as f32
+                            * self.fuzzy_weight
+                    };
+                    res.push((a, score));
+                }
+            }
         } else {
             if self.query.is_empty() {
                 res.extend(self.actions.iter().cloned().map(|a| (a, 0.0)));
             } else {
                 for a in &self.actions {
-                    let s1 = self.matcher.fuzzy_match(&a.label, &self.query);
-                    let s2 = self.matcher.fuzzy_match(&a.desc, &self.query);
-                    if let Some(score) = s1.max(s2) {
-                        res.push((a.clone(), score as f32 * self.fuzzy_weight));
+                    if self.fuzzy_weight <= 0.0 {
+                        let alias_match = self
+                            .folder_aliases
+                            .get(&a.action)
+                            .or_else(|| self.bookmark_aliases.get(&a.action))
+                            .and_then(|v| v.as_ref())
+                            .map(|s| s.to_lowercase().contains(&query_lc))
+                            .unwrap_or(false);
+                        if a.label.to_lowercase().contains(&query_lc)
+                            || a.desc.to_lowercase().contains(&query_lc)
+                            || alias_match
+                        {
+                            res.push((a.clone(), 0.0));
+                        }
+                    } else {
+                        let s1 = self.matcher.fuzzy_match(&a.label, &self.query);
+                        let s2 = self.matcher.fuzzy_match(&a.desc, &self.query);
+                        if let Some(score) = s1.max(s2) {
+                            res.push((a.clone(), score as f32 * self.fuzzy_weight));
+                        }
                     }
                 }
             }
 
-            res.extend(
-                self.plugins
-                    .search_filtered(
-                        &self.query,
-                        self.enabled_plugins.as_ref(),
-                        self.enabled_capabilities.as_ref(),
-                    )
-                    .into_iter()
-                    .map(|a| {
-                        let score = if self.query.is_empty() {
-                            0.0
-                        } else {
-                            self.matcher
-                                .fuzzy_match(&a.label, &self.query)
-                                .max(self.matcher.fuzzy_match(&a.desc, &self.query))
-                                .unwrap_or(0) as f32
-                                * self.fuzzy_weight
-                        };
-                        (a, score)
-                    }),
+            let plugin_results = self.plugins.search_filtered(
+                &self.query,
+                self.enabled_plugins.as_ref(),
+                self.enabled_capabilities.as_ref(),
             );
+            for a in plugin_results {
+                if self.fuzzy_weight <= 0.0 {
+                    let alias_match = self
+                        .folder_aliases
+                        .get(&a.action)
+                        .or_else(|| self.bookmark_aliases.get(&a.action))
+                        .and_then(|v| v.as_ref())
+                        .map(|s| s.to_lowercase().contains(&query_lc))
+                        .unwrap_or(false);
+                    if a.label.to_lowercase().contains(&query_lc)
+                        || a.desc.to_lowercase().contains(&query_lc)
+                        || alias_match
+                    {
+                        res.push((a, 0.0));
+                    }
+                } else {
+                    let score = if self.query.is_empty() {
+                        0.0
+                    } else {
+                        self.matcher
+                            .fuzzy_match(&a.label, &self.query)
+                            .max(self.matcher.fuzzy_match(&a.desc, &self.query))
+                            .unwrap_or(0) as f32
+                            * self.fuzzy_weight
+                    };
+                    res.push((a, score));
+                }
+            }
         }
 
         for (a, score) in res.iter_mut() {
