@@ -301,9 +301,9 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         let (dur_str, name) = arg.split_once('|').unwrap_or((arg, ""));
         if let Some(dur) = timer::parse_duration(dur_str) {
             if name.is_empty() {
-                timer::start_timer(dur);
+                timer::start_timer(dur, "None".to_string());
             } else {
-                timer::start_timer_named(dur, Some(name.to_string()));
+                timer::start_timer_named(dur, Some(name.to_string()), "None".to_string());
             }
         }
         return Ok(());
@@ -312,9 +312,9 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         let (time_str, name) = arg.split_once('|').unwrap_or((arg, ""));
         if let Some((h, m)) = timer::parse_hhmm(time_str) {
             if name.is_empty() {
-                timer::start_alarm(h, m);
+                timer::start_alarm(h, m, "None".to_string());
             } else {
-                timer::start_alarm_named(h, m, Some(name.to_string()));
+                timer::start_alarm_named(h, m, Some(name.to_string()), "None".to_string());
             }
         }
         return Ok(());

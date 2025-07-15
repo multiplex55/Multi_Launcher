@@ -62,6 +62,7 @@ fn search_cancel_lists_timers() {
             paused: false,
             remaining: Duration::from_secs(10),
             generation: 0,
+            sound: "None".into(),
         });
     }
     let plugin = TimerPlugin;
@@ -88,6 +89,7 @@ fn search_list_lists_timers() {
             paused: false,
             remaining: Duration::from_secs(20),
             generation: 0,
+            sound: "None".into(),
         });
     }
     let plugin = TimerPlugin;
@@ -111,6 +113,7 @@ fn search_rm_lists_timers() {
             paused: false,
             remaining: Duration::from_secs(30),
             generation: 0,
+            sound: "None".into(),
         });
     }
     let plugin = TimerPlugin;
@@ -145,6 +148,7 @@ fn search_pause_lists_running_timers() {
             paused: false,
             remaining: Duration::from_secs(5),
             generation: 0,
+            sound: "None".into(),
         });
     }
     let plugin = TimerPlugin;
@@ -177,6 +181,7 @@ fn search_resume_lists_paused_timers() {
             paused: true,
             remaining: Duration::from_secs(5),
             generation: 0,
+            sound: "None".into(),
         });
     }
     let plugin = TimerPlugin;

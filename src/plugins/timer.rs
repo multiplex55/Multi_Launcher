@@ -26,6 +26,7 @@ pub struct TimerEntry {
     pub paused: bool,
     pub remaining: Duration,
     pub generation: u64,
+    pub sound: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -34,6 +35,8 @@ struct SavedAlarm {
     end_ts: u64,
     #[serde(default)]
     start_ts: u64,
+    #[serde(default)]
+    sound: String,
 }
 
 fn save_persistent_alarms_locked(timers: &Vec<TimerEntry>) {
@@ -44,6 +47,7 @@ fn save_persistent_alarms_locked(timers: &Vec<TimerEntry>) {
             label: t.label.clone(),
             end_ts: t.end_ts,
             start_ts: t.start_ts,
+            sound: t.sound.clone(),
         })
         .collect();
     if let Ok(json) = serde_json::to_string_pretty(&list) {
@@ -113,6 +117,7 @@ impl TimerManager {
             } else {
                 format!("Timer finished: {}", entry.label)
             };
+            crate::sound::play_sound(&entry.sound);
             notify(&msg);
             FINISHED_MESSAGES.lock().unwrap().push(msg);
         }
@@ -172,7 +177,7 @@ pub fn load_saved_alarms() {
             } else {
                 alarm.end_ts - dur.as_secs()
             };
-            start_entry(dur, alarm.label, true, start_ts, alarm.end_ts);
+            start_entry(dur, alarm.label, true, start_ts, alarm.end_ts, alarm.sound);
         }
     }
     ALARMS_LOADED.store(true, Ordering::SeqCst);
@@ -361,7 +366,14 @@ pub fn format_ts(ts: u64) -> String {
         .to_string()
 }
 
-fn start_entry(duration: Duration, label: String, persist: bool, start_ts: u64, end_ts: u64) {
+fn start_entry(
+    duration: Duration,
+    label: String,
+    persist: bool,
+    start_ts: u64,
+    end_ts: u64,
+    sound: String,
+) {
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
     let deadline = Instant::now() + duration;
     {
@@ -376,6 +388,7 @@ fn start_entry(duration: Duration, label: String, persist: bool, start_ts: u64, 
             paused: false,
             remaining: duration,
             generation: 0,
+            sound: sound.clone(),
         });
         if persist {
             save_persistent_alarms_locked(&list);
@@ -385,23 +398,23 @@ fn start_entry(duration: Duration, label: String, persist: bool, start_ts: u64, 
 }
 
 /// Start a timer that lasts `duration` with an optional `name`.
-pub fn start_timer_named(duration: Duration, name: Option<String>) {
+pub fn start_timer_named(duration: Duration, name: Option<String>, sound: String) {
     let label = name.unwrap_or_else(|| format!("Timer {:?}", duration));
     let start_ts = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs();
     let end_ts = start_ts + duration.as_secs();
-    start_entry(duration, label, false, start_ts, end_ts);
+    start_entry(duration, label, false, start_ts, end_ts, sound);
 }
 
 /// Start an unnamed timer that lasts `duration`.
-pub fn start_timer(duration: Duration) {
-    start_timer_named(duration, None);
+pub fn start_timer(duration: Duration, sound: String) {
+    start_timer_named(duration, None, sound);
 }
 
 /// Set an alarm for the specified time with an optional `name`.
-pub fn start_alarm_named(hour: u32, minute: u32, name: Option<String>) {
+pub fn start_alarm_named(hour: u32, minute: u32, name: Option<String>, sound: String) {
     use chrono::{Duration as ChronoDuration, Local};
     let now = Local::now();
     let mut target = now.date_naive().and_hms_opt(hour, minute, 0).unwrap();
@@ -417,12 +430,12 @@ pub fn start_alarm_named(hour: u32, minute: u32, name: Option<String>) {
         .unwrap()
         .as_secs();
     let end_ts = start_ts + duration.as_secs();
-    start_entry(duration, label, true, start_ts, end_ts);
+    start_entry(duration, label, true, start_ts, end_ts, sound);
 }
 
 /// Convenience wrapper for [`start_alarm_named`] without a name.
-pub fn start_alarm(hour: u32, minute: u32) {
-    start_alarm_named(hour, minute, None);
+pub fn start_alarm(hour: u32, minute: u32, sound: String) {
+    start_alarm_named(hour, minute, None, sound);
 }
 
 pub struct TimerPlugin;
