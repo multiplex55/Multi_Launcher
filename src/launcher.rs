@@ -181,17 +181,21 @@ fn system_command(action: &str) -> Option<std::process::Command> {
 pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     #[cfg(target_os = "windows")]
     if let Some(cmd) = action.action.strip_prefix("shell:") {
-        let mut command = {
-            let mut c = std::process::Command::new("cmd");
-            c.arg("/C").arg(cmd);
-            c
-        };
-        return command.spawn().map(|_| ()).map_err(|e| e.into());
+        if !cmd.starts_with("add:") && !cmd.starts_with("remove:") {
+            let mut command = {
+                let mut c = std::process::Command::new("cmd");
+                c.arg("/C").arg(cmd);
+                c
+            };
+            return command.spawn().map(|_| ()).map_err(|e| e.into());
+        }
     }
     #[cfg(not(target_os = "windows"))]
-    if let Some(_cmd) = action.action.strip_prefix("shell:") {
-        // Shell commands are only supported on Windows
-        return Ok(());
+    if let Some(cmd) = action.action.strip_prefix("shell:") {
+        if !cmd.starts_with("add:") && !cmd.starts_with("remove:") {
+            // Shell commands are only supported on Windows
+            return Ok(());
+        }
     }
     if let Some(rest) = action.action.strip_prefix("clipboard:") {
         if rest == "clear" {
@@ -350,6 +354,20 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         if let Some((alias, text)) = rest.split_once('|') {
             append_snippet(SNIPPETS_FILE, alias, text)?;
         }
+        return Ok(());
+    }
+    if let Some(rest) = action.action.strip_prefix("shell:add:") {
+        if let Some((name, args)) = rest.split_once('|') {
+            crate::plugins::shell::append_shell_cmd(
+                crate::plugins::shell::SHELL_CMDS_FILE,
+                name,
+                args,
+            )?;
+        }
+        return Ok(());
+    }
+    if let Some(name) = action.action.strip_prefix("shell:remove:") {
+        crate::plugins::shell::remove_shell_cmd(crate::plugins::shell::SHELL_CMDS_FILE, name)?;
         return Ok(());
     }
     if let Some(val) = action.action.strip_prefix("brightness:set:") {
