@@ -122,6 +122,24 @@ fn search_rm_lists_timers() {
 }
 
 #[test]
+fn search_pause_timer_action() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let plugin = TimerPlugin;
+    let results = plugin.search("timer pause 5");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "timer:pause:5");
+}
+
+#[test]
+fn search_resume_timer_action() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let plugin = TimerPlugin;
+    let results = plugin.search("timer resume 7");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "timer:resume:7");
+}
+
+#[test]
 fn take_finished_returns_messages() {
     let _lock = TEST_MUTEX.lock().unwrap();
     use multi_launcher::plugins::timer::{take_finished_messages, FINISHED_MESSAGES};

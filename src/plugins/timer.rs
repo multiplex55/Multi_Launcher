@@ -449,6 +449,26 @@ impl Plugin for TimerPlugin {
                 })
                 .collect();
         }
+        if let Some(id_str) = trimmed.strip_prefix("timer pause") {
+            if let Ok(id) = id_str.trim().parse::<u64>() {
+                return vec![Action {
+                    label: format!("Pause timer {id}"),
+                    desc: "Timer".into(),
+                    action: format!("timer:pause:{id}"),
+                    args: None,
+                }];
+            }
+        }
+        if let Some(id_str) = trimmed.strip_prefix("timer resume") {
+            if let Ok(id) = id_str.trim().parse::<u64>() {
+                return vec![Action {
+                    label: format!("Resume timer {id}"),
+                    desc: "Timer".into(),
+                    action: format!("timer:resume:{id}"),
+                    args: None,
+                }];
+            }
+        }
         if let Some(arg) = trimmed.strip_prefix("timer add") {
             let arg = arg.trim();
             let mut parts = arg.splitn(2, ' ');
