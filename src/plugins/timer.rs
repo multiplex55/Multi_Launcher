@@ -449,7 +449,7 @@ impl Plugin for TimerPlugin {
                 })
                 .collect();
         }
-        if let Some(arg) = trimmed.strip_prefix("timer ") {
+        if let Some(arg) = trimmed.strip_prefix("timer add") {
             let arg = arg.trim();
             let mut parts = arg.splitn(2, ' ');
             let dur_part = parts.next().unwrap_or("");
