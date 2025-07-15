@@ -18,6 +18,7 @@ pub mod plugin;
 pub mod plugin_editor;
 pub mod plugins;
 pub mod plugins_builtin;
+pub mod sound;
 pub mod settings;
 pub mod settings_editor;
 pub mod shell_cmd_dialog;
