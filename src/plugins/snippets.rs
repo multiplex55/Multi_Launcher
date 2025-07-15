@@ -2,7 +2,9 @@ use crate::actions::Action;
 use crate::plugin::Plugin;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 pub const SNIPPETS_FILE: &str = "snippets.json";
 
@@ -55,13 +57,45 @@ pub fn remove_snippet(path: &str, alias: &str) -> anyhow::Result<()> {
 
 pub struct SnippetsPlugin {
     matcher: SkimMatcherV2,
+    data: Arc<Mutex<Vec<SnippetEntry>>>,
+    #[allow(dead_code)]
+    watcher: Option<RecommendedWatcher>,
 }
 
 impl SnippetsPlugin {
     /// Create a new snippets plugin instance.
     pub fn new() -> Self {
+        let data = Arc::new(Mutex::new(load_snippets(SNIPPETS_FILE).unwrap_or_default()));
+        let data_clone = data.clone();
+        let path = SNIPPETS_FILE.to_string();
+        let mut watcher = RecommendedWatcher::new(
+            {
+                let path = path.clone();
+                move |res: notify::Result<notify::Event>| {
+                    if let Ok(event) = res {
+                        if matches!(
+                            event.kind,
+                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                        ) {
+                            if let Ok(list) = load_snippets(&path) {
+                                if let Ok(mut lock) = data_clone.lock() {
+                                    *lock = list;
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            Config::default(),
+        )
+        .ok();
+        if let Some(w) = watcher.as_mut() {
+            let _ = w.watch(std::path::Path::new(&path), RecursiveMode::NonRecursive);
+        }
         Self {
             matcher: SkimMatcherV2::default(),
+            data,
+            watcher,
         }
     }
 }
@@ -85,7 +119,7 @@ impl Plugin for SnippetsPlugin {
         }
         if let Some(rest) = trimmed.strip_prefix("cs rm") {
             let filter = rest.trim();
-            let list = load_snippets(SNIPPETS_FILE).unwrap_or_default();
+            let list = self.data.lock().unwrap().clone();
             return list
                 .into_iter()
                 .filter(|s| {
@@ -118,7 +152,7 @@ impl Plugin for SnippetsPlugin {
 
         if let Some(rest) = trimmed.strip_prefix("cs edit") {
             let filter = rest.trim();
-            let list = load_snippets(SNIPPETS_FILE).unwrap_or_default();
+            let list = self.data.lock().unwrap().clone();
             return list
                 .into_iter()
                 .filter(|s| {
@@ -137,7 +171,7 @@ impl Plugin for SnippetsPlugin {
 
         if let Some(rest) = trimmed.strip_prefix("cs list") {
             let filter = rest.trim();
-            let list = load_snippets(SNIPPETS_FILE).unwrap_or_default();
+            let list = self.data.lock().unwrap().clone();
             return list
                 .into_iter()
                 .filter(|s| {
@@ -158,7 +192,7 @@ impl Plugin for SnippetsPlugin {
         }
 
         let filter = trimmed.strip_prefix("cs").unwrap_or("").trim();
-        let list = load_snippets(SNIPPETS_FILE).unwrap_or_default();
+        let list = self.data.lock().unwrap().clone();
         list.into_iter()
             .filter(|s| {
                 self.matcher.fuzzy_match(&s.alias, filter).is_some()

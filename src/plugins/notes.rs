@@ -3,7 +3,9 @@ use crate::plugin::Plugin;
 use chrono::{Local, TimeZone};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 pub const QUICK_NOTES_FILE: &str = "quick_notes.json";
 
@@ -61,13 +63,45 @@ fn format_ts(ts: u64) -> String {
 
 pub struct NotesPlugin {
     matcher: SkimMatcherV2,
+    data: Arc<Mutex<Vec<NoteEntry>>>,
+    #[allow(dead_code)]
+    watcher: Option<RecommendedWatcher>,
 }
 
 impl NotesPlugin {
     /// Create a new notes plugin with a fuzzy matcher.
     pub fn new() -> Self {
+        let data = Arc::new(Mutex::new(load_notes(QUICK_NOTES_FILE).unwrap_or_default()));
+        let data_clone = data.clone();
+        let path = QUICK_NOTES_FILE.to_string();
+        let mut watcher = RecommendedWatcher::new(
+            {
+                let path = path.clone();
+                move |res: notify::Result<notify::Event>| {
+                    if let Ok(event) = res {
+                        if matches!(
+                            event.kind,
+                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                        ) {
+                            if let Ok(list) = load_notes(&path) {
+                                if let Ok(mut lock) = data_clone.lock() {
+                                    *lock = list;
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            Config::default(),
+        )
+        .ok();
+        if let Some(w) = watcher.as_mut() {
+            let _ = w.watch(std::path::Path::new(&path), RecursiveMode::NonRecursive);
+        }
         Self {
             matcher: SkimMatcherV2::default(),
+            data,
+            watcher,
         }
     }
 }
@@ -94,7 +128,7 @@ impl Plugin for NotesPlugin {
 
         if let Some(pattern) = query.strip_prefix("note rm ") {
             let filter = pattern.trim();
-            let notes = load_notes(QUICK_NOTES_FILE).unwrap_or_default();
+            let notes = self.data.lock().unwrap().clone();
             return notes
                 .into_iter()
                 .enumerate()
@@ -110,7 +144,7 @@ impl Plugin for NotesPlugin {
 
         if let Some(rest) = query.strip_prefix("note list") {
             let filter = rest.trim();
-            let notes = load_notes(QUICK_NOTES_FILE).unwrap_or_default();
+            let notes = self.data.lock().unwrap().clone();
             return notes
                 .into_iter()
                 .enumerate()
