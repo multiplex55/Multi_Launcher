@@ -549,6 +549,26 @@ impl LauncherApp {
         self.focus_query = true;
     }
 
+    fn any_panel_open(&self) -> bool {
+        self.alias_dialog.open
+            || self.bookmark_alias_dialog.open
+            || self.tempfile_alias_dialog.open
+            || self.tempfile_dialog.open
+            || self.add_bookmark_dialog.open
+            || self.timer_dialog.open
+            || self.shell_cmd_dialog.open
+            || self.snippet_dialog.open
+            || self.notes_dialog.open
+            || self.todo_dialog.open
+            || self.clipboard_dialog.open
+            || self.volume_dialog.open
+            || self.brightness_dialog.open
+            || self.cpu_list_dialog.open
+            || self.show_editor
+            || self.show_settings
+            || self.show_plugins
+    }
+
     #[cfg(target_os = "windows")]
     pub fn unregister_all_hotkeys(&self) {
         use windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
@@ -941,7 +961,9 @@ impl eframe::App for LauncherApp {
                         }
                         if set_focus {
                             self.focus_input();
-                        } else if self.visible_flag.load(Ordering::SeqCst) {
+                        } else if self.visible_flag.load(Ordering::SeqCst)
+                            && !self.any_panel_open()
+                        {
                             self.focus_input();
                         }
                     }
@@ -1409,7 +1431,9 @@ impl eframe::App for LauncherApp {
                         }
                         if set_focus {
                             self.focus_input();
-                        } else if self.visible_flag.load(Ordering::SeqCst) {
+                        } else if self.visible_flag.load(Ordering::SeqCst)
+                            && !self.any_panel_open()
+                        {
                             self.focus_input();
                         }
                     });
