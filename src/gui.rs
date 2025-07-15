@@ -52,6 +52,8 @@ fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egu
 
 enum WatchEvent {
     Actions,
+    Folders,
+    Bookmarks,
 }
 
 pub struct LauncherApp {
@@ -78,6 +80,8 @@ pub struct LauncherApp {
     #[allow(dead_code)] // required to keep watchers alive
     watchers: Vec<RecommendedWatcher>,
     rx: Receiver<WatchEvent>,
+    folder_aliases: HashMap<String, Option<String>>,
+    bookmark_aliases: HashMap<String, Option<String>>,
     plugin_dirs: Option<Vec<String>>,
     index_paths: Option<Vec<String>>,
     enabled_plugins: Option<Vec<String>>,
@@ -211,6 +215,22 @@ impl LauncherApp {
         let mut watchers = Vec::new();
         let toasts = Toasts::new().anchor(egui::Align2::RIGHT_TOP, [10.0, 10.0]);
         let enable_toasts = settings.enable_toasts;
+        use std::path::Path;
+
+        let folder_aliases = crate::plugins::folders::load_folders(
+            crate::plugins::folders::FOLDERS_FILE,
+        )
+        .unwrap_or_else(|_| crate::plugins::folders::default_folders())
+        .into_iter()
+        .map(|f| (f.path, f.alias))
+        .collect::<HashMap<_, _>>();
+        let bookmark_aliases = crate::plugins::bookmarks::load_bookmarks(
+            crate::plugins::bookmarks::BOOKMARKS_FILE,
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .map(|b| (b.url, b.alias))
+        .collect::<HashMap<_, _>>();
 
         if let Ok(mut watcher) = RecommendedWatcher::new(
             {
@@ -229,9 +249,58 @@ impl LauncherApp {
             },
             Config::default(),
         ) {
-            use std::path::Path;
             if watcher
                 .watch(Path::new(&actions_path), RecursiveMode::NonRecursive)
+                .is_ok()
+            {
+                watchers.push(watcher);
+            }
+        }
+
+        if let Ok(mut watcher) = RecommendedWatcher::new(
+            {
+                let tx = tx.clone();
+                move |res: notify::Result<notify::Event>| match res {
+                    Ok(event) => {
+                        if matches!(
+                            event.kind,
+                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                        ) {
+                            let _ = tx.send(WatchEvent::Folders);
+                        }
+                    }
+                    Err(e) => tracing::error!("watch error: {:?}", e),
+                }
+            },
+            Config::default(),
+        ) {
+            if watcher
+                .watch(Path::new(crate::plugins::folders::FOLDERS_FILE), RecursiveMode::NonRecursive)
+                .is_ok()
+            {
+                watchers.push(watcher);
+            }
+        }
+
+        if let Ok(mut watcher) = RecommendedWatcher::new(
+            {
+                let tx = tx.clone();
+                move |res: notify::Result<notify::Event>| match res {
+                    Ok(event) => {
+                        if matches!(
+                            event.kind,
+                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                        ) {
+                            let _ = tx.send(WatchEvent::Bookmarks);
+                        }
+                    }
+                    Err(e) => tracing::error!("watch error: {:?}", e),
+                }
+            },
+            Config::default(),
+        ) {
+            if watcher
+                .watch(Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE), RecursiveMode::NonRecursive)
                 .is_ok()
             {
                 watchers.push(watcher);
@@ -276,6 +345,8 @@ impl LauncherApp {
             settings_path,
             watchers,
             rx,
+            folder_aliases,
+            bookmark_aliases,
             plugin_dirs,
             index_paths,
             enabled_plugins,
@@ -614,6 +685,24 @@ impl eframe::App for LauncherApp {
                         tracing::info!("actions reloaded");
                     }
                 }
+                WatchEvent::Folders => {
+                    self.folder_aliases = crate::plugins::folders::load_folders(
+                        crate::plugins::folders::FOLDERS_FILE,
+                    )
+                    .unwrap_or_else(|_| crate::plugins::folders::default_folders())
+                    .into_iter()
+                    .map(|f| (f.path, f.alias))
+                    .collect();
+                }
+                WatchEvent::Bookmarks => {
+                    self.bookmark_aliases = crate::plugins::bookmarks::load_bookmarks(
+                        crate::plugins::bookmarks::BOOKMARKS_FILE,
+                    )
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|b| (b.url, b.alias))
+                    .collect();
+                }
             }
         }
 
@@ -862,26 +951,8 @@ impl eframe::App for LauncherApp {
                     scale_ui(ui, self.list_scale, |ui| {
                         let mut refresh = false;
                         let mut set_focus = false;
-                        let alias_list = crate::plugins::folders::load_folders(
-                            crate::plugins::folders::FOLDERS_FILE,
-                        )
-                        .unwrap_or_default();
-                        let custom = alias_list
-                            .iter()
-                            .map(|f| f.path.clone())
-                            .collect::<std::collections::HashSet<_>>();
-                        let alias_map = alias_list
-                            .into_iter()
-                            .map(|f| (f.path, f.alias))
-                            .collect::<std::collections::HashMap<_, _>>();
-                        let bm_list = crate::plugins::bookmarks::load_bookmarks(
-                            crate::plugins::bookmarks::BOOKMARKS_FILE,
-                        )
-                        .unwrap_or_default();
-                        let bm_custom = bm_list
-                            .iter()
-                            .map(|b| b.url.clone())
-                            .collect::<std::collections::HashSet<_>>();
+                        let alias_map = &self.folder_aliases;
+                        let bm_map = &self.bookmark_aliases;
                         let show_full = self
                             .enabled_capabilities
                             .as_ref()
@@ -918,7 +989,7 @@ impl eframe::App for LauncherApp {
                                 .iter()
                                 .take(self.custom_len)
                                 .position(|act| act.action == a.action && act.label == a.label);
-                            if custom.contains(&a.action) && !a.action.starts_with("folder:") {
+                            if alias_map.contains_key(&a.action) && !a.action.starts_with("folder:") {
                                 menu_resp.clone().context_menu(|ui| {
                                     if ui.button("Set Alias").clicked() {
                                         self.alias_dialog.open(&a.action);
@@ -947,7 +1018,7 @@ impl eframe::App for LauncherApp {
                                         ui.close_menu();
                                     }
                                 });
-                            } else if bm_custom.contains(&a.action) {
+                            } else if bm_map.contains_key(&a.action) {
                                 menu_resp.clone().context_menu(|ui| {
                                     if ui.button("Set Alias").clicked() {
                                         self.bookmark_alias_dialog.open(&a.action);
