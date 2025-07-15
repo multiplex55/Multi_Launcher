@@ -190,7 +190,7 @@ Built-in plugins and their command prefixes are:
 - Search history (`hi`)
 - Quick notes (`note add <text>`, `note list`, `note rm <pattern>`)
 - Todo items (`todo add <task>`, `todo list`, `todo rm <pattern>`, `todo clear`)
-- Text snippets (`cs`, `cs list`, `cs rm`)
+- Text snippets (`cs`, `cs list`, `cs rm`, `cs add <alias> <text>`)
 - Recycle Bin cleanup (`rec`)
 - Temporary files (`tmp`, `tmp new [name]`, `tmp open`, `tmp clear`, `tmp list`, `tmp rm`)
 - ASCII art (`ascii text`)

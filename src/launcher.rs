@@ -3,7 +3,7 @@ use crate::history;
 use crate::plugins::bookmarks::{append_bookmark, remove_bookmark};
 use crate::plugins::folders::{append_folder, remove_folder, FOLDERS_FILE};
 use crate::plugins::notes::{append_note, load_notes, remove_note, QUICK_NOTES_FILE};
-use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
+use crate::plugins::snippets::{append_snippet, remove_snippet, SNIPPETS_FILE};
 use crate::plugins::timer;
 use arboard::Clipboard;
 use shlex;
@@ -344,6 +344,12 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     }
     if let Some(alias) = action.action.strip_prefix("snippet:remove:") {
         remove_snippet(SNIPPETS_FILE, alias)?;
+        return Ok(());
+    }
+    if let Some(rest) = action.action.strip_prefix("snippet:add:") {
+        if let Some((alias, text)) = rest.split_once('|') {
+            append_snippet(SNIPPETS_FILE, alias, text)?;
+        }
         return Ok(());
     }
     if let Some(val) = action.action.strip_prefix("brightness:set:") {

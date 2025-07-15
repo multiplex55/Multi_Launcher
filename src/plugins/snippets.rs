@@ -29,6 +29,20 @@ pub fn save_snippets(path: &str, snippets: &[SnippetEntry]) -> anyhow::Result<()
     Ok(())
 }
 
+/// Append or update a snippet entry identified by `alias`.
+pub fn append_snippet(path: &str, alias: &str, text: &str) -> anyhow::Result<()> {
+    let mut list = load_snippets(path).unwrap_or_default();
+    if let Some(item) = list.iter_mut().find(|e| e.alias == alias) {
+        item.text = text.to_string();
+    } else {
+        list.push(SnippetEntry {
+            alias: alias.to_string(),
+            text: text.to_string(),
+        });
+    }
+    save_snippets(path, &list)
+}
+
 
 /// Remove the snippet identified by `alias`.
 pub fn remove_snippet(path: &str, alias: &str) -> anyhow::Result<()> {
@@ -84,6 +98,20 @@ impl Plugin for SnippetsPlugin {
                     args: None,
                 })
                 .collect();
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("cs add ") {
+            let mut parts = rest.trim().splitn(2, ' ');
+            let alias = parts.next().unwrap_or("").trim();
+            let text = parts.next().unwrap_or("").trim();
+            if !alias.is_empty() && !text.is_empty() {
+                return vec![Action {
+                    label: format!("Add snippet {alias}"),
+                    desc: "Snippet".into(),
+                    action: format!("snippet:add:{alias}|{text}"),
+                    args: None,
+                }];
+            }
         }
 
         if let Some(rest) = trimmed.strip_prefix("cs list") {

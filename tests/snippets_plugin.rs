@@ -1,5 +1,6 @@
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::snippets::{save_snippets, load_snippets, SnippetEntry, SnippetsPlugin, SNIPPETS_FILE};
+use multi_launcher::{actions::Action, launcher::launch_action};
 use tempfile::tempdir;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
@@ -82,4 +83,33 @@ fn search_preserves_newlines() {
     let results = plugin.search("cs multi");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "clipboard:a\nb");
+}
+
+#[test]
+fn search_add_returns_action() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let plugin = SnippetsPlugin::default();
+    let results = plugin.search("cs add greet hello world");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "snippet:add:greet|hello world");
+}
+
+#[test]
+fn launch_action_add_saves_snippet() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    save_snippets(SNIPPETS_FILE, &[]).unwrap();
+    let action = Action {
+        label: String::new(),
+        desc: String::new(),
+        action: "snippet:add:alias|text".into(),
+        args: None,
+    };
+    launch_action(&action).unwrap();
+    let list = load_snippets(SNIPPETS_FILE).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].alias, "alias");
+    assert_eq!(list[0].text, "text");
 }
