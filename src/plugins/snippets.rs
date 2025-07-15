@@ -29,6 +29,19 @@ pub fn save_snippets(path: &str, snippets: &[SnippetEntry]) -> anyhow::Result<()
     Ok(())
 }
 
+/// Append or update a snippet entry identified by `alias`.
+pub fn append_snippet(path: &str, alias: &str, text: &str) -> anyhow::Result<()> {
+    let mut list = load_snippets(path).unwrap_or_default();
+    if let Some(item) = list.iter_mut().find(|e| e.alias == alias) {
+        item.text = text.to_string();
+    } else {
+        list.push(SnippetEntry {
+            alias: alias.to_string(),
+            text: text.to_string(),
+        });
+    }
+    save_snippets(path, &list)
+}
 
 /// Remove the snippet identified by `alias`.
 pub fn remove_snippet(path: &str, alias: &str) -> anyhow::Result<()> {
@@ -47,7 +60,9 @@ pub struct SnippetsPlugin {
 impl SnippetsPlugin {
     /// Create a new snippets plugin instance.
     pub fn new() -> Self {
-        Self { matcher: SkimMatcherV2::default() }
+        Self {
+            matcher: SkimMatcherV2::default(),
+        }
     }
 }
 
@@ -68,19 +83,53 @@ impl Plugin for SnippetsPlugin {
                 args: None,
             }];
         }
-        if let Some(pattern) = trimmed.strip_prefix("cs rm ") {
-            let filter = pattern.trim();
+        if let Some(rest) = trimmed.strip_prefix("cs rm") {
+            let filter = rest.trim();
             let list = load_snippets(SNIPPETS_FILE).unwrap_or_default();
             return list
                 .into_iter()
                 .filter(|s| {
-                    self.matcher.fuzzy_match(&s.alias, filter).is_some()
+                    filter.is_empty()
+                        || self.matcher.fuzzy_match(&s.alias, filter).is_some()
                         || self.matcher.fuzzy_match(&s.text, filter).is_some()
                 })
                 .map(|s| Action {
                     label: format!("Remove snippet {}", s.alias),
                     desc: "Snippet".into(),
                     action: format!("snippet:remove:{}", s.alias),
+                    args: None,
+                })
+                .collect();
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("cs add ") {
+            let mut parts = rest.trim().splitn(2, ' ');
+            let alias = parts.next().unwrap_or("").trim();
+            let text = parts.next().unwrap_or("").trim();
+            if !alias.is_empty() && !text.is_empty() {
+                return vec![Action {
+                    label: format!("Add snippet {alias}"),
+                    desc: "Snippet".into(),
+                    action: format!("snippet:add:{alias}|{text}"),
+                    args: None,
+                }];
+            }
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("cs edit") {
+            let filter = rest.trim();
+            let list = load_snippets(SNIPPETS_FILE).unwrap_or_default();
+            return list
+                .into_iter()
+                .filter(|s| {
+                    filter.is_empty()
+                        || self.matcher.fuzzy_match(&s.alias, filter).is_some()
+                        || self.matcher.fuzzy_match(&s.text, filter).is_some()
+                })
+                .map(|s| Action {
+                    label: format!("Edit snippet {}", s.alias),
+                    desc: "Snippet".into(),
+                    action: format!("snippet:edit:{}", s.alias),
                     args: None,
                 })
                 .collect();
@@ -136,4 +185,3 @@ impl Plugin for SnippetsPlugin {
         &["search"]
     }
 }
-
