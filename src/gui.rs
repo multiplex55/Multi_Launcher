@@ -848,6 +848,8 @@ impl eframe::App for LauncherApp {
                         }
                         if set_focus {
                             self.focus_input();
+                        } else if self.visible_flag.load(Ordering::SeqCst) {
+                            self.focus_input();
                         }
                     }
                 }
@@ -1331,6 +1333,8 @@ impl eframe::App for LauncherApp {
                             self.search();
                         }
                         if set_focus {
+                            self.focus_input();
+                        } else if self.visible_flag.load(Ordering::SeqCst) {
                             self.focus_input();
                         }
                     });
