@@ -749,15 +749,55 @@ impl eframe::App for LauncherApp {
                             } else if a.action.starts_with("todo:add:") {
                                 refresh = true;
                                 set_focus = true;
+                                if self.enable_toasts {
+                                    if let Some(text) = a.action.strip_prefix("todo:add:") {
+                                        self.toasts.add(Toast {
+                                            text: format!("Added todo {text}").into(),
+                                            kind: ToastKind::Success,
+                                            options: ToastOptions::default()
+                                                .duration_in_seconds(3.0),
+                                        });
+                                    }
+                                }
                             } else if a.action.starts_with("todo:remove:") {
                                 refresh = true;
                                 set_focus = true;
+                                if self.enable_toasts {
+                                    let label = a
+                                        .label
+                                        .strip_prefix("Remove todo ")
+                                        .unwrap_or(&a.label);
+                                    self.toasts.add(Toast {
+                                        text: format!("Removed todo {label}").into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(3.0),
+                                    });
+                                }
                             } else if a.action.starts_with("todo:done:") {
                                 refresh = true;
                                 set_focus = true;
+                                if self.enable_toasts {
+                                    let label = a.label.trim_start_matches("[x] ")
+                                        .trim_start_matches("[ ] ");
+                                    self.toasts.add(Toast {
+                                        text: format!("Toggled todo {label}").into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(3.0),
+                                    });
+                                }
                             } else if a.action == "todo:clear" {
                                 refresh = true;
                                 set_focus = true;
+                                if self.enable_toasts {
+                                    self.toasts.add(Toast {
+                                        text: "Cleared completed todos".into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(3.0),
+                                    });
+                                }
                             } else if a.action.starts_with("snippet:remove:") {
                                 refresh = true;
                                 set_focus = true;
@@ -1192,15 +1232,55 @@ impl eframe::App for LauncherApp {
                                     } else if a.action.starts_with("todo:add:") {
                                         refresh = true;
                                         set_focus = true;
+                                        if self.enable_toasts {
+                                            if let Some(text) = a.action.strip_prefix("todo:add:") {
+                                                self.toasts.add(Toast {
+                                                    text: format!("Added todo {text}").into(),
+                                                    kind: ToastKind::Success,
+                                                    options: ToastOptions::default()
+                                                        .duration_in_seconds(3.0),
+                                                });
+                                            }
+                                        }
                                     } else if a.action.starts_with("todo:remove:") {
                                         refresh = true;
                                         set_focus = true;
+                                        if self.enable_toasts {
+                                            let label = a
+                                                .label
+                                                .strip_prefix("Remove todo ")
+                                                .unwrap_or(&a.label);
+                                            self.toasts.add(Toast {
+                                                text: format!("Removed todo {label}").into(),
+                                                kind: ToastKind::Success,
+                                                options: ToastOptions::default()
+                                                    .duration_in_seconds(3.0),
+                                            });
+                                        }
                                     } else if a.action.starts_with("todo:done:") {
                                         refresh = true;
                                         set_focus = true;
+                                        if self.enable_toasts {
+                                            let label = a.label.trim_start_matches("[x] ")
+                                                .trim_start_matches("[ ] ");
+                                            self.toasts.add(Toast {
+                                                text: format!("Toggled todo {label}").into(),
+                                                kind: ToastKind::Success,
+                                                options: ToastOptions::default()
+                                                    .duration_in_seconds(3.0),
+                                            });
+                                        }
                                     } else if a.action == "todo:clear" {
                                         refresh = true;
                                         set_focus = true;
+                                        if self.enable_toasts {
+                                            self.toasts.add(Toast {
+                                                text: "Cleared completed todos".into(),
+                                                kind: ToastKind::Success,
+                                                options: ToastOptions::default()
+                                                    .duration_in_seconds(3.0),
+                                            });
+                                        }
                                     } else if a.action.starts_with("snippet:remove:") {
                                         refresh = true;
                                         set_focus = true;
