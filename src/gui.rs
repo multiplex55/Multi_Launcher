@@ -831,7 +831,9 @@ impl eframe::App for LauncherApp {
                                 a.label.clone()
                             };
                             let mut resp = ui.selectable_label(self.selected == Some(idx), text);
-                            let tooltip = if a.desc == "Timer" && a.action.starts_with("timer:show:") {
+                            let tooltip = if a.desc == "Timer"
+                                && a.action.starts_with("timer:show:")
+                            {
                                 if let Ok(id) = a.action[11..].parse::<u64>() {
                                     if let Some(ts) = crate::plugins::timer::timer_start_ts(id) {
                                         format!("Started {}", crate::plugins::timer::format_ts(ts))
@@ -917,6 +919,15 @@ impl eframe::App for LauncherApp {
                                             if query.starts_with("timer list") {
                                                 refresh = true;
                                                 set_focus = true;
+                                                if self.enable_toasts {
+                                                    self.toasts.add(Toast {
+                                                        text: format!("Paused timer {}", a.label)
+                                                            .into(),
+                                                        kind: ToastKind::Success,
+                                                        options: ToastOptions::default()
+                                                            .duration_in_seconds(3.0),
+                                                    });
+                                                }
                                             }
                                             ui.close_menu();
                                         }
@@ -925,6 +936,15 @@ impl eframe::App for LauncherApp {
                                             if query.starts_with("timer list") {
                                                 refresh = true;
                                                 set_focus = true;
+                                                if self.enable_toasts {
+                                                    self.toasts.add(Toast {
+                                                        text: format!("Removed timer {}", a.label)
+                                                            .into(),
+                                                        kind: ToastKind::Success,
+                                                        options: ToastOptions::default()
+                                                            .duration_in_seconds(3.0),
+                                                    });
+                                                }
                                             }
                                             ui.close_menu();
                                         }

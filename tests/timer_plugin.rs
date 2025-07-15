@@ -32,7 +32,7 @@ fn search_alarm_dialog() {
 fn search_timer_returns_start_action() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let plugin = TimerPlugin;
-    let results = plugin.search("timer 1s");
+    let results = plugin.search("timer add 1s");
     assert_eq!(results.len(), 1);
     assert!(results[0].action.starts_with("timer:start:"));
 }
@@ -41,7 +41,7 @@ fn search_timer_returns_start_action() {
 fn search_named_timer() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let plugin = TimerPlugin;
-    let results = plugin.search("timer 1s tea");
+    let results = plugin.search("timer add 1s tea");
     assert_eq!(results.len(), 1);
     assert!(results[0].action.starts_with("timer:start:1s|"));
 }
@@ -174,7 +174,7 @@ fn parse_duration_colon_formats() {
 fn search_timer_hms_format() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let plugin = TimerPlugin;
-    let results = plugin.search("timer 1:30");
+    let results = plugin.search("timer add 1:30");
     assert_eq!(results.len(), 1);
     assert!(results[0].action.starts_with("timer:start:1:30"));
 }

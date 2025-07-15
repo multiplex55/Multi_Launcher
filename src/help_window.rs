@@ -96,7 +96,7 @@ fn example_queries(name: &str) -> Option<&'static [&'static str]> {
         "sysinfo" => Some(&["info", "info cpu", "info cpu list 5"]),
         "weather" => Some(&["weather Berlin"]),
         "history" => Some(&["hi"]),
-        "timer" => Some(&["timer 10s break", "timer list", "alarm 07:30"]),
+        "timer" => Some(&["timer add 10s break", "timer list", "alarm 07:30"]),
         "notes" => Some(&["note", "note add buy milk", "note list", "note rm milk"]),
         "volume" => Some(&["vol 50"]),
         "brightness" => Some(&["bright 50"]),

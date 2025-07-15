@@ -197,7 +197,7 @@ Built-in plugins and their command prefixes are:
 - Volume control (`vol 50`) *(Windows only)*
 - Brightness control (`bright 50`) *(Windows only)*
 - Command overview (`help`)
-- Timers and alarms (`timer 5m tea`, `timer 1:30`, `alarm 07:30`). Use `timer list` to view
+- Timers and alarms (`timer add 5m tea`, `timer add 1:30`, `alarm 07:30`). Use `timer list` to view
    remaining time or `timer rm` to remove timers. Pending alarms are saved to `alarms.json` and resume after
    restarting the launcher. A plugin setting controls pop-up dialogs when a
    timer completes.

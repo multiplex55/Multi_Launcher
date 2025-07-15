@@ -18,10 +18,10 @@ impl TimerHelpWindow {
             .show(ctx, |ui| {
                 ui.heading("Timer Plugin Usage");
                 ui.separator();
-                ui.label("Create a timer: use 'timer <duration> [name]'. Examples:");
-                ui.monospace("timer 10s tea");
-                ui.monospace("timer 5m");
-                ui.monospace("timer 1:30");
+                ui.label("Create a timer: use 'timer add <duration> [name]'. Examples:");
+                ui.monospace("timer add 10s tea");
+                ui.monospace("timer add 5m");
+                ui.monospace("timer add 1:30");
                 ui.label(
                     "Supported units are seconds (s), minutes (m) and hours (h). \
 You can also use hh:mm:ss or mm:ss notation.",
