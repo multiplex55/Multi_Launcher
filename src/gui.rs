@@ -763,28 +763,26 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                                 set_focus = true;
                                 if self.enable_toasts {
-                                    let label = a
-                                        .label
-                                        .strip_prefix("Remove todo ")
-                                        .unwrap_or(&a.label);
+                                    let label =
+                                        a.label.strip_prefix("Remove todo ").unwrap_or(&a.label);
                                     self.toasts.add(Toast {
                                         text: format!("Removed todo {label}").into(),
                                         kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(3.0),
+                                        options: ToastOptions::default().duration_in_seconds(3.0),
                                     });
                                 }
                             } else if a.action.starts_with("todo:done:") {
                                 refresh = true;
                                 set_focus = true;
                                 if self.enable_toasts {
-                                    let label = a.label.trim_start_matches("[x] ")
+                                    let label = a
+                                        .label
+                                        .trim_start_matches("[x] ")
                                         .trim_start_matches("[ ] ");
                                     self.toasts.add(Toast {
                                         text: format!("Toggled todo {label}").into(),
                                         kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(3.0),
+                                        options: ToastOptions::default().duration_in_seconds(3.0),
                                     });
                                 }
                             } else if a.action == "todo:clear" {
@@ -794,8 +792,7 @@ impl eframe::App for LauncherApp {
                                     self.toasts.add(Toast {
                                         text: "Cleared completed todos".into(),
                                         kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(3.0),
+                                        options: ToastOptions::default().duration_in_seconds(3.0),
                                     });
                                 }
                             } else if a.action.starts_with("snippet:remove:") {
@@ -818,6 +815,20 @@ impl eframe::App for LauncherApp {
                                 && current.starts_with("timer rm")
                             {
                                 refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("timer:pause:")
+                                && current.starts_with("timer pause")
+                            {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("timer:resume:")
+                                && current.starts_with("timer resume")
+                            {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("timer:start:")
+                                && current.starts_with("timer add")
+                            {
                                 set_focus = true;
                             }
                             if self.hide_after_run
@@ -1261,7 +1272,9 @@ impl eframe::App for LauncherApp {
                                         refresh = true;
                                         set_focus = true;
                                         if self.enable_toasts {
-                                            let label = a.label.trim_start_matches("[x] ")
+                                            let label = a
+                                                .label
+                                                .trim_start_matches("[x] ")
                                                 .trim_start_matches("[ ] ");
                                             self.toasts.add(Toast {
                                                 text: format!("Toggled todo {label}").into(),

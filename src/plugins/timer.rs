@@ -247,6 +247,36 @@ pub fn active_timers() -> Vec<(u64, String, Duration, u64)> {
         .collect()
 }
 
+/// Return active timers that are currently running (not paused).
+pub fn running_timers() -> Vec<(u64, String, Duration, u64)> {
+    let now = Instant::now();
+    ACTIVE_TIMERS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|t| !t.paused)
+        .map(|t| {
+            (
+                t.id,
+                t.label.clone(),
+                t.deadline.saturating_duration_since(now),
+                t.start_ts,
+            )
+        })
+        .collect()
+}
+
+/// Return timers that are currently paused.
+pub fn paused_timers() -> Vec<(u64, String, Duration, u64)> {
+    ACTIVE_TIMERS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|t| t.paused)
+        .map(|t| (t.id, t.label.clone(), t.remaining, t.start_ts))
+        .collect()
+}
+
 /// Get the start timestamp of the timer with `id`.
 pub fn timer_start_ts(id: u64) -> Option<u64> {
     let timers = ACTIVE_TIMERS.lock().unwrap();
@@ -448,6 +478,48 @@ impl Plugin for TimerPlugin {
                     args: None,
                 })
                 .collect();
+        }
+        if let Some(id_str) = trimmed.strip_prefix("timer pause") {
+            let tail = id_str.trim();
+            if tail.is_empty() {
+                return running_timers()
+                    .into_iter()
+                    .map(|(id, label, _rem, _start)| Action {
+                        label: format!("Pause {label}"),
+                        desc: "Timer".into(),
+                        action: format!("timer:pause:{id}"),
+                        args: None,
+                    })
+                    .collect();
+            } else if let Ok(id) = tail.parse::<u64>() {
+                return vec![Action {
+                    label: format!("Pause timer {id}"),
+                    desc: "Timer".into(),
+                    action: format!("timer:pause:{id}"),
+                    args: None,
+                }];
+            }
+        }
+        if let Some(id_str) = trimmed.strip_prefix("timer resume") {
+            let tail = id_str.trim();
+            if tail.is_empty() {
+                return paused_timers()
+                    .into_iter()
+                    .map(|(id, label, _rem, _start)| Action {
+                        label: format!("Resume {label}"),
+                        desc: "Timer".into(),
+                        action: format!("timer:resume:{id}"),
+                        args: None,
+                    })
+                    .collect();
+            } else if let Ok(id) = tail.parse::<u64>() {
+                return vec![Action {
+                    label: format!("Resume timer {id}"),
+                    desc: "Timer".into(),
+                    action: format!("timer:resume:{id}"),
+                    args: None,
+                }];
+            }
         }
         if let Some(arg) = trimmed.strip_prefix("timer add") {
             let arg = arg.trim();

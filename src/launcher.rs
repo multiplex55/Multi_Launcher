@@ -285,6 +285,18 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         }
         return Ok(());
     }
+    if let Some(id) = action.action.strip_prefix("timer:pause:") {
+        if let Ok(id) = id.parse::<u64>() {
+            timer::pause_timer(id);
+        }
+        return Ok(());
+    }
+    if let Some(id) = action.action.strip_prefix("timer:resume:") {
+        if let Ok(id) = id.parse::<u64>() {
+            timer::resume_timer(id);
+        }
+        return Ok(());
+    }
     if let Some(arg) = action.action.strip_prefix("timer:start:") {
         let (dur_str, name) = arg.split_once('|').unwrap_or((arg, ""));
         if let Some(dur) = timer::parse_duration(dur_str) {

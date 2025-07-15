@@ -33,6 +33,8 @@ You can also use hh:mm:ss or mm:ss notation.",
                 ui.label("Manage timers and alarms:");
                 ui.monospace("timer list  # show active timers");
                 ui.monospace("alarm list  # show active alarms");
+                ui.monospace("timer pause <id>  # pause a timer");
+                ui.monospace("timer resume <id>  # resume a timer");
                 ui.monospace("timer cancel  # cancel timers/alarms");
                 ui.monospace("timer rm  # remove timers");
             });
