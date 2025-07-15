@@ -274,10 +274,12 @@ impl LauncherApp {
             },
             Config::default(),
         ) {
-            if watcher
-                .watch(Path::new(crate::plugins::folders::FOLDERS_FILE), RecursiveMode::NonRecursive)
-                .is_ok()
-            {
+            let path = Path::new(crate::plugins::folders::FOLDERS_FILE);
+            let res = watcher.watch(path, RecursiveMode::NonRecursive).or_else(|_| {
+                let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                watcher.watch(parent, RecursiveMode::NonRecursive)
+            });
+            if res.is_ok() {
                 watchers.push(watcher);
             }
         }
@@ -299,10 +301,12 @@ impl LauncherApp {
             },
             Config::default(),
         ) {
-            if watcher
-                .watch(Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE), RecursiveMode::NonRecursive)
-                .is_ok()
-            {
+            let path = Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE);
+            let res = watcher.watch(path, RecursiveMode::NonRecursive).or_else(|_| {
+                let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                watcher.watch(parent, RecursiveMode::NonRecursive)
+            });
+            if res.is_ok() {
                 watchers.push(watcher);
             }
         }

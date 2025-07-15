@@ -151,7 +151,11 @@ impl FoldersPlugin {
         )
         .ok();
         if let Some(w) = watcher.as_mut() {
-            let _ = w.watch(std::path::Path::new(&path), RecursiveMode::NonRecursive);
+            let p = std::path::Path::new(&path);
+            if w.watch(p, RecursiveMode::NonRecursive).is_err() {
+                let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
+                let _ = w.watch(parent, RecursiveMode::NonRecursive);
+            }
         }
         Self {
             matcher: SkimMatcherV2::default(),
