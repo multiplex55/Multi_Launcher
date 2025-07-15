@@ -761,6 +761,13 @@ impl eframe::App for LauncherApp {
                             } else if a.action.starts_with("snippet:remove:") {
                                 refresh = true;
                                 set_focus = true;
+                                if self.enable_toasts {
+                                    self.toasts.add(Toast {
+                                        text: format!("Removed snippet {}", a.label).into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default().duration_in_seconds(3.0),
+                                    });
+                                }
                             } else if a.action.starts_with("tempfile:remove:") {
                                 refresh = true;
                                 set_focus = true;
@@ -778,6 +785,7 @@ impl eframe::App for LauncherApp {
                                 && !a.action.starts_with("bookmark:remove:")
                                 && !a.action.starts_with("folder:add:")
                                 && !a.action.starts_with("folder:remove:")
+                                && !a.action.starts_with("snippet:remove:")
                                 && !a.action.starts_with("calc:")
                                 && !a.action.starts_with("todo:done:")
                             {
@@ -1193,6 +1201,17 @@ impl eframe::App for LauncherApp {
                                     } else if a.action == "todo:clear" {
                                         refresh = true;
                                         set_focus = true;
+                                    } else if a.action.starts_with("snippet:remove:") {
+                                        refresh = true;
+                                        set_focus = true;
+                                        if self.enable_toasts {
+                                            self.toasts.add(Toast {
+                                                text: format!("Removed snippet {}", a.label).into(),
+                                                kind: ToastKind::Success,
+                                                options: ToastOptions::default()
+                                                    .duration_in_seconds(3.0),
+                                            });
+                                        }
                                     } else if a.action.starts_with("tempfile:remove:") {
                                         refresh = true;
                                         set_focus = true;
@@ -1205,6 +1224,7 @@ impl eframe::App for LauncherApp {
                                         && !a.action.starts_with("bookmark:remove:")
                                         && !a.action.starts_with("folder:add:")
                                         && !a.action.starts_with("folder:remove:")
+                                        && !a.action.starts_with("snippet:remove:")
                                         && !a.action.starts_with("calc:")
                                         && !a.action.starts_with("todo:done:")
                                     {
