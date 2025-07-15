@@ -131,12 +131,58 @@ fn search_pause_timer_action() {
 }
 
 #[test]
+fn search_pause_lists_running_timers() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    {
+        let mut list = ACTIVE_TIMERS.lock().unwrap();
+        list.push(TimerEntry {
+            id: 11,
+            label: "run".into(),
+            deadline: Instant::now() + Duration::from_secs(5),
+            persist: false,
+            end_ts: 0,
+            start_ts: 0,
+            paused: false,
+            remaining: Duration::from_secs(5),
+            generation: 0,
+        });
+    }
+    let plugin = TimerPlugin;
+    let results = plugin.search("timer pause");
+    assert!(results.iter().any(|a| a.action == "timer:pause:11"));
+    ACTIVE_TIMERS.lock().unwrap().clear();
+}
+
+#[test]
 fn search_resume_timer_action() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let plugin = TimerPlugin;
     let results = plugin.search("timer resume 7");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "timer:resume:7");
+}
+
+#[test]
+fn search_resume_lists_paused_timers() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    {
+        let mut list = ACTIVE_TIMERS.lock().unwrap();
+        list.push(TimerEntry {
+            id: 12,
+            label: "pause".into(),
+            deadline: Instant::now() + Duration::from_secs(5),
+            persist: false,
+            end_ts: 0,
+            start_ts: 0,
+            paused: true,
+            remaining: Duration::from_secs(5),
+            generation: 0,
+        });
+    }
+    let plugin = TimerPlugin;
+    let results = plugin.search("timer resume");
+    assert!(results.iter().any(|a| a.action == "timer:resume:12"));
+    ACTIVE_TIMERS.lock().unwrap().clear();
 }
 
 #[test]
