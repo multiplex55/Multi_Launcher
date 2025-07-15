@@ -2,7 +2,9 @@ use crate::actions::Action;
 use crate::plugin::Plugin;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 pub const BOOKMARKS_FILE: &str = "bookmarks.json";
 
@@ -15,12 +17,48 @@ pub struct BookmarkEntry {
 
 pub struct BookmarksPlugin {
     matcher: SkimMatcherV2,
+    data: Arc<Mutex<Vec<BookmarkEntry>>>,
+    #[allow(dead_code)]
+    watcher: Option<RecommendedWatcher>,
 }
 
 impl BookmarksPlugin {
     /// Construct a new `BookmarksPlugin` with a fuzzy matcher.
     pub fn new() -> Self {
-        Self { matcher: SkimMatcherV2::default() }
+        let data = Arc::new(Mutex::new(
+            load_bookmarks(BOOKMARKS_FILE).unwrap_or_default(),
+        ));
+        let data_clone = data.clone();
+        let path = BOOKMARKS_FILE.to_string();
+        let mut watcher = RecommendedWatcher::new(
+            {
+                let path = path.clone();
+                move |res: notify::Result<notify::Event>| {
+                    if let Ok(event) = res {
+                        if matches!(
+                            event.kind,
+                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                        ) {
+                            if let Ok(list) = load_bookmarks(&path) {
+                                if let Ok(mut lock) = data_clone.lock() {
+                                    *lock = list;
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            Config::default(),
+        )
+        .ok();
+        if let Some(w) = watcher.as_mut() {
+            let _ = w.watch(std::path::Path::new(&path), RecursiveMode::NonRecursive);
+        }
+        Self {
+            matcher: SkimMatcherV2::default(),
+            data,
+            watcher,
+        }
     }
 }
 
@@ -81,7 +119,10 @@ pub fn append_bookmark(path: &str, url: &str) -> anyhow::Result<()> {
     let mut list = load_bookmarks(path).unwrap_or_default();
     let fixed = normalize_url(url);
     if !list.iter().any(|b| b.url == fixed) {
-        list.push(BookmarkEntry { url: fixed, alias: None });
+        list.push(BookmarkEntry {
+            url: fixed,
+            alias: None,
+        });
         save_bookmarks(path, &list)?;
     }
     Ok(())
@@ -105,7 +146,11 @@ pub fn set_alias(path: &str, url: &str, alias: &str) -> anyhow::Result<()> {
     let mut list = load_bookmarks(path).unwrap_or_default();
     let fixed = normalize_url(url);
     if let Some(item) = list.iter_mut().find(|b| b.url == fixed) {
-        item.alias = if alias.is_empty() { None } else { Some(alias.to_string()) };
+        item.alias = if alias.is_empty() {
+            None
+        } else {
+            Some(alias.to_string())
+        };
         save_bookmarks(path, &list)?;
     }
     Ok(())
@@ -143,13 +188,12 @@ impl Plugin for BookmarksPlugin {
         }
         if let Some(rest) = trimmed.strip_prefix("bm rm") {
             let filter = rest.trim();
-            let bookmarks = load_bookmarks(BOOKMARKS_FILE).unwrap_or_default();
+            let bookmarks = self.data.lock().unwrap().clone();
             return bookmarks
                 .into_iter()
                 .filter(|b| {
                     self.matcher.fuzzy_match(&b.url, filter).is_some()
-                        || b
-                            .alias
+                        || b.alias
                             .as_ref()
                             .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
                             .unwrap_or(false)
@@ -164,13 +208,12 @@ impl Plugin for BookmarksPlugin {
         }
         if let Some(rest) = trimmed.strip_prefix("bm list") {
             let filter = rest.trim();
-            let bookmarks = load_bookmarks(BOOKMARKS_FILE).unwrap_or_default();
+            let bookmarks = self.data.lock().unwrap().clone();
             return bookmarks
                 .into_iter()
                 .filter(|b| {
                     self.matcher.fuzzy_match(&b.url, filter).is_some()
-                        || b
-                            .alias
+                        || b.alias
                             .as_ref()
                             .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
                             .unwrap_or(false)
@@ -190,15 +233,16 @@ impl Plugin for BookmarksPlugin {
             return Vec::new();
         }
         let filter = trimmed.strip_prefix("bm").unwrap_or("").trim();
-        let bookmarks = load_bookmarks(BOOKMARKS_FILE).unwrap_or_default();
+        let bookmarks = self.data.lock().unwrap().clone();
         bookmarks
             .into_iter()
-            .filter(|b| self.matcher.fuzzy_match(&b.url, filter).is_some()
-                || b
-                    .alias
-                    .as_ref()
-                    .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
-                    .unwrap_or(false))
+            .filter(|b| {
+                self.matcher.fuzzy_match(&b.url, filter).is_some()
+                    || b.alias
+                        .as_ref()
+                        .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
+                        .unwrap_or(false)
+            })
             .map(|b| {
                 let label = b.alias.clone().unwrap_or_else(|| b.url.clone());
                 Action {
@@ -223,4 +267,3 @@ impl Plugin for BookmarksPlugin {
         &["search"]
     }
 }
-

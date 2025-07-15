@@ -2,7 +2,9 @@ use crate::actions::Action;
 use crate::plugin::Plugin;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 pub const TODO_FILE: &str = "todo.json";
 
@@ -72,13 +74,45 @@ pub fn clear_done(path: &str) -> anyhow::Result<()> {
 
 pub struct TodoPlugin {
     matcher: SkimMatcherV2,
+    data: Arc<Mutex<Vec<TodoEntry>>>,
+    #[allow(dead_code)]
+    watcher: Option<RecommendedWatcher>,
 }
 
 impl TodoPlugin {
     /// Create a new todo plugin with a fuzzy matcher.
     pub fn new() -> Self {
+        let data = Arc::new(Mutex::new(load_todos(TODO_FILE).unwrap_or_default()));
+        let data_clone = data.clone();
+        let path = TODO_FILE.to_string();
+        let mut watcher = RecommendedWatcher::new(
+            {
+                let path = path.clone();
+                move |res: notify::Result<notify::Event>| {
+                    if let Ok(event) = res {
+                        if matches!(
+                            event.kind,
+                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                        ) {
+                            if let Ok(list) = load_todos(&path) {
+                                if let Ok(mut lock) = data_clone.lock() {
+                                    *lock = list;
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            Config::default(),
+        )
+        .ok();
+        if let Some(w) = watcher.as_mut() {
+            let _ = w.watch(std::path::Path::new(&path), RecursiveMode::NonRecursive);
+        }
         Self {
             matcher: SkimMatcherV2::default(),
+            data,
+            watcher,
         }
     }
 }
@@ -134,7 +168,7 @@ impl Plugin for TodoPlugin {
 
         if let Some(pattern) = trimmed.strip_prefix("todo rm ") {
             let filter = pattern.trim();
-            let todos = load_todos(TODO_FILE).unwrap_or_default();
+            let todos = self.data.lock().unwrap().clone();
             return todos
                 .into_iter()
                 .enumerate()
@@ -150,7 +184,7 @@ impl Plugin for TodoPlugin {
 
         if let Some(rest) = trimmed.strip_prefix("todo list") {
             let filter = rest.trim();
-            let todos = load_todos(TODO_FILE).unwrap_or_default();
+            let todos = self.data.lock().unwrap().clone();
             return todos
                 .into_iter()
                 .enumerate()

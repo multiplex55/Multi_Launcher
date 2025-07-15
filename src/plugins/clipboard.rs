@@ -1,6 +1,8 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
+use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 pub const CLIPBOARD_FILE: &str = "clipboard_history.json";
 
@@ -34,7 +36,6 @@ pub fn remove_entry(path: &str, index: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
-
 /// Clear the clipboard history file at `path`.
 pub fn clear_history_file(path: &str) -> anyhow::Result<()> {
     save_history(path, &VecDeque::new())
@@ -43,16 +44,51 @@ pub fn clear_history_file(path: &str) -> anyhow::Result<()> {
 pub struct ClipboardPlugin {
     max_entries: usize,
     path: String,
+    history: Arc<Mutex<VecDeque<String>>>,
+    #[allow(dead_code)]
+    watcher: Option<RecommendedWatcher>,
 }
 
 impl ClipboardPlugin {
     /// Create a new plugin keeping up to `max_entries` in history.
     pub fn new(max_entries: usize) -> Self {
-        Self { max_entries, path: CLIPBOARD_FILE.into() }
+        let path = CLIPBOARD_FILE.to_string();
+        let history = Arc::new(Mutex::new(load_history(&path).unwrap_or_default()));
+        let history_clone = history.clone();
+        let mut watcher = RecommendedWatcher::new(
+            {
+                let path = path.clone();
+                move |res: notify::Result<notify::Event>| {
+                    if let Ok(event) = res {
+                        if matches!(
+                            event.kind,
+                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                        ) {
+                            if let Ok(list) = load_history(&path) {
+                                if let Ok(mut lock) = history_clone.lock() {
+                                    *lock = list;
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            Config::default(),
+        )
+        .ok();
+        if let Some(w) = watcher.as_mut() {
+            let _ = w.watch(std::path::Path::new(&path), RecursiveMode::NonRecursive);
+        }
+        Self {
+            max_entries,
+            path,
+            history,
+            watcher,
+        }
     }
 
     fn update_history(&self) -> VecDeque<String> {
-        let mut history = load_history(&self.path).unwrap_or_default();
+        let mut history = self.history.lock().unwrap().clone();
         if let Ok(mut clipboard) = arboard::Clipboard::new() {
             if let Ok(txt) = clipboard.get_text() {
                 if history.front().map(|v| v != &txt).unwrap_or(true) {
@@ -62,6 +98,9 @@ impl ClipboardPlugin {
                     history.push_front(txt.clone());
                     while history.len() > self.max_entries {
                         history.pop_back();
+                    }
+                    if let Ok(mut lock) = self.history.lock() {
+                        *lock = history.clone();
                     }
                     let _ = save_history(&self.path, &history);
                 }

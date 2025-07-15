@@ -2,7 +2,9 @@ use crate::actions::Action;
 use crate::plugin::Plugin;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 pub const FOLDERS_FILE: &str = "folders.json";
 
@@ -18,16 +20,32 @@ pub struct FolderEntry {
 pub fn default_folders() -> Vec<FolderEntry> {
     let mut out = Vec::new();
     if let Some(p) = dirs_next::home_dir() {
-        out.push(FolderEntry { label: "Home".into(), path: p.to_string_lossy().into(), alias: None });
+        out.push(FolderEntry {
+            label: "Home".into(),
+            path: p.to_string_lossy().into(),
+            alias: None,
+        });
     }
     if let Some(p) = dirs_next::download_dir() {
-        out.push(FolderEntry { label: "Downloads".into(), path: p.to_string_lossy().into(), alias: None });
+        out.push(FolderEntry {
+            label: "Downloads".into(),
+            path: p.to_string_lossy().into(),
+            alias: None,
+        });
     }
     if let Some(p) = dirs_next::desktop_dir() {
-        out.push(FolderEntry { label: "Desktop".into(), path: p.to_string_lossy().into(), alias: None });
+        out.push(FolderEntry {
+            label: "Desktop".into(),
+            path: p.to_string_lossy().into(),
+            alias: None,
+        });
     }
     if let Some(p) = dirs_next::document_dir() {
-        out.push(FolderEntry { label: "Documents".into(), path: p.to_string_lossy().into(), alias: None });
+        out.push(FolderEntry {
+            label: "Documents".into(),
+            path: p.to_string_lossy().into(),
+            alias: None,
+        });
     }
     out
 }
@@ -63,7 +81,11 @@ pub fn append_folder(path: &str, folder: &str) -> anyhow::Result<()> {
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| folder.to_string());
-        list.push(FolderEntry { label, path: folder.to_string(), alias: None });
+        list.push(FolderEntry {
+            label,
+            path: folder.to_string(),
+            alias: None,
+        });
         save_folders(path, &list)?;
     }
     Ok(())
@@ -83,7 +105,11 @@ pub fn remove_folder(path: &str, folder: &str) -> anyhow::Result<()> {
 pub fn set_alias(path: &str, folder: &str, alias: &str) -> anyhow::Result<()> {
     let mut list = load_folders(path).unwrap_or_else(|_| default_folders());
     if let Some(item) = list.iter_mut().find(|f| f.path == folder) {
-        item.alias = if alias.is_empty() { None } else { Some(alias.to_string()) };
+        item.alias = if alias.is_empty() {
+            None
+        } else {
+            Some(alias.to_string())
+        };
         save_folders(path, &list)?;
     }
     Ok(())
@@ -91,12 +117,47 @@ pub fn set_alias(path: &str, folder: &str, alias: &str) -> anyhow::Result<()> {
 
 pub struct FoldersPlugin {
     matcher: SkimMatcherV2,
+    data: Arc<Mutex<Vec<FolderEntry>>>,
+    #[allow(dead_code)]
+    watcher: Option<RecommendedWatcher>,
 }
 
 impl FoldersPlugin {
     /// Create a new folders plugin.
     pub fn new() -> Self {
-        Self { matcher: SkimMatcherV2::default() }
+        let data = Arc::new(Mutex::new(
+            load_folders(FOLDERS_FILE).unwrap_or_else(|_| default_folders()),
+        ));
+        let data_clone = data.clone();
+        let path = FOLDERS_FILE.to_string();
+        let mut watcher = RecommendedWatcher::new(
+            {
+                let path = path.clone();
+                move |res: notify::Result<notify::Event>| {
+                    if let Ok(event) = res {
+                        if matches!(
+                            event.kind,
+                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                        ) {
+                            let list = load_folders(&path).unwrap_or_else(|_| default_folders());
+                            if let Ok(mut lock) = data_clone.lock() {
+                                *lock = list;
+                            }
+                        }
+                    }
+                }
+            },
+            Config::default(),
+        )
+        .ok();
+        if let Some(w) = watcher.as_mut() {
+            let _ = w.watch(std::path::Path::new(&path), RecursiveMode::NonRecursive);
+        }
+        Self {
+            matcher: SkimMatcherV2::default(),
+            data,
+            watcher,
+        }
     }
 }
 
@@ -122,14 +183,13 @@ impl Plugin for FoldersPlugin {
 
         if let Some(pattern) = query.strip_prefix("f rm ") {
             let filter = pattern.trim();
-            let folders = load_folders(FOLDERS_FILE).unwrap_or_else(|_| default_folders());
+            let folders = self.data.lock().unwrap().clone();
             return folders
                 .into_iter()
                 .filter(|f| {
                     self.matcher.fuzzy_match(&f.label, filter).is_some()
                         || self.matcher.fuzzy_match(&f.path, filter).is_some()
-                        || f
-                            .alias
+                        || f.alias
                             .as_ref()
                             .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
                             .unwrap_or(false)
@@ -147,14 +207,13 @@ impl Plugin for FoldersPlugin {
             return Vec::new();
         }
         let filter = query.strip_prefix("f").unwrap_or("").trim();
-        let folders = load_folders(FOLDERS_FILE).unwrap_or_else(|_| default_folders());
+        let folders = self.data.lock().unwrap().clone();
         folders
             .into_iter()
             .filter(|f| {
                 self.matcher.fuzzy_match(&f.label, filter).is_some()
                     || self.matcher.fuzzy_match(&f.path, filter).is_some()
-                    || f
-                        .alias
+                    || f.alias
                         .as_ref()
                         .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
                         .unwrap_or(false)
