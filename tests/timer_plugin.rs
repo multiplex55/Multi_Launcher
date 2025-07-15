@@ -1,10 +1,10 @@
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::timer::{
-    TimerPlugin, ACTIVE_TIMERS, TimerEntry, ALARMS_FILE, load_saved_alarms,
-    reset_alarms_loaded, cancel_timer,
+    cancel_timer, load_saved_alarms, reset_alarms_loaded, TimerEntry, TimerPlugin, ACTIVE_TIMERS,
+    ALARMS_FILE,
 };
 use once_cell::sync::Lazy;
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 use tempfile::tempdir;
 
@@ -56,17 +56,19 @@ fn search_cancel_lists_timers() {
             id: 1,
             label: "test".into(),
             deadline: Instant::now() + Duration::from_secs(10),
-            cancel: Arc::new(AtomicBool::new(false)),
             persist: false,
             end_ts: 0,
             start_ts: 0,
             paused: false,
             remaining: Duration::from_secs(10),
+            generation: 0,
         });
     }
     let plugin = TimerPlugin;
     let results = plugin.search("timer cancel");
-    assert!(results.iter().any(|a| a.action.starts_with("timer:cancel:")));
+    assert!(results
+        .iter()
+        .any(|a| a.action.starts_with("timer:cancel:")));
     // clear list
     ACTIVE_TIMERS.lock().unwrap().clear();
 }
@@ -80,12 +82,12 @@ fn search_list_lists_timers() {
             id: 2,
             label: "demo".into(),
             deadline: Instant::now() + Duration::from_secs(20),
-            cancel: Arc::new(AtomicBool::new(false)),
             persist: false,
             end_ts: 0,
             start_ts: 0,
             paused: false,
             remaining: Duration::from_secs(20),
+            generation: 0,
         });
     }
     let plugin = TimerPlugin;
@@ -103,24 +105,26 @@ fn search_rm_lists_timers() {
             id: 3,
             label: "remove".into(),
             deadline: Instant::now() + Duration::from_secs(30),
-            cancel: Arc::new(AtomicBool::new(false)),
             persist: false,
             end_ts: 0,
             start_ts: 0,
             paused: false,
             remaining: Duration::from_secs(30),
+            generation: 0,
         });
     }
     let plugin = TimerPlugin;
     let results = plugin.search("timer rm");
-    assert!(results.iter().any(|a| a.action.starts_with("timer:cancel:")));
+    assert!(results
+        .iter()
+        .any(|a| a.action.starts_with("timer:cancel:")));
     ACTIVE_TIMERS.lock().unwrap().clear();
 }
 
 #[test]
 fn take_finished_returns_messages() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    use multi_launcher::plugins::timer::{FINISHED_MESSAGES, take_finished_messages};
+    use multi_launcher::plugins::timer::{take_finished_messages, FINISHED_MESSAGES};
     FINISHED_MESSAGES.lock().unwrap().push("done".to_string());
     let msgs = take_finished_messages();
     assert_eq!(msgs, vec!["done".to_string()]);
@@ -151,12 +155,7 @@ fn load_saved_alarms_is_idempotent() {
     assert_eq!(first, 1);
     assert_eq!(second, 1);
 
-    let ids: Vec<u64> = ACTIVE_TIMERS
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|t| t.id)
-        .collect();
+    let ids: Vec<u64> = ACTIVE_TIMERS.lock().unwrap().iter().map(|t| t.id).collect();
     for id in ids {
         cancel_timer(id);
     }
@@ -179,4 +178,3 @@ fn search_timer_hms_format() {
     assert_eq!(results.len(), 1);
     assert!(results[0].action.starts_with("timer:start:1:30"));
 }
-

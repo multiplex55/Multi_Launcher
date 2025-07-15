@@ -2,9 +2,14 @@ use crate::actions::Action;
 use crate::plugin::Plugin;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Condvar, Mutex,
+};
 use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 pub static ALARMS_LOADED: AtomicBool = AtomicBool::new(false);
@@ -15,12 +20,12 @@ pub struct TimerEntry {
     pub id: u64,
     pub label: String,
     pub deadline: Instant,
-    pub cancel: Arc<AtomicBool>,
     pub persist: bool,
     pub end_ts: u64,
     pub start_ts: u64,
     pub paused: bool,
     pub remaining: Duration,
+    pub generation: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -47,6 +52,84 @@ fn save_persistent_alarms_locked(timers: &Vec<TimerEntry>) {
 }
 
 pub static ACTIVE_TIMERS: Lazy<Mutex<Vec<TimerEntry>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+struct TimerManager {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    heap: Mutex<BinaryHeap<Reverse<(Instant, u64, u64)>>>,
+    condvar: Condvar,
+}
+
+impl TimerManager {
+    fn new() -> Self {
+        let inner = Arc::new(Inner {
+            heap: Mutex::new(BinaryHeap::new()),
+            condvar: Condvar::new(),
+        });
+        let thread_inner = inner.clone();
+        thread::spawn(move || Self::run(thread_inner));
+        Self { inner }
+    }
+
+    fn run(inner: Arc<Inner>) {
+        let mut heap_guard = inner.heap.lock().unwrap();
+        loop {
+            while heap_guard.peek().is_none() {
+                heap_guard = inner.condvar.wait(heap_guard).unwrap();
+            }
+            let now = Instant::now();
+            if let Some(Reverse((deadline, id, gen))) = heap_guard.peek().cloned() {
+                if deadline <= now {
+                    heap_guard.pop();
+                    drop(heap_guard);
+                    Self::fire_timer(id, gen);
+                    heap_guard = inner.heap.lock().unwrap();
+                    continue;
+                } else {
+                    let wait = deadline.saturating_duration_since(now);
+                    let res = inner.condvar.wait_timeout(heap_guard, wait).unwrap();
+                    heap_guard = res.0;
+                    continue;
+                }
+            }
+        }
+    }
+
+    fn fire_timer(id: u64, gen: u64) {
+        let mut list = ACTIVE_TIMERS.lock().unwrap();
+        if let Some(pos) = list
+            .iter()
+            .position(|t| t.id == id && t.generation == gen && !t.paused)
+        {
+            let entry = list.remove(pos);
+            if entry.persist {
+                save_persistent_alarms_locked(&list);
+            }
+            drop(list);
+            let msg = if entry.persist {
+                format!("Alarm triggered: {}", entry.label)
+            } else {
+                format!("Timer finished: {}", entry.label)
+            };
+            notify(&msg);
+            FINISHED_MESSAGES.lock().unwrap().push(msg);
+        }
+    }
+
+    fn register(&self, deadline: Instant, id: u64, gen: u64) {
+        let mut heap = self.inner.heap.lock().unwrap();
+        heap.push(Reverse((deadline, id, gen)));
+        self.inner.condvar.notify_one();
+    }
+
+    fn wakeup(&self) {
+        self.inner.condvar.notify_one();
+    }
+}
+
+static TIMER_MANAGER: Lazy<TimerManager> = Lazy::new(|| TimerManager::new());
 
 /// Reset the flag tracking whether saved alarms have been loaded.
 pub fn reset_alarms_loaded() {
@@ -118,8 +201,10 @@ pub fn parse_duration(input: &str) -> Option<Duration> {
             return None;
         }
     }
-    if input.len() < 2 { return None; }
-    let (num_str, unit) = input.split_at(input.len()-1);
+    if input.len() < 2 {
+        return None;
+    }
+    let (num_str, unit) = input.split_at(input.len() - 1);
     let value: u64 = num_str.parse().ok()?;
     match unit {
         "s" | "S" => Some(Duration::from_secs(value)),
@@ -132,7 +217,9 @@ pub fn parse_duration(input: &str) -> Option<Duration> {
 /// Parse a time of day in `HH:MM` format.
 pub fn parse_hhmm(input: &str) -> Option<(u32, u32)> {
     let parts: Vec<&str> = input.split(':').collect();
-    if parts.len() != 2 { return None; }
+    if parts.len() != 2 {
+        return None;
+    }
     let h: u32 = parts[0].parse().ok()?;
     let m: u32 = parts[1].parse().ok()?;
     if h < 24 && m < 60 {
@@ -171,10 +258,10 @@ pub fn cancel_timer(id: u64) {
     let mut timers = ACTIVE_TIMERS.lock().unwrap();
     if let Some(pos) = timers.iter().position(|t| t.id == id) {
         let entry = timers.remove(pos);
-        entry.cancel.store(true, Ordering::SeqCst);
         if entry.persist {
             save_persistent_alarms_locked(&timers);
         }
+        TIMER_MANAGER.wakeup();
     }
 }
 
@@ -185,10 +272,11 @@ pub fn pause_timer(id: u64) {
         if !t.paused {
             t.remaining = t.deadline.saturating_duration_since(Instant::now());
             t.paused = true;
-            t.cancel.store(true, Ordering::SeqCst);
+            t.generation = t.generation.wrapping_add(1);
             if t.persist {
                 save_persistent_alarms_locked(&timers);
             }
+            TIMER_MANAGER.wakeup();
         }
     }
 }
@@ -199,16 +287,13 @@ pub fn resume_timer(id: u64) {
     if let Some(t) = timers.iter_mut().find(|t| t.id == id) {
         if t.paused {
             t.paused = false;
-            t.cancel = Arc::new(AtomicBool::new(false));
             t.deadline = Instant::now() + t.remaining;
-            let cancel = t.cancel.clone();
-            let duration = t.remaining;
-            let label = t.label.clone();
-            let persist = t.persist;
-            spawn_timer_thread(id, label, duration, cancel, persist);
-            if persist {
+            t.generation = t.generation.wrapping_add(1);
+            TIMER_MANAGER.register(t.deadline, t.id, t.generation);
+            if t.persist {
                 save_persistent_alarms_locked(&timers);
             }
+            TIMER_MANAGER.wakeup();
         }
     }
 }
@@ -246,47 +331,8 @@ pub fn format_ts(ts: u64) -> String {
         .to_string()
 }
 
-fn spawn_timer_thread(
-    id: u64,
-    label: String,
-    duration: Duration,
-    cancel: Arc<AtomicBool>,
-    persist: bool,
-) {
-    thread::spawn(move || {
-        let start = Instant::now();
-        loop {
-            let remaining = duration.saturating_sub(start.elapsed());
-            if remaining.is_zero() {
-                break;
-            }
-            if cancel.load(Ordering::SeqCst) {
-                return;
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        if !cancel.load(Ordering::SeqCst) {
-            let msg = if persist {
-                format!("Alarm triggered: {}", label)
-            } else {
-                format!("Timer finished: {}", label)
-            };
-            notify(&msg);
-            FINISHED_MESSAGES.lock().unwrap().push(msg);
-        }
-        let mut list = ACTIVE_TIMERS.lock().unwrap();
-        if let Some(pos) = list.iter().position(|t| t.id == id) {
-            let removed = list.remove(pos);
-            if removed.persist {
-                save_persistent_alarms_locked(&list);
-            }
-        }
-    });
-}
-
 fn start_entry(duration: Duration, label: String, persist: bool, start_ts: u64, end_ts: u64) {
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-    let cancel = Arc::new(AtomicBool::new(false));
     let deadline = Instant::now() + duration;
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
@@ -294,18 +340,18 @@ fn start_entry(duration: Duration, label: String, persist: bool, start_ts: u64, 
             id,
             label: label.clone(),
             deadline,
-            cancel: cancel.clone(),
             persist,
             end_ts,
             start_ts,
             paused: false,
             remaining: duration,
+            generation: 0,
         });
         if persist {
             save_persistent_alarms_locked(&list);
         }
     }
-    spawn_timer_thread(id, label, duration, cancel, persist);
+    TIMER_MANAGER.register(deadline, id, 0);
 }
 
 /// Start a timer that lasts `duration` with an optional `name`.
@@ -419,7 +465,12 @@ impl Plugin for TimerPlugin {
                 } else {
                     format!("Start timer {dur_part}")
                 };
-                return vec![Action { label, desc: "Timer".into(), action, args: None }];
+                return vec![Action {
+                    label,
+                    desc: "Timer".into(),
+                    action,
+                    args: None,
+                }];
             }
         }
         if let Some(arg) = trimmed.strip_prefix("alarm ") {
@@ -438,16 +489,26 @@ impl Plugin for TimerPlugin {
                 } else {
                     format!("Set alarm {time_part}")
                 };
-                return vec![Action { label, desc: "Timer".into(), action, args: None }];
+                return vec![Action {
+                    label,
+                    desc: "Timer".into(),
+                    action,
+                    args: None,
+                }];
             }
         }
         Vec::new()
     }
 
-    fn name(&self) -> &str { "timer" }
+    fn name(&self) -> &str {
+        "timer"
+    }
 
-    fn description(&self) -> &str { "Create timers and alarms (prefix: `timer` / `alarm`)" }
+    fn description(&self) -> &str {
+        "Create timers and alarms (prefix: `timer` / `alarm`)"
+    }
 
-    fn capabilities(&self) -> &[&str] { &["search", "completion_dialog"] }
+    fn capabilities(&self) -> &[&str] {
+        &["search", "completion_dialog"]
+    }
 }
-
