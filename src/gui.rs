@@ -448,19 +448,7 @@ impl LauncherApp {
             );
             for a in plugin_results {
                 if self.fuzzy_weight <= 0.0 {
-                    let alias_match = self
-                        .folder_aliases
-                        .get(&a.action)
-                        .or_else(|| self.bookmark_aliases.get(&a.action))
-                        .and_then(|v| v.as_ref())
-                        .map(|s| s.to_lowercase().contains(&query_lc))
-                        .unwrap_or(false);
-                    if a.label.to_lowercase().contains(&query_lc)
-                        || a.desc.to_lowercase().contains(&query_lc)
-                        || alias_match
-                    {
-                        res.push((a, 0.0));
-                    }
+                    res.push((a, 0.0));
                 } else {
                     let score = if self.query.is_empty() {
                         0.0
@@ -510,19 +498,7 @@ impl LauncherApp {
             );
             for a in plugin_results {
                 if self.fuzzy_weight <= 0.0 {
-                    let alias_match = self
-                        .folder_aliases
-                        .get(&a.action)
-                        .or_else(|| self.bookmark_aliases.get(&a.action))
-                        .and_then(|v| v.as_ref())
-                        .map(|s| s.to_lowercase().contains(&query_lc))
-                        .unwrap_or(false);
-                    if a.label.to_lowercase().contains(&query_lc)
-                        || a.desc.to_lowercase().contains(&query_lc)
-                        || alias_match
-                    {
-                        res.push((a, 0.0));
-                    }
+                    res.push((a, 0.0));
                 } else {
                     let score = if self.query.is_empty() {
                         0.0
