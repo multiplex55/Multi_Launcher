@@ -5,8 +5,11 @@ pub struct RedditPlugin;
 
 impl Plugin for RedditPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        if let Some(q) = query.strip_prefix("red ") {
-            let q = q.trim();
+        const PREFIX: &str = "red ";
+        if query.len() >= PREFIX.len()
+            && query[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
+        {
+            let q = query[PREFIX.len()..].trim();
             if !q.is_empty() {
                 return vec![Action {
                     label: format!("Search Reddit for {q}"),

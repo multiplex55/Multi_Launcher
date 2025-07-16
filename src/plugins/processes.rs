@@ -6,10 +6,11 @@ pub struct ProcessesPlugin;
 
 impl Plugin for ProcessesPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        if !query.starts_with("ps") {
+        const PREFIX: &str = "ps";
+        if query.len() < PREFIX.len() || !query[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
             return Vec::new();
         }
-        let filter = query.strip_prefix("ps").unwrap_or("").trim().to_lowercase();
+        let filter = query[PREFIX.len()..].trim().to_lowercase();
         let system = System::new_all();
         system
             .processes()

@@ -118,8 +118,11 @@ impl Default for NotesPlugin {
 
 impl Plugin for NotesPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        if let Some(text) = query.strip_prefix("note add ") {
-            let text = text.trim();
+        const ADD_PREFIX: &str = "note add ";
+        if query.len() >= ADD_PREFIX.len()
+            && query[..ADD_PREFIX.len()].eq_ignore_ascii_case(ADD_PREFIX)
+        {
+            let text = query[ADD_PREFIX.len()..].trim();
             if !text.is_empty() {
                 return vec![Action {
                     label: format!("Add note {text}"),
@@ -130,8 +133,11 @@ impl Plugin for NotesPlugin {
             }
         }
 
-        if let Some(pattern) = query.strip_prefix("note rm ") {
-            let filter = pattern.trim();
+        const RM_PREFIX: &str = "note rm ";
+        if query.len() >= RM_PREFIX.len()
+            && query[..RM_PREFIX.len()].eq_ignore_ascii_case(RM_PREFIX)
+        {
+            let filter = query[RM_PREFIX.len()..].trim();
             let notes = self.data.lock().unwrap().clone();
             return notes
                 .into_iter()
@@ -146,8 +152,11 @@ impl Plugin for NotesPlugin {
                 .collect();
         }
 
-        if let Some(rest) = query.strip_prefix("note list") {
-            let filter = rest.trim();
+        const LIST_PREFIX: &str = "note list";
+        if query.len() >= LIST_PREFIX.len()
+            && query[..LIST_PREFIX.len()].eq_ignore_ascii_case(LIST_PREFIX)
+        {
+            let filter = query[LIST_PREFIX.len()..].trim();
             let notes = self.data.lock().unwrap().clone();
             return notes
                 .into_iter()
@@ -162,7 +171,7 @@ impl Plugin for NotesPlugin {
                 .collect();
         }
 
-        if query.trim() == "note" {
+        if query.trim().eq_ignore_ascii_case("note") {
             return vec![Action {
                 label: "note: edit notes".into(),
                 desc: "Note".into(),

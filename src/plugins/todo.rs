@@ -131,7 +131,7 @@ impl Plugin for TodoPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
 
-        if trimmed.eq("todo") {
+        if trimmed.eq_ignore_ascii_case("todo") {
             return vec![Action {
                 label: "todo: edit todos".into(),
                 desc: "Todo".into(),
@@ -140,7 +140,7 @@ impl Plugin for TodoPlugin {
             }];
         }
 
-        if trimmed.eq("todo clear") {
+        if trimmed.eq_ignore_ascii_case("todo clear") {
             return vec![Action {
                 label: "Clear completed todos".into(),
                 desc: "Todo".into(),
@@ -149,7 +149,7 @@ impl Plugin for TodoPlugin {
             }];
         }
 
-        if trimmed.eq("todo add") {
+        if trimmed.eq_ignore_ascii_case("todo add") {
             return vec![Action {
                 label: "todo: edit todos".into(),
                 desc: "Todo".into(),
@@ -158,8 +158,11 @@ impl Plugin for TodoPlugin {
             }];
         }
 
-        if let Some(text) = trimmed.strip_prefix("todo add ") {
-            let text = text.trim();
+        const ADD_PREFIX: &str = "todo add ";
+        if trimmed.len() >= ADD_PREFIX.len()
+            && trimmed[..ADD_PREFIX.len()].eq_ignore_ascii_case(ADD_PREFIX)
+        {
+            let text = trimmed[ADD_PREFIX.len()..].trim();
             if !text.is_empty() {
                 return vec![Action {
                     label: format!("Add todo {text}"),
@@ -170,8 +173,11 @@ impl Plugin for TodoPlugin {
             }
         }
 
-        if let Some(pattern) = trimmed.strip_prefix("todo rm ") {
-            let filter = pattern.trim();
+        const RM_PREFIX: &str = "todo rm ";
+        if trimmed.len() >= RM_PREFIX.len()
+            && trimmed[..RM_PREFIX.len()].eq_ignore_ascii_case(RM_PREFIX)
+        {
+            let filter = trimmed[RM_PREFIX.len()..].trim();
             let todos = self.data.lock().unwrap().clone();
             return todos
                 .into_iter()
@@ -186,8 +192,11 @@ impl Plugin for TodoPlugin {
                 .collect();
         }
 
-        if let Some(rest) = trimmed.strip_prefix("todo list") {
-            let filter = rest.trim();
+        const LIST_PREFIX: &str = "todo list";
+        if trimmed.len() >= LIST_PREFIX.len()
+            && trimmed[..LIST_PREFIX.len()].eq_ignore_ascii_case(LIST_PREFIX)
+        {
+            let filter = trimmed[LIST_PREFIX.len()..].trim();
             let todos = self.data.lock().unwrap().clone();
             return todos
                 .into_iter()

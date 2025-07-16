@@ -8,10 +8,11 @@ pub struct HistoryPlugin;
 
 impl Plugin for HistoryPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        if !query.starts_with("hi") {
+        const PREFIX: &str = "hi";
+        if query.len() < PREFIX.len() || !query[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
             return Vec::new();
         }
-        if query.trim() == "hi clear" {
+        if query.trim().eq_ignore_ascii_case("hi clear") {
             return vec![Action {
                 label: "Clear history".into(),
                 desc: "History".into(),
@@ -19,7 +20,7 @@ impl Plugin for HistoryPlugin {
                 args: None,
             }];
         }
-        let filter = query.strip_prefix("hi").unwrap_or("").trim();
+        let filter = query[PREFIX.len()..].trim();
         get_history()
             .into_iter()
             .enumerate()

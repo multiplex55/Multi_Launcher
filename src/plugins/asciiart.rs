@@ -21,8 +21,11 @@ impl Default for AsciiArtPlugin {
 
 impl Plugin for AsciiArtPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        if let Some(text) = query.strip_prefix("ascii ") {
-            let text = text.trim();
+        const PREFIX: &str = "ascii ";
+        if query.len() >= PREFIX.len()
+            && query[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
+        {
+            let text = query[PREFIX.len()..].trim();
             if !text.is_empty() {
                 if let Some(fig) = self.font.convert(text) {
                     let art = fig.to_string();

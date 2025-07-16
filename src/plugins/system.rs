@@ -5,10 +5,11 @@ pub struct SystemPlugin;
 
 impl Plugin for SystemPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        if !query.starts_with("sys") {
+        const PREFIX: &str = "sys";
+        if query.len() < PREFIX.len() || !query[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
             return Vec::new();
         }
-        let filter = query.strip_prefix("sys").unwrap_or("").trim();
+        let filter = query[PREFIX.len()..].trim();
         const OPTIONS: [&str; 4] = ["shutdown", "reboot", "lock", "logoff"];
         OPTIONS
             .iter()

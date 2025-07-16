@@ -6,7 +6,12 @@ pub struct HelpPlugin;
 impl Plugin for HelpPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let q = query.trim();
-        if q == "help" || q.starts_with("help ") {
+        const PREFIX: &str = "help";
+        const PREFIX_SPACE: &str = "help ";
+        if q.eq_ignore_ascii_case(PREFIX)
+            || (q.len() >= PREFIX_SPACE.len()
+                && q[..PREFIX_SPACE.len()].eq_ignore_ascii_case(PREFIX_SPACE))
+        {
             return vec![Action {
                 label: "Show command list".into(),
                 desc: "Display available command prefixes".into(),

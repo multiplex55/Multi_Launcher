@@ -6,7 +6,11 @@ pub struct WeatherPlugin;
 
 impl Plugin for WeatherPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        if let Some(q) = query.strip_prefix("weather ") {
+        const PREFIX: &str = "weather ";
+        if query.len() >= PREFIX.len()
+            && query[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
+        {
+            let q = query[PREFIX.len()..].trim();
             let q = q.trim();
             if !q.is_empty() {
                 return vec![Action {

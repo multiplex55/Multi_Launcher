@@ -119,7 +119,7 @@ pub struct TempfilePlugin;
 impl Plugin for TempfilePlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
-        if trimmed == "tmp" {
+        if trimmed.eq_ignore_ascii_case("tmp") {
             return vec![Action {
                 label: "tmp: create".into(),
                 desc: "Tempfile".into(),
@@ -127,8 +127,11 @@ impl Plugin for TempfilePlugin {
                 args: None,
             }];
         }
-        if let Some(alias) = trimmed.strip_prefix("tmp new ") {
-            let alias = alias.trim();
+        const NEW_PREFIX: &str = "tmp new ";
+        if trimmed.len() >= NEW_PREFIX.len()
+            && trimmed[..NEW_PREFIX.len()].eq_ignore_ascii_case(NEW_PREFIX)
+        {
+            let alias = trimmed[NEW_PREFIX.len()..].trim();
             if !alias.is_empty() && validate_alias(alias).is_ok() {
                 return vec![Action {
                     label: format!("Create temp file {alias}"),
@@ -137,7 +140,7 @@ impl Plugin for TempfilePlugin {
                     args: None,
                 }];
             }
-        } else if trimmed == "tmp new" {
+        } else if trimmed.eq_ignore_ascii_case("tmp new") {
             return vec![Action {
                 label: "Create temp file".into(),
                 desc: "Tempfile".into(),
@@ -145,7 +148,7 @@ impl Plugin for TempfilePlugin {
                 args: None,
             }];
         }
-        if trimmed == "tmp open" {
+        if trimmed.eq_ignore_ascii_case("tmp open") {
             return vec![Action {
                 label: "Open temp directory".into(),
                 desc: "Tempfile".into(),
@@ -153,7 +156,7 @@ impl Plugin for TempfilePlugin {
                 args: None,
             }];
         }
-        if trimmed == "tmp clear" {
+        if trimmed.eq_ignore_ascii_case("tmp clear") {
             return vec![Action {
                 label: "Clear temp files".into(),
                 desc: "Tempfile".into(),
@@ -161,8 +164,11 @@ impl Plugin for TempfilePlugin {
                 args: None,
             }];
         }
-        if let Some(filter) = trimmed.strip_prefix("tmp rm") {
-            let filter = filter.trim();
+        const RM_PREFIX: &str = "tmp rm";
+        if trimmed.len() >= RM_PREFIX.len()
+            && trimmed[..RM_PREFIX.len()].eq_ignore_ascii_case(RM_PREFIX)
+        {
+            let filter = trimmed[RM_PREFIX.len()..].trim();
             let files = list_files().unwrap_or_default();
             return files
                 .into_iter()
@@ -181,7 +187,11 @@ impl Plugin for TempfilePlugin {
                 })
                 .collect();
         }
-        if let Some(rest) = trimmed.strip_prefix("tmp alias") {
+        const ALIAS_PREFIX: &str = "tmp alias";
+        if trimmed.len() >= ALIAS_PREFIX.len()
+            && trimmed[..ALIAS_PREFIX.len()].eq_ignore_ascii_case(ALIAS_PREFIX)
+        {
+            let rest = &trimmed[ALIAS_PREFIX.len()..];
             let mut parts = rest.trim().splitn(2, ' ');
             if let (Some(file), Some(alias)) = (parts.next(), parts.next()) {
                 let file = file.trim();
@@ -205,8 +215,11 @@ impl Plugin for TempfilePlugin {
                 }
             }
         }
-        if let Some(filter) = trimmed.strip_prefix("tmp list") {
-            let filter = filter.trim();
+        const LIST_PREFIX: &str = "tmp list";
+        if trimmed.len() >= LIST_PREFIX.len()
+            && trimmed[..LIST_PREFIX.len()].eq_ignore_ascii_case(LIST_PREFIX)
+        {
+            let filter = trimmed[LIST_PREFIX.len()..].trim();
             let files = list_files().unwrap_or_default();
             return files
                 .into_iter()

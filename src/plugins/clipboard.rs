@@ -122,12 +122,13 @@ impl Default for ClipboardPlugin {
 
 impl Plugin for ClipboardPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        if !query.starts_with("cb") {
+        const PREFIX: &str = "cb";
+        if query.len() < PREFIX.len() || !query[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
             return Vec::new();
         }
 
         let trimmed = query.trim();
-        if trimmed == "cb" {
+        if trimmed.eq_ignore_ascii_case("cb") {
             return vec![Action {
                 label: "cb: edit clipboard".into(),
                 desc: "Clipboard".into(),
@@ -136,7 +137,7 @@ impl Plugin for ClipboardPlugin {
             }];
         }
 
-        if trimmed == "cb clear" {
+        if trimmed.eq_ignore_ascii_case("cb clear") {
             return vec![Action {
                 label: "Clear clipboard history".into(),
                 desc: "Clipboard".into(),
@@ -145,7 +146,7 @@ impl Plugin for ClipboardPlugin {
             }];
         }
 
-        if trimmed == "cb list" {
+        if trimmed.eq_ignore_ascii_case("cb list") {
             let history = self.update_history();
             return history
                 .iter()
@@ -159,7 +160,7 @@ impl Plugin for ClipboardPlugin {
                 .collect();
         }
 
-        let filter = query.strip_prefix("cb").unwrap_or("").trim();
+        let filter = trimmed[PREFIX.len()..].trim();
         let history = self.update_history();
         history
             .iter()

@@ -19,8 +19,11 @@ fn parse_prob(input: &str) -> Option<f64> {
 impl Plugin for DropCalcPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
-        let rest = if let Some(r) = trimmed.strip_prefix("drop ") {
-            r.trim()
+        const PREFIX: &str = "drop ";
+        let rest = if trimmed.len() >= PREFIX.len()
+            && trimmed[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
+        {
+            trimmed[PREFIX.len()..].trim()
         } else {
             return Vec::new();
         };
