@@ -131,6 +131,7 @@ pub struct LauncherApp {
     pub hide_after_run: bool,
     pub timer_refresh: f32,
     pub disable_timer_updates: bool,
+    pub preserve_command: bool,
     last_timer_update: Instant,
 }
 
@@ -155,6 +156,7 @@ impl LauncherApp {
         hide_after_run: Option<bool>,
         timer_refresh: Option<f32>,
         disable_timer_updates: Option<bool>,
+        preserve_command: Option<bool>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -192,6 +194,9 @@ impl LauncherApp {
         }
         if let Some(v) = disable_timer_updates {
             self.disable_timer_updates = v;
+        }
+        if let Some(v) = preserve_command {
+            self.preserve_command = v;
         }
     }
 
@@ -399,6 +404,7 @@ impl LauncherApp {
             hide_after_run: settings.hide_after_run,
             timer_refresh: settings.timer_refresh,
             disable_timer_updates: settings.disable_timer_updates,
+            preserve_command: settings.preserve_command,
             last_timer_update: Instant::now(),
         };
 
@@ -864,14 +870,22 @@ impl eframe::App for LauncherApp {
                                 *count += 1;
                             }
                             if a.action.starts_with("bookmark:add:") {
-                                self.query.clear();
+                                if self.preserve_command {
+                                    self.query = "bm add ".into();
+                                } else {
+                                    self.query.clear();
+                                }
                                 refresh = true;
                                 set_focus = true;
                             } else if a.action.starts_with("bookmark:remove:") {
                                 refresh = true;
                                 set_focus = true;
                             } else if a.action.starts_with("folder:add:") {
-                                self.query.clear();
+                                if self.preserve_command {
+                                    self.query = "f add ".into();
+                                } else {
+                                    self.query.clear();
+                                }
                                 refresh = true;
                                 set_focus = true;
                             } else if a.action.starts_with("folder:remove:") {
@@ -1344,14 +1358,22 @@ impl eframe::App for LauncherApp {
                                         *count += 1;
                                     }
                                     if a.action.starts_with("bookmark:add:") {
-                                        self.query.clear();
+                                        if self.preserve_command {
+                                            self.query = "bm add ".into();
+                                        } else {
+                                            self.query.clear();
+                                        }
                                         refresh = true;
                                         set_focus = true;
                                     } else if a.action.starts_with("bookmark:remove:") {
                                         refresh = true;
                                         set_focus = true;
                                     } else if a.action.starts_with("folder:add:") {
-                                        self.query.clear();
+                                        if self.preserve_command {
+                                            self.query = "f add ".into();
+                                        } else {
+                                            self.query.clear();
+                                        }
                                         refresh = true;
                                         set_focus = true;
                                     } else if a.action.starts_with("folder:remove:") {

@@ -42,6 +42,7 @@ pub struct SettingsEditor {
     hide_after_run: bool,
     timer_refresh: f32,
     disable_timer_updates: bool,
+    preserve_command: bool,
 }
 
 impl SettingsEditor {
@@ -113,6 +114,7 @@ impl SettingsEditor {
             hide_after_run: settings.hide_after_run,
             timer_refresh: settings.timer_refresh,
             disable_timer_updates: settings.disable_timer_updates,
+            preserve_command: settings.preserve_command,
         }
     }
 
@@ -158,6 +160,7 @@ impl SettingsEditor {
             hide_after_run: self.hide_after_run,
             timer_refresh: self.timer_refresh,
             disable_timer_updates: self.disable_timer_updates,
+            preserve_command: self.preserve_command,
         }
     }
 
@@ -246,6 +249,7 @@ impl SettingsEditor {
 
             ui.checkbox(&mut self.show_toasts, "Enable toast notifications");
             ui.checkbox(&mut self.hide_after_run, "Hide window after running action");
+            ui.checkbox(&mut self.preserve_command, "Preserve command after run");
             ui.checkbox(&mut self.disable_timer_updates, "Disable timer auto refresh");
             ui.horizontal(|ui| {
                 ui.label("Timer refresh rate (s)");
@@ -400,6 +404,7 @@ impl SettingsEditor {
                                     Some(new_settings.hide_after_run),
                                     Some(new_settings.timer_refresh),
                                     Some(new_settings.disable_timer_updates),
+                                    Some(new_settings.preserve_command),
                                 );
                                 app.hotkey_str = new_settings.hotkey.clone();
                                 app.quit_hotkey_str = new_settings.quit_hotkey.clone();
@@ -408,6 +413,7 @@ impl SettingsEditor {
                                 app.list_scale = new_settings.list_scale.unwrap_or(1.0).min(5.0);
                                 app.history_limit = new_settings.history_limit;
                                 app.clipboard_limit = new_settings.clipboard_limit;
+                                app.preserve_command = new_settings.preserve_command;
                                 crate::request_hotkey_restart(new_settings);
                                 if app.enable_toasts {
                                     app.add_toast(Toast {

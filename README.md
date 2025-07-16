@@ -99,6 +99,7 @@ value as shown below:
   "list_scale": 1.0,
   "history_limit": 100,
   "clipboard_limit": 20,
+  "preserve_command": false,
   "follow_mouse": true,
   "static_location_enabled": false,
   "static_pos": [0, 0],
@@ -140,6 +141,7 @@ for these fields.
 `fuzzy_weight` and `usage_weight` adjust how results are ranked. The fuzzy weight multiplies the match score while the usage weight favours frequently launched actions.
 `history_limit` defines how many entries the history plugin keeps.
 `clipboard_limit` sets how many clipboard entries are persisted for the clipboard plugin.
+`preserve_command` keeps the typed command prefix (like `bm add` or `f add`) in the search field after running an action.
 `enabled_capabilities` maps plugin names to capability identifiers so features can be toggled individually. The folders plugin, for example, exposes `show_full_path`.
 
 
