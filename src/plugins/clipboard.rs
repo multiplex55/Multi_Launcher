@@ -160,12 +160,12 @@ impl Plugin for ClipboardPlugin {
                 .collect();
         }
 
-        let filter = trimmed[PREFIX.len()..].trim();
+        let filter = trimmed[PREFIX.len()..].trim().to_lowercase();
         let history = self.update_history();
         history
             .iter()
             .enumerate()
-            .filter(|(_, entry)| entry.contains(filter))
+            .filter(|(_, entry)| entry.to_lowercase().contains(&filter))
             .map(|(idx, entry)| Action {
                 label: entry.clone(),
                 desc: "Clipboard".into(),

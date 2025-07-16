@@ -1,6 +1,6 @@
 use crate::actions::Action;
-use crate::plugin::Plugin;
 use crate::history::get_history;
+use crate::plugin::Plugin;
 
 const MAX_HISTORY_RESULTS: usize = 10;
 
@@ -20,11 +20,11 @@ impl Plugin for HistoryPlugin {
                 args: None,
             }];
         }
-        let filter = query[PREFIX.len()..].trim();
+        let filter = query[PREFIX.len()..].trim().to_lowercase();
         get_history()
             .into_iter()
             .enumerate()
-            .filter(|(_, entry)| entry.query.contains(filter))
+            .filter(|(_, entry)| entry.query.to_lowercase().contains(&filter))
             .take(MAX_HISTORY_RESULTS)
             .map(|(idx, entry)| Action {
                 label: entry.query,
