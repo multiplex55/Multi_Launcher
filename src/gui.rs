@@ -222,20 +222,18 @@ impl LauncherApp {
         let enable_toasts = settings.enable_toasts;
         use std::path::Path;
 
-        let folder_aliases = crate::plugins::folders::load_folders(
-            crate::plugins::folders::FOLDERS_FILE,
-        )
-        .unwrap_or_else(|_| crate::plugins::folders::default_folders())
-        .into_iter()
-        .map(|f| (f.path, f.alias))
-        .collect::<HashMap<_, _>>();
-        let bookmark_aliases = crate::plugins::bookmarks::load_bookmarks(
-            crate::plugins::bookmarks::BOOKMARKS_FILE,
-        )
-        .unwrap_or_default()
-        .into_iter()
-        .map(|b| (b.url, b.alias))
-        .collect::<HashMap<_, _>>();
+        let folder_aliases =
+            crate::plugins::folders::load_folders(crate::plugins::folders::FOLDERS_FILE)
+                .unwrap_or_else(|_| crate::plugins::folders::default_folders())
+                .into_iter()
+                .map(|f| (f.path, f.alias))
+                .collect::<HashMap<_, _>>();
+        let bookmark_aliases =
+            crate::plugins::bookmarks::load_bookmarks(crate::plugins::bookmarks::BOOKMARKS_FILE)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|b| (b.url, b.alias))
+                .collect::<HashMap<_, _>>();
 
         if let Ok(mut watcher) = RecommendedWatcher::new(
             {
@@ -280,10 +278,12 @@ impl LauncherApp {
             Config::default(),
         ) {
             let path = Path::new(crate::plugins::folders::FOLDERS_FILE);
-            let res = watcher.watch(path, RecursiveMode::NonRecursive).or_else(|_| {
-                let parent = path.parent().unwrap_or_else(|| Path::new("."));
-                watcher.watch(parent, RecursiveMode::NonRecursive)
-            });
+            let res = watcher
+                .watch(path, RecursiveMode::NonRecursive)
+                .or_else(|_| {
+                    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                    watcher.watch(parent, RecursiveMode::NonRecursive)
+                });
             if res.is_ok() {
                 watchers.push(watcher);
             }
@@ -307,10 +307,12 @@ impl LauncherApp {
             Config::default(),
         ) {
             let path = Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE);
-            let res = watcher.watch(path, RecursiveMode::NonRecursive).or_else(|_| {
-                let parent = path.parent().unwrap_or_else(|| Path::new("."));
-                watcher.watch(parent, RecursiveMode::NonRecursive)
-            });
+            let res = watcher
+                .watch(path, RecursiveMode::NonRecursive)
+                .or_else(|_| {
+                    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                    watcher.watch(parent, RecursiveMode::NonRecursive)
+                });
             if res.is_ok() {
                 watchers.push(watcher);
             }
@@ -892,6 +894,11 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                                 set_focus = true;
                             } else if a.action.starts_with("todo:add:") {
+                                if self.preserve_command {
+                                    self.query = "todo add ".into();
+                                } else {
+                                    self.query.clear();
+                                }
                                 refresh = true;
                                 set_focus = true;
                                 if self.enable_toasts {
@@ -956,6 +963,15 @@ impl eframe::App for LauncherApp {
                             } else if a.action.starts_with("tempfile:alias:") {
                                 refresh = true;
                                 set_focus = true;
+                            } else if a.action == "tempfile:new"
+                                || a.action.starts_with("tempfile:new:")
+                            {
+                                if self.preserve_command {
+                                    self.query = "tmp new ".into();
+                                } else {
+                                    self.query.clear();
+                                }
+                                set_focus = true;
                             } else if a.action.starts_with("timer:cancel:")
                                 && current.starts_with("timer rm")
                             {
@@ -974,6 +990,11 @@ impl eframe::App for LauncherApp {
                             } else if a.action.starts_with("timer:start:")
                                 && current.starts_with("timer add")
                             {
+                                if self.preserve_command {
+                                    self.query = "timer add ".into();
+                                } else {
+                                    self.query.clear();
+                                }
                                 set_focus = true;
                             }
                             if self.hide_after_run
@@ -993,8 +1014,7 @@ impl eframe::App for LauncherApp {
                         }
                         if set_focus {
                             self.focus_input();
-                        } else if self.visible_flag.load(Ordering::SeqCst)
-                            && !self.any_panel_open()
+                        } else if self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open()
                         {
                             self.focus_input();
                         }
@@ -1047,7 +1067,8 @@ impl eframe::App for LauncherApp {
                                 .iter()
                                 .take(self.custom_len)
                                 .position(|act| act.action == a.action && act.label == a.label);
-                            if alias_map.contains_key(&a.action) && !a.action.starts_with("folder:") {
+                            if alias_map.contains_key(&a.action) && !a.action.starts_with("folder:")
+                            {
                                 menu_resp.clone().context_menu(|ui| {
                                     if ui.button("Set Alias").clicked() {
                                         self.alias_dialog.open(&a.action);
@@ -1380,6 +1401,11 @@ impl eframe::App for LauncherApp {
                                         refresh = true;
                                         set_focus = true;
                                     } else if a.action.starts_with("todo:add:") {
+                                        if self.preserve_command {
+                                            self.query = "todo add ".into();
+                                        } else {
+                                            self.query.clear();
+                                        }
                                         refresh = true;
                                         set_focus = true;
                                         if self.enable_toasts {
@@ -1450,6 +1476,15 @@ impl eframe::App for LauncherApp {
                                     } else if a.action.starts_with("tempfile:alias:") {
                                         refresh = true;
                                         set_focus = true;
+                                    } else if a.action == "tempfile:new"
+                                        || a.action.starts_with("tempfile:new:")
+                                    {
+                                        if self.preserve_command {
+                                            self.query = "tmp new ".into();
+                                        } else {
+                                            self.query.clear();
+                                        }
+                                        set_focus = true;
                                     }
                                     if self.hide_after_run
                                         && !a.action.starts_with("bookmark:add:")
@@ -1471,8 +1506,7 @@ impl eframe::App for LauncherApp {
                         }
                         if set_focus {
                             self.focus_input();
-                        } else if self.visible_flag.load(Ordering::SeqCst)
-                            && !self.any_panel_open()
+                        } else if self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open()
                         {
                             self.focus_input();
                         }
