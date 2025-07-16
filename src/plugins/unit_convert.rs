@@ -78,10 +78,16 @@ fn parse_query(query: &str) -> Option<(f64, String, String)> {
 impl Plugin for UnitConvertPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
-        let rest = if let Some(r) = trimmed.strip_prefix("conv ") {
-            r
-        } else if let Some(r) = trimmed.strip_prefix("convert ") {
-            r
+        const CONV_PREFIX: &str = "conv ";
+        const CONVERT_PREFIX: &str = "convert ";
+        let rest = if trimmed.len() >= CONV_PREFIX.len()
+            && trimmed[..CONV_PREFIX.len()].eq_ignore_ascii_case(CONV_PREFIX)
+        {
+            &trimmed[CONV_PREFIX.len()..]
+        } else if trimmed.len() >= CONVERT_PREFIX.len()
+            && trimmed[..CONVERT_PREFIX.len()].eq_ignore_ascii_case(CONVERT_PREFIX)
+        {
+            &trimmed[CONVERT_PREFIX.len()..]
         } else {
             return Vec::new();
         };

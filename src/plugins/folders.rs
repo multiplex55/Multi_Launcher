@@ -173,8 +173,11 @@ impl Default for FoldersPlugin {
 
 impl Plugin for FoldersPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        if let Some(path) = query.strip_prefix("f add ") {
-            let path = path.trim();
+        const ADD_PREFIX: &str = "f add ";
+        if query.len() >= ADD_PREFIX.len()
+            && query[..ADD_PREFIX.len()].eq_ignore_ascii_case(ADD_PREFIX)
+        {
+            let path = query[ADD_PREFIX.len()..].trim();
             if !path.is_empty() {
                 return vec![Action {
                     label: format!("Add folder {path}"),
@@ -185,8 +188,11 @@ impl Plugin for FoldersPlugin {
             }
         }
 
-        if let Some(pattern) = query.strip_prefix("f rm ") {
-            let filter = pattern.trim();
+        const RM_PREFIX: &str = "f rm ";
+        if query.len() >= RM_PREFIX.len()
+            && query[..RM_PREFIX.len()].eq_ignore_ascii_case(RM_PREFIX)
+        {
+            let filter = query[RM_PREFIX.len()..].trim();
             let folders = self.data.lock().unwrap().clone();
             return folders
                 .into_iter()
@@ -207,10 +213,11 @@ impl Plugin for FoldersPlugin {
                 .collect();
         }
 
-        if !query.starts_with("f") {
+        const PREFIX: &str = "f";
+        if query.len() < PREFIX.len() || !query[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
             return Vec::new();
         }
-        let filter = query.strip_prefix("f").unwrap_or("").trim();
+        let filter = query[PREFIX.len()..].trim();
         let folders = self.data.lock().unwrap().clone();
         folders
             .into_iter()

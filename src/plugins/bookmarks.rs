@@ -178,8 +178,11 @@ impl Plugin for BookmarksPlugin {
             }];
         }
 
-        if let Some(url) = trimmed.strip_prefix("bm add ") {
-            let url = url.trim();
+        const ADD_PREFIX: &str = "bm add ";
+        if trimmed.len() >= ADD_PREFIX.len()
+            && trimmed[..ADD_PREFIX.len()].eq_ignore_ascii_case(ADD_PREFIX)
+        {
+            let url = trimmed[ADD_PREFIX.len()..].trim();
             if !url.is_empty() {
                 let norm = normalize_url(url);
                 return vec![Action {
@@ -190,7 +193,11 @@ impl Plugin for BookmarksPlugin {
                 }];
             }
         }
-        if let Some(rest) = trimmed.strip_prefix("bm rm") {
+        const RM_PREFIX: &str = "bm rm";
+        if trimmed.len() >= RM_PREFIX.len()
+            && trimmed[..RM_PREFIX.len()].eq_ignore_ascii_case(RM_PREFIX)
+        {
+            let rest = &trimmed[RM_PREFIX.len()..];
             let filter = rest.trim();
             let bookmarks = self.data.lock().unwrap().clone();
             return bookmarks
@@ -210,7 +217,11 @@ impl Plugin for BookmarksPlugin {
                 })
                 .collect();
         }
-        if let Some(rest) = trimmed.strip_prefix("bm list") {
+        const LIST_PREFIX: &str = "bm list";
+        if trimmed.len() >= LIST_PREFIX.len()
+            && trimmed[..LIST_PREFIX.len()].eq_ignore_ascii_case(LIST_PREFIX)
+        {
+            let rest = &trimmed[LIST_PREFIX.len()..];
             let filter = rest.trim();
             let bookmarks = self.data.lock().unwrap().clone();
             return bookmarks
@@ -233,10 +244,11 @@ impl Plugin for BookmarksPlugin {
                 })
                 .collect();
         }
-        if !trimmed.starts_with("bm") {
+        const PREFIX: &str = "bm";
+        if trimmed.len() < PREFIX.len() || !trimmed[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
             return Vec::new();
         }
-        let filter = trimmed.strip_prefix("bm").unwrap_or("").trim();
+        let filter = trimmed[PREFIX.len()..].trim();
         let bookmarks = self.data.lock().unwrap().clone();
         bookmarks
             .into_iter()

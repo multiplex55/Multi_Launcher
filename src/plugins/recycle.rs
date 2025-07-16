@@ -6,7 +6,9 @@ pub struct RecyclePlugin;
 impl Plugin for RecyclePlugin {
     #[cfg(target_os = "windows")]
     fn search(&self, query: &str) -> Vec<Action> {
-        if query.trim_start().starts_with("rec") {
+        const PREFIX: &str = "rec";
+        let trimmed = query.trim_start();
+        if trimmed.len() >= PREFIX.len() && trimmed[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
             return vec![Action {
                 label: "Clean Recycle Bin".into(),
                 desc: "Recycle Bin".into(),

@@ -66,7 +66,11 @@ impl Plugin for ShellPlugin {
             }];
         }
 
-        if let Some(rest) = trimmed.strip_prefix("sh add ") {
+        const ADD_PREFIX: &str = "sh add ";
+        if trimmed.len() >= ADD_PREFIX.len()
+            && trimmed[..ADD_PREFIX.len()].eq_ignore_ascii_case(ADD_PREFIX)
+        {
+            let rest = &trimmed[ADD_PREFIX.len()..];
             let mut parts = rest.trim().splitn(2, ' ');
             let name = parts.next().unwrap_or("").trim();
             let args = parts.next().unwrap_or("").trim();
@@ -80,7 +84,11 @@ impl Plugin for ShellPlugin {
             }
         }
 
-        if let Some(rest) = trimmed.strip_prefix("sh rm") {
+        const RM_PREFIX: &str = "sh rm";
+        if trimmed.len() >= RM_PREFIX.len()
+            && trimmed[..RM_PREFIX.len()].eq_ignore_ascii_case(RM_PREFIX)
+        {
+            let rest = &trimmed[RM_PREFIX.len()..];
             let filter = rest.trim();
             if let Ok(list) = load_shell_cmds(SHELL_CMDS_FILE) {
                 let matcher = SkimMatcherV2::default();
@@ -101,7 +109,11 @@ impl Plugin for ShellPlugin {
             }
         }
 
-        if let Some(rest) = trimmed.strip_prefix("sh list") {
+        const LIST_PREFIX: &str = "sh list";
+        if trimmed.len() >= LIST_PREFIX.len()
+            && trimmed[..LIST_PREFIX.len()].eq_ignore_ascii_case(LIST_PREFIX)
+        {
+            let rest = &trimmed[LIST_PREFIX.len()..];
             let filter = rest.trim();
             if let Ok(list) = load_shell_cmds(SHELL_CMDS_FILE) {
                 let matcher = SkimMatcherV2::default();
@@ -121,7 +133,11 @@ impl Plugin for ShellPlugin {
             }
         }
 
-        if let Some(cmd) = trimmed.strip_prefix("sh ") {
+        const CMD_PREFIX: &str = "sh ";
+        if trimmed.len() >= CMD_PREFIX.len()
+            && trimmed[..CMD_PREFIX.len()].eq_ignore_ascii_case(CMD_PREFIX)
+        {
+            let cmd = &trimmed[CMD_PREFIX.len()..];
             let arg = cmd.trim();
             if arg.is_empty() {
                 return Vec::new();
