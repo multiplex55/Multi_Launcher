@@ -772,7 +772,10 @@ impl eframe::App for LauncherApp {
             }
 
             scale_ui(ui, self.query_scale, |ui| {
-                let input = ui.text_edit_singleline(&mut self.query);
+                let input = ui.add(
+                    egui::TextEdit::singleline(&mut self.query)
+                        .desired_width(f32::INFINITY),
+                );
                 if just_became_visible || self.focus_query {
                     input.request_focus();
                     self.focus_query = false;
@@ -1045,7 +1048,10 @@ impl eframe::App for LauncherApp {
                             } else {
                                 a.label.clone()
                             };
-                            let mut resp = ui.selectable_label(self.selected == Some(idx), text);
+                            let mut resp = ui.add_sized(
+                                [ui.available_width(), 0.0],
+                                egui::SelectableLabel::new(self.selected == Some(idx), text),
+                            );
                             let tooltip = if a.desc == "Timer"
                                 && a.action.starts_with("timer:show:")
                             {
