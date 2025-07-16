@@ -168,7 +168,7 @@ impl Plugin for TempfilePlugin {
         if trimmed.len() >= RM_PREFIX.len()
             && trimmed[..RM_PREFIX.len()].eq_ignore_ascii_case(RM_PREFIX)
         {
-            let filter = trimmed[RM_PREFIX.len()..].trim();
+            let filter = trimmed[RM_PREFIX.len()..].trim().to_lowercase();
             let files = list_files().unwrap_or_default();
             return files
                 .into_iter()
@@ -176,7 +176,7 @@ impl Plugin for TempfilePlugin {
                     filter.is_empty()
                         || p.file_name()
                             .and_then(|n| n.to_str())
-                            .map(|n| n.contains(filter))
+                            .map(|n| n.to_lowercase().contains(&filter))
                             .unwrap_or(false)
                 })
                 .map(|p| Action {
@@ -219,7 +219,7 @@ impl Plugin for TempfilePlugin {
         if trimmed.len() >= LIST_PREFIX.len()
             && trimmed[..LIST_PREFIX.len()].eq_ignore_ascii_case(LIST_PREFIX)
         {
-            let filter = trimmed[LIST_PREFIX.len()..].trim();
+            let filter = trimmed[LIST_PREFIX.len()..].trim().to_lowercase();
             let files = list_files().unwrap_or_default();
             return files
                 .into_iter()
@@ -227,7 +227,7 @@ impl Plugin for TempfilePlugin {
                     filter.is_empty()
                         || p.file_name()
                             .and_then(|n| n.to_str())
-                            .map(|n| n.contains(filter))
+                            .map(|n| n.to_lowercase().contains(&filter))
                             .unwrap_or(false)
                 })
                 .map(|p| Action {
