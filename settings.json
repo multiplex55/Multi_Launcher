@@ -6,5 +6,6 @@
     "plugin_dirs": null,
     "debug_logging": false,
     "enable_toasts": true,
+    "preserve_command": false,
     "history_limit": 100
 }

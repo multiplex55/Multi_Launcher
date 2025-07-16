@@ -70,6 +70,9 @@ pub struct Settings {
     /// When true, the timer list will not refresh automatically.
     #[serde(default)]
     pub disable_timer_updates: bool,
+    /// Keep the command prefix in the query after running an action.
+    #[serde(default)]
+    pub preserve_command: bool,
 }
 
 fn default_toasts() -> bool { true }
@@ -115,6 +118,7 @@ impl Default for Settings {
             hide_after_run: false,
             timer_refresh: default_timer_refresh(),
             disable_timer_updates: false,
+            preserve_command: false,
         }
     }
 }

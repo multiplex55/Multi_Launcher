@@ -119,6 +119,7 @@ impl PluginEditor {
                         Some(s.hide_after_run),
                         Some(s.timer_refresh),
                         Some(s.disable_timer_updates),
+                        Some(s.preserve_command),
                     );
 
                     app.plugins.reload_from_dirs(&self.plugin_dirs, app.clipboard_limit, false);
