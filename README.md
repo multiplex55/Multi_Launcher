@@ -137,7 +137,7 @@ for these fields.
 
 `query_scale` and `list_scale` control the size of the search field and the results list separately. Values around `1.0` keep the default look while higher numbers enlarge the respective element up to five times.
 `enable_toasts` controls short pop-up notifications when saving settings or commands. Set it to `false` to disable these messages.
-`fuzzy_weight` and `usage_weight` adjust how results are ranked. The fuzzy weight multiplies the match score while the usage weight favours frequently launched actions.
+`fuzzy_weight` and `usage_weight` adjust how results are ranked. The fuzzy weight multiplies the match score while the usage weight favours frequently launched actions. Set `"fuzzy_weight": 0` in `settings.json` for exact substring matching instead of fuzzy search.
 `history_limit` defines how many entries the history plugin keeps.
 `clipboard_limit` sets how many clipboard entries are persisted for the clipboard plugin.
 `enabled_capabilities` maps plugin names to capability identifiers so features can be toggled individually. The folders plugin, for example, exposes `show_full_path`.
@@ -294,6 +294,7 @@ RUST_LOG=info cargo run
 - Press the help hotkey (F1 by default) to display a quick list of available commands.
 - Right click a folder result to set a custom alias for easier access.
 - Use the *Snapshot* button in Settings when adjusting static window placement.
+- Searches are case-insensitive and also match on command aliases.
 - Tweak `fuzzy_weight` and `usage_weight` if you want results to favour name matches or past usage differently.
 
 
