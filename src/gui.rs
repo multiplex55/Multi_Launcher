@@ -34,6 +34,10 @@ use std::sync::{
 };
 use std::time::Instant;
 
+const SUBCOMMANDS: &[&str] = &[
+    "add", "rm", "list", "clear", "open", "new", "alias", "set", "pause", "resume", "cancel",
+];
+
 fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
         if (scale - 1.0).abs() > f32::EPSILON {
@@ -521,7 +525,16 @@ impl LauncherApp {
                 self.enabled_plugins.as_ref(),
                 self.enabled_capabilities.as_ref(),
             );
-            let query_term = trimmed_lc.splitn(2, ' ').nth(1).unwrap_or("").to_string();
+            let tail = trimmed_lc.splitn(2, " ").nth(1).unwrap_or("");
+            let mut query_term = tail.splitn(3, " ").nth(1).unwrap_or("").to_string();
+            if query_term.is_empty() {
+                let parts: Vec<&str> = tail.split_whitespace().collect();
+                if parts.len() == 1 && !SUBCOMMANDS.contains(&parts[0]) {
+                    query_term = parts[0].to_string();
+                } else if parts.len() > 1 {
+                    query_term = parts[1..].join(" ");
+                }
+            }
             for a in plugin_results {
                 if self.fuzzy_weight <= 0.0 {
                     if query_term.is_empty() {
