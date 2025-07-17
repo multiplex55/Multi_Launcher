@@ -342,7 +342,7 @@ impl LauncherApp {
 
         let settings_editor = SettingsEditor::new(&settings);
         let plugin_editor = PluginEditor::new(&settings);
-        let app = Self {
+        let mut app = Self {
             actions: actions.clone(),
             query: String::new(),
             results: actions,
@@ -445,6 +445,7 @@ impl LauncherApp {
             }
         }
 
+        app.search();
         app
     }
 
