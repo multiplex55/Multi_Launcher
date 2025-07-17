@@ -35,5 +35,16 @@ impl Plugin for RecyclePlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        #[cfg(target_os = "windows")]
+        {
+            vec![Action { label: "rec".into(), desc: "recycle".into(), action: "fill:rec".into(), args: None }]
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Vec::new()
+        }
+    }
 }
 

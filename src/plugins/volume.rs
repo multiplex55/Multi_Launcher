@@ -55,4 +55,18 @@ impl Plugin for VolumePlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        #[cfg(target_os = "windows")]
+        {
+            vec![
+                Action { label: "vol".into(), desc: "volume".into(), action: "fill:vol ".into(), args: None },
+                Action { label: "vol ma".into(), desc: "volume".into(), action: "fill:vol ma".into(), args: None },
+            ]
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Vec::new()
+        }
+    }
 }

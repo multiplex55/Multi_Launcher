@@ -454,6 +454,12 @@ impl LauncherApp {
         let trimmed = self.query.trim();
         let trimmed_lc = trimmed.to_lowercase();
 
+        if trimmed.is_empty() {
+            self.results = self.command_shortcuts();
+            self.selected = None;
+            return;
+        }
+
         let search_actions =
             trimmed_lc == APP_PREFIX || trimmed_lc.starts_with(&format!("{} ", APP_PREFIX));
         let action_query = if search_actions {
@@ -638,6 +644,19 @@ impl LauncherApp {
 
     pub fn focus_input(&mut self) {
         self.focus_query = true;
+    }
+
+    fn command_shortcuts(&self) -> Vec<Action> {
+        let mut cmds = self.plugins.commands();
+        for a in &self.actions {
+            cmds.push(Action {
+                label: format!("app {}", a.label),
+                desc: "app".into(),
+                action: format!("fill:app {}", a.label),
+                args: None,
+            });
+        }
+        cmds
     }
 
     fn any_panel_open(&self) -> bool {
@@ -901,6 +920,10 @@ impl eframe::App for LauncherApp {
                             if let Ok(count) = n.parse::<usize>() {
                                 self.cpu_list_dialog.open(count);
                             }
+                        } else if let Some(q) = a.action.strip_prefix("fill:") {
+                            self.query = q.to_string();
+                            refresh = true;
+                            set_focus = true;
                         } else if let Err(e) = launch_action(&a) {
                             self.error = Some(format!("Failed: {e}"));
                             self.error_time = Some(Instant::now());
@@ -1409,6 +1432,10 @@ impl eframe::App for LauncherApp {
                                     if let Ok(count) = n.parse::<usize>() {
                                         self.cpu_list_dialog.open(count);
                                     }
+                                } else if let Some(q) = a.action.strip_prefix("fill:") {
+                                    self.query = q.to_string();
+                                    refresh = true;
+                                    set_focus = true;
                                 } else if let Err(e) = launch_action(&a) {
                                     self.error = Some(format!("Failed: {e}"));
                                     self.error_time = Some(Instant::now());

@@ -596,4 +596,16 @@ impl Plugin for TimerPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search", "completion_dialog"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![
+            Action { label: "timer add".into(), desc: "timer".into(), action: "fill:timer add ".into(), args: None },
+            Action { label: "timer list".into(), desc: "timer".into(), action: "fill:timer list".into(), args: None },
+            Action { label: "timer pause".into(), desc: "timer".into(), action: "fill:timer pause ".into(), args: None },
+            Action { label: "timer resume".into(), desc: "timer".into(), action: "fill:timer resume ".into(), args: None },
+            Action { label: "timer rm".into(), desc: "timer".into(), action: "fill:timer rm".into(), args: None },
+            Action { label: "timer cancel".into(), desc: "timer".into(), action: "fill:timer cancel".into(), args: None },
+            Action { label: "alarm".into(), desc: "timer".into(), action: "fill:alarm ".into(), args: None },
+        ]
+    }
 }

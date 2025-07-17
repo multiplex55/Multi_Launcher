@@ -29,6 +29,10 @@ impl Plugin for WebSearchPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![Action { label: "g".into(), desc: "web_search".into(), action: "fill:g ".into(), args: None }]
+    }
 }
 
 pub struct CalculatorPlugin;
@@ -61,5 +65,9 @@ impl Plugin for CalculatorPlugin {
 
     fn capabilities(&self) -> &[&str] {
         &["search"]
+    }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![Action { label: "=".into(), desc: "calculator".into(), action: "fill:=".into(), args: None }]
     }
 }

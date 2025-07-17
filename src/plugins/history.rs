@@ -46,4 +46,11 @@ impl Plugin for HistoryPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![
+            Action { label: "hi".into(), desc: "history".into(), action: "fill:hi ".into(), args: None },
+            Action { label: "hi clear".into(), desc: "history".into(), action: "fill:hi clear".into(), args: None },
+        ]
+    }
 }

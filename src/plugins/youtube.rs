@@ -36,4 +36,8 @@ impl Plugin for YoutubePlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![Action { label: "yt".into(), desc: "youtube".into(), action: "fill:yt ".into(), args: None }]
+    }
 }

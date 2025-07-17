@@ -30,14 +30,14 @@ impl HelpWindow {
                     }
                     ui.separator();
                     ui.label(egui::RichText::new("Commands").strong());
-                    let mut infos = app.plugins.plugin_infos();
-                    infos.sort_by(|a, b| a.0.cmp(&b.0));
+                    let mut list = app.command_shortcuts();
+                    list.sort_by(|a, b| a.label.cmp(&b.label));
                     let area_height = ui.available_height();
                     egui::ScrollArea::vertical()
                         .max_height(area_height)
                         .show(ui, |ui| {
-                            for (name, desc, _) in &infos {
-                                ui.label(format!("{name}: {desc}"));
+                            for a in &list {
+                                ui.monospace(&a.label);
                             }
                         });
                 });

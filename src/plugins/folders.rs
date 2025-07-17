@@ -252,4 +252,12 @@ impl Plugin for FoldersPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search", "show_full_path"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![
+            Action { label: "f".into(), desc: "folders".into(), action: "fill:f ".into(), args: None },
+            Action { label: "f add".into(), desc: "folders".into(), action: "fill:f add ".into(), args: None },
+            Action { label: "f rm".into(), desc: "folders".into(), action: "fill:f rm ".into(), args: None },
+        ]
+    }
 }

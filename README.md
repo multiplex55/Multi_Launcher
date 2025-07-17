@@ -301,6 +301,7 @@ RUST_LOG=info cargo run
 ## Tips
 
 - Press the help hotkey (F1 by default) to display a quick list of available commands.
+- Leave the query empty to view plugin shortcut commands.
 - Right click a folder result to set a custom alias for easier access.
 - Use the *Snapshot* button in Settings when adjusting static window placement.
 - Searches are case-insensitive and also match on command aliases.

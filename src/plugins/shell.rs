@@ -182,4 +182,13 @@ impl Plugin for ShellPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![
+            Action { label: "sh".into(), desc: "shell".into(), action: "fill:sh ".into(), args: None },
+            Action { label: "sh add".into(), desc: "shell".into(), action: "fill:sh add ".into(), args: None },
+            Action { label: "sh rm".into(), desc: "shell".into(), action: "fill:sh rm ".into(), args: None },
+            Action { label: "sh list".into(), desc: "shell".into(), action: "fill:sh list".into(), args: None },
+        ]
+    }
 }

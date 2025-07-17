@@ -45,4 +45,15 @@ impl Plugin for BrightnessPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        #[cfg(target_os = "windows")]
+        {
+            vec![Action { label: "bright".into(), desc: "brightness".into(), action: "fill:bright ".into(), args: None }]
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Vec::new()
+        }
+    }
 }

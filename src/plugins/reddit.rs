@@ -33,4 +33,8 @@ impl Plugin for RedditPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![Action { label: "red".into(), desc: "reddit".into(), action: "fill:red ".into(), args: None }]
+    }
 }

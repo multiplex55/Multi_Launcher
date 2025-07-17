@@ -52,5 +52,9 @@ impl Plugin for AsciiArtPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![Action { label: "ascii".into(), desc: "asciiart".into(), action: "fill:ascii ".into(), args: None }]
+    }
 }
 

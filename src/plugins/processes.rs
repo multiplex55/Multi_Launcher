@@ -57,5 +57,9 @@ impl Plugin for ProcessesPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![Action { label: "ps".into(), desc: "processes".into(), action: "fill:ps ".into(), args: None }]
+    }
 }
 

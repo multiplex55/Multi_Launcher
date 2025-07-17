@@ -35,5 +35,9 @@ impl Plugin for WeatherPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![Action { label: "weather".into(), desc: "weather".into(), action: "fill:weather ".into(), args: None }]
+    }
 }
 
