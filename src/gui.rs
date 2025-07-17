@@ -460,12 +460,15 @@ impl LauncherApp {
                 res.push((cmd, 0.0));
             }
             for a in &self.actions {
-                res.push((Action {
-                    label: format!("app {}", a.label),
-                    desc: a.desc.clone(),
-                    action: a.action.clone(),
-                    args: a.args.clone(),
-                }, 0.0));
+                res.push((
+                    Action {
+                        label: format!("app {}", a.label),
+                        desc: a.desc.clone(),
+                        action: a.action.clone(),
+                        args: a.args.clone(),
+                    },
+                    0.0,
+                ));
             }
             self.results = res.into_iter().map(|(a, _)| a).collect();
             self.selected = None;
@@ -561,46 +564,72 @@ impl LauncherApp {
                 self.enabled_plugins.as_ref(),
                 self.enabled_capabilities.as_ref(),
             );
-            let tail = trimmed_lc.splitn(2, " ").nth(1).unwrap_or("");
-            let mut query_term = tail.splitn(3, " ").nth(1).unwrap_or("").to_string();
-            if query_term.is_empty() {
-                let parts: Vec<&str> = tail.split_whitespace().collect();
-                if parts.len() == 1 && !SUBCOMMANDS.contains(&parts[0]) {
-                    query_term = parts[0].to_string();
-                } else if parts.len() > 1 {
-                    query_term = parts[1..].join(" ");
-                }
-            }
-            for a in plugin_results {
-                if self.fuzzy_weight <= 0.0 {
-                    if query_term.is_empty() {
-                        res.push((a, 0.0));
-                    } else {
+            if plugin_results.is_empty() && !trimmed.is_empty() {
+                for a in self.plugins.commands() {
+                    if self.fuzzy_weight <= 0.0 {
                         let alias_match = self
                             .folder_aliases
                             .get(&a.action)
                             .or_else(|| self.bookmark_aliases.get(&a.action))
                             .and_then(|v| v.as_ref())
-                            .map(|s| s.to_lowercase().contains(&query_term))
+                            .map(|s| s.to_lowercase().contains(&trimmed_lc))
                             .unwrap_or(false);
-                        let label_match = a.label.to_lowercase().contains(&query_term);
-                        let desc_match = a.desc.to_lowercase().contains(&query_term);
+                        let label_match = a.label.to_lowercase().contains(&trimmed_lc);
+                        let desc_match = a.desc.to_lowercase().contains(&trimmed_lc);
                         if label_match || desc_match || alias_match {
                             let score = if alias_match { 1.0 } else { 0.0 };
                             res.push((a, score));
                         }
-                    }
-                } else {
-                    let score = if self.query.is_empty() {
-                        0.0
                     } else {
-                        self.matcher
-                            .fuzzy_match(&a.label, &self.query)
-                            .max(self.matcher.fuzzy_match(&a.desc, &self.query))
-                            .unwrap_or(0) as f32
-                            * self.fuzzy_weight
-                    };
-                    res.push((a, score));
+                        let s1 = self.matcher.fuzzy_match(&a.label, trimmed);
+                        let s2 = self.matcher.fuzzy_match(&a.desc, trimmed);
+                        if let Some(score) = s1.max(s2) {
+                            res.push((a, score as f32 * self.fuzzy_weight));
+                        }
+                    }
+                }
+            } else {
+                let tail = trimmed_lc.splitn(2, " ").nth(1).unwrap_or("");
+                let mut query_term = tail.splitn(3, " ").nth(1).unwrap_or("").to_string();
+                if query_term.is_empty() {
+                    let parts: Vec<&str> = tail.split_whitespace().collect();
+                    if parts.len() == 1 && !SUBCOMMANDS.contains(&parts[0]) {
+                        query_term = parts[0].to_string();
+                    } else if parts.len() > 1 {
+                        query_term = parts[1..].join(" ");
+                    }
+                }
+                for a in plugin_results {
+                    if self.fuzzy_weight <= 0.0 {
+                        if query_term.is_empty() {
+                            res.push((a, 0.0));
+                        } else {
+                            let alias_match = self
+                                .folder_aliases
+                                .get(&a.action)
+                                .or_else(|| self.bookmark_aliases.get(&a.action))
+                                .and_then(|v| v.as_ref())
+                                .map(|s| s.to_lowercase().contains(&query_term))
+                                .unwrap_or(false);
+                            let label_match = a.label.to_lowercase().contains(&query_term);
+                            let desc_match = a.desc.to_lowercase().contains(&query_term);
+                            if label_match || desc_match || alias_match {
+                                let score = if alias_match { 1.0 } else { 0.0 };
+                                res.push((a, score));
+                            }
+                        }
+                    } else {
+                        let score = if self.query.is_empty() {
+                            0.0
+                        } else {
+                            self.matcher
+                                .fuzzy_match(&a.label, &self.query)
+                                .max(self.matcher.fuzzy_match(&a.desc, &self.query))
+                                .unwrap_or(0) as f32
+                                * self.fuzzy_weight
+                        };
+                        res.push((a, score));
+                    }
                 }
             }
         }
