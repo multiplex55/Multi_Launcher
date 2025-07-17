@@ -199,6 +199,7 @@ Built-in plugins and their command prefixes are:
 - Recycle Bin cleanup (`rec`)
 - Temporary files (`tmp`, `tmp new [name]`, `tmp open`, `tmp clear`, `tmp list`, `tmp rm`)
 - ASCII art (`ascii text`)
+- Saved apps (`app <filter>` or just `app`)
 - Volume control (`vol 50`) *(Windows only)*
 - Brightness control (`bright 50`) *(Windows only)*
 - Command overview (`help`)
@@ -279,6 +280,9 @@ select the file interactively. Existing entries can be edited via the **Edit**
 button or by right clicking an app in the results list and choosing *Edit
 App*. Apps can also be removed from the list. All changes are written to
 `actions.json` immediately.
+
+Type `app <filter>` in the launcher to search these saved entries. Typing `app`
+alone lists all saved apps.
 
 ## Packaging
 

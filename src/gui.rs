@@ -39,6 +39,9 @@ const SUBCOMMANDS: &[&str] = &[
     "edit", "ma",
 ];
 
+/// Prefix used to search user saved applications.
+pub const APP_PREFIX: &str = "app";
+
 fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
         if (scale - 1.0).abs() > f32::EPSILON {
@@ -449,8 +452,20 @@ impl LauncherApp {
         let mut res: Vec<(Action, f32)> = Vec::new();
 
         let trimmed = self.query.trim();
-        let query_lc = self.query.to_lowercase();
         let trimmed_lc = trimmed.to_lowercase();
+
+        let search_actions =
+            trimmed_lc == APP_PREFIX || trimmed_lc.starts_with(&format!("{} ", APP_PREFIX));
+        let action_query = if search_actions {
+            if trimmed_lc == APP_PREFIX {
+                "".to_string()
+            } else {
+                trimmed.splitn(2, ' ').nth(1).unwrap_or("").to_string()
+            }
+        } else {
+            String::new()
+        };
+        let action_query_lc = action_query.to_lowercase();
 
         if trimmed_lc.starts_with("g ") {
             let filter = vec!["web_search".to_string()];
@@ -493,29 +508,31 @@ impl LauncherApp {
                 }
             }
         } else {
-            if self.query.is_empty() {
-                res.extend(self.actions.iter().cloned().map(|a| (a, 0.0)));
-            } else {
-                for a in &self.actions {
-                    if self.fuzzy_weight <= 0.0 {
-                        let alias_match = self
-                            .folder_aliases
-                            .get(&a.action)
-                            .or_else(|| self.bookmark_aliases.get(&a.action))
-                            .and_then(|v| v.as_ref())
-                            .map(|s| s.to_lowercase().contains(&query_lc))
-                            .unwrap_or(false);
-                        let label_match = a.label.to_lowercase().contains(&query_lc);
-                        let desc_match = a.desc.to_lowercase().contains(&query_lc);
-                        if label_match || desc_match || alias_match {
-                            let score = if alias_match { 1.0 } else { 0.0 };
-                            res.push((a.clone(), score));
-                        }
-                    } else {
-                        let s1 = self.matcher.fuzzy_match(&a.label, &self.query);
-                        let s2 = self.matcher.fuzzy_match(&a.desc, &self.query);
-                        if let Some(score) = s1.max(s2) {
-                            res.push((a.clone(), score as f32 * self.fuzzy_weight));
+            if search_actions {
+                if action_query.is_empty() {
+                    res.extend(self.actions.iter().cloned().map(|a| (a, 0.0)));
+                } else {
+                    for a in &self.actions {
+                        if self.fuzzy_weight <= 0.0 {
+                            let alias_match = self
+                                .folder_aliases
+                                .get(&a.action)
+                                .or_else(|| self.bookmark_aliases.get(&a.action))
+                                .and_then(|v| v.as_ref())
+                                .map(|s| s.to_lowercase().contains(&action_query_lc))
+                                .unwrap_or(false);
+                            let label_match = a.label.to_lowercase().contains(&action_query_lc);
+                            let desc_match = a.desc.to_lowercase().contains(&action_query_lc);
+                            if label_match || desc_match || alias_match {
+                                let score = if alias_match { 1.0 } else { 0.0 };
+                                res.push((a.clone(), score));
+                            }
+                        } else {
+                            let s1 = self.matcher.fuzzy_match(&a.label, &action_query);
+                            let s2 = self.matcher.fuzzy_match(&a.desc, &action_query);
+                            if let Some(score) = s1.max(s2) {
+                                res.push((a.clone(), score as f32 * self.fuzzy_weight));
+                            }
                         }
                     }
                 }

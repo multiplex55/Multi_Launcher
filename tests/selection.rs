@@ -1,4 +1,4 @@
-use multi_launcher::gui::LauncherApp;
+use multi_launcher::gui::{LauncherApp, APP_PREFIX};
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::actions::Action;
 use multi_launcher::settings::Settings;
@@ -33,6 +33,7 @@ fn arrow_keys_update_selection() {
         Action { label: "two".into(), desc: "".into(), action: "two".into(), args: None },
     ];
     let mut app = new_app(&ctx, acts);
+    app.query = APP_PREFIX.into();
     app.search();
     assert_eq!(app.selected, None);
     app.handle_key(egui::Key::ArrowDown);
@@ -51,6 +52,7 @@ fn enter_returns_selected_index() {
         Action { label: "two".into(), desc: "".into(), action: "two".into(), args: None },
     ];
     let mut app = new_app(&ctx, acts);
+    app.query = APP_PREFIX.into();
     app.search();
     app.handle_key(egui::Key::ArrowDown);
     let idx = app.handle_key(egui::Key::Enter);
