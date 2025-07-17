@@ -2,6 +2,7 @@ use eframe::egui;
 use multi_launcher::gui::LauncherApp;
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::plugins::bookmarks::{save_bookmarks, BookmarkEntry, BOOKMARKS_FILE};
+use multi_launcher::plugins::snippets::{save_snippets, SnippetEntry, SNIPPETS_FILE};
 use multi_launcher::settings::Settings;
 use once_cell::sync::Lazy;
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
@@ -73,6 +74,22 @@ fn plugin_command_unfiltered_when_no_query() {
     let ctx = egui::Context::default();
     let mut app = new_app(&ctx, settings);
     app.query = "bm list".into();
+    app.search();
+    assert_eq!(app.results.len(), 1);
+}
+
+#[test]
+fn snippet_edit_command_unfiltered() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+    let entries = vec![SnippetEntry { alias: "foo".into(), text: "bar".into() }];
+    save_snippets(SNIPPETS_FILE, &entries).unwrap();
+    let mut settings = Settings::default();
+    settings.fuzzy_weight = 0.0;
+    let ctx = egui::Context::default();
+    let mut app = new_app(&ctx, settings);
+    app.query = "cs edit".into();
     app.search();
     assert_eq!(app.results.len(), 1);
 }
