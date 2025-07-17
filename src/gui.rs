@@ -736,8 +736,8 @@ impl eframe::App for LauncherApp {
         TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    ui.menu_button("Commands", |ui| {
-                        if ui.button("Edit Commands").clicked() {
+                    ui.menu_button("Apps", |ui| {
+                        if ui.button("Edit Apps").clicked() {
                             self.show_editor = !self.show_editor;
                         }
                         if ui.button("Edit Plugins").clicked() {
@@ -1350,7 +1350,7 @@ impl eframe::App for LauncherApp {
                             }
                             if let Some(idx_act) = custom_idx {
                                 menu_resp.clone().context_menu(|ui| {
-                                    if ui.button("Edit Command").clicked() {
+                                    if ui.button("Edit App").clicked() {
                                         self.editor.open_edit(idx_act, &self.actions[idx_act]);
                                         self.show_editor = true;
                                         ui.close_menu();

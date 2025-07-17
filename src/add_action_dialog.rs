@@ -74,7 +74,7 @@ impl AddActionDialog {
         self.mode = DialogMode::Edit(idx);
     }
 
-    /// Draw the "Add Command" dialog and update `app` with any new action.
+    /// Draw the "Add App" dialog and update `app` with any new action.
     ///
     /// * `ctx` - Egui context used to render the window.
     /// * `app` - Application state that will receive the new action if the
@@ -85,8 +85,8 @@ impl AddActionDialog {
         }
         let mut should_close = false;
         let title = match self.mode {
-            DialogMode::Add => "Add Command",
-            DialogMode::Edit(_) => "Edit Command",
+            DialogMode::Add => "Add App",
+            DialogMode::Edit(_) => "Edit App",
         };
         egui::Window::new(title)
             .open(&mut self.open)
