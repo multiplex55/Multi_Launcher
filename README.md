@@ -138,7 +138,10 @@ for these fields.
 
 `query_scale` and `list_scale` control the size of the search field and the results list separately. Values around `1.0` keep the default look while higher numbers enlarge the respective element up to five times.
 `enable_toasts` controls short pop-up notifications when saving settings or commands. Set it to `false` to disable these messages.
-`fuzzy_weight` and `usage_weight` adjust how results are ranked. The fuzzy weight multiplies the match score while the usage weight favours frequently launched actions. Set `"fuzzy_weight": 0` in `settings.json` for exact substring matching instead of fuzzy search.
+`fuzzy_weight` and `usage_weight` adjust how results are ranked. The fuzzy weight multiplies the match score while the usage weight favours frequently launched actions. Setting `"fuzzy_weight": 0` in `settings.json` forces case-insensitive substring matching across all plugins.
+Command aliases are checked first and a matching alias ranks above other results.
+
+Example: typing `test` will only list entries containing `test`. If an alias matches this word it appears before the other results.
 `history_limit` defines how many entries the history plugin keeps.
 `clipboard_limit` sets how many clipboard entries are persisted for the clipboard plugin.
 `preserve_command` keeps the typed command prefix (like `bm add` or `f add`) in the search field after running an action.
