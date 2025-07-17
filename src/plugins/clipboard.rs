@@ -186,4 +186,12 @@ impl Plugin for ClipboardPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![
+            Action { label: "cb".into(), desc: "Clipboard".into(), action: "query:cb".into(), args: None },
+            Action { label: "cb list".into(), desc: "Clipboard".into(), action: "query:cb list".into(), args: None },
+            Action { label: "cb clear".into(), desc: "Clipboard".into(), action: "query:cb clear".into(), args: None },
+        ]
+    }
 }

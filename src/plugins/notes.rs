@@ -194,4 +194,13 @@ impl Plugin for NotesPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![
+            Action { label: "note".into(), desc: "Note".into(), action: "query:note".into(), args: None },
+            Action { label: "note add".into(), desc: "Note".into(), action: "query:note add ".into(), args: None },
+            Action { label: "note list".into(), desc: "Note".into(), action: "query:note list".into(), args: None },
+            Action { label: "note rm".into(), desc: "Note".into(), action: "query:note rm ".into(), args: None },
+        ]
+    }
 }

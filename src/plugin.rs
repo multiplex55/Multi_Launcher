@@ -38,6 +38,10 @@ pub trait Plugin: Send + Sync {
     fn description(&self) -> &str;
     /// Capabilities offered by the plugin
     fn capabilities(&self) -> &[&str];
+    /// Query shortcuts offered by the plugin
+    fn commands(&self) -> Vec<Action> {
+        Vec::new()
+    }
 }
 
 /// A manager that holds plugins
@@ -126,6 +130,15 @@ impl PluginManager {
                 )
             })
             .collect()
+    }
+
+    /// Collect command shortcuts from all plugins.
+    pub fn commands(&self) -> Vec<Action> {
+        let mut out = Vec::new();
+        for p in &self.plugins {
+            out.extend(p.commands());
+        }
+        out
     }
 
     pub fn load_dir(&mut self, path: &str) -> anyhow::Result<()> {

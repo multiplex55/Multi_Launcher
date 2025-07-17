@@ -252,4 +252,15 @@ impl Plugin for TempfilePlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![
+            Action { label: "tmp".into(), desc: "Tempfile".into(), action: "query:tmp".into(), args: None },
+            Action { label: "tmp new".into(), desc: "Tempfile".into(), action: "query:tmp new ".into(), args: None },
+            Action { label: "tmp open".into(), desc: "Tempfile".into(), action: "query:tmp open".into(), args: None },
+            Action { label: "tmp clear".into(), desc: "Tempfile".into(), action: "query:tmp clear".into(), args: None },
+            Action { label: "tmp list".into(), desc: "Tempfile".into(), action: "query:tmp list".into(), args: None },
+            Action { label: "tmp rm".into(), desc: "Tempfile".into(), action: "query:tmp rm ".into(), args: None },
+        ]
+    }
 }

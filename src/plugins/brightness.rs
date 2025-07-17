@@ -45,4 +45,13 @@ impl Plugin for BrightnessPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![Action {
+            label: "bright".into(),
+            desc: "Brightness".into(),
+            action: "query:bright ".into(),
+            args: None,
+        }]
+    }
 }

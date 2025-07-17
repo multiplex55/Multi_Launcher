@@ -36,5 +36,9 @@ impl Plugin for WikipediaPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![Action { label: "wiki".into(), desc: "Wikipedia".into(), action: "query:wiki ".into(), args: None }]
+    }
 }
 

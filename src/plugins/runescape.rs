@@ -47,5 +47,12 @@ impl Plugin for RunescapeSearchPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![
+            Action { label: "rs".into(), desc: "Runescape".into(), action: "query:rs ".into(), args: None },
+            Action { label: "osrs".into(), desc: "Runescape".into(), action: "query:osrs ".into(), args: None },
+        ]
+    }
 }
 

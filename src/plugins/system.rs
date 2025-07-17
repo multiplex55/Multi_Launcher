@@ -34,4 +34,8 @@ impl Plugin for SystemPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![Action { label: "sys".into(), desc: "System".into(), action: "query:sys ".into(), args: None }]
+    }
 }

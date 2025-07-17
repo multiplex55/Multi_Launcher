@@ -118,4 +118,11 @@ impl Plugin for UnitConvertPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![
+            Action { label: "conv".into(), desc: "Unit convert".into(), action: "query:conv ".into(), args: None },
+            Action { label: "convert".into(), desc: "Unit convert".into(), action: "query:convert ".into(), args: None },
+        ]
+    }
 }
