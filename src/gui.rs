@@ -505,11 +505,11 @@ impl LauncherApp {
                             .and_then(|v| v.as_ref())
                             .map(|s| s.to_lowercase().contains(&query_lc))
                             .unwrap_or(false);
-                        if a.label.to_lowercase().contains(&query_lc)
-                            || a.desc.to_lowercase().contains(&query_lc)
-                            || alias_match
-                        {
-                            res.push((a.clone(), 0.0));
+                        let label_match = a.label.to_lowercase().contains(&query_lc);
+                        let desc_match = a.desc.to_lowercase().contains(&query_lc);
+                        if label_match || desc_match || alias_match {
+                            let score = if alias_match { 1.0 } else { 0.0 };
+                            res.push((a.clone(), score));
                         }
                     } else {
                         let s1 = self.matcher.fuzzy_match(&a.label, &self.query);
