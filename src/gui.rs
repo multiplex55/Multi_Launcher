@@ -454,25 +454,25 @@ impl LauncherApp {
                 Some(&filter),
                 self.enabled_capabilities.as_ref(),
             );
-            let query_term = trimmed_lc
-                .splitn(2, ' ')
-                .nth(1)
-                .unwrap_or(&trimmed_lc)
-                .to_string();
-            for mut a in plugin_results {
+            let query_term = trimmed_lc.splitn(2, ' ').nth(1).unwrap_or("").to_string();
+            for a in plugin_results {
                 if self.fuzzy_weight <= 0.0 {
-                    let alias_match = self
-                        .folder_aliases
-                        .get(&a.action)
-                        .or_else(|| self.bookmark_aliases.get(&a.action))
-                        .and_then(|v| v.as_ref())
-                        .map(|s| s.to_lowercase().contains(&query_term))
-                        .unwrap_or(false);
-                    let label_match = a.label.to_lowercase().contains(&query_term);
-                    let desc_match = a.desc.to_lowercase().contains(&query_term);
-                    if label_match || desc_match || alias_match {
-                        let score = if alias_match { 1.0 } else { 0.0 };
-                        res.push((a, score));
+                    if query_term.is_empty() {
+                        res.push((a, 0.0));
+                    } else {
+                        let alias_match = self
+                            .folder_aliases
+                            .get(&a.action)
+                            .or_else(|| self.bookmark_aliases.get(&a.action))
+                            .and_then(|v| v.as_ref())
+                            .map(|s| s.to_lowercase().contains(&query_term))
+                            .unwrap_or(false);
+                        let label_match = a.label.to_lowercase().contains(&query_term);
+                        let desc_match = a.desc.to_lowercase().contains(&query_term);
+                        if label_match || desc_match || alias_match {
+                            let score = if alias_match { 1.0 } else { 0.0 };
+                            res.push((a, score));
+                        }
                     }
                 } else {
                     let score = if self.query.is_empty() {
@@ -521,25 +521,25 @@ impl LauncherApp {
                 self.enabled_plugins.as_ref(),
                 self.enabled_capabilities.as_ref(),
             );
-            let query_term = trimmed_lc
-                .splitn(2, ' ')
-                .nth(1)
-                .unwrap_or(&trimmed_lc)
-                .to_string();
-            for mut a in plugin_results {
+            let query_term = trimmed_lc.splitn(2, ' ').nth(1).unwrap_or("").to_string();
+            for a in plugin_results {
                 if self.fuzzy_weight <= 0.0 {
-                    let alias_match = self
-                        .folder_aliases
-                        .get(&a.action)
-                        .or_else(|| self.bookmark_aliases.get(&a.action))
-                        .and_then(|v| v.as_ref())
-                        .map(|s| s.to_lowercase().contains(&query_term))
-                        .unwrap_or(false);
-                    let label_match = a.label.to_lowercase().contains(&query_term);
-                    let desc_match = a.desc.to_lowercase().contains(&query_term);
-                    if label_match || desc_match || alias_match {
-                        let score = if alias_match { 1.0 } else { 0.0 };
-                        res.push((a, score));
+                    if query_term.is_empty() {
+                        res.push((a, 0.0));
+                    } else {
+                        let alias_match = self
+                            .folder_aliases
+                            .get(&a.action)
+                            .or_else(|| self.bookmark_aliases.get(&a.action))
+                            .and_then(|v| v.as_ref())
+                            .map(|s| s.to_lowercase().contains(&query_term))
+                            .unwrap_or(false);
+                        let label_match = a.label.to_lowercase().contains(&query_term);
+                        let desc_match = a.desc.to_lowercase().contains(&query_term);
+                        if label_match || desc_match || alias_match {
+                            let score = if alias_match { 1.0 } else { 0.0 };
+                            res.push((a, score));
+                        }
                     }
                 } else {
                     let score = if self.query.is_empty() {
@@ -806,10 +806,8 @@ impl eframe::App for LauncherApp {
             }
 
             scale_ui(ui, self.query_scale, |ui| {
-                let input = ui.add(
-                    egui::TextEdit::singleline(&mut self.query)
-                        .desired_width(f32::INFINITY),
-                );
+                let input = ui
+                    .add(egui::TextEdit::singleline(&mut self.query).desired_width(f32::INFINITY));
                 if just_became_visible || self.focus_query {
                     input.request_focus();
                     self.focus_query = false;
