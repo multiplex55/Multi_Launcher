@@ -282,4 +282,33 @@ impl Plugin for BookmarksPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![
+            Action {
+                label: "bm".into(),
+                desc: "Bookmark".into(),
+                action: "query:bm ".into(),
+                args: None,
+            },
+            Action {
+                label: "bm add".into(),
+                desc: "Bookmark".into(),
+                action: "query:bm add ".into(),
+                args: None,
+            },
+            Action {
+                label: "bm rm".into(),
+                desc: "Bookmark".into(),
+                action: "query:bm rm ".into(),
+                args: None,
+            },
+            Action {
+                label: "bm list".into(),
+                desc: "Bookmark".into(),
+                action: "query:bm list".into(),
+                args: None,
+            },
+        ]
+    }
 }

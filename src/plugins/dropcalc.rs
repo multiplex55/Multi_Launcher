@@ -60,5 +60,14 @@ impl Plugin for DropCalcPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![Action {
+            label: "drop <p> <n>".into(),
+            desc: "DropCalc".into(),
+            action: "query:drop ".into(),
+            args: None,
+        }]
+    }
 }
 

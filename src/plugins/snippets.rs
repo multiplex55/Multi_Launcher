@@ -222,4 +222,14 @@ impl Plugin for SnippetsPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![
+            Action { label: "cs".into(), desc: "Snippet".into(), action: "query:cs".into(), args: None },
+            Action { label: "cs add".into(), desc: "Snippet".into(), action: "query:cs add ".into(), args: None },
+            Action { label: "cs rm".into(), desc: "Snippet".into(), action: "query:cs rm ".into(), args: None },
+            Action { label: "cs list".into(), desc: "Snippet".into(), action: "query:cs list".into(), args: None },
+            Action { label: "cs edit".into(), desc: "Snippet".into(), action: "query:cs edit".into(), args: None },
+        ]
+    }
 }

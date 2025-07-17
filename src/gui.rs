@@ -454,6 +454,23 @@ impl LauncherApp {
         let trimmed = self.query.trim();
         let trimmed_lc = trimmed.to_lowercase();
 
+        if trimmed.is_empty() {
+            for cmd in self.plugins.commands() {
+                res.push((cmd, 0.0));
+            }
+            for a in &self.actions {
+                res.push((Action {
+                    label: format!("app {}", a.label),
+                    desc: a.desc.clone(),
+                    action: a.action.clone(),
+                    args: a.args.clone(),
+                }, 0.0));
+            }
+            self.results = res.into_iter().map(|(a, _)| a).collect();
+            self.selected = None;
+            return;
+        }
+
         let search_actions =
             trimmed_lc == APP_PREFIX || trimmed_lc.starts_with(&format!("{} ", APP_PREFIX));
         let action_query = if search_actions {
@@ -871,7 +888,11 @@ impl eframe::App for LauncherApp {
                         let current = self.query.clone();
                         let mut refresh = false;
                         let mut set_focus = false;
-                        if a.action == "help:show" {
+                        if let Some(new_q) = a.action.strip_prefix("query:") {
+                            self.query = new_q.to_string();
+                            self.search();
+                            set_focus = true;
+                        } else if a.action == "help:show" {
                             self.help_window.open = true;
                         } else if a.action == "timer:dialog:timer" {
                             self.timer_dialog.open_timer();

@@ -105,4 +105,13 @@ impl Plugin for SysInfoPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![
+            Action { label: "info".into(), desc: "SysInfo".into(), action: "query:info".into(), args: None },
+            Action { label: "info cpu".into(), desc: "SysInfo".into(), action: "query:info cpu".into(), args: None },
+            Action { label: "info mem".into(), desc: "SysInfo".into(), action: "query:info mem".into(), args: None },
+            Action { label: "info disk".into(), desc: "SysInfo".into(), action: "query:info disk".into(), args: None },
+        ]
+    }
 }

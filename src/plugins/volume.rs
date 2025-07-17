@@ -55,4 +55,11 @@ impl Plugin for VolumePlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![
+            Action { label: "vol".into(), desc: "Volume".into(), action: "query:vol ".into(), args: None },
+            Action { label: "vol ma".into(), desc: "Volume".into(), action: "query:vol ma".into(), args: None },
+        ]
+    }
 }

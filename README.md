@@ -209,6 +209,8 @@ Built-in plugins and their command prefixes are:
    timer completes.
 - Weather lookup (`weather Berlin`)
 
+When the search box is empty the launcher shows these shortcuts along with `app <alias>` entries for saved actions.
+
 On Windows the optional `vol` and `bright` plugins allow changing system volume
 and display brightness. These plugins are stubbed on other platforms and simply
 return no results.

@@ -225,4 +225,14 @@ impl Plugin for TodoPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![
+            Action { label: "todo".into(), desc: "Todo".into(), action: "query:todo".into(), args: None },
+            Action { label: "todo add".into(), desc: "Todo".into(), action: "query:todo add ".into(), args: None },
+            Action { label: "todo list".into(), desc: "Todo".into(), action: "query:todo list".into(), args: None },
+            Action { label: "todo rm".into(), desc: "Todo".into(), action: "query:todo rm ".into(), args: None },
+            Action { label: "todo clear".into(), desc: "Todo".into(), action: "query:todo clear".into(), args: None },
+        ]
+    }
 }

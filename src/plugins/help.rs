@@ -33,5 +33,14 @@ impl Plugin for HelpPlugin {
     fn capabilities(&self) -> &[&str] {
         &["search"]
     }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![Action {
+            label: "help".into(),
+            desc: "Help".into(),
+            action: "query:help".into(),
+            args: None,
+        }]
+    }
 }
 
