@@ -266,18 +266,18 @@ memory and disk usage or `info cpu` for a single metric.
 ### Security Considerations
 The shell plugin runs commands using the system shell without sanitising input. Only enable it if you trust the commands you type. Errors while spawning the process are logged.
 Type `sh` in the launcher to open the shell command editor for managing predefined commands. Saved commands can also be added with `sh add <name> <command>`, removed via `sh rm <pattern>` or listed with `sh list`.
-## Editing Commands
+## Editing Apps
 The launcher stores its custom actions in `actions.json` next to the
-executable. This file is created automatically the first time you save a
-command. While running the application you can manage this list through
-**Edit Commands**. Open the launcher with the configured hotkey and choose
-*Edit Commands* from the menu.
-Use the **New Command** button to open the *Add Command* dialog where you enter
+executable. This file is created automatically the first time you save an
+app. While running the application you can manage this list through
+**Edit Apps**. Open the launcher with the configured hotkey and choose
+*Edit Apps* from the menu.
+Use the **New App** button to open the *Add App* dialog where you enter
 a label, description and the executable path. Enable **Add arguments** to supply
 extra command line parameters. The **Browse** button lets you
 select the file interactively. Existing entries can be edited via the **Edit**
-button or by right clicking a command in the results list and choosing *Edit
-Command*. Commands can also be removed from the list. All changes are written to
+button or by right clicking an app in the results list and choosing *Edit
+App*. Apps can also be removed from the list. All changes are written to
 `actions.json` immediately.
 
 ## Packaging

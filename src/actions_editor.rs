@@ -3,10 +3,10 @@ use crate::add_action_dialog::AddActionDialog;
 use crate::gui::LauncherApp;
 use eframe::egui;
 
-/// State container for the command editor window.
+/// State container for the app editor window.
 ///
 /// It tracks the current search filter and manages the nested
-/// [`AddActionDialog`] used when creating new commands.
+/// [`AddActionDialog`] used when creating new apps.
 pub struct ActionsEditor {
     /// Search text used to filter the displayed actions.
     search: String,
@@ -24,25 +24,25 @@ impl Default for ActionsEditor {
 }
 
 impl ActionsEditor {
-    /// Open the dialog for editing an existing command.
+    /// Open the dialog for editing an existing app.
     pub fn open_edit(&mut self, idx: usize, act: &crate::actions::Action) {
         self.dialog.open_edit(idx, act);
     }
 
-    /// Render the command editor window.
+    /// Render the app editor window.
     ///
     /// * `ctx` - Egui context used for drawing the editor UI.
     /// * `app` - Mutable reference to the application state. Actions can be
     ///   added or removed and will be persisted when modified.
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         let mut open = app.show_editor;
-        egui::Window::new("Command Editor")
+        egui::Window::new("App Editor")
             .open(&mut open)
             .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Search");
                 ui.text_edit_singleline(&mut self.search);
-                if ui.button("New Command").clicked() {
+                if ui.button("New App").clicked() {
                     self.dialog.open_add();
                 }
             });
