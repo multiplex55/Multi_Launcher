@@ -943,6 +943,7 @@ impl eframe::App for LauncherApp {
                         let mut refresh = false;
                         let mut set_focus = false;
                         if let Some(new_q) = a.action.strip_prefix("query:") {
+                            tracing::debug!("query action via Enter: {new_q}");
                             self.query = new_q.to_string();
                             self.search();
                             set_focus = true;
@@ -1460,6 +1461,7 @@ impl eframe::App for LauncherApp {
                                 let a = a.clone();
                                 let current = self.query.clone();
                                 if let Some(new_q) = a.action.strip_prefix("query:") {
+                                    tracing::debug!("query action via click: {new_q}");
                                     query_update = Some(new_q.to_string());
                                     set_focus = true;
                                     tracing::debug!("move_cursor_end set via mouse click");
@@ -1654,7 +1656,7 @@ impl eframe::App for LauncherApp {
                             }
                         }
                         if let Some(new_q) = query_update {
-                            tracing::debug!("query updated from action click");
+                            tracing::debug!("query updated from action click: {new_q}");
                             self.query = new_q;
                             self.search();
                         }
