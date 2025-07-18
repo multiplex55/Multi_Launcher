@@ -886,7 +886,24 @@ impl eframe::App for LauncherApp {
             }
 
             scale_ui(ui, self.query_scale, |ui| {
-                let input_id = "query_input";
+                let input_id = egui::Id::new("query_input");
+
+                if self.move_cursor_end {
+                    let len = self.query.chars().count();
+                    tracing::debug!("moving cursor to end: {len}");
+                    ui.ctx().data_mut(|data| {
+                        let state = data
+                            .get_persisted_mut_or_default::<egui::widgets::text_edit::TextEditState>(
+                                input_id,
+                            );
+                        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                            egui::text::CCursor::new(len),
+                        )));
+                    });
+                    self.move_cursor_end = false;
+                    tracing::debug!("move_cursor_end cleared after moving");
+                }
+
                 let input = ui.add(
                     egui::TextEdit::singleline(&mut self.query)
                         .id_source(input_id)
@@ -895,24 +912,6 @@ impl eframe::App for LauncherApp {
                 if just_became_visible || self.focus_query {
                     input.request_focus();
                     self.focus_query = false;
-                }
-                if self.move_cursor_end {
-                    if input.has_focus() {
-                        tracing::debug!("moving cursor to end: {} chars", self.query.chars().count());
-                        ui.ctx().data_mut(|data| {
-                            let state = data.get_persisted_mut_or_default::<egui::widgets::text_edit::TextEditState>(
-                                egui::Id::new(input_id),
-                            );
-                            let len = self.query.chars().count();
-                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
-                                egui::text::CCursor::new(len),
-                            )));
-                        });
-                        self.move_cursor_end = false;
-                        tracing::debug!("move_cursor_end cleared after moving");
-                    } else {
-                        tracing::debug!("move_cursor_end flagged but input lacks focus");
-                    }
                 }
                 if input.changed() {
                     self.search();
