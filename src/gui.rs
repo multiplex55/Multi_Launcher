@@ -101,6 +101,7 @@ pub struct LauncherApp {
     pub window_size: (i32, i32),
     pub window_pos: (i32, i32),
     focus_query: bool,
+    move_cursor_end: bool,
     toasts: egui_toast::Toasts,
     pub enable_toasts: bool,
     alias_dialog: crate::alias_dialog::AliasDialog,
@@ -377,6 +378,7 @@ impl LauncherApp {
             window_size: win_size,
             window_pos: (0, 0),
             focus_query: false,
+            move_cursor_end: false,
             toasts,
             enable_toasts,
             alias_dialog: crate::alias_dialog::AliasDialog::default(),
@@ -884,11 +886,19 @@ impl eframe::App for LauncherApp {
             }
 
             scale_ui(ui, self.query_scale, |ui| {
-                let input = ui
-                    .add(egui::TextEdit::singleline(&mut self.query).desired_width(f32::INFINITY));
+                let input_id = "query_input";
+                let input = ui.add(
+                    egui::TextEdit::singleline(&mut self.query)
+                        .id_source(input_id)
+                        .cursor_at_end(self.move_cursor_end)
+                        .desired_width(f32::INFINITY),
+                );
                 if just_became_visible || self.focus_query {
                     input.request_focus();
                     self.focus_query = false;
+                }
+                if self.move_cursor_end {
+                    self.move_cursor_end = false;
                 }
                 if input.changed() {
                     self.search();
@@ -922,6 +932,7 @@ impl eframe::App for LauncherApp {
                             self.query = new_q.to_string();
                             self.search();
                             set_focus = true;
+                            self.move_cursor_end = true;
                         } else if a.action == "help:show" {
                             self.help_window.open = true;
                         } else if a.action == "timer:dialog:timer" {
@@ -1436,6 +1447,7 @@ impl eframe::App for LauncherApp {
                                     self.query = new_q.to_string();
                                     refresh = true;
                                     set_focus = true;
+                                    self.move_cursor_end = true;
                                 } else if a.action == "help:show" {
                                     self.help_window.open = true;
                                 } else if a.action == "timer:dialog:timer" {
