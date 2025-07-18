@@ -1174,6 +1174,7 @@ impl eframe::App for LauncherApp {
                     scale_ui(ui, self.list_scale, |ui| {
                         let mut refresh = false;
                         let mut set_focus = false;
+                        let mut clicked_query: Option<String> = None;
                         let show_full = self
                             .enabled_capabilities
                             .as_ref()
@@ -1464,8 +1465,7 @@ impl eframe::App for LauncherApp {
                                 let current = self.query.clone();
                                 if let Some(new_q) = a.action.strip_prefix("query:") {
                                     tracing::debug!("query action via click: {new_q}");
-                                    self.query = new_q.to_string();
-                                    self.search();
+                                    clicked_query = Some(new_q.to_string());
                                     set_focus = true;
                                     tracing::debug!("move_cursor_end set via mouse click");
                                     self.move_cursor_end = true;
@@ -1657,6 +1657,10 @@ impl eframe::App for LauncherApp {
                                 }
                                 self.selected = Some(idx);
                             }
+                        }
+                        if let Some(new_q) = clicked_query {
+                            self.query = new_q;
+                            self.search();
                         }
                         if refresh {
                             self.search();
