@@ -890,14 +890,22 @@ impl eframe::App for LauncherApp {
                 let input = ui.add(
                     egui::TextEdit::singleline(&mut self.query)
                         .id_source(input_id)
-                        .cursor_at_end(self.move_cursor_end)
                         .desired_width(f32::INFINITY),
                 );
                 if just_became_visible || self.focus_query {
                     input.request_focus();
                     self.focus_query = false;
                 }
-                if self.move_cursor_end {
+                if self.move_cursor_end && input.has_focus() {
+                    ui.ctx().data_mut(|data| {
+                        let state = data.get_persisted_mut_or_default::<egui::widgets::text_edit::TextEditState>(
+                            egui::Id::new(input_id),
+                        );
+                        let len = self.query.chars().count();
+                        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                            egui::text::CCursor::new(len),
+                        )));
+                    });
                     self.move_cursor_end = false;
                 }
                 if input.changed() {
@@ -1157,6 +1165,7 @@ impl eframe::App for LauncherApp {
                     scale_ui(ui, self.list_scale, |ui| {
                         let mut refresh = false;
                         let mut set_focus = false;
+                        let mut query_update: Option<String> = None;
                         let show_full = self
                             .enabled_capabilities
                             .as_ref()
@@ -1444,8 +1453,7 @@ impl eframe::App for LauncherApp {
                                 let a = a.clone();
                                 let current = self.query.clone();
                                 if let Some(new_q) = a.action.strip_prefix("query:") {
-                                    self.query = new_q.to_string();
-                                    refresh = true;
+                                    query_update = Some(new_q.to_string());
                                     set_focus = true;
                                     self.move_cursor_end = true;
                                 } else if a.action == "help:show" {
@@ -1636,6 +1644,10 @@ impl eframe::App for LauncherApp {
                                 }
                                 self.selected = Some(idx);
                             }
+                        }
+                        if let Some(new_q) = query_update {
+                            self.query = new_q;
+                            self.search();
                         }
                         if refresh {
                             self.search();
