@@ -1146,8 +1146,6 @@ impl eframe::App for LauncherApp {
                     scale_ui(ui, self.list_scale, |ui| {
                         let mut refresh = false;
                         let mut set_focus = false;
-                        let alias_map = &self.folder_aliases;
-                        let bm_map = &self.bookmark_aliases;
                         let show_full = self
                             .enabled_capabilities
                             .as_ref()
@@ -1155,7 +1153,8 @@ impl eframe::App for LauncherApp {
                             .map(|caps| caps.contains(&"show_full_path".to_string()))
                             .unwrap_or(false);
                         for (idx, a) in self.results.iter().enumerate() {
-                            let aliased = alias_map.get(&a.action).and_then(|v| v.as_ref());
+                            let aliased =
+                                self.folder_aliases.get(&a.action).and_then(|v| v.as_ref());
                             let show_path = show_full || aliased.is_none();
                             let text = if show_path {
                                 format!("{} : {}", a.label, a.desc)
@@ -1187,7 +1186,8 @@ impl eframe::App for LauncherApp {
                                 .iter()
                                 .take(self.custom_len)
                                 .position(|act| act.action == a.action && act.label == a.label);
-                            if alias_map.contains_key(&a.action) && !a.action.starts_with("folder:")
+                            if self.folder_aliases.contains_key(&a.action)
+                                && !a.action.starts_with("folder:")
                             {
                                 menu_resp.clone().context_menu(|ui| {
                                     if ui.button("Set Alias").clicked() {
@@ -1217,7 +1217,7 @@ impl eframe::App for LauncherApp {
                                         ui.close_menu();
                                     }
                                 });
-                            } else if bm_map.contains_key(&a.action) {
+                            } else if self.bookmark_aliases.contains_key(&a.action) {
                                 menu_resp.clone().context_menu(|ui| {
                                     if ui.button("Set Alias").clicked() {
                                         self.bookmark_alias_dialog.open(&a.action);
@@ -1432,7 +1432,11 @@ impl eframe::App for LauncherApp {
                             if resp.clicked() {
                                 let a = a.clone();
                                 let current = self.query.clone();
-                                if a.action == "help:show" {
+                                if let Some(new_q) = a.action.strip_prefix("query:") {
+                                    self.query = new_q.to_string();
+                                    refresh = true;
+                                    set_focus = true;
+                                } else if a.action == "help:show" {
                                     self.help_window.open = true;
                                 } else if a.action == "timer:dialog:timer" {
                                     self.timer_dialog.open_timer();
