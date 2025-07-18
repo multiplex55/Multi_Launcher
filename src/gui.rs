@@ -896,17 +896,23 @@ impl eframe::App for LauncherApp {
                     input.request_focus();
                     self.focus_query = false;
                 }
-                if self.move_cursor_end && input.has_focus() {
-                    ui.ctx().data_mut(|data| {
-                        let state = data.get_persisted_mut_or_default::<egui::widgets::text_edit::TextEditState>(
-                            egui::Id::new(input_id),
-                        );
-                        let len = self.query.chars().count();
-                        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
-                            egui::text::CCursor::new(len),
-                        )));
-                    });
-                    self.move_cursor_end = false;
+                if self.move_cursor_end {
+                    if input.has_focus() {
+                        tracing::debug!("moving cursor to end: {} chars", self.query.chars().count());
+                        ui.ctx().data_mut(|data| {
+                            let state = data.get_persisted_mut_or_default::<egui::widgets::text_edit::TextEditState>(
+                                egui::Id::new(input_id),
+                            );
+                            let len = self.query.chars().count();
+                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                                egui::text::CCursor::new(len),
+                            )));
+                        });
+                        self.move_cursor_end = false;
+                        tracing::debug!("move_cursor_end cleared after moving");
+                    } else {
+                        tracing::debug!("move_cursor_end flagged but input lacks focus");
+                    }
                 }
                 if input.changed() {
                     self.search();
@@ -940,6 +946,7 @@ impl eframe::App for LauncherApp {
                             self.query = new_q.to_string();
                             self.search();
                             set_focus = true;
+                            tracing::debug!("move_cursor_end set via Enter key");
                             self.move_cursor_end = true;
                         } else if a.action == "help:show" {
                             self.help_window.open = true;
@@ -1455,6 +1462,7 @@ impl eframe::App for LauncherApp {
                                 if let Some(new_q) = a.action.strip_prefix("query:") {
                                     query_update = Some(new_q.to_string());
                                     set_focus = true;
+                                    tracing::debug!("move_cursor_end set via mouse click");
                                     self.move_cursor_end = true;
                                 } else if a.action == "help:show" {
                                     self.help_window.open = true;
@@ -1646,6 +1654,7 @@ impl eframe::App for LauncherApp {
                             }
                         }
                         if let Some(new_q) = query_update {
+                            tracing::debug!("query updated from action click");
                             self.query = new_q;
                             self.search();
                         }
