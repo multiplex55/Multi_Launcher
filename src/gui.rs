@@ -1174,7 +1174,8 @@ impl eframe::App for LauncherApp {
                     scale_ui(ui, self.list_scale, |ui| {
                         let mut refresh = false;
                         let mut set_focus = false;
-                        let mut query_update: Option<String> = None;
+                        let alias_map = &self.folder_aliases;
+                        let bm_map = &self.bookmark_aliases;
                         let show_full = self
                             .enabled_capabilities
                             .as_ref()
@@ -1182,8 +1183,7 @@ impl eframe::App for LauncherApp {
                             .map(|caps| caps.contains(&"show_full_path".to_string()))
                             .unwrap_or(false);
                         for (idx, a) in self.results.iter().enumerate() {
-                            let aliased =
-                                self.folder_aliases.get(&a.action).and_then(|v| v.as_ref());
+                            let aliased = alias_map.get(&a.action).and_then(|v| v.as_ref());
                             let show_path = show_full || aliased.is_none();
                             let text = if show_path {
                                 format!("{} : {}", a.label, a.desc)
@@ -1215,7 +1215,7 @@ impl eframe::App for LauncherApp {
                                 .iter()
                                 .take(self.custom_len)
                                 .position(|act| act.action == a.action && act.label == a.label);
-                            if self.folder_aliases.contains_key(&a.action)
+                            if alias_map.contains_key(&a.action)
                                 && !a.action.starts_with("folder:")
                             {
                                 menu_resp.clone().context_menu(|ui| {
@@ -1246,7 +1246,7 @@ impl eframe::App for LauncherApp {
                                         ui.close_menu();
                                     }
                                 });
-                            } else if self.bookmark_aliases.contains_key(&a.action) {
+                            } else if bm_map.contains_key(&a.action) {
                                 menu_resp.clone().context_menu(|ui| {
                                     if ui.button("Set Alias").clicked() {
                                         self.bookmark_alias_dialog.open(&a.action);
@@ -1463,7 +1463,8 @@ impl eframe::App for LauncherApp {
                                 let current = self.query.clone();
                                 if let Some(new_q) = a.action.strip_prefix("query:") {
                                     tracing::debug!("query action via click: {new_q}");
-                                    query_update = Some(new_q.to_string());
+                                    self.query = new_q.to_string();
+                                    self.search();
                                     set_focus = true;
                                     tracing::debug!("move_cursor_end set via mouse click");
                                     self.move_cursor_end = true;
@@ -1655,11 +1656,6 @@ impl eframe::App for LauncherApp {
                                 }
                                 self.selected = Some(idx);
                             }
-                        }
-                        if let Some(new_q) = query_update {
-                            tracing::debug!("query updated from action click: {new_q}");
-                            self.query = new_q;
-                            self.search();
                         }
                         if refresh {
                             self.search();
