@@ -108,3 +108,34 @@ fn set_priority_and_tags_update_entry() {
     assert_eq!(todos[0].priority, 5);
     assert_eq!(todos[0].tags, vec!["a", "b"]);
 }
+
+#[test]
+fn list_without_filter_sorts_by_priority() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    append_todo(TODO_FILE, "low", 1, &[]).unwrap();
+    append_todo(TODO_FILE, "high", 5, &[]).unwrap();
+
+    let plugin = TodoPlugin::default();
+    let results = plugin.search("todo list");
+    assert_eq!(results.len(), 2);
+    assert!(results[0].label.contains("high"));
+    assert!(results[1].label.contains("low"));
+}
+
+#[test]
+fn list_filters_by_tag() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    append_todo(TODO_FILE, "alpha", 1, &["rs3".into()]).unwrap();
+    append_todo(TODO_FILE, "beta", 1, &["other".into()]).unwrap();
+
+    let plugin = TodoPlugin::default();
+    let results = plugin.search("todo list #rs3");
+    assert_eq!(results.len(), 1);
+    assert!(results[0].label.contains("alpha"));
+}
