@@ -143,6 +143,7 @@ impl AddActionDialog {
                                             },
                                         });
                                         app.custom_len += 1;
+                                        app.update_action_cache();
                                     }
                                     DialogMode::Edit(idx) => {
                                         if let Some(act) = app.actions.get_mut(idx) {
@@ -154,6 +155,7 @@ impl AddActionDialog {
                                             } else {
                                                 None
                                             };
+                                            app.update_action_cache();
                                         }
                                     }
                                 }

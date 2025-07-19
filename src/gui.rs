@@ -66,6 +66,7 @@ enum WatchEvent {
 
 pub struct LauncherApp {
     pub actions: Vec<Action>,
+    action_cache: Vec<(String, String)>,
     pub query: String,
     pub results: Vec<Action>,
     pub matcher: SkimMatcherV2,
@@ -145,6 +146,13 @@ pub struct LauncherApp {
 }
 
 impl LauncherApp {
+    pub fn update_action_cache(&mut self) {
+        self.action_cache = self
+            .actions
+            .iter()
+            .map(|a| (a.label.to_lowercase(), a.desc.to_lowercase()))
+            .collect();
+    }
     pub fn add_toast(&mut self, toast: Toast) {
         self.toasts.add(toast);
     }
@@ -418,6 +426,7 @@ impl LauncherApp {
             disable_timer_updates: settings.disable_timer_updates,
             preserve_command: settings.preserve_command,
             last_timer_update: Instant::now(),
+            action_cache: Vec::new(),
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -447,6 +456,7 @@ impl LauncherApp {
             }
         }
 
+        app.update_action_cache();
         app.search();
         app
     }
@@ -499,6 +509,8 @@ impl LauncherApp {
             );
             let query_term = trimmed_lc.splitn(2, ' ').nth(1).unwrap_or("").to_string();
             for a in plugin_results {
+                let label_lc = a.label.to_lowercase();
+                let desc_lc = a.desc.to_lowercase();
                 if self.fuzzy_weight <= 0.0 {
                     if query_term.is_empty() {
                         res.push((a, 0.0));
@@ -510,8 +522,8 @@ impl LauncherApp {
                             .and_then(|v| v.as_ref())
                             .map(|s| s.to_lowercase().contains(&query_term))
                             .unwrap_or(false);
-                        let label_match = a.label.to_lowercase().contains(&query_term);
-                        let desc_match = a.desc.to_lowercase().contains(&query_term);
+                        let label_match = label_lc.contains(&query_term);
+                        let desc_match = desc_lc.contains(&query_term);
                         if label_match || desc_match || alias_match {
                             let score = if alias_match { 1.0 } else { 0.0 };
                             res.push((a, score));
@@ -535,7 +547,8 @@ impl LauncherApp {
                 if action_query.is_empty() {
                     res.extend(self.actions.iter().cloned().map(|a| (a, 0.0)));
                 } else {
-                    for a in &self.actions {
+                    for (i, a) in self.actions.iter().enumerate() {
+                        let (ref label_lc, ref desc_lc) = self.action_cache[i];
                         if self.fuzzy_weight <= 0.0 {
                             let alias_match = self
                                 .folder_aliases
@@ -544,8 +557,8 @@ impl LauncherApp {
                                 .and_then(|v| v.as_ref())
                                 .map(|s| s.to_lowercase().contains(&action_query_lc))
                                 .unwrap_or(false);
-                            let label_match = a.label.to_lowercase().contains(&action_query_lc);
-                            let desc_match = a.desc.to_lowercase().contains(&action_query_lc);
+                            let label_match = label_lc.contains(&action_query_lc);
+                            let desc_match = desc_lc.contains(&action_query_lc);
                             if label_match || desc_match || alias_match {
                                 let score = if alias_match { 1.0 } else { 0.0 };
                                 res.push((a.clone(), score));
@@ -568,6 +581,8 @@ impl LauncherApp {
             );
             if plugin_results.is_empty() && !trimmed.is_empty() {
                 for a in self.plugins.commands() {
+                    let label_lc = a.label.to_lowercase();
+                    let desc_lc = a.desc.to_lowercase();
                     if self.fuzzy_weight <= 0.0 {
                         let alias_match = self
                             .folder_aliases
@@ -576,8 +591,8 @@ impl LauncherApp {
                             .and_then(|v| v.as_ref())
                             .map(|s| s.to_lowercase().contains(&trimmed_lc))
                             .unwrap_or(false);
-                        let label_match = a.label.to_lowercase().contains(&trimmed_lc);
-                        let desc_match = a.desc.to_lowercase().contains(&trimmed_lc);
+                        let label_match = label_lc.contains(&trimmed_lc);
+                        let desc_match = desc_lc.contains(&trimmed_lc);
                         if label_match || desc_match || alias_match {
                             let score = if alias_match { 1.0 } else { 0.0 };
                             res.push((a, score));
@@ -602,6 +617,8 @@ impl LauncherApp {
                     }
                 }
                 for a in plugin_results {
+                    let label_lc = a.label.to_lowercase();
+                    let desc_lc = a.desc.to_lowercase();
                     if self.fuzzy_weight <= 0.0 {
                         if query_term.is_empty() {
                             res.push((a, 0.0));
@@ -613,8 +630,8 @@ impl LauncherApp {
                                 .and_then(|v| v.as_ref())
                                 .map(|s| s.to_lowercase().contains(&query_term))
                                 .unwrap_or(false);
-                            let label_match = a.label.to_lowercase().contains(&query_term);
-                            let desc_match = a.desc.to_lowercase().contains(&query_term);
+                            let label_match = label_lc.contains(&query_term);
+                            let desc_match = desc_lc.contains(&query_term);
                             if label_match || desc_match || alias_match {
                                 let score = if alias_match { 1.0 } else { 0.0 };
                                 res.push((a, score));
@@ -845,6 +862,7 @@ impl eframe::App for LauncherApp {
                         }
                         self.actions = acts;
                         self.custom_len = custom_len;
+                        self.update_action_cache();
                         self.search();
                         tracing::info!("actions reloaded");
                     }
