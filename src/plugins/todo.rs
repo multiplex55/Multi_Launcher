@@ -171,6 +171,15 @@ impl Plugin for TodoPlugin {
             }];
         }
 
+        if trimmed.eq_ignore_ascii_case("todo view") {
+            return vec![Action {
+                label: "todo: view list".into(),
+                desc: "Todo".into(),
+                action: "todo:view".into(),
+                args: None,
+            }];
+        }
+
         if trimmed.eq_ignore_ascii_case("todo clear") {
             return vec![Action {
                 label: "Clear completed todos".into(),

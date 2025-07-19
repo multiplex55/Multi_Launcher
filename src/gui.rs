@@ -17,6 +17,7 @@ use crate::tempfile_dialog::TempfileDialog;
 use crate::timer_dialog::{TimerCompletionDialog, TimerDialog};
 use crate::timer_help_window::TimerHelpWindow;
 use crate::todo_dialog::TodoDialog;
+use crate::todo_view_dialog::TodoViewDialog;
 use crate::usage::{self, USAGE_FILE};
 use crate::visibility::apply_visibility;
 use eframe::egui;
@@ -118,6 +119,7 @@ pub struct LauncherApp {
     snippet_dialog: SnippetDialog,
     notes_dialog: NotesDialog,
     todo_dialog: TodoDialog,
+    todo_view_dialog: TodoViewDialog,
     clipboard_dialog: ClipboardDialog,
     volume_dialog: crate::volume_dialog::VolumeDialog,
     brightness_dialog: crate::brightness_dialog::BrightnessDialog,
@@ -402,6 +404,7 @@ impl LauncherApp {
             snippet_dialog: SnippetDialog::default(),
             notes_dialog: NotesDialog::default(),
             todo_dialog: TodoDialog::default(),
+            todo_view_dialog: TodoViewDialog::default(),
             clipboard_dialog: ClipboardDialog::default(),
             volume_dialog: crate::volume_dialog::VolumeDialog::default(),
             brightness_dialog: crate::brightness_dialog::BrightnessDialog::default(),
@@ -717,6 +720,7 @@ impl LauncherApp {
             || self.snippet_dialog.open
             || self.notes_dialog.open
             || self.todo_dialog.open
+            || self.todo_view_dialog.open
             || self.clipboard_dialog.open
             || self.volume_dialog.open
             || self.brightness_dialog.open
@@ -990,6 +994,8 @@ impl eframe::App for LauncherApp {
                             self.snippet_dialog.open_edit(alias);
                         } else if a.action == "todo:dialog" {
                             self.todo_dialog.open();
+                        } else if a.action == "todo:view" {
+                            self.todo_view_dialog.open();
                         } else if a.action == "clipboard:dialog" {
                             self.clipboard_dialog.open();
                         } else if a.action == "tempfile:dialog" {
@@ -1526,14 +1532,16 @@ impl eframe::App for LauncherApp {
                                     self.notes_dialog.open();
                                 } else if a.action == "bookmark:dialog" {
                                     self.add_bookmark_dialog.open();
-                                } else if a.action == "snippet:dialog" {
-                                    self.snippet_dialog.open();
-                                } else if a.action == "todo:dialog" {
-                                    self.todo_dialog.open();
-                                } else if a.action == "clipboard:dialog" {
-                                    self.clipboard_dialog.open();
-                                } else if a.action == "tempfile:dialog" {
-                                    self.tempfile_dialog.open();
+                        } else if a.action == "snippet:dialog" {
+                            self.snippet_dialog.open();
+                        } else if a.action == "todo:dialog" {
+                            self.todo_dialog.open();
+                        } else if a.action == "todo:view" {
+                            self.todo_view_dialog.open();
+                        } else if a.action == "clipboard:dialog" {
+                            self.clipboard_dialog.open();
+                        } else if a.action == "tempfile:dialog" {
+                            self.tempfile_dialog.open();
                                 } else if a.action == "volume:dialog" {
                                     self.volume_dialog.open();
                                 } else if a.action == "brightness:dialog" {
@@ -1809,6 +1817,9 @@ impl eframe::App for LauncherApp {
         let mut todo_dlg = std::mem::take(&mut self.todo_dialog);
         todo_dlg.ui(ctx, self);
         self.todo_dialog = todo_dlg;
+        let mut todo_view = std::mem::take(&mut self.todo_view_dialog);
+        todo_view.ui(ctx, self);
+        self.todo_view_dialog = todo_view;
         let mut cb_dlg = std::mem::take(&mut self.clipboard_dialog);
         cb_dlg.ui(ctx, self);
         self.clipboard_dialog = cb_dlg;

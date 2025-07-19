@@ -28,6 +28,7 @@ pub mod tempfile_dialog;
 pub mod timer_dialog;
 pub mod timer_help_window;
 pub mod todo_dialog;
+pub mod todo_view_dialog;
 pub mod usage;
 pub mod visibility;
 pub mod volume_dialog;
