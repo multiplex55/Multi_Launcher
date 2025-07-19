@@ -266,3 +266,27 @@ pub fn activate_process(pid: u32) {
         let _ = EnumWindows(Some(enum_cb), LPARAM(pid as isize));
     }
 }
+
+#[cfg(target_os = "windows")]
+pub fn send_end_key() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_END,
+    };
+    unsafe {
+        let mut input = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_END.0 as u16,
+                    wScan: 0,
+                    dwFlags: 0,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        let _ = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+        input.Anonymous.ki.dwFlags = KEYEVENTF_KEYUP;
+        let _ = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+    }
+}

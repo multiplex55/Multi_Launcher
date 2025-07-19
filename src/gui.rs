@@ -901,6 +901,8 @@ impl eframe::App for LauncherApp {
                                 egui::text::CCursor::new(len),
                             )));
                         });
+                        #[cfg(target_os = "windows")]
+                        crate::window_manager::send_end_key();
                         self.move_cursor_end = false;
                         tracing::debug!("move_cursor_end cleared after moving");
                     } else {
