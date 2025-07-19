@@ -23,3 +23,4 @@ pub mod dropcalc;
 pub mod recycle;
 pub mod tempfile;
 pub mod asciiart;
+pub mod task_manager;
