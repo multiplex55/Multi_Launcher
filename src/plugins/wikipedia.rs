@@ -6,10 +6,8 @@ pub struct WikipediaPlugin;
 impl Plugin for WikipediaPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         const PREFIX: &str = "wiki ";
-        if query.len() >= PREFIX.len()
-            && query[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
-        {
-            let q = query[PREFIX.len()..].trim();
+        if let Some(rest) = crate::common::strip_prefix_ci(query, PREFIX) {
+            let q = rest.trim();
             let q = q.trim();
             if !q.is_empty() {
                 return vec![Action {

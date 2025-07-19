@@ -162,16 +162,18 @@ impl Plugin for TodoPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
 
-        if trimmed.eq_ignore_ascii_case("todo") {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "todo") {
+            if rest.is_empty() {
             return vec![Action {
                 label: "todo: edit todos".into(),
                 desc: "Todo".into(),
                 action: "todo:dialog".into(),
                 args: None,
             }];
+            }
         }
 
-        if trimmed.eq_ignore_ascii_case("todo view") {
+        if crate::common::strip_prefix_ci(trimmed, "todo view").is_some() {
             return vec![Action {
                 label: "todo: view list".into(),
                 desc: "Todo".into(),
@@ -180,7 +182,7 @@ impl Plugin for TodoPlugin {
             }];
         }
 
-        if trimmed.eq_ignore_ascii_case("todo clear") {
+        if crate::common::strip_prefix_ci(trimmed, "todo clear").is_some() {
             return vec![Action {
                 label: "Clear completed todos".into(),
                 desc: "Todo".into(),
@@ -189,7 +191,7 @@ impl Plugin for TodoPlugin {
             }];
         }
 
-        if trimmed.eq_ignore_ascii_case("todo add") {
+        if crate::common::strip_prefix_ci(trimmed, "todo add").is_some() {
             return vec![Action {
                 label: "todo: edit todos".into(),
                 desc: "Todo".into(),
@@ -199,10 +201,8 @@ impl Plugin for TodoPlugin {
         }
 
         const ADD_PREFIX: &str = "todo add ";
-        if trimmed.len() >= ADD_PREFIX.len()
-            && trimmed[..ADD_PREFIX.len()].eq_ignore_ascii_case(ADD_PREFIX)
-        {
-            let rest = trimmed[ADD_PREFIX.len()..].trim();
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, ADD_PREFIX) {
+            let rest = rest.trim();
             if !rest.is_empty() {
                 let mut priority: u8 = 0;
                 let mut tags: Vec<String> = Vec::new();
@@ -234,10 +234,8 @@ impl Plugin for TodoPlugin {
         }
 
         const PSET_PREFIX: &str = "todo pset ";
-        if trimmed.len() >= PSET_PREFIX.len()
-            && trimmed[..PSET_PREFIX.len()].eq_ignore_ascii_case(PSET_PREFIX)
-        {
-            let rest = trimmed[PSET_PREFIX.len()..].trim();
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, PSET_PREFIX) {
+            let rest = rest.trim();
             let mut parts = rest.split_whitespace();
             if let (Some(idx_str), Some(priority_str)) = (parts.next(), parts.next()) {
                 if let (Ok(idx), Ok(priority)) = (idx_str.parse::<usize>(), priority_str.parse::<u8>()) {
@@ -252,10 +250,8 @@ impl Plugin for TodoPlugin {
         }
 
         const TAG_PREFIX: &str = "todo tag ";
-        if trimmed.len() >= TAG_PREFIX.len()
-            && trimmed[..TAG_PREFIX.len()].eq_ignore_ascii_case(TAG_PREFIX)
-        {
-            let rest = trimmed[TAG_PREFIX.len()..].trim();
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, TAG_PREFIX) {
+            let rest = rest.trim();
             let mut parts = rest.split_whitespace();
             if let Some(idx_str) = parts.next() {
                 if let Ok(idx) = idx_str.parse::<usize>() {
@@ -279,10 +275,8 @@ impl Plugin for TodoPlugin {
         }
 
         const RM_PREFIX: &str = "todo rm ";
-        if trimmed.len() >= RM_PREFIX.len()
-            && trimmed[..RM_PREFIX.len()].eq_ignore_ascii_case(RM_PREFIX)
-        {
-            let filter = trimmed[RM_PREFIX.len()..].trim();
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, RM_PREFIX) {
+            let filter = rest.trim();
             let todos = self.data.lock().unwrap().clone();
             return todos
                 .into_iter()
@@ -298,10 +292,8 @@ impl Plugin for TodoPlugin {
         }
 
         const LIST_PREFIX: &str = "todo list";
-        if trimmed.len() >= LIST_PREFIX.len()
-            && trimmed[..LIST_PREFIX.len()].eq_ignore_ascii_case(LIST_PREFIX)
-        {
-            let filter = trimmed[LIST_PREFIX.len()..].trim();
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
+            let filter = rest.trim();
             let todos = self.data.lock().unwrap().clone();
             let mut entries: Vec<(usize, TodoEntry)> = todos.into_iter().enumerate().collect();
 

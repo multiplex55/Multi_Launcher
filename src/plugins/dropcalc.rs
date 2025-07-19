@@ -20,12 +20,9 @@ impl Plugin for DropCalcPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
         const PREFIX: &str = "drop ";
-        let rest = if trimmed.len() >= PREFIX.len()
-            && trimmed[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
-        {
-            trimmed[PREFIX.len()..].trim()
-        } else {
-            return Vec::new();
+        let rest = match crate::common::strip_prefix_ci(trimmed, PREFIX) {
+            Some(r) => r.trim(),
+            None => return Vec::new(),
         };
         let parts: Vec<&str> = rest.split_whitespace().collect();
         if parts.len() != 2 {

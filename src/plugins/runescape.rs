@@ -6,10 +6,8 @@ pub struct RunescapeSearchPlugin;
 impl Plugin for RunescapeSearchPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         const RS_PREFIX: &str = "rs ";
-        if query.len() >= RS_PREFIX.len()
-            && query[..RS_PREFIX.len()].eq_ignore_ascii_case(RS_PREFIX)
-        {
-            let q = query[RS_PREFIX.len()..].trim();
+        if let Some(rest) = crate::common::strip_prefix_ci(query, RS_PREFIX) {
+            let q = rest.trim();
             if !q.is_empty() {
                 return vec![Action {
                     label: format!("Search RuneScape Wiki for {q}"),
@@ -20,10 +18,8 @@ impl Plugin for RunescapeSearchPlugin {
             }
         }
         const OSRS_PREFIX: &str = "osrs ";
-        if query.len() >= OSRS_PREFIX.len()
-            && query[..OSRS_PREFIX.len()].eq_ignore_ascii_case(OSRS_PREFIX)
-        {
-            let q = query[OSRS_PREFIX.len()..].trim();
+        if let Some(rest) = crate::common::strip_prefix_ci(query, OSRS_PREFIX) {
+            let q = rest.trim();
             if !q.is_empty() {
                 return vec![Action {
                     label: format!("Search Old School RuneScape Wiki for {q}"),

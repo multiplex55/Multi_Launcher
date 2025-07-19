@@ -113,15 +113,17 @@ impl Default for SnippetsPlugin {
 impl Plugin for SnippetsPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
-        if trimmed.eq_ignore_ascii_case("cs") {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs") {
+            if rest.is_empty() {
             return vec![Action {
                 label: "cs: edit snippets".into(),
                 desc: "Snippet".into(),
                 action: "snippet:dialog".into(),
                 args: None,
             }];
+            }
         }
-        if let Some(rest) = trimmed.strip_prefix("cs rm") {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs rm") {
             let filter = rest.trim();
             let list = self.data.lock().unwrap().clone();
             return list
@@ -140,7 +142,7 @@ impl Plugin for SnippetsPlugin {
                 .collect();
         }
 
-        if let Some(rest) = trimmed.strip_prefix("cs add ") {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs add ") {
             let mut parts = rest.trim().splitn(2, ' ');
             let alias = parts.next().unwrap_or("").trim();
             let text = parts.next().unwrap_or("").trim();
@@ -154,7 +156,7 @@ impl Plugin for SnippetsPlugin {
             }
         }
 
-        if let Some(rest) = trimmed.strip_prefix("cs edit") {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs edit") {
             let filter = rest.trim();
             let list = self.data.lock().unwrap().clone();
             return list
@@ -173,7 +175,7 @@ impl Plugin for SnippetsPlugin {
                 .collect();
         }
 
-        if let Some(rest) = trimmed.strip_prefix("cs list") {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs list") {
             let filter = rest.trim();
             let list = self.data.lock().unwrap().clone();
             return list
@@ -191,24 +193,24 @@ impl Plugin for SnippetsPlugin {
                 .collect();
         }
 
-        if !trimmed.starts_with("cs") {
-            return Vec::new();
+        if let Some(filter) = crate::common::strip_prefix_ci(trimmed, "cs") {
+            let filter = filter.trim();
+            let list = self.data.lock().unwrap().clone();
+            return list
+                .into_iter()
+                .filter(|s| {
+                    self.matcher.fuzzy_match(&s.alias, filter).is_some()
+                        || self.matcher.fuzzy_match(&s.text, filter).is_some()
+                })
+                .map(|s| Action {
+                    label: s.alias,
+                    desc: "Snippet".into(),
+                    action: format!("clipboard:{}", s.text),
+                    args: None,
+                })
+                .collect();
         }
-
-        let filter = trimmed.strip_prefix("cs").unwrap_or("").trim();
-        let list = self.data.lock().unwrap().clone();
-        list.into_iter()
-            .filter(|s| {
-                self.matcher.fuzzy_match(&s.alias, filter).is_some()
-                    || self.matcher.fuzzy_match(&s.text, filter).is_some()
-            })
-            .map(|s| Action {
-                label: s.alias,
-                desc: "Snippet".into(),
-                action: format!("clipboard:{}", s.text),
-                args: None,
-            })
-            .collect()
+        Vec::new()
     }
 
     fn name(&self) -> &str {

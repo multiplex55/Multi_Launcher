@@ -80,14 +80,10 @@ impl Plugin for UnitConvertPlugin {
         let trimmed = query.trim();
         const CONV_PREFIX: &str = "conv ";
         const CONVERT_PREFIX: &str = "convert ";
-        let rest = if trimmed.len() >= CONV_PREFIX.len()
-            && trimmed[..CONV_PREFIX.len()].eq_ignore_ascii_case(CONV_PREFIX)
-        {
-            &trimmed[CONV_PREFIX.len()..]
-        } else if trimmed.len() >= CONVERT_PREFIX.len()
-            && trimmed[..CONVERT_PREFIX.len()].eq_ignore_ascii_case(CONVERT_PREFIX)
-        {
-            &trimmed[CONVERT_PREFIX.len()..]
+        let rest = if let Some(r) = crate::common::strip_prefix_ci(trimmed, CONV_PREFIX) {
+            r
+        } else if let Some(r) = crate::common::strip_prefix_ci(trimmed, CONVERT_PREFIX) {
+            r
         } else {
             return Vec::new();
         };

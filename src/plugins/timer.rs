@@ -445,23 +445,29 @@ pub struct TimerPlugin;
 impl Plugin for TimerPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
-        if trimmed.eq_ignore_ascii_case("timer") {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "timer") {
+            if rest.is_empty() {
             return vec![Action {
                 label: "Open timer dialog".into(),
                 desc: "Timer".into(),
                 action: "timer:dialog:timer".into(),
                 args: None,
             }];
+            }
         }
-        if trimmed.eq_ignore_ascii_case("alarm") {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "alarm") {
+            if rest.is_empty() {
             return vec![Action {
                 label: "Open alarm dialog".into(),
                 desc: "Timer".into(),
                 action: "timer:dialog:alarm".into(),
                 args: None,
             }];
+            }
         }
-        if trimmed.starts_with("timer list") || trimmed.starts_with("alarm list") {
+        if crate::common::strip_prefix_ci(trimmed, "timer list").is_some()
+            || crate::common::strip_prefix_ci(trimmed, "alarm list").is_some()
+        {
             return active_timers()
                 .into_iter()
                 .map(|(id, label, rem, _start)| Action {
@@ -472,7 +478,7 @@ impl Plugin for TimerPlugin {
                 })
                 .collect();
         }
-        if trimmed.starts_with("timer cancel") {
+        if crate::common::strip_prefix_ci(trimmed, "timer cancel").is_some() {
             return active_timers()
                 .into_iter()
                 .map(|(id, label, _rem, _start)| Action {
@@ -483,7 +489,7 @@ impl Plugin for TimerPlugin {
                 })
                 .collect();
         }
-        if trimmed.starts_with("timer rm") {
+        if crate::common::strip_prefix_ci(trimmed, "timer rm").is_some() {
             return active_timers()
                 .into_iter()
                 .map(|(id, label, rem, _start)| Action {
@@ -494,7 +500,7 @@ impl Plugin for TimerPlugin {
                 })
                 .collect();
         }
-        if let Some(id_str) = trimmed.strip_prefix("timer pause") {
+        if let Some(id_str) = crate::common::strip_prefix_ci(trimmed, "timer pause") {
             let tail = id_str.trim();
             if tail.is_empty() {
                 return running_timers()
@@ -515,7 +521,7 @@ impl Plugin for TimerPlugin {
                 }];
             }
         }
-        if let Some(id_str) = trimmed.strip_prefix("timer resume") {
+        if let Some(id_str) = crate::common::strip_prefix_ci(trimmed, "timer resume") {
             let tail = id_str.trim();
             if tail.is_empty() {
                 return paused_timers()
@@ -536,7 +542,7 @@ impl Plugin for TimerPlugin {
                 }];
             }
         }
-        if let Some(arg) = trimmed.strip_prefix("timer add") {
+        if let Some(arg) = crate::common::strip_prefix_ci(trimmed, "timer add") {
             let arg = arg.trim();
             let mut parts = arg.splitn(2, ' ');
             let dur_part = parts.next().unwrap_or("");
@@ -560,7 +566,7 @@ impl Plugin for TimerPlugin {
                 }];
             }
         }
-        if let Some(arg) = trimmed.strip_prefix("alarm ") {
+        if let Some(arg) = crate::common::strip_prefix_ci(trimmed, "alarm ") {
             let arg = arg.trim();
             let mut parts = arg.splitn(2, ' ');
             let time_part = parts.next().unwrap_or("");

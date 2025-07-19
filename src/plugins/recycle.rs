@@ -8,7 +8,7 @@ impl Plugin for RecyclePlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         const PREFIX: &str = "rec";
         let trimmed = query.trim_start();
-        if trimmed.len() >= PREFIX.len() && trimmed[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
+        if crate::common::strip_prefix_ci(trimmed, PREFIX).is_some() {
             return vec![Action {
                 label: "Clean Recycle Bin".into(),
                 desc: "Recycle Bin".into(),

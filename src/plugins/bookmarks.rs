@@ -169,20 +169,20 @@ impl Default for BookmarksPlugin {
 impl Plugin for BookmarksPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
-        if trimmed.eq_ignore_ascii_case("bm") || trimmed.eq_ignore_ascii_case("bm add") {
-            return vec![Action {
-                label: "bm: add bookmark".into(),
-                desc: "Bookmark".into(),
-                action: "bookmark:dialog".into(),
-                args: None,
-            }];
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "bm") {
+            if rest.trim().is_empty() || rest.trim().eq_ignore_ascii_case("add") {
+                return vec![Action {
+                    label: "bm: add bookmark".into(),
+                    desc: "Bookmark".into(),
+                    action: "bookmark:dialog".into(),
+                    args: None,
+                }];
+            }
         }
 
         const ADD_PREFIX: &str = "bm add ";
-        if trimmed.len() >= ADD_PREFIX.len()
-            && trimmed[..ADD_PREFIX.len()].eq_ignore_ascii_case(ADD_PREFIX)
-        {
-            let url = trimmed[ADD_PREFIX.len()..].trim();
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, ADD_PREFIX) {
+            let url = rest.trim();
             if !url.is_empty() {
                 let norm = normalize_url(url);
                 return vec![Action {
@@ -194,10 +194,7 @@ impl Plugin for BookmarksPlugin {
             }
         }
         const RM_PREFIX: &str = "bm rm";
-        if trimmed.len() >= RM_PREFIX.len()
-            && trimmed[..RM_PREFIX.len()].eq_ignore_ascii_case(RM_PREFIX)
-        {
-            let rest = &trimmed[RM_PREFIX.len()..];
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, RM_PREFIX) {
             let filter = rest.trim();
             let bookmarks = self.data.lock().unwrap().clone();
             return bookmarks
@@ -218,10 +215,7 @@ impl Plugin for BookmarksPlugin {
                 .collect();
         }
         const LIST_PREFIX: &str = "bm list";
-        if trimmed.len() >= LIST_PREFIX.len()
-            && trimmed[..LIST_PREFIX.len()].eq_ignore_ascii_case(LIST_PREFIX)
-        {
-            let rest = &trimmed[LIST_PREFIX.len()..];
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
             let filter = rest.trim();
             let bookmarks = self.data.lock().unwrap().clone();
             return bookmarks
@@ -245,10 +239,11 @@ impl Plugin for BookmarksPlugin {
                 .collect();
         }
         const PREFIX: &str = "bm";
-        if trimmed.len() < PREFIX.len() || !trimmed[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
-            return Vec::new();
-        }
-        let filter = trimmed[PREFIX.len()..].trim();
+        let rest = match crate::common::strip_prefix_ci(trimmed, PREFIX) {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        let filter = rest.trim();
         let bookmarks = self.data.lock().unwrap().clone();
         bookmarks
             .into_iter()

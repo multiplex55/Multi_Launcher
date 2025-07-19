@@ -7,15 +7,17 @@ impl Plugin for VolumePlugin {
     #[cfg(target_os = "windows")]
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
-        if trimmed.eq_ignore_ascii_case("vol") {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "vol") {
+            if rest.is_empty() {
             return vec![Action {
                 label: "vol: edit volume".into(),
                 desc: "Volume".into(),
                 action: "volume:dialog".into(),
                 args: None,
             }];
+            }
         }
-        if let Some(rest) = trimmed.strip_prefix("vol ") {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "vol ") {
             let rest = rest.trim();
             if rest.eq_ignore_ascii_case("ma") {
                 return vec![Action {
