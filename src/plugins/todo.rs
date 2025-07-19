@@ -173,7 +173,7 @@ impl Plugin for TodoPlugin {
             }
         }
 
-        if crate::common::strip_prefix_ci(trimmed, "todo view").is_some() {
+        if trimmed.eq_ignore_ascii_case("todo view") {
             return vec![Action {
                 label: "todo: view list".into(),
                 desc: "Todo".into(),
@@ -182,7 +182,7 @@ impl Plugin for TodoPlugin {
             }];
         }
 
-        if crate::common::strip_prefix_ci(trimmed, "todo clear").is_some() {
+        if trimmed.eq_ignore_ascii_case("todo clear") {
             return vec![Action {
                 label: "Clear completed todos".into(),
                 desc: "Todo".into(),
@@ -191,7 +191,7 @@ impl Plugin for TodoPlugin {
             }];
         }
 
-        if crate::common::strip_prefix_ci(trimmed, "todo add").is_some() {
+        if trimmed.eq_ignore_ascii_case("todo add") {
             return vec![Action {
                 label: "todo: edit todos".into(),
                 desc: "Todo".into(),
