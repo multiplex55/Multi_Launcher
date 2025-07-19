@@ -160,3 +160,11 @@ fn list_filters_by_tag() {
     assert_eq!(results.len(), 1);
     assert!(results[0].label.contains("alpha"));
 }
+#[test]
+fn search_view_opens_dialog() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let plugin = TodoPlugin::default();
+    let results = plugin.search("todo view");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "todo:view");
+}
