@@ -193,14 +193,79 @@ impl Plugin for TodoPlugin {
         if trimmed.len() >= ADD_PREFIX.len()
             && trimmed[..ADD_PREFIX.len()].eq_ignore_ascii_case(ADD_PREFIX)
         {
-            let text = trimmed[ADD_PREFIX.len()..].trim();
-            if !text.is_empty() {
-                return vec![Action {
-                    label: format!("Add todo {text}"),
-                    desc: "Todo".into(),
-                    action: format!("todo:add:{text}"),
-                    args: None,
-                }];
+            let rest = trimmed[ADD_PREFIX.len()..].trim();
+            if !rest.is_empty() {
+                let mut priority: u8 = 0;
+                let mut tags: Vec<String> = Vec::new();
+                let mut words: Vec<String> = Vec::new();
+                for part in rest.split_whitespace() {
+                    if let Some(p) = part.strip_prefix("p=") {
+                        if let Ok(n) = p.parse::<u8>() {
+                            priority = n;
+                        }
+                    } else if let Some(tag) = part.strip_prefix('#') {
+                        if !tag.is_empty() {
+                            tags.push(tag.to_string());
+                        }
+                    } else {
+                        words.push(part.to_string());
+                    }
+                }
+                let text = words.join(" ");
+                if !text.is_empty() {
+                    let tag_str = tags.join(",");
+                    return vec![Action {
+                        label: format!("Add todo {text}"),
+                        desc: "Todo".into(),
+                        action: format!("todo:add:{text}|{priority}|{tag_str}"),
+                        args: None,
+                    }];
+                }
+            }
+        }
+
+        const PSET_PREFIX: &str = "todo pset ";
+        if trimmed.len() >= PSET_PREFIX.len()
+            && trimmed[..PSET_PREFIX.len()].eq_ignore_ascii_case(PSET_PREFIX)
+        {
+            let rest = trimmed[PSET_PREFIX.len()..].trim();
+            let mut parts = rest.split_whitespace();
+            if let (Some(idx_str), Some(priority_str)) = (parts.next(), parts.next()) {
+                if let (Ok(idx), Ok(priority)) = (idx_str.parse::<usize>(), priority_str.parse::<u8>()) {
+                    return vec![Action {
+                        label: format!("Set priority {priority} for todo {idx}"),
+                        desc: "Todo".into(),
+                        action: format!("todo:pset:{idx}|{priority}"),
+                        args: None,
+                    }];
+                }
+            }
+        }
+
+        const TAG_PREFIX: &str = "todo tag ";
+        if trimmed.len() >= TAG_PREFIX.len()
+            && trimmed[..TAG_PREFIX.len()].eq_ignore_ascii_case(TAG_PREFIX)
+        {
+            let rest = trimmed[TAG_PREFIX.len()..].trim();
+            let mut parts = rest.split_whitespace();
+            if let Some(idx_str) = parts.next() {
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    let mut tags: Vec<String> = Vec::new();
+                    for t in parts {
+                        if let Some(tag) = t.strip_prefix('#') {
+                            if !tag.is_empty() {
+                                tags.push(tag.to_string());
+                            }
+                        }
+                    }
+                    let tag_str = tags.join(",");
+                    return vec![Action {
+                        label: format!("Set tags for todo {idx}"),
+                        desc: "Todo".into(),
+                        action: format!("todo:tag:{idx}|{tag_str}"),
+                        args: None,
+                    }];
+                }
             }
         }
 
@@ -276,6 +341,8 @@ impl Plugin for TodoPlugin {
             Action { label: "todo list".into(), desc: "Todo".into(), action: "query:todo list".into(), args: None },
             Action { label: "todo rm".into(), desc: "Todo".into(), action: "query:todo rm ".into(), args: None },
             Action { label: "todo clear".into(), desc: "Todo".into(), action: "query:todo clear".into(), args: None },
+            Action { label: "todo pset".into(), desc: "Todo".into(), action: "query:todo pset ".into(), args: None },
+            Action { label: "todo tag".into(), desc: "Todo".into(), action: "query:todo tag ".into(), args: None },
         ]
     }
 }

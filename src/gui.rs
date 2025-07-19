@@ -1069,12 +1069,15 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                                 set_focus = true;
                                 if self.enable_toasts {
-                                    if let Some(text) = a.action.strip_prefix("todo:add:") {
+                                    if let Some(text) = a
+                                        .action
+                                        .strip_prefix("todo:add:")
+                                        .and_then(|r| r.split('|').next())
+                                    {
                                         self.toasts.add(Toast {
                                             text: format!("Added todo {text}").into(),
                                             kind: ToastKind::Success,
-                                            options: ToastOptions::default()
-                                                .duration_in_seconds(3.0),
+                                            options: ToastOptions::default().duration_in_seconds(3.0),
                                         });
                                     }
                                 }
@@ -1100,6 +1103,26 @@ impl eframe::App for LauncherApp {
                                         .trim_start_matches("[ ] ");
                                     self.toasts.add(Toast {
                                         text: format!("Toggled todo {label}").into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default().duration_in_seconds(3.0),
+                                    });
+                                }
+                            } else if a.action.starts_with("todo:pset:") {
+                                refresh = true;
+                                set_focus = true;
+                                if self.enable_toasts {
+                                    self.toasts.add(Toast {
+                                        text: "Updated todo priority".into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default().duration_in_seconds(3.0),
+                                    });
+                                }
+                            } else if a.action.starts_with("todo:tag:") {
+                                refresh = true;
+                                set_focus = true;
+                                if self.enable_toasts {
+                                    self.toasts.add(Toast {
+                                        text: "Updated todo tags".into(),
                                         kind: ToastKind::Success,
                                         options: ToastOptions::default().duration_in_seconds(3.0),
                                     });
@@ -1588,12 +1611,15 @@ impl eframe::App for LauncherApp {
                                         refresh = true;
                                         set_focus = true;
                                         if self.enable_toasts {
-                                            if let Some(text) = a.action.strip_prefix("todo:add:") {
+                                            if let Some(text) = a
+                                                .action
+                                                .strip_prefix("todo:add:")
+                                                .and_then(|r| r.split('|').next())
+                                            {
                                                 self.toasts.add(Toast {
                                                     text: format!("Added todo {text}").into(),
                                                     kind: ToastKind::Success,
-                                                    options: ToastOptions::default()
-                                                        .duration_in_seconds(3.0),
+                                                    options: ToastOptions::default().duration_in_seconds(3.0),
                                                 });
                                             }
                                         }
@@ -1625,6 +1651,26 @@ impl eframe::App for LauncherApp {
                                                 kind: ToastKind::Success,
                                                 options: ToastOptions::default()
                                                     .duration_in_seconds(3.0),
+                                            });
+                                        }
+                                    } else if a.action.starts_with("todo:pset:") {
+                                        refresh = true;
+                                        set_focus = true;
+                                        if self.enable_toasts {
+                                            self.toasts.add(Toast {
+                                                text: "Updated todo priority".into(),
+                                                kind: ToastKind::Success,
+                                                options: ToastOptions::default().duration_in_seconds(3.0),
+                                            });
+                                        }
+                                    } else if a.action.starts_with("todo:tag:") {
+                                        refresh = true;
+                                        set_focus = true;
+                                        if self.enable_toasts {
+                                            self.toasts.add(Toast {
+                                                text: "Updated todo tags".into(),
+                                                kind: ToastKind::Success,
+                                                options: ToastOptions::default().duration_in_seconds(3.0),
                                             });
                                         }
                                     } else if a.action == "todo:clear" {

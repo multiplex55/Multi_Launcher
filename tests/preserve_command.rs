@@ -101,7 +101,7 @@ fn todo_add_preserves_prefix() {
     let actions = vec![Action {
         label: "todo".into(),
         desc: "".into(),
-        action: "todo:add:test".into(),
+        action: "todo:add:test|0|".into(),
         args: None,
     }];
     let mut app = new_app(&ctx, actions, true);
