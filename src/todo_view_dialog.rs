@@ -41,7 +41,7 @@ impl TodoViewDialog {
         egui::Window::new("View Todos")
             .open(&mut self.open)
             .resizable(true)
-            .default_size((360.0, 240.0))
+            .default_size((320.0, 240.0))
             .min_width(200.0)
             .min_height(150.0)
             .show(ctx, |ui| {
@@ -79,39 +79,47 @@ impl TodoViewDialog {
                     .show(ui, |ui| {
                         for idx in indices {
                             if Some(idx) == self.editing_idx {
-                                ui.horizontal(|ui| {
-                                    ui.label("Text:");
-                                    ui.text_edit_singleline(&mut self.editing_text);
-                                    ui.label("Priority:");
-                                    ui.add(
-                                        egui::DragValue::new(&mut self.editing_priority)
-                                            .clamp_range(0..=255),
-                                    );
-                                    ui.label("Tags:");
-                                    ui.text_edit_singleline(&mut self.editing_tags);
-                                    if ui.button("Save").clicked() {
-                                        let tags: Vec<String> = self
-                                            .editing_tags
-                                            .split(',')
-                                            .map(|t| t.trim())
-                                            .filter(|t| !t.is_empty())
-                                            .map(|t| t.to_string())
-                                            .collect();
-                                        if let Some(e) = self.entries.get_mut(idx) {
-                                            e.text = self.editing_text.clone();
-                                            e.priority = self.editing_priority;
-                                            e.tags = tags;
+                                ui.vertical(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Text:");
+                                        ui.text_edit_singleline(&mut self.editing_text);
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Priority:");
+                                        ui.add(
+                                            egui::DragValue::new(&mut self.editing_priority)
+                                                .clamp_range(0..=255),
+                                        );
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Tags:");
+                                        ui.text_edit_singleline(&mut self.editing_tags);
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Save").clicked() {
+                                            let tags: Vec<String> = self
+                                                .editing_tags
+                                                .split(',')
+                                                .map(|t| t.trim())
+                                                .filter(|t| !t.is_empty())
+                                                .map(|t| t.to_string())
+                                                .collect();
+                                            if let Some(e) = self.entries.get_mut(idx) {
+                                                e.text = self.editing_text.clone();
+                                                e.priority = self.editing_priority;
+                                                e.tags = tags;
+                                            }
+                                            self.editing_idx = None;
+                                            save_now = true;
                                         }
-                                        self.editing_idx = None;
-                                        save_now = true;
-                                    }
-                                    if ui.button("Cancel").clicked() {
-                                        self.editing_idx = None;
-                                    }
+                                        if ui.button("Cancel").clicked() {
+                                            self.editing_idx = None;
+                                        }
+                                    });
                                 });
                             } else {
                                 let entry = &mut self.entries[idx];
-                                ui.horizontal(|ui| {
+                                ui.horizontal_wrapped(|ui| {
                                     if ui.checkbox(&mut entry.done, "").changed() {
                                         save_now = true;
                                     }
