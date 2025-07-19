@@ -77,6 +77,7 @@ static SOUNDS: Lazy<Vec<(&'static str, &'static [u8])>> = Lazy::new(|| {
     ]
 });
 
+#[cfg(target_os = "windows")]
 pub fn play_sound(name: &str) {
     if name == "None" {
         return;
@@ -96,3 +97,6 @@ pub fn play_sound(name: &str) {
         }
     });
 }
+
+#[cfg(not(target_os = "windows"))]
+pub fn play_sound(_name: &str) {}
