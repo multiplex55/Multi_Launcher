@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
+use arboard::Clipboard;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -45,6 +46,7 @@ pub struct ClipboardPlugin {
     max_entries: usize,
     path: String,
     history: Arc<Mutex<VecDeque<String>>>,
+    clipboard: Mutex<Option<Clipboard>>,
     #[allow(dead_code)]
     watcher: Option<RecommendedWatcher>,
 }
@@ -83,33 +85,56 @@ impl ClipboardPlugin {
                 let _ = w.watch(parent, RecursiveMode::NonRecursive);
             }
         }
+        let clipboard = Mutex::new(Clipboard::new().ok());
         Self {
             max_entries,
             path,
             history,
+            clipboard,
             watcher,
         }
     }
 
     fn update_history(&self) -> VecDeque<String> {
         let mut history = self.history.lock().unwrap().clone();
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            if let Ok(txt) = clipboard.get_text() {
-                if history.front().map(|v| v != &txt).unwrap_or(true) {
-                    if let Some(pos) = history.iter().position(|v| v == &txt) {
-                        history.remove(pos);
-                    }
-                    history.push_front(txt.clone());
-                    while history.len() > self.max_entries {
-                        history.pop_back();
-                    }
-                    if let Ok(mut lock) = self.history.lock() {
-                        *lock = history.clone();
-                    }
-                    let _ = save_history(&self.path, &history);
+        let mut cb_lock = self.clipboard.lock().unwrap();
+
+        if cb_lock.is_none() {
+            match Clipboard::new() {
+                Ok(cb) => {
+                    *cb_lock = Some(cb);
+                }
+                Err(e) => {
+                    tracing::error!("clipboard init error: {:?}", e);
+                    return history;
                 }
             }
         }
+
+        if let Some(ref mut clipboard) = *cb_lock {
+            match clipboard.get_text() {
+                Ok(txt) => {
+                    if history.front().map(|v| v != &txt).unwrap_or(true) {
+                        if let Some(pos) = history.iter().position(|v| v == &txt) {
+                            history.remove(pos);
+                        }
+                        history.push_front(txt.clone());
+                        while history.len() > self.max_entries {
+                            history.pop_back();
+                        }
+                        if let Ok(mut lock) = self.history.lock() {
+                            *lock = history.clone();
+                        }
+                        let _ = save_history(&self.path, &history);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("clipboard read error: {:?}", e);
+                    *cb_lock = None;
+                }
+            }
+        }
+
         history
     }
 }
@@ -189,9 +214,24 @@ impl Plugin for ClipboardPlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![
-            Action { label: "cb".into(), desc: "Clipboard".into(), action: "query:cb".into(), args: None },
-            Action { label: "cb list".into(), desc: "Clipboard".into(), action: "query:cb list".into(), args: None },
-            Action { label: "cb clear".into(), desc: "Clipboard".into(), action: "query:cb clear".into(), args: None },
+            Action {
+                label: "cb".into(),
+                desc: "Clipboard".into(),
+                action: "query:cb".into(),
+                args: None,
+            },
+            Action {
+                label: "cb list".into(),
+                desc: "Clipboard".into(),
+                action: "query:cb list".into(),
+                args: None,
+            },
+            Action {
+                label: "cb clear".into(),
+                desc: "Clipboard".into(),
+                action: "query:cb clear".into(),
+                args: None,
+            },
         ]
     }
 }
