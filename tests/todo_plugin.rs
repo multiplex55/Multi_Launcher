@@ -119,6 +119,30 @@ fn set_priority_and_tags_update_entry() {
 }
 
 #[test]
+fn set_priority_persists_to_file() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    append_todo(TODO_FILE, "task", 0, &[]).unwrap();
+    set_priority(TODO_FILE, 0, 7).unwrap();
+    let todos = load_todos(TODO_FILE).unwrap();
+    assert_eq!(todos[0].priority, 7);
+}
+
+#[test]
+fn set_tags_persists_to_file() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    append_todo(TODO_FILE, "task", 0, &[]).unwrap();
+    set_tags(TODO_FILE, 0, &["x".into(), "y".into()]).unwrap();
+    let todos = load_todos(TODO_FILE).unwrap();
+    assert_eq!(todos[0].tags, vec!["x", "y"]);
+}
+
+#[test]
 fn search_pset_and_tag_actions() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let plugin = TodoPlugin::default();
@@ -159,6 +183,24 @@ fn list_filters_by_tag() {
     let results = plugin.search("todo list #rs3");
     assert_eq!(results.len(), 1);
     assert!(results[0].label.contains("alpha"));
+}
+
+#[test]
+fn list_tag_filter_sorts_by_priority() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    append_todo(TODO_FILE, "low", 1, &["p".into()]).unwrap();
+    append_todo(TODO_FILE, "high", 5, &["p".into()]).unwrap();
+    append_todo(TODO_FILE, "mid", 3, &["p".into()]).unwrap();
+
+    let plugin = TodoPlugin::default();
+    let results = plugin.search("todo list #p");
+    assert_eq!(results.len(), 3);
+    assert!(results[0].label.contains("high"));
+    assert!(results[1].label.contains("mid"));
+    assert!(results[2].label.contains("low"));
 }
 #[test]
 fn search_view_opens_dialog() {
