@@ -52,7 +52,7 @@ fn search_cancel_lists_timers() {
     // manually insert an active timer
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
-        list.push(TimerEntry {
+        list.insert(1, TimerEntry {
             id: 1,
             label: "test".into(),
             deadline: Instant::now() + Duration::from_secs(10),
@@ -79,7 +79,7 @@ fn search_list_lists_timers() {
     let _lock = TEST_MUTEX.lock().unwrap();
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
-        list.push(TimerEntry {
+        list.insert(2, TimerEntry {
             id: 2,
             label: "demo".into(),
             deadline: Instant::now() + Duration::from_secs(20),
@@ -103,7 +103,7 @@ fn search_rm_lists_timers() {
     let _lock = TEST_MUTEX.lock().unwrap();
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
-        list.push(TimerEntry {
+        list.insert(3, TimerEntry {
             id: 3,
             label: "remove".into(),
             deadline: Instant::now() + Duration::from_secs(30),
@@ -138,7 +138,7 @@ fn search_pause_lists_running_timers() {
     let _lock = TEST_MUTEX.lock().unwrap();
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
-        list.push(TimerEntry {
+        list.insert(11, TimerEntry {
             id: 11,
             label: "run".into(),
             deadline: Instant::now() + Duration::from_secs(5),
@@ -171,7 +171,7 @@ fn search_resume_lists_paused_timers() {
     let _lock = TEST_MUTEX.lock().unwrap();
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
-        list.push(TimerEntry {
+        list.insert(12, TimerEntry {
             id: 12,
             label: "pause".into(),
             deadline: Instant::now() + Duration::from_secs(5),
@@ -224,7 +224,12 @@ fn load_saved_alarms_is_idempotent() {
     assert_eq!(first, 1);
     assert_eq!(second, 1);
 
-    let ids: Vec<u64> = ACTIVE_TIMERS.lock().unwrap().iter().map(|t| t.id).collect();
+    let ids: Vec<u64> = ACTIVE_TIMERS
+        .lock()
+        .unwrap()
+        .values()
+        .map(|t| t.id)
+        .collect();
     for id in ids {
         cancel_timer(id);
     }
