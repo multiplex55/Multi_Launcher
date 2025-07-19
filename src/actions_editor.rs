@@ -1,5 +1,5 @@
 use crate::actions::save_actions;
-use crate::add_action_dialog::AddActionDialog;
+use crate::gui::AddActionDialog;
 use crate::gui::LauncherApp;
 use eframe::egui;
 

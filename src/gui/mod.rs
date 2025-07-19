@@ -1,23 +1,49 @@
+mod add_action_dialog;
+mod add_bookmark_dialog;
+mod alias_dialog;
+mod bookmark_alias_dialog;
+mod brightness_dialog;
+mod clipboard_dialog;
+mod cpu_list_dialog;
+mod notes_dialog;
+mod shell_cmd_dialog;
+mod snippet_dialog;
+mod tempfile_alias_dialog;
+mod tempfile_dialog;
+mod timer_dialog;
+mod todo_dialog;
+mod todo_view_dialog;
+mod volume_dialog;
+
+pub use add_action_dialog::AddActionDialog;
+pub use add_bookmark_dialog::AddBookmarkDialog;
+pub use alias_dialog::AliasDialog;
+pub use bookmark_alias_dialog::BookmarkAliasDialog;
+pub use brightness_dialog::BrightnessDialog;
+pub use clipboard_dialog::ClipboardDialog;
+pub use cpu_list_dialog::CpuListDialog;
+pub use notes_dialog::NotesDialog;
+pub use shell_cmd_dialog::ShellCmdDialog;
+pub use snippet_dialog::SnippetDialog;
+pub use tempfile_alias_dialog::TempfileAliasDialog;
+pub use tempfile_dialog::TempfileDialog;
+pub use timer_dialog::{TimerCompletionDialog, TimerDialog};
+pub use todo_dialog::TodoDialog;
+pub use todo_view_dialog::TodoViewDialog;
+pub use volume_dialog::VolumeDialog;
+
 use crate::actions::{load_actions, Action};
 use crate::actions_editor::ActionsEditor;
-use crate::clipboard_dialog::ClipboardDialog;
-use crate::cpu_list_dialog::CpuListDialog;
 use crate::help_window::HelpWindow;
 use crate::history::{self, HistoryEntry};
 use crate::indexer;
 use crate::launcher::launch_action;
-use crate::notes_dialog::NotesDialog;
 use crate::plugin::PluginManager;
 use crate::plugin_editor::PluginEditor;
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
 use crate::settings::Settings;
 use crate::settings_editor::SettingsEditor;
-use crate::snippet_dialog::SnippetDialog;
-use crate::tempfile_dialog::TempfileDialog;
-use crate::timer_dialog::{TimerCompletionDialog, TimerDialog};
 use crate::timer_help_window::TimerHelpWindow;
-use crate::todo_dialog::TodoDialog;
-use crate::todo_view_dialog::TodoViewDialog;
 use crate::usage::{self, USAGE_FILE};
 use crate::visibility::apply_visibility;
 use eframe::egui;
@@ -106,23 +132,23 @@ pub struct LauncherApp {
     move_cursor_end: bool,
     toasts: egui_toast::Toasts,
     pub enable_toasts: bool,
-    alias_dialog: crate::alias_dialog::AliasDialog,
-    bookmark_alias_dialog: crate::bookmark_alias_dialog::BookmarkAliasDialog,
-    tempfile_alias_dialog: crate::tempfile_alias_dialog::TempfileAliasDialog,
+    alias_dialog: AliasDialog,
+    bookmark_alias_dialog: BookmarkAliasDialog,
+    tempfile_alias_dialog: TempfileAliasDialog,
     tempfile_dialog: TempfileDialog,
-    add_bookmark_dialog: crate::add_bookmark_dialog::AddBookmarkDialog,
+    add_bookmark_dialog: AddBookmarkDialog,
     help_window: crate::help_window::HelpWindow,
     timer_help: crate::timer_help_window::TimerHelpWindow,
-    timer_dialog: crate::timer_dialog::TimerDialog,
-    completion_dialog: crate::timer_dialog::TimerCompletionDialog,
-    shell_cmd_dialog: crate::shell_cmd_dialog::ShellCmdDialog,
+    timer_dialog: TimerDialog,
+    completion_dialog: TimerCompletionDialog,
+    shell_cmd_dialog: ShellCmdDialog,
     snippet_dialog: SnippetDialog,
     notes_dialog: NotesDialog,
     todo_dialog: TodoDialog,
     todo_view_dialog: TodoViewDialog,
     clipboard_dialog: ClipboardDialog,
-    volume_dialog: crate::volume_dialog::VolumeDialog,
-    brightness_dialog: crate::brightness_dialog::BrightnessDialog,
+    volume_dialog: VolumeDialog,
+    brightness_dialog: BrightnessDialog,
     cpu_list_dialog: CpuListDialog,
     pub help_flag: Arc<AtomicBool>,
     pub hotkey_str: Option<String>,
@@ -391,23 +417,23 @@ impl LauncherApp {
             move_cursor_end: false,
             toasts,
             enable_toasts,
-            alias_dialog: crate::alias_dialog::AliasDialog::default(),
-            bookmark_alias_dialog: crate::bookmark_alias_dialog::BookmarkAliasDialog::default(),
-            tempfile_alias_dialog: crate::tempfile_alias_dialog::TempfileAliasDialog::default(),
+            alias_dialog: AliasDialog::default(),
+            bookmark_alias_dialog: BookmarkAliasDialog::default(),
+            tempfile_alias_dialog: TempfileAliasDialog::default(),
             tempfile_dialog: TempfileDialog::default(),
-            add_bookmark_dialog: crate::add_bookmark_dialog::AddBookmarkDialog::default(),
+            add_bookmark_dialog: AddBookmarkDialog::default(),
             help_window: HelpWindow::default(),
             timer_help: TimerHelpWindow::default(),
             timer_dialog: TimerDialog::default(),
             completion_dialog: TimerCompletionDialog::default(),
-            shell_cmd_dialog: crate::shell_cmd_dialog::ShellCmdDialog::default(),
+            shell_cmd_dialog: ShellCmdDialog::default(),
             snippet_dialog: SnippetDialog::default(),
             notes_dialog: NotesDialog::default(),
             todo_dialog: TodoDialog::default(),
             todo_view_dialog: TodoViewDialog::default(),
             clipboard_dialog: ClipboardDialog::default(),
-            volume_dialog: crate::volume_dialog::VolumeDialog::default(),
-            brightness_dialog: crate::brightness_dialog::BrightnessDialog::default(),
+            volume_dialog: VolumeDialog::default(),
+            brightness_dialog: BrightnessDialog::default(),
             cpu_list_dialog: CpuListDialog::default(),
             help_flag: help_flag.clone(),
             hotkey_str: settings.hotkey.clone(),
