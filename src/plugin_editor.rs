@@ -14,6 +14,7 @@ pub struct PluginEditor {
     enabled_capabilities: HashMap<String, Vec<String>>,
     plugin_input: String,
     available: Vec<(String, String, Vec<String>)>,
+    filter: String,
 }
 
 impl PluginEditor {
@@ -44,13 +45,16 @@ impl PluginEditor {
             enabled_capabilities,
             plugin_input: String::new(),
             available: info,
+            filter: String::new(),
         }
     }
 
     fn gather_available(plugin_dirs: &[String]) -> Vec<(String, String, Vec<String>)> {
         let mut pm = PluginManager::new();
         pm.reload_from_dirs(plugin_dirs, Settings::default().clipboard_limit, false);
-        pm.plugin_infos()
+        let mut infos = pm.plugin_infos();
+        infos.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        infos
     }
 
     fn save_settings(&mut self, app: &mut LauncherApp) {
@@ -173,14 +177,21 @@ impl PluginEditor {
 
                 ui.separator();
                 ui.label("Plugins:");
+                ui.horizontal(|ui| {
+                    ui.label("Filter:");
+                    ui.text_edit_singleline(&mut self.filter);
+                });
                 egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                     for (name, desc, caps) in &self.available {
+                        if !self.filter.is_empty()
+                            && !name.to_lowercase().contains(&self.filter.to_lowercase())
+                            && !desc.to_lowercase().contains(&self.filter.to_lowercase())
+                        {
+                            continue;
+                        }
                         let mut enabled = self.enabled_plugins.contains(name);
                         ui.horizontal(|ui| {
-                            if ui
-                                .checkbox(&mut enabled, name)
-                                .on_hover_text(desc)
-                                .changed()
+                            if ui.checkbox(&mut enabled, name).changed()
                             {
                                 if enabled {
                                     if !self.enabled_plugins.contains(name) {
@@ -194,6 +205,7 @@ impl PluginEditor {
                                 }
                                 changed = true;
                             }
+                            ui.label(desc);
                         });
                         ui.indent(name, |ui| {
                             ui.add_enabled_ui(enabled, |ui| {
@@ -206,7 +218,11 @@ impl PluginEditor {
                                     } else {
                                         cap.to_string()
                                     };
-                                    if ui.checkbox(&mut cap_enabled, label).changed() {
+                                    if ui
+                                        .checkbox(&mut cap_enabled, label)
+                                        .on_hover_text(cap)
+                                        .changed()
+                                    {
                                         if cap_enabled {
                                             if !entry.contains(cap) {
                                                 entry.push(cap.clone());
@@ -221,10 +237,6 @@ impl PluginEditor {
                         });
                     }
                 });
-
-                if ui.button("Save").clicked() {
-                    changed = true;
-                }
             });
         app.show_plugins = open;
         if changed {
