@@ -8,6 +8,10 @@ pub struct TodoViewDialog {
     entries: Vec<TodoEntry>,
     filter: String,
     sort_by_priority: bool,
+    editing_idx: Option<usize>,
+    editing_text: String,
+    editing_priority: u8,
+    editing_tags: String,
 }
 
 impl TodoViewDialog {
@@ -16,6 +20,7 @@ impl TodoViewDialog {
         self.open = true;
         self.filter.clear();
         self.sort_by_priority = true;
+        self.editing_idx = None;
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
@@ -46,57 +51,85 @@ impl TodoViewDialog {
                     ui.text_edit_singleline(&mut self.filter);
                 });
                 ui.separator();
-                let filter = self.filter.trim().trim_start_matches('#').to_lowercase();
+                let filter = self.filter.trim().to_lowercase();
                 let mut indices: Vec<usize> = self
                     .entries
                     .iter()
                     .enumerate()
                     .filter(|(_, e)| {
-                        filter.is_empty()
-                            || e.tags
-                                .iter()
-                                .any(|t| t.eq_ignore_ascii_case(&filter))
+                        if filter.is_empty() {
+                            true
+                        } else if filter.starts_with('#') {
+                            let tag = filter.trim_start_matches('#');
+                            e.tags.iter().any(|t| t.to_lowercase().contains(tag))
+                        } else {
+                            e.text.to_lowercase().contains(&filter)
+                                || e.tags.iter().any(|t| t.to_lowercase().contains(&filter))
+                        }
                     })
                     .map(|(i, _)| i)
                     .collect();
                 if self.sort_by_priority {
-                    indices.sort_by(|a, b| self.entries[*b].priority.cmp(&self.entries[*a].priority));
+                    indices
+                        .sort_by(|a, b| self.entries[*b].priority.cmp(&self.entries[*a].priority));
                 }
-                let mut remove: Option<usize> = None;
                 let area_height = ui.available_height();
-                egui::ScrollArea::both().max_height(area_height).show(ui, |ui| {
-                    for idx in indices {
-                        let entry = &mut self.entries[idx];
-                        ui.horizontal(|ui| {
-                            if ui.text_edit_singleline(&mut entry.text).changed() {
-                                save_now = true;
+                egui::ScrollArea::both()
+                    .max_height(area_height)
+                    .show(ui, |ui| {
+                        for idx in indices {
+                            if Some(idx) == self.editing_idx {
+                                ui.horizontal(|ui| {
+                                    ui.label("Text:");
+                                    ui.text_edit_singleline(&mut self.editing_text);
+                                    ui.label("Priority:");
+                                    ui.add(
+                                        egui::DragValue::new(&mut self.editing_priority)
+                                            .clamp_range(0..=255),
+                                    );
+                                    ui.label("Tags:");
+                                    ui.text_edit_singleline(&mut self.editing_tags);
+                                    if ui.button("Save").clicked() {
+                                        let tags: Vec<String> = self
+                                            .editing_tags
+                                            .split(',')
+                                            .map(|t| t.trim())
+                                            .filter(|t| !t.is_empty())
+                                            .map(|t| t.to_string())
+                                            .collect();
+                                        if let Some(e) = self.entries.get_mut(idx) {
+                                            e.text = self.editing_text.clone();
+                                            e.priority = self.editing_priority;
+                                            e.tags = tags;
+                                        }
+                                        self.editing_idx = None;
+                                        save_now = true;
+                                    }
+                                    if ui.button("Cancel").clicked() {
+                                        self.editing_idx = None;
+                                    }
+                                });
+                            } else {
+                                let entry = &mut self.entries[idx];
+                                ui.horizontal(|ui| {
+                                    if ui.checkbox(&mut entry.done, "").changed() {
+                                        save_now = true;
+                                    }
+                                    ui.label(entry.text.replace('\n', " "));
+                                    ui.label(format!("p{}", entry.priority));
+                                    if !entry.tags.is_empty() {
+                                        ui.label(format!("#{:?}", entry.tags.join(", ")));
+                                    }
+                                    if ui.button("Edit").clicked() {
+                                        self.editing_idx = Some(idx);
+                                        self.editing_text = entry.text.clone();
+                                        self.editing_priority = entry.priority;
+                                        self.editing_tags = entry.tags.join(", ");
+                                    }
+                                });
                             }
-                            if ui
-                                .add(egui::DragValue::new(&mut entry.priority).clamp_range(0..=255))
-                                .changed()
-                            {
-                                save_now = true;
-                            }
-                            let mut tag_str = entry.tags.join(", ");
-                            if ui.text_edit_singleline(&mut tag_str).changed() {
-                                entry.tags = tag_str
-                                    .split(',')
-                                    .map(|t| t.trim())
-                                    .filter(|t| !t.is_empty())
-                                    .map(|t| t.to_string())
-                                    .collect();
-                                save_now = true;
-                            }
-                            if ui.button("Remove").clicked() {
-                                remove = Some(idx);
-                            }
-                        });
-                    }
-                });
-                if let Some(idx) = remove {
-                    self.entries.remove(idx);
-                    save_now = true;
-                }
+                        }
+                    });
                 ui.horizontal(|ui| {
                     if ui.button("Close").clicked() {
                         close = true;
@@ -111,4 +144,3 @@ impl TodoViewDialog {
         }
     }
 }
-
