@@ -1663,6 +1663,16 @@ impl eframe::App for LauncherApp {
                         if let Some(new_q) = clicked_query {
                             self.query = new_q;
                             self.search();
+                            let input_id = egui::Id::new("query_input");
+                            ui.ctx().memory_mut(|m| m.request_focus(input_id));
+                            let len = self.query.chars().count();
+                            ui.ctx().data_mut(|data| {
+                                let state = data
+                                    .get_persisted_mut_or_default::<egui::widgets::text_edit::TextEditState>(input_id);
+                                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                                    egui::text::CCursor::new(len),
+                                )));
+                            });
                         }
                         if refresh {
                             self.search();
