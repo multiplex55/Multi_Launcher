@@ -202,6 +202,7 @@ Built-in plugins and their command prefixes are:
 - Saved apps (`app <filter>` or just `app`)
 - Volume control (`vol 50`) *(Windows only)*
 - Brightness control (`bright 50`) *(Windows only)*
+- Task Manager (`tm`) *(Windows only)*
 - Command overview (`help`)
 - Timers and alarms (`timer add 5m tea`, `timer add 1:30`, `alarm 07:30`). Use `timer list` to view
    remaining time or `timer rm` to remove timers. Pending alarms are saved to `alarms.json` and resume after
