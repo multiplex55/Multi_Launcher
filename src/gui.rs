@@ -101,6 +101,7 @@ pub struct LauncherApp {
     pub window_size: (i32, i32),
     pub window_pos: (i32, i32),
     focus_query: bool,
+    move_cursor_end: bool,
     toasts: egui_toast::Toasts,
     pub enable_toasts: bool,
     alias_dialog: crate::alias_dialog::AliasDialog,
@@ -377,6 +378,7 @@ impl LauncherApp {
             window_size: win_size,
             window_pos: (0, 0),
             focus_query: false,
+            move_cursor_end: false,
             toasts,
             enable_toasts,
             alias_dialog: crate::alias_dialog::AliasDialog::default(),
@@ -884,8 +886,35 @@ impl eframe::App for LauncherApp {
             }
 
             scale_ui(ui, self.query_scale, |ui| {
-                let input = ui
-                    .add(egui::TextEdit::singleline(&mut self.query).desired_width(f32::INFINITY));
+                let input_id = egui::Id::new("query_input");
+
+                if self.move_cursor_end {
+                    if ui.ctx().memory(|m| m.has_focus(input_id)) {
+                        let len = self.query.chars().count();
+                        tracing::debug!("moving cursor to end: {len}");
+                        ui.ctx().data_mut(|data| {
+                            let state = data
+                                .get_persisted_mut_or_default::<egui::widgets::text_edit::TextEditState>(
+                                    input_id,
+                                );
+                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                                egui::text::CCursor::new(len),
+                            )));
+                        });
+                        #[cfg(target_os = "windows")]
+                        crate::window_manager::send_end_key();
+                        self.move_cursor_end = false;
+                        tracing::debug!("move_cursor_end cleared after moving");
+                    } else {
+                        tracing::debug!("cursor not moved - input not focused");
+                    }
+                }
+
+                let input = ui.add(
+                    egui::TextEdit::singleline(&mut self.query)
+                        .id_source(input_id)
+                        .desired_width(f32::INFINITY),
+                );
                 if just_became_visible || self.focus_query {
                     input.request_focus();
                     self.focus_query = false;
@@ -919,9 +948,12 @@ impl eframe::App for LauncherApp {
                         let mut refresh = false;
                         let mut set_focus = false;
                         if let Some(new_q) = a.action.strip_prefix("query:") {
+                            tracing::debug!("query action via Enter: {new_q}");
                             self.query = new_q.to_string();
                             self.search();
                             set_focus = true;
+                            tracing::debug!("move_cursor_end set via Enter key");
+                            self.move_cursor_end = true;
                         } else if a.action == "help:show" {
                             self.help_window.open = true;
                         } else if a.action == "timer:dialog:timer" {
@@ -1146,8 +1178,7 @@ impl eframe::App for LauncherApp {
                     scale_ui(ui, self.list_scale, |ui| {
                         let mut refresh = false;
                         let mut set_focus = false;
-                        let alias_map = &self.folder_aliases;
-                        let bm_map = &self.bookmark_aliases;
+                        let mut clicked_query: Option<String> = None;
                         let show_full = self
                             .enabled_capabilities
                             .as_ref()
@@ -1155,7 +1186,10 @@ impl eframe::App for LauncherApp {
                             .map(|caps| caps.contains(&"show_full_path".to_string()))
                             .unwrap_or(false);
                         for (idx, a) in self.results.iter().enumerate() {
-                            let aliased = alias_map.get(&a.action).and_then(|v| v.as_ref());
+                            let aliased = self
+                                .folder_aliases
+                                .get(&a.action)
+                                .and_then(|v| v.as_ref());
                             let show_path = show_full || aliased.is_none();
                             let text = if show_path {
                                 format!("{} : {}", a.label, a.desc)
@@ -1187,7 +1221,8 @@ impl eframe::App for LauncherApp {
                                 .iter()
                                 .take(self.custom_len)
                                 .position(|act| act.action == a.action && act.label == a.label);
-                            if alias_map.contains_key(&a.action) && !a.action.starts_with("folder:")
+                            if self.folder_aliases.contains_key(&a.action)
+                                && !a.action.starts_with("folder:")
                             {
                                 menu_resp.clone().context_menu(|ui| {
                                     if ui.button("Set Alias").clicked() {
@@ -1217,7 +1252,7 @@ impl eframe::App for LauncherApp {
                                         ui.close_menu();
                                     }
                                 });
-                            } else if bm_map.contains_key(&a.action) {
+                            } else if self.bookmark_aliases.contains_key(&a.action) {
                                 menu_resp.clone().context_menu(|ui| {
                                     if ui.button("Set Alias").clicked() {
                                         self.bookmark_alias_dialog.open(&a.action);
@@ -1432,7 +1467,13 @@ impl eframe::App for LauncherApp {
                             if resp.clicked() {
                                 let a = a.clone();
                                 let current = self.query.clone();
-                                if a.action == "help:show" {
+                                if let Some(new_q) = a.action.strip_prefix("query:") {
+                                    tracing::debug!("query action via click: {new_q}");
+                                    clicked_query = Some(new_q.to_string());
+                                    set_focus = true;
+                                    tracing::debug!("move_cursor_end set via mouse click");
+                                    self.move_cursor_end = true;
+                                } else if a.action == "help:show" {
                                     self.help_window.open = true;
                                 } else if a.action == "timer:dialog:timer" {
                                     self.timer_dialog.open_timer();
@@ -1620,6 +1661,20 @@ impl eframe::App for LauncherApp {
                                 }
                                 self.selected = Some(idx);
                             }
+                        }
+                        if let Some(new_q) = clicked_query {
+                            self.query = new_q;
+                            self.search();
+                            let input_id = egui::Id::new("query_input");
+                            ui.ctx().memory_mut(|m| m.request_focus(input_id));
+                            let len = self.query.chars().count();
+                            ui.ctx().data_mut(|data| {
+                                let state = data
+                                    .get_persisted_mut_or_default::<egui::widgets::text_edit::TextEditState>(input_id);
+                                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                                    egui::text::CCursor::new(len),
+                                )));
+                            });
                         }
                         if refresh {
                             self.search();
