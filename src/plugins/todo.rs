@@ -18,6 +18,11 @@ pub struct TodoEntry {
     pub tags: Vec<String>,
 }
 
+/// Sort todo entries by priority descending (highest priority first).
+pub fn sort_by_priority_desc(entries: &mut Vec<TodoEntry>) {
+    entries.sort_by(|a, b| b.priority.cmp(&a.priority));
+}
+
 /// Load todo entries from `path`.
 pub fn load_todos(path: &str) -> anyhow::Result<Vec<TodoEntry>> {
     let content = std::fs::read_to_string(path).unwrap_or_default();
@@ -224,10 +229,22 @@ impl Plugin for TodoPlugin {
         {
             let filter = trimmed[LIST_PREFIX.len()..].trim();
             let todos = self.data.lock().unwrap().clone();
-            return todos
+            let mut entries: Vec<(usize, TodoEntry)> = todos.into_iter().enumerate().collect();
+
+            let tag_filter = filter.starts_with('#');
+            if tag_filter {
+                let tag = filter.trim_start_matches('#');
+                entries.retain(|(_, t)| t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(tag)));
+            } else if !filter.is_empty() {
+                entries.retain(|(_, t)| self.matcher.fuzzy_match(&t.text, filter).is_some());
+            }
+
+            if filter.is_empty() || tag_filter {
+                entries.sort_by(|a, b| b.1.priority.cmp(&a.1.priority));
+            }
+
+            return entries
                 .into_iter()
-                .enumerate()
-                .filter(|(_, t)| self.matcher.fuzzy_match(&t.text, filter).is_some())
                 .map(|(idx, t)| Action {
                     label: format!("{} {}", if t.done { "[x]" } else { "[ ]" }, t.text),
                     desc: "Todo".into(),
