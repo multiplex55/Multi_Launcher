@@ -6,10 +6,11 @@ pub struct SystemPlugin;
 impl Plugin for SystemPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         const PREFIX: &str = "sys";
-        if query.len() < PREFIX.len() || !query[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
-            return Vec::new();
-        }
-        let filter = query[PREFIX.len()..].trim();
+        let rest = match crate::common::strip_prefix_ci(query, PREFIX) {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        let filter = rest.trim();
         const OPTIONS: [&str; 4] = ["shutdown", "reboot", "lock", "logoff"];
         OPTIONS
             .iter()

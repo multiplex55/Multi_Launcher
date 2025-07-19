@@ -7,15 +7,15 @@ impl Plugin for BrightnessPlugin {
     #[cfg(target_os = "windows")]
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
-        if trimmed.eq_ignore_ascii_case("bright") {
-            return vec![Action {
-                label: "bright: edit brightness".into(),
-                desc: "Brightness".into(),
-                action: "brightness:dialog".into(),
-                args: None,
-            }];
-        }
-        if let Some(rest) = trimmed.strip_prefix("bright ") {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "bright") {
+            if rest.trim().is_empty() {
+                return vec![Action {
+                    label: "bright: edit brightness".into(),
+                    desc: "Brightness".into(),
+                    action: "brightness:dialog".into(),
+                    args: None,
+                }];
+            }
             let rest = rest.trim();
             if let Ok(val) = rest.parse::<u8>() {
                 if val <= 100 {

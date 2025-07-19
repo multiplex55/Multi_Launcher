@@ -119,10 +119,8 @@ impl Default for NotesPlugin {
 impl Plugin for NotesPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         const ADD_PREFIX: &str = "note add ";
-        if query.len() >= ADD_PREFIX.len()
-            && query[..ADD_PREFIX.len()].eq_ignore_ascii_case(ADD_PREFIX)
-        {
-            let text = query[ADD_PREFIX.len()..].trim();
+        if let Some(rest) = crate::common::strip_prefix_ci(query, ADD_PREFIX) {
+            let text = rest.trim();
             if !text.is_empty() {
                 return vec![Action {
                     label: format!("Add note {text}"),
@@ -134,10 +132,8 @@ impl Plugin for NotesPlugin {
         }
 
         const RM_PREFIX: &str = "note rm ";
-        if query.len() >= RM_PREFIX.len()
-            && query[..RM_PREFIX.len()].eq_ignore_ascii_case(RM_PREFIX)
-        {
-            let filter = query[RM_PREFIX.len()..].trim();
+        if let Some(rest) = crate::common::strip_prefix_ci(query, RM_PREFIX) {
+            let filter = rest.trim();
             let notes = self.data.lock().unwrap().clone();
             return notes
                 .into_iter()
@@ -153,10 +149,8 @@ impl Plugin for NotesPlugin {
         }
 
         const LIST_PREFIX: &str = "note list";
-        if query.len() >= LIST_PREFIX.len()
-            && query[..LIST_PREFIX.len()].eq_ignore_ascii_case(LIST_PREFIX)
-        {
-            let filter = query[LIST_PREFIX.len()..].trim();
+        if let Some(rest) = crate::common::strip_prefix_ci(query, LIST_PREFIX) {
+            let filter = rest.trim();
             let notes = self.data.lock().unwrap().clone();
             return notes
                 .into_iter()
@@ -171,13 +165,15 @@ impl Plugin for NotesPlugin {
                 .collect();
         }
 
-        if query.trim().eq_ignore_ascii_case("note") {
+        if let Some(rest) = crate::common::strip_prefix_ci(query.trim(), "note") {
+            if rest.is_empty() {
             return vec![Action {
                 label: "note: edit notes".into(),
                 desc: "Note".into(),
                 action: "note:dialog".into(),
                 args: None,
             }];
+        }
         }
 
         Vec::new()

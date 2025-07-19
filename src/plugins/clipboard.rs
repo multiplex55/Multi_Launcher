@@ -148,41 +148,47 @@ impl Default for ClipboardPlugin {
 impl Plugin for ClipboardPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         const PREFIX: &str = "cb";
-        if query.len() < PREFIX.len() || !query[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
+        if crate::common::strip_prefix_ci(query, PREFIX).is_none() {
             return Vec::new();
         }
 
         let trimmed = query.trim();
-        if trimmed.eq_ignore_ascii_case("cb") {
-            return vec![Action {
-                label: "cb: edit clipboard".into(),
-                desc: "Clipboard".into(),
-                action: "clipboard:dialog".into(),
-                args: None,
-            }];
-        }
-
-        if trimmed.eq_ignore_ascii_case("cb clear") {
-            return vec![Action {
-                label: "Clear clipboard history".into(),
-                desc: "Clipboard".into(),
-                action: "clipboard:clear".into(),
-                args: None,
-            }];
-        }
-
-        if trimmed.eq_ignore_ascii_case("cb list") {
-            let history = self.update_history();
-            return history
-                .iter()
-                .enumerate()
-                .map(|(idx, entry)| Action {
-                    label: entry.clone(),
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cb") {
+            if rest.is_empty() {
+                return vec![Action {
+                    label: "cb: edit clipboard".into(),
                     desc: "Clipboard".into(),
-                    action: format!("clipboard:copy:{idx}"),
+                    action: "clipboard:dialog".into(),
                     args: None,
-                })
-                .collect();
+                }];
+            }
+        }
+
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cb clear") {
+            if rest.is_empty() {
+                return vec![Action {
+                    label: "Clear clipboard history".into(),
+                    desc: "Clipboard".into(),
+                    action: "clipboard:clear".into(),
+                    args: None,
+                }];
+            }
+        }
+
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cb list") {
+            if rest.is_empty() {
+                let history = self.update_history();
+                return history
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, entry)| Action {
+                        label: entry.clone(),
+                        desc: "Clipboard".into(),
+                        action: format!("clipboard:copy:{idx}"),
+                        args: None,
+                    })
+                    .collect();
+            }
         }
 
         let filter = trimmed[PREFIX.len()..].trim().to_lowercase();

@@ -174,10 +174,8 @@ impl Default for FoldersPlugin {
 impl Plugin for FoldersPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         const ADD_PREFIX: &str = "f add ";
-        if query.len() >= ADD_PREFIX.len()
-            && query[..ADD_PREFIX.len()].eq_ignore_ascii_case(ADD_PREFIX)
-        {
-            let path = query[ADD_PREFIX.len()..].trim();
+        if let Some(rest) = crate::common::strip_prefix_ci(query, ADD_PREFIX) {
+            let path = rest.trim();
             if !path.is_empty() {
                 return vec![Action {
                     label: format!("Add folder {path}"),
@@ -189,10 +187,8 @@ impl Plugin for FoldersPlugin {
         }
 
         const RM_PREFIX: &str = "f rm ";
-        if query.len() >= RM_PREFIX.len()
-            && query[..RM_PREFIX.len()].eq_ignore_ascii_case(RM_PREFIX)
-        {
-            let filter = query[RM_PREFIX.len()..].trim();
+        if let Some(rest) = crate::common::strip_prefix_ci(query, RM_PREFIX) {
+            let filter = rest.trim();
             let folders = self.data.lock().unwrap().clone();
             return folders
                 .into_iter()
@@ -214,10 +210,11 @@ impl Plugin for FoldersPlugin {
         }
 
         const PREFIX: &str = "f";
-        if query.len() < PREFIX.len() || !query[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
-            return Vec::new();
-        }
-        let filter = query[PREFIX.len()..].trim();
+        let rest = match crate::common::strip_prefix_ci(query, PREFIX) {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        let filter = rest.trim();
         let folders = self.data.lock().unwrap().clone();
         folders
             .into_iter()

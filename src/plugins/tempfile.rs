@@ -119,19 +119,19 @@ pub struct TempfilePlugin;
 impl Plugin for TempfilePlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
-        if trimmed.eq_ignore_ascii_case("tmp") {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp") {
+            if rest.is_empty() {
             return vec![Action {
                 label: "tmp: create".into(),
                 desc: "Tempfile".into(),
                 action: "tempfile:dialog".into(),
                 args: None,
             }];
+            }
         }
         const NEW_PREFIX: &str = "tmp new ";
-        if trimmed.len() >= NEW_PREFIX.len()
-            && trimmed[..NEW_PREFIX.len()].eq_ignore_ascii_case(NEW_PREFIX)
-        {
-            let alias = trimmed[NEW_PREFIX.len()..].trim();
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, NEW_PREFIX) {
+            let alias = rest.trim();
             if !alias.is_empty() && validate_alias(alias).is_ok() {
                 return vec![Action {
                     label: format!("Create temp file {alias}"),
@@ -140,35 +140,39 @@ impl Plugin for TempfilePlugin {
                     args: None,
                 }];
             }
-        } else if trimmed.eq_ignore_ascii_case("tmp new") {
+        } else if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp new") {
+            if rest.is_empty() {
             return vec![Action {
                 label: "Create temp file".into(),
                 desc: "Tempfile".into(),
                 action: "tempfile:new".into(),
                 args: None,
             }];
+            }
         }
-        if trimmed.eq_ignore_ascii_case("tmp open") {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp open") {
+            if rest.is_empty() {
             return vec![Action {
                 label: "Open temp directory".into(),
                 desc: "Tempfile".into(),
                 action: "tempfile:open".into(),
                 args: None,
             }];
+            }
         }
-        if trimmed.eq_ignore_ascii_case("tmp clear") {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp clear") {
+            if rest.is_empty() {
             return vec![Action {
                 label: "Clear temp files".into(),
                 desc: "Tempfile".into(),
                 action: "tempfile:clear".into(),
                 args: None,
             }];
+            }
         }
         const RM_PREFIX: &str = "tmp rm";
-        if trimmed.len() >= RM_PREFIX.len()
-            && trimmed[..RM_PREFIX.len()].eq_ignore_ascii_case(RM_PREFIX)
-        {
-            let filter = trimmed[RM_PREFIX.len()..].trim().to_lowercase();
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, RM_PREFIX) {
+            let filter = rest.trim().to_lowercase();
             let files = list_files().unwrap_or_default();
             return files
                 .into_iter()
@@ -188,10 +192,7 @@ impl Plugin for TempfilePlugin {
                 .collect();
         }
         const ALIAS_PREFIX: &str = "tmp alias";
-        if trimmed.len() >= ALIAS_PREFIX.len()
-            && trimmed[..ALIAS_PREFIX.len()].eq_ignore_ascii_case(ALIAS_PREFIX)
-        {
-            let rest = &trimmed[ALIAS_PREFIX.len()..];
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, ALIAS_PREFIX) {
             let mut parts = rest.trim().splitn(2, ' ');
             if let (Some(file), Some(alias)) = (parts.next(), parts.next()) {
                 let file = file.trim();
@@ -216,10 +217,8 @@ impl Plugin for TempfilePlugin {
             }
         }
         const LIST_PREFIX: &str = "tmp list";
-        if trimmed.len() >= LIST_PREFIX.len()
-            && trimmed[..LIST_PREFIX.len()].eq_ignore_ascii_case(LIST_PREFIX)
-        {
-            let filter = trimmed[LIST_PREFIX.len()..].trim().to_lowercase();
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
+            let filter = rest.trim().to_lowercase();
             let files = list_files().unwrap_or_default();
             return files
                 .into_iter()

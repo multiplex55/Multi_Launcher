@@ -57,20 +57,19 @@ pub struct ShellPlugin;
 impl Plugin for ShellPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
-        if trimmed.eq_ignore_ascii_case("sh") {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "sh") {
+            if rest.is_empty() {
             return vec![Action {
                 label: "sh: edit saved commands".into(),
                 desc: "Shell".into(),
                 action: "shell:dialog".into(),
                 args: None,
             }];
+            }
         }
 
         const ADD_PREFIX: &str = "sh add ";
-        if trimmed.len() >= ADD_PREFIX.len()
-            && trimmed[..ADD_PREFIX.len()].eq_ignore_ascii_case(ADD_PREFIX)
-        {
-            let rest = &trimmed[ADD_PREFIX.len()..];
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, ADD_PREFIX) {
             let mut parts = rest.trim().splitn(2, ' ');
             let name = parts.next().unwrap_or("").trim();
             let args = parts.next().unwrap_or("").trim();
@@ -85,10 +84,7 @@ impl Plugin for ShellPlugin {
         }
 
         const RM_PREFIX: &str = "sh rm";
-        if trimmed.len() >= RM_PREFIX.len()
-            && trimmed[..RM_PREFIX.len()].eq_ignore_ascii_case(RM_PREFIX)
-        {
-            let rest = &trimmed[RM_PREFIX.len()..];
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, RM_PREFIX) {
             let filter = rest.trim();
             if let Ok(list) = load_shell_cmds(SHELL_CMDS_FILE) {
                 let matcher = SkimMatcherV2::default();
@@ -110,10 +106,7 @@ impl Plugin for ShellPlugin {
         }
 
         const LIST_PREFIX: &str = "sh list";
-        if trimmed.len() >= LIST_PREFIX.len()
-            && trimmed[..LIST_PREFIX.len()].eq_ignore_ascii_case(LIST_PREFIX)
-        {
-            let rest = &trimmed[LIST_PREFIX.len()..];
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
             let filter = rest.trim();
             if let Ok(list) = load_shell_cmds(SHELL_CMDS_FILE) {
                 let matcher = SkimMatcherV2::default();
@@ -134,10 +127,7 @@ impl Plugin for ShellPlugin {
         }
 
         const CMD_PREFIX: &str = "sh ";
-        if trimmed.len() >= CMD_PREFIX.len()
-            && trimmed[..CMD_PREFIX.len()].eq_ignore_ascii_case(CMD_PREFIX)
-        {
-            let cmd = &trimmed[CMD_PREFIX.len()..];
+        if let Some(cmd) = crate::common::strip_prefix_ci(trimmed, CMD_PREFIX) {
             let arg = cmd.trim();
             if arg.is_empty() {
                 return Vec::new();

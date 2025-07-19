@@ -6,10 +6,8 @@ pub struct RedditPlugin;
 impl Plugin for RedditPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         const PREFIX: &str = "red ";
-        if query.len() >= PREFIX.len()
-            && query[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
-        {
-            let q = query[PREFIX.len()..].trim();
+        if let Some(rest) = crate::common::strip_prefix_ci(query, PREFIX) {
+            let q = rest.trim();
             if !q.is_empty() {
                 return vec![Action {
                     label: format!("Search Reddit for {q}"),

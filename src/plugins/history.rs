@@ -9,18 +9,21 @@ pub struct HistoryPlugin;
 impl Plugin for HistoryPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         const PREFIX: &str = "hi";
-        if query.len() < PREFIX.len() || !query[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
-            return Vec::new();
+        let rest = match crate::common::strip_prefix_ci(query, PREFIX) {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        if let Some(clear_rest) = crate::common::strip_prefix_ci(query.trim(), "hi clear") {
+            if clear_rest.is_empty() {
+                return vec![Action {
+                    label: "Clear history".into(),
+                    desc: "History".into(),
+                    action: "history:clear".into(),
+                    args: None,
+                }];
+            }
         }
-        if query.trim().eq_ignore_ascii_case("hi clear") {
-            return vec![Action {
-                label: "Clear history".into(),
-                desc: "History".into(),
-                action: "history:clear".into(),
-                args: None,
-            }];
-        }
-        let filter = query[PREFIX.len()..].trim().to_lowercase();
+        let filter = rest.trim().to_lowercase();
         get_history()
             .into_iter()
             .enumerate()

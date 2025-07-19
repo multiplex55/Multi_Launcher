@@ -6,18 +6,15 @@ pub struct HelpPlugin;
 impl Plugin for HelpPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let q = query.trim();
-        const PREFIX: &str = "help";
-        const PREFIX_SPACE: &str = "help ";
-        if q.eq_ignore_ascii_case(PREFIX)
-            || (q.len() >= PREFIX_SPACE.len()
-                && q[..PREFIX_SPACE.len()].eq_ignore_ascii_case(PREFIX_SPACE))
-        {
+        if let Some(rest) = crate::common::strip_prefix_ci(q, "help") {
+            if rest.is_empty() || rest.starts_with(' ') {
             return vec![Action {
                 label: "Show command list".into(),
                 desc: "Display available command prefixes".into(),
                 action: "help:show".into(),
                 args: None,
             }];
+            }
         }
         Vec::new()
     }
