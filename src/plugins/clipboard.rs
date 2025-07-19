@@ -96,7 +96,7 @@ impl ClipboardPlugin {
     }
 
     fn update_history(&self) -> VecDeque<String> {
-        let mut history = self.history.lock().unwrap().clone();
+        let mut history = self.history.lock().unwrap();
         let mut cb_lock = self.clipboard.lock().unwrap();
 
         if cb_lock.is_none() {
@@ -106,7 +106,7 @@ impl ClipboardPlugin {
                 }
                 Err(e) => {
                     tracing::error!("clipboard init error: {:?}", e);
-                    return history;
+                    return history.clone();
                 }
             }
         }
@@ -118,12 +118,9 @@ impl ClipboardPlugin {
                         if let Some(pos) = history.iter().position(|v| v == &txt) {
                             history.remove(pos);
                         }
-                        history.push_front(txt.clone());
+                        history.push_front(txt);
                         while history.len() > self.max_entries {
                             history.pop_back();
-                        }
-                        if let Ok(mut lock) = self.history.lock() {
-                            *lock = history.clone();
                         }
                         let _ = save_history(&self.path, &history);
                     }
@@ -135,7 +132,7 @@ impl ClipboardPlugin {
             }
         }
 
-        history
+        history.clone()
     }
 }
 
