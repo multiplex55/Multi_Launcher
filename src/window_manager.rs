@@ -270,16 +270,17 @@ pub fn activate_process(pid: u32) {
 #[cfg(target_os = "windows")]
 pub fn send_end_key() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_END,
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+        KEYBD_EVENT_FLAGS, VIRTUAL_KEY, VK_END,
     };
     unsafe {
         let mut input = INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
-                    wVk: VK_END.0 as u16,
+                    wVk: VIRTUAL_KEY(VK_END.0),
                     wScan: 0,
-                    dwFlags: 0,
+                    dwFlags: KEYBD_EVENT_FLAGS(0),
                     time: 0,
                     dwExtraInfo: 0,
                 },
