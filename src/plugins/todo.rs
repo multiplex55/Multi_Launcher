@@ -12,6 +12,10 @@ pub const TODO_FILE: &str = "todo.json";
 pub struct TodoEntry {
     pub text: String,
     pub done: bool,
+    #[serde(default)]
+    pub priority: u8,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// Load todo entries from `path`.
@@ -31,12 +35,14 @@ pub fn save_todos(path: &str, todos: &[TodoEntry]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Append a new todo entry with `text`.
-pub fn append_todo(path: &str, text: &str) -> anyhow::Result<()> {
+/// Append a new todo entry with `text`, `priority` and `tags`.
+pub fn append_todo(path: &str, text: &str, priority: u8, tags: &[String]) -> anyhow::Result<()> {
     let mut list = load_todos(path).unwrap_or_default();
     list.push(TodoEntry {
         text: text.to_string(),
         done: false,
+        priority,
+        tags: tags.to_vec(),
     });
     save_todos(path, &list)
 }
@@ -56,6 +62,26 @@ pub fn mark_done(path: &str, index: usize) -> anyhow::Result<()> {
     let mut list = load_todos(path).unwrap_or_default();
     if let Some(entry) = list.get_mut(index) {
         entry.done = !entry.done;
+        save_todos(path, &list)?;
+    }
+    Ok(())
+}
+
+/// Set the priority of the todo at `index` in `path`.
+pub fn set_priority(path: &str, index: usize, priority: u8) -> anyhow::Result<()> {
+    let mut list = load_todos(path).unwrap_or_default();
+    if let Some(entry) = list.get_mut(index) {
+        entry.priority = priority;
+        save_todos(path, &list)?;
+    }
+    Ok(())
+}
+
+/// Replace the tags of the todo at `index` in `path`.
+pub fn set_tags(path: &str, index: usize, tags: &[String]) -> anyhow::Result<()> {
+    let mut list = load_todos(path).unwrap_or_default();
+    if let Some(entry) = list.get_mut(index) {
+        entry.tags = tags.to_vec();
         save_todos(path, &list)?;
     }
     Ok(())

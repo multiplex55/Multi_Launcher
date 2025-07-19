@@ -1,5 +1,8 @@
 use multi_launcher::plugin::Plugin;
-use multi_launcher::plugins::todo::{append_todo, load_todos, remove_todo, mark_done, TodoPlugin, TODO_FILE};
+use multi_launcher::plugins::todo::{
+    append_todo, load_todos, remove_todo, mark_done, set_priority, set_tags,
+    TodoPlugin, TODO_FILE,
+};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use tempfile::tempdir;
@@ -30,8 +33,8 @@ fn list_returns_saved_items() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    append_todo(TODO_FILE, "alpha").unwrap();
-    append_todo(TODO_FILE, "beta").unwrap();
+    append_todo(TODO_FILE, "alpha", 0, &[]).unwrap();
+    append_todo(TODO_FILE, "beta", 0, &[]).unwrap();
 
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo list");
@@ -45,8 +48,8 @@ fn remove_action_deletes_entry() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    append_todo(TODO_FILE, "remove me").unwrap();
-    append_todo(TODO_FILE, "keep").unwrap();
+    append_todo(TODO_FILE, "remove me", 0, &[]).unwrap();
+    append_todo(TODO_FILE, "keep", 0, &[]).unwrap();
 
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo rm remove");
@@ -81,7 +84,7 @@ fn mark_done_toggles_status() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    append_todo(TODO_FILE, "task").unwrap();
+    append_todo(TODO_FILE, "task", 0, &[]).unwrap();
 
     mark_done(TODO_FILE, 0).unwrap();
     let todos = load_todos(TODO_FILE).unwrap();
@@ -90,4 +93,18 @@ fn mark_done_toggles_status() {
     mark_done(TODO_FILE, 0).unwrap();
     let todos = load_todos(TODO_FILE).unwrap();
     assert!(!todos[0].done);
+}
+
+#[test]
+fn set_priority_and_tags_update_entry() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    append_todo(TODO_FILE, "task", 0, &[]).unwrap();
+    set_priority(TODO_FILE, 0, 5).unwrap();
+    set_tags(TODO_FILE, 0, &["a".into(), "b".into()]).unwrap();
+    let todos = load_todos(TODO_FILE).unwrap();
+    assert_eq!(todos[0].priority, 5);
+    assert_eq!(todos[0].tags, vec!["a", "b"]);
 }

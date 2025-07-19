@@ -339,7 +339,12 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         return Ok(());
     }
     if let Some(text) = action.action.strip_prefix("todo:add:") {
-        crate::plugins::todo::append_todo(crate::plugins::todo::TODO_FILE, text)?;
+        crate::plugins::todo::append_todo(
+            crate::plugins::todo::TODO_FILE,
+            text,
+            0,
+            &[],
+        )?;
         return Ok(());
     }
     if let Some(idx) = action.action.strip_prefix("todo:remove:") {
