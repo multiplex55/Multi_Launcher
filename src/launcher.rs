@@ -338,13 +338,50 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         }
         return Ok(());
     }
-    if let Some(text) = action.action.strip_prefix("todo:add:") {
+    if let Some(rest) = action.action.strip_prefix("todo:add:") {
+        let mut parts = rest.splitn(3, '|');
+        let text = parts.next().unwrap_or("");
+        let priority = parts
+            .next()
+            .and_then(|p| p.parse::<u8>().ok())
+            .unwrap_or(0);
+        let tags: Vec<String> = parts
+            .next()
+            .map(|t| {
+                if t.is_empty() {
+                    Vec::new()
+                } else {
+                    t.split(',').map(|s| s.to_string()).collect()
+                }
+            })
+            .unwrap_or_default();
         crate::plugins::todo::append_todo(
             crate::plugins::todo::TODO_FILE,
             text,
-            0,
-            &[],
+            priority,
+            &tags,
         )?;
+        return Ok(());
+    }
+    if let Some(rest) = action.action.strip_prefix("todo:pset:") {
+        if let Some((idx_str, p_str)) = rest.split_once('|') {
+            if let (Ok(idx), Ok(priority)) = (idx_str.parse::<usize>(), p_str.parse::<u8>()) {
+                crate::plugins::todo::set_priority(crate::plugins::todo::TODO_FILE, idx, priority)?;
+            }
+        }
+        return Ok(());
+    }
+    if let Some(rest) = action.action.strip_prefix("todo:tag:") {
+        if let Some((idx_str, tags_str)) = rest.split_once('|') {
+            if let Ok(idx) = idx_str.parse::<usize>() {
+                let tags: Vec<String> = if tags_str.is_empty() {
+                    Vec::new()
+                } else {
+                    tags_str.split(',').map(|s| s.to_string()).collect()
+                };
+                crate::plugins::todo::set_tags(crate::plugins::todo::TODO_FILE, idx, &tags)?;
+            }
+        }
         return Ok(());
     }
     if let Some(idx) = action.action.strip_prefix("todo:remove:") {

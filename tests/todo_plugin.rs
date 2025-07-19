@@ -15,7 +15,16 @@ fn search_add_returns_action() {
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo add task   ");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].action, "todo:add:task");
+    assert_eq!(results[0].action, "todo:add:task|0|");
+}
+
+#[test]
+fn search_add_with_priority_and_tags() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let plugin = TodoPlugin::default();
+    let results = plugin.search("todo add task p=3 #a #b");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "todo:add:task|3|a,b");
 }
 
 #[test]
@@ -107,6 +116,18 @@ fn set_priority_and_tags_update_entry() {
     let todos = load_todos(TODO_FILE).unwrap();
     assert_eq!(todos[0].priority, 5);
     assert_eq!(todos[0].tags, vec!["a", "b"]);
+}
+
+#[test]
+fn search_pset_and_tag_actions() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let plugin = TodoPlugin::default();
+    let res = plugin.search("todo pset 1 4");
+    assert_eq!(res.len(), 1);
+    assert_eq!(res[0].action, "todo:pset:1|4");
+    let res = plugin.search("todo tag 2 #x #y");
+    assert_eq!(res.len(), 1);
+    assert_eq!(res[0].action, "todo:tag:2|x,y");
 }
 
 #[test]
