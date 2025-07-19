@@ -3,7 +3,7 @@ use crate::plugin::Plugin;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Condvar, Mutex,
@@ -39,9 +39,9 @@ struct SavedAlarm {
     sound: String,
 }
 
-fn save_persistent_alarms_locked(timers: &Vec<TimerEntry>) {
+fn save_persistent_alarms_locked(timers: &HashMap<u64, TimerEntry>) {
     let list: Vec<SavedAlarm> = timers
-        .iter()
+        .values()
         .filter(|t| t.persist)
         .map(|t| SavedAlarm {
             label: t.label.clone(),
@@ -55,7 +55,8 @@ fn save_persistent_alarms_locked(timers: &Vec<TimerEntry>) {
     }
 }
 
-pub static ACTIVE_TIMERS: Lazy<Mutex<Vec<TimerEntry>>> = Lazy::new(|| Mutex::new(Vec::new()));
+pub static ACTIVE_TIMERS: Lazy<Mutex<HashMap<u64, TimerEntry>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 struct TimerManager {
     inner: Arc<Inner>,
@@ -103,23 +104,22 @@ impl TimerManager {
 
     fn fire_timer(id: u64, gen: u64) {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
-        if let Some(pos) = list
-            .iter()
-            .position(|t| t.id == id && t.generation == gen && !t.paused)
-        {
-            let entry = list.remove(pos);
-            if entry.persist {
-                save_persistent_alarms_locked(&list);
+        if let Some(entry) = list.get(&id) {
+            if entry.generation == gen && !entry.paused {
+                let entry = list.remove(&id).unwrap();
+                if entry.persist {
+                    save_persistent_alarms_locked(&list);
+                }
+                drop(list);
+                let msg = if entry.persist {
+                    format!("Alarm triggered: {}", entry.label)
+                } else {
+                    format!("Timer finished: {}", entry.label)
+                };
+                crate::sound::play_sound(&entry.sound);
+                notify(&msg);
+                FINISHED_MESSAGES.lock().unwrap().push(msg);
             }
-            drop(list);
-            let msg = if entry.persist {
-                format!("Alarm triggered: {}", entry.label)
-            } else {
-                format!("Timer finished: {}", entry.label)
-            };
-            crate::sound::play_sound(&entry.sound);
-            notify(&msg);
-            FINISHED_MESSAGES.lock().unwrap().push(msg);
         }
     }
 
@@ -240,7 +240,7 @@ pub fn active_timers() -> Vec<(u64, String, Duration, u64)> {
     ACTIVE_TIMERS
         .lock()
         .unwrap()
-        .iter()
+        .values()
         .map(|t| {
             let remaining = if t.paused {
                 t.remaining
@@ -258,7 +258,7 @@ pub fn running_timers() -> Vec<(u64, String, Duration, u64)> {
     ACTIVE_TIMERS
         .lock()
         .unwrap()
-        .iter()
+        .values()
         .filter(|t| !t.paused)
         .map(|t| {
             (
@@ -276,7 +276,7 @@ pub fn paused_timers() -> Vec<(u64, String, Duration, u64)> {
     ACTIVE_TIMERS
         .lock()
         .unwrap()
-        .iter()
+        .values()
         .filter(|t| t.paused)
         .map(|t| (t.id, t.label.clone(), t.remaining, t.start_ts))
         .collect()
@@ -285,14 +285,13 @@ pub fn paused_timers() -> Vec<(u64, String, Duration, u64)> {
 /// Get the start timestamp of the timer with `id`.
 pub fn timer_start_ts(id: u64) -> Option<u64> {
     let timers = ACTIVE_TIMERS.lock().unwrap();
-    timers.iter().find(|t| t.id == id).map(|t| t.start_ts)
+    timers.get(&id).map(|t| t.start_ts)
 }
 
 /// Cancel the timer with the given `id` if it exists.
 pub fn cancel_timer(id: u64) {
     let mut timers = ACTIVE_TIMERS.lock().unwrap();
-    if let Some(pos) = timers.iter().position(|t| t.id == id) {
-        let entry = timers.remove(pos);
+    if let Some(entry) = timers.remove(&id) {
         if entry.persist {
             save_persistent_alarms_locked(&timers);
         }
@@ -303,7 +302,7 @@ pub fn cancel_timer(id: u64) {
 /// Pause the timer with the given `id` if it exists.
 pub fn pause_timer(id: u64) {
     let mut timers = ACTIVE_TIMERS.lock().unwrap();
-    if let Some(t) = timers.iter_mut().find(|t| t.id == id) {
+    if let Some(t) = timers.get_mut(&id) {
         if !t.paused {
             t.remaining = t.deadline.saturating_duration_since(Instant::now());
             t.paused = true;
@@ -319,7 +318,7 @@ pub fn pause_timer(id: u64) {
 /// Resume the timer with the given `id` if it is paused.
 pub fn resume_timer(id: u64) {
     let mut timers = ACTIVE_TIMERS.lock().unwrap();
-    if let Some(t) = timers.iter_mut().find(|t| t.id == id) {
+    if let Some(t) = timers.get_mut(&id) {
         if t.paused {
             t.paused = false;
             t.deadline = Instant::now() + t.remaining;
@@ -378,18 +377,21 @@ fn start_entry(
     let deadline = Instant::now() + duration;
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
-        list.push(TimerEntry {
+        list.insert(
             id,
-            label: label.clone(),
-            deadline,
-            persist,
-            end_ts,
-            start_ts,
-            paused: false,
-            remaining: duration,
-            generation: 0,
-            sound: sound.clone(),
-        });
+            TimerEntry {
+                id,
+                label: label.clone(),
+                deadline,
+                persist,
+                end_ts,
+                start_ts,
+                paused: false,
+                remaining: duration,
+                generation: 0,
+                sound: sound.clone(),
+            },
+        );
         if persist {
             save_persistent_alarms_locked(&list);
         }
