@@ -889,19 +889,23 @@ impl eframe::App for LauncherApp {
                 let input_id = egui::Id::new("query_input");
 
                 if self.move_cursor_end {
-                    let len = self.query.chars().count();
-                    tracing::debug!("moving cursor to end: {len}");
-                    ui.ctx().data_mut(|data| {
-                        let state = data
-                            .get_persisted_mut_or_default::<egui::widgets::text_edit::TextEditState>(
-                                input_id,
-                            );
-                        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
-                            egui::text::CCursor::new(len),
-                        )));
-                    });
-                    self.move_cursor_end = false;
-                    tracing::debug!("move_cursor_end cleared after moving");
+                    if ui.ctx().memory(|m| m.has_focus(input_id)) {
+                        let len = self.query.chars().count();
+                        tracing::debug!("moving cursor to end: {len}");
+                        ui.ctx().data_mut(|data| {
+                            let state = data
+                                .get_persisted_mut_or_default::<egui::widgets::text_edit::TextEditState>(
+                                    input_id,
+                                );
+                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                                egui::text::CCursor::new(len),
+                            )));
+                        });
+                        self.move_cursor_end = false;
+                        tracing::debug!("move_cursor_end cleared after moving");
+                    } else {
+                        tracing::debug!("cursor not moved - input not focused");
+                    }
                 }
 
                 let input = ui.add(
