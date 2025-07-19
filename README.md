@@ -194,7 +194,7 @@ Built-in plugins and their command prefixes are:
 - Shell commands (`sh echo hi`)
 - Search history (`hi`)
 - Quick notes (`note add <text>`, `note list`, `note rm <pattern>`)
-- Todo items (`todo add <task>`, `todo list`, `todo rm <pattern>`, `todo clear`)
+- Todo items (`todo add <task> p=<n> #tag`, `todo list`, `todo rm <pattern>`, `todo pset <idx> <n>`, `todo tag <idx> #tag`, `todo clear`)
 - Text snippets (`cs`, `cs list`, `cs rm`, `cs add <alias> <text>`, `cs edit`)
 - Recycle Bin cleanup (`rec`)
 - Temporary files (`tmp`, `tmp new [name]`, `tmp open`, `tmp clear`, `tmp list`, `tmp rm`)

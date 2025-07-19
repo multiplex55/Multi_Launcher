@@ -341,6 +341,8 @@ impl Plugin for TodoPlugin {
             Action { label: "todo list".into(), desc: "Todo".into(), action: "query:todo list".into(), args: None },
             Action { label: "todo rm".into(), desc: "Todo".into(), action: "query:todo rm ".into(), args: None },
             Action { label: "todo clear".into(), desc: "Todo".into(), action: "query:todo clear".into(), args: None },
+            Action { label: "todo pset".into(), desc: "Todo".into(), action: "query:todo pset ".into(), args: None },
+            Action { label: "todo tag".into(), desc: "Todo".into(), action: "query:todo tag ".into(), args: None },
         ]
     }
 }
