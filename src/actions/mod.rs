@@ -31,5 +31,6 @@ pub mod notes;
 pub mod todo;
 pub mod snippets;
 pub mod tempfiles;
+pub mod media;
 pub mod system;
 pub mod exec;

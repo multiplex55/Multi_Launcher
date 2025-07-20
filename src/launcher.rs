@@ -197,6 +197,10 @@ enum ActionKind<'a> {
     BrightnessSet(u32),
     VolumeSet(u32),
     VolumeMuteActive,
+    MediaPlay,
+    MediaPause,
+    MediaNext,
+    MediaPrev,
     RecycleClean,
     WindowSwitch(isize),
     WindowClose(isize),
@@ -386,6 +390,18 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if s == "volume:mute_active" {
         return ActionKind::VolumeMuteActive;
     }
+    if s == "media:play" {
+        return ActionKind::MediaPlay;
+    }
+    if s == "media:pause" {
+        return ActionKind::MediaPause;
+    }
+    if s == "media:next" {
+        return ActionKind::MediaNext;
+    }
+    if s == "media:prev" {
+        return ActionKind::MediaPrev;
+    }
     if s == "recycle:clean" {
         return ActionKind::RecycleClean;
     }
@@ -497,6 +513,22 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         }
         ActionKind::VolumeMuteActive => {
             system::mute_active_window();
+            Ok(())
+        }
+        ActionKind::MediaPlay => {
+            crate::actions::media::play()?;
+            Ok(())
+        }
+        ActionKind::MediaPause => {
+            crate::actions::media::pause()?;
+            Ok(())
+        }
+        ActionKind::MediaNext => {
+            crate::actions::media::next()?;
+            Ok(())
+        }
+        ActionKind::MediaPrev => {
+            crate::actions::media::prev()?;
             Ok(())
         }
         ActionKind::RecycleClean => {
