@@ -184,6 +184,17 @@ impl LauncherApp {
             .map(|a| (a.label.to_lowercase(), a.desc.to_lowercase()))
             .collect();
     }
+
+    pub fn plugin_enabled(&self, name: &str) -> bool {
+        match &self.enabled_plugins {
+            Some(list) => list.contains(&name.to_string()),
+            None => true,
+        }
+    }
+
+    pub fn enabled_plugins_list(&self) -> Option<Vec<String>> {
+        self.enabled_plugins.clone()
+    }
     pub fn add_toast(&mut self, toast: Toast) {
         self.toasts.add(toast);
     }

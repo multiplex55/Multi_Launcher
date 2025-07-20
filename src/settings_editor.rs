@@ -47,6 +47,7 @@ pub struct SettingsEditor {
     net_unit: crate::settings::NetUnit,
     screenshot_dir: String,
     screenshot_save_file: bool,
+    plugin_settings: std::collections::HashMap<String, serde_json::Value>,
 }
 
 impl SettingsEditor {
@@ -123,6 +124,7 @@ impl SettingsEditor {
             net_unit: settings.net_unit,
             screenshot_dir: settings.screenshot_dir.clone().unwrap_or_default(),
             screenshot_save_file: settings.screenshot_save_file,
+            plugin_settings: settings.plugin_settings.clone(),
         }
     }
 
@@ -177,6 +179,7 @@ impl SettingsEditor {
                 Some(self.screenshot_dir.clone())
             },
             screenshot_save_file: self.screenshot_save_file,
+            plugin_settings: self.plugin_settings.clone(),
             show_examples: current.show_examples,
         }
     }
@@ -414,6 +417,26 @@ impl SettingsEditor {
                             "Save file when copying screenshot",
                         );
 
+                        ui.separator();
+                        let enabled_list = app.enabled_plugins_list();
+                        for plugin in app.plugins.iter_mut() {
+                            let name = plugin.name().to_string();
+                            let enabled = match &enabled_list {
+                                Some(list) => list.contains(&name),
+                                None => true,
+                            };
+                            if !enabled {
+                                continue;
+                            }
+                            let entry = self
+                                .plugin_settings
+                                .entry(name.clone())
+                                .or_insert_with(|| plugin.default_settings().unwrap_or(serde_json::Value::Null));
+                            ui.collapsing(format!("{name} settings"), |ui| {
+                                plugin.settings_ui(ui, entry);
+                            });
+                        }
+
                         if ui.button("Save").clicked() {
                             if parse_hotkey(&self.hotkey).is_none() {
                                 self.hotkey = self.last_valid_hotkey.clone();
@@ -510,6 +533,7 @@ impl SettingsEditor {
                                                 app.clipboard_limit,
                                                 app.net_unit,
                                                 false,
+                                                &new_settings.plugin_settings,
                                             );
                                             crate::request_hotkey_restart(new_settings);
                                             if app.enable_toasts {

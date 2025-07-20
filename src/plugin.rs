@@ -36,6 +36,8 @@ use crate::plugins::youtube::YoutubePlugin;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::NetUnit;
 use libloading::Library;
+use serde_json::Value;
+use eframe::egui;
 
 pub trait Plugin: Send + Sync {
     /// Return actions based on the query string
@@ -50,6 +52,17 @@ pub trait Plugin: Send + Sync {
     fn commands(&self) -> Vec<Action> {
         Vec::new()
     }
+
+    /// Return default settings for this plugin if any.
+    fn default_settings(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Update the plugin using the provided settings value.
+    fn apply_settings(&mut self, _value: &serde_json::Value) {}
+
+    /// Draw the settings UI for this plugin.
+    fn settings_ui(&mut self, _ui: &mut egui::Ui, _value: &mut serde_json::Value) {}
 }
 
 /// A manager that holds plugins
@@ -79,50 +92,51 @@ impl PluginManager {
         clipboard_limit: usize,
         net_unit: NetUnit,
         reset_alarm: bool,
+        plugin_settings: &std::collections::HashMap<String, Value>,
     ) {
         self.clear_plugins();
-        self.register(Box::new(WebSearchPlugin));
-        self.register(Box::new(CalculatorPlugin));
-        self.register(Box::new(UnitConvertPlugin));
-        self.register(Box::new(DropCalcPlugin));
-        self.register(Box::new(RunescapeSearchPlugin));
-        self.register(Box::new(YoutubePlugin));
-        self.register(Box::new(RedditPlugin));
-        self.register(Box::new(WikipediaPlugin));
-        self.register(Box::new(ClipboardPlugin::new(clipboard_limit)));
-        self.register(Box::new(BookmarksPlugin::default()));
-        self.register(Box::new(FoldersPlugin::default()));
-        self.register(Box::new(SystemPlugin));
-        self.register(Box::new(ProcessesPlugin));
-        self.register(Box::new(SysInfoPlugin));
-        self.register(Box::new(NetworkPlugin::new(net_unit)));
-        self.register(Box::new(ShellPlugin));
-        self.register(Box::new(HistoryPlugin));
-        self.register(Box::new(NotesPlugin::default()));
-        self.register(Box::new(TodoPlugin::default()));
-        self.register(Box::new(SnippetsPlugin::default()));
-        self.register(Box::new(RecyclePlugin));
-        self.register(Box::new(TempfilePlugin));
-        self.register(Box::new(MediaPlugin));
-        self.register(Box::new(AsciiArtPlugin::default()));
-        self.register(Box::new(ScreenshotPlugin));
+        self.register_with_settings(WebSearchPlugin, plugin_settings);
+        self.register_with_settings(CalculatorPlugin, plugin_settings);
+        self.register_with_settings(UnitConvertPlugin, plugin_settings);
+        self.register_with_settings(DropCalcPlugin, plugin_settings);
+        self.register_with_settings(RunescapeSearchPlugin, plugin_settings);
+        self.register_with_settings(YoutubePlugin, plugin_settings);
+        self.register_with_settings(RedditPlugin, plugin_settings);
+        self.register_with_settings(WikipediaPlugin, plugin_settings);
+        self.register_with_settings(ClipboardPlugin::new(clipboard_limit), plugin_settings);
+        self.register_with_settings(BookmarksPlugin::default(), plugin_settings);
+        self.register_with_settings(FoldersPlugin::default(), plugin_settings);
+        self.register_with_settings(SystemPlugin, plugin_settings);
+        self.register_with_settings(ProcessesPlugin, plugin_settings);
+        self.register_with_settings(SysInfoPlugin, plugin_settings);
+        self.register_with_settings(NetworkPlugin::new(net_unit), plugin_settings);
+        self.register_with_settings(ShellPlugin, plugin_settings);
+        self.register_with_settings(HistoryPlugin, plugin_settings);
+        self.register_with_settings(NotesPlugin::default(), plugin_settings);
+        self.register_with_settings(TodoPlugin::default(), plugin_settings);
+        self.register_with_settings(SnippetsPlugin::default(), plugin_settings);
+        self.register_with_settings(RecyclePlugin, plugin_settings);
+        self.register_with_settings(TempfilePlugin, plugin_settings);
+        self.register_with_settings(MediaPlugin, plugin_settings);
+        self.register_with_settings(AsciiArtPlugin::default(), plugin_settings);
+        self.register_with_settings(ScreenshotPlugin, plugin_settings);
         #[cfg(target_os = "windows")]
         {
-            self.register(Box::new(VolumePlugin));
-            self.register(Box::new(BrightnessPlugin));
-            self.register(Box::new(TaskManagerPlugin));
-            self.register(Box::new(WindowsPlugin));
+            self.register_with_settings(VolumePlugin, plugin_settings);
+            self.register_with_settings(BrightnessPlugin, plugin_settings);
+            self.register_with_settings(TaskManagerPlugin, plugin_settings);
+            self.register_with_settings(WindowsPlugin, plugin_settings);
         }
-        self.register(Box::new(HelpPlugin));
-        self.register(Box::new(TimerPlugin));
+        self.register_with_settings(HelpPlugin, plugin_settings);
+        self.register_with_settings(TimerPlugin, plugin_settings);
         if reset_alarm {
             crate::plugins::timer::reset_alarms_loaded();
         }
         crate::plugins::timer::load_saved_alarms();
-        self.register(Box::new(WeatherPlugin));
+        self.register_with_settings(WeatherPlugin, plugin_settings);
         for dir in dirs {
             tracing::debug!("loading plugins from {dir}");
-            let _ = self.load_dir(dir);
+            let _ = self.load_dir(dir, plugin_settings);
         }
         tracing::debug!(loaded=?self.plugin_names());
     }
@@ -130,6 +144,17 @@ impl PluginManager {
     pub fn register(&mut self, plugin: Box<dyn Plugin>) {
         tracing::debug!("registered plugin {}", plugin.name());
         self.plugins.push(plugin);
+    }
+
+    fn register_with_settings<P: Plugin + 'static>(
+        &mut self,
+        mut plugin: P,
+        settings: &std::collections::HashMap<String, Value>,
+    ) {
+        if let Some(val) = settings.get(plugin.name()) {
+            plugin.apply_settings(val);
+        }
+        self.register(Box::new(plugin));
     }
 
     /// Return a list of registered plugin names.
@@ -160,7 +185,19 @@ impl PluginManager {
         out
     }
 
-    pub fn load_dir(&mut self, path: &str) -> anyhow::Result<()> {
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Box<dyn Plugin>> {
+        self.plugins.iter_mut()
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, Box<dyn Plugin>> {
+        self.plugins.iter()
+    }
+
+    pub fn load_dir(
+        &mut self,
+        path: &str,
+        plugin_settings: &std::collections::HashMap<String, Value>,
+    ) -> anyhow::Result<()> {
         use std::ffi::OsStr;
 
         let ext = "dll";
@@ -179,7 +216,10 @@ impl PluginManager {
                 let lib = Library::new(entry.path())?;
                 let constructor: libloading::Symbol<unsafe extern "C" fn() -> Box<dyn Plugin>> =
                     lib.get(b"create_plugin")?;
-                let plugin = constructor();
+                let mut plugin = constructor();
+                if let Some(val) = plugin_settings.get(plugin.name()) {
+                    plugin.apply_settings(val);
+                }
                 let name = plugin.name().to_string();
                 self.plugins.push(plugin);
                 self.libs.push(lib);

@@ -4,6 +4,8 @@ use arboard::Clipboard;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use eframe::egui;
+use serde_json;
 
 pub const CLIPBOARD_FILE: &str = "clipboard_history.json";
 
@@ -49,6 +51,17 @@ pub struct ClipboardPlugin {
     clipboard: Mutex<Option<Clipboard>>,
     #[allow(dead_code)]
     watcher: Option<RecommendedWatcher>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct ClipboardPluginSettings {
+    pub max_entries: usize,
+}
+
+impl Default for ClipboardPluginSettings {
+    fn default() -> Self {
+        Self { max_entries: 20 }
+    }
 }
 
 impl ClipboardPlugin {
@@ -242,5 +255,25 @@ impl Plugin for ClipboardPlugin {
                 args: None,
             },
         ]
+    }
+
+    fn default_settings(&self) -> Option<serde_json::Value> {
+        Some(serde_json::to_value(ClipboardPluginSettings { max_entries: self.max_entries }).unwrap())
+    }
+
+    fn apply_settings(&mut self, value: &serde_json::Value) {
+        if let Ok(s) = serde_json::from_value::<ClipboardPluginSettings>(value.clone()) {
+            self.max_entries = s.max_entries;
+        }
+    }
+
+    fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
+        let mut cfg: ClipboardPluginSettings = serde_json::from_value(value.clone()).unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.label("Max history entries");
+            ui.add(egui::DragValue::new(&mut cfg.max_entries).clamp_range(1..=200));
+        });
+        *value = serde_json::to_value(&cfg).unwrap();
+        self.max_entries = cfg.max_entries;
     }
 }

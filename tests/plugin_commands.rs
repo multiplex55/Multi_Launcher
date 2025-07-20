@@ -14,6 +14,7 @@ fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
         Settings::default().clipboard_limit,
         Settings::default().net_unit,
         false,
+        &std::collections::HashMap::new(),
     );
     LauncherApp::new(
         ctx,
