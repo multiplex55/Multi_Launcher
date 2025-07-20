@@ -134,7 +134,12 @@ impl Plugin for NotesPlugin {
         const RM_PREFIX: &str = "note rm ";
         if let Some(rest) = crate::common::strip_prefix_ci(query, RM_PREFIX) {
             let filter = rest.trim();
-            let notes = self.data.lock().unwrap().clone();
+            let notes = self
+                .data
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default();
             return notes
                 .into_iter()
                 .enumerate()
@@ -151,7 +156,12 @@ impl Plugin for NotesPlugin {
         const LIST_PREFIX: &str = "note list";
         if let Some(rest) = crate::common::strip_prefix_ci(query, LIST_PREFIX) {
             let filter = rest.trim();
-            let notes = self.data.lock().unwrap().clone();
+            let notes = self
+                .data
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default();
             return notes
                 .into_iter()
                 .enumerate()

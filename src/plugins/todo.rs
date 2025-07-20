@@ -277,7 +277,12 @@ impl Plugin for TodoPlugin {
         const RM_PREFIX: &str = "todo rm ";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, RM_PREFIX) {
             let filter = rest.trim();
-            let todos = self.data.lock().unwrap().clone();
+            let todos = self
+                .data
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default();
             return todos
                 .into_iter()
                 .enumerate()
@@ -294,7 +299,12 @@ impl Plugin for TodoPlugin {
         const LIST_PREFIX: &str = "todo list";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
             let filter = rest.trim();
-            let todos = self.data.lock().unwrap().clone();
+            let todos = self
+                .data
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default();
             let mut entries: Vec<(usize, TodoEntry)> = todos.into_iter().enumerate().collect();
 
             let tag_filter = filter.starts_with('#');

@@ -96,8 +96,14 @@ impl ClipboardPlugin {
     }
 
     fn update_history(&self) -> VecDeque<String> {
-        let mut history = self.history.lock().unwrap();
-        let mut cb_lock = self.clipboard.lock().unwrap();
+        let mut history = match self.history.lock().ok() {
+            Some(h) => h,
+            None => return VecDeque::new(),
+        };
+        let mut cb_lock = match self.clipboard.lock().ok() {
+            Some(c) => c,
+            None => return history.clone(),
+        };
 
         if cb_lock.is_none() {
             match Clipboard::new() {
