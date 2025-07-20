@@ -1,5 +1,18 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
+use std::path::PathBuf;
+
+/// Return the directory used to store screenshots.
+///
+/// The directory is created inside the folder of the current executable if
+/// possible, otherwise a temporary directory is used.
+pub fn screenshot_dir() -> PathBuf {
+    let base = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("screenshots")
+}
 
 pub struct ScreenshotPlugin;
 

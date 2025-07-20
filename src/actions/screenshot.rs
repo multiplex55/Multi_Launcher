@@ -1,6 +1,11 @@
+#[cfg(target_os = "windows")]
 use chrono::Local;
+#[cfg(target_os = "windows")]
 use std::borrow::Cow;
 use std::path::PathBuf;
+
+#[cfg(target_os = "windows")]
+use crate::plugins::screenshot::screenshot_dir;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -11,9 +16,12 @@ pub enum Mode {
 
 #[cfg(target_os = "windows")]
 pub fn capture(mode: Mode, clipboard: bool) -> anyhow::Result<PathBuf> {
-    let dir = dirs_next::picture_dir().unwrap_or_else(|| std::env::current_dir().unwrap());
+    let dir = screenshot_dir();
     std::fs::create_dir_all(&dir)?;
-    let filename = format!("multi_launcher_{}.png", Local::now().format("%Y%m%d_%H%M%S"));
+    let filename = format!(
+        "multi_launcher_{}.png",
+        Local::now().format("%Y%m%d_%H%M%S")
+    );
     let path = dir.join(filename);
     let path_str = path.to_string_lossy().to_string();
     match mode {
