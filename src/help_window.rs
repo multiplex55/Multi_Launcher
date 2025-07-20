@@ -119,6 +119,7 @@ fn example_queries(name: &str) -> Option<&'static [&'static str]> {
         "shell" => Some(&["sh", "sh echo hello"]),
         "system" => Some(&["sys shutdown"]),
         "sysinfo" => Some(&["info", "info cpu", "info cpu list 5"]),
+        "network" => Some(&["net"]),
         "weather" => Some(&["weather Berlin"]),
         "history" => Some(&["hi"]),
         "timer" => Some(&[
