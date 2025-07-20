@@ -15,7 +15,6 @@ pub mod common;
 pub mod sound;
 pub mod settings;
 pub mod settings_editor;
-pub mod timer_help_window;
 pub mod usage;
 pub mod visibility;
 

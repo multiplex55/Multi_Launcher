@@ -43,7 +43,6 @@ use crate::plugin_editor::PluginEditor;
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
 use crate::settings::Settings;
 use crate::settings_editor::SettingsEditor;
-use crate::timer_help_window::TimerHelpWindow;
 use crate::usage::{self, USAGE_FILE};
 use crate::visibility::apply_visibility;
 use eframe::egui;
@@ -138,7 +137,6 @@ pub struct LauncherApp {
     tempfile_dialog: TempfileDialog,
     add_bookmark_dialog: AddBookmarkDialog,
     help_window: crate::help_window::HelpWindow,
-    timer_help: crate::timer_help_window::TimerHelpWindow,
     timer_dialog: TimerDialog,
     completion_dialog: TimerCompletionDialog,
     shell_cmd_dialog: ShellCmdDialog,
@@ -437,7 +435,6 @@ impl LauncherApp {
                 show_examples: settings.show_examples,
                 ..Default::default()
             },
-            timer_help: TimerHelpWindow::default(),
             timer_dialog: TimerDialog::default(),
             completion_dialog: TimerCompletionDialog::default(),
             shell_cmd_dialog: ShellCmdDialog::default(),
@@ -916,9 +913,6 @@ impl eframe::App for LauncherApp {
                 ui.menu_button("Help", |ui| {
                     if ui.button("Command List").clicked() {
                         self.help_window.open = true;
-                    }
-                    if ui.button("Timer Plugin Help").clicked() {
-                        self.timer_help.open = true;
                     }
                 });
             });
@@ -1872,9 +1866,6 @@ impl eframe::App for LauncherApp {
         let mut help = std::mem::take(&mut self.help_window);
         help.ui(ctx, self);
         self.help_window = help;
-        let mut timer_help = std::mem::take(&mut self.timer_help);
-        timer_help.ui(ctx);
-        self.timer_help = timer_help;
         let mut timer_dlg = std::mem::take(&mut self.timer_dialog);
         timer_dlg.ui(ctx, self);
         self.timer_dialog = timer_dlg;
