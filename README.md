@@ -205,10 +205,12 @@ Built-in plugins and their command prefixes are:
 - Task Manager (`tm`) *(Windows only)*
 - Window management (`win <title>` to switch or close) *(Windows only)*
 - Command overview (`help`)
-- Timers and alarms (`timer add 5m tea`, `timer add 1:30`, `alarm 07:30`). Use `timer list` to view
-   remaining time or `timer rm` to remove timers. Pending alarms are saved to `alarms.json` and resume after
-   restarting the launcher. A plugin setting controls pop-up dialogs when a
-   timer completes.
+- Timers and alarms (`timer add 5m tea`, `timer add 1:30`, `alarm 07:30`). Type `timer` or
+  `alarm` and press <kbd>Enter</kbd> to open the creation dialog. Use `timer list` to view
+  remaining time or `timer rm` to remove timers. Alarms are stored in `alarms.json`
+  and reload automatically when the launcher starts. The timer plugin exposes a
+  `completion_dialog` capability that toggles pop-up notifications when a timer
+  completes.
 - Weather lookup (`weather Berlin`)
 
 When the search box is empty the launcher shows these shortcuts along with `app <alias>` entries for saved actions.
@@ -235,6 +237,12 @@ Plugins can be enabled or disabled from the **Settings** window. The list of
 active plugins is stored in the `enabled_plugins` section of `settings.json`.
 The **Plugin Settings** dialog provides a graphical way to manage plugin directories, enable or disable plugins and toggle capabilities like `show_full_path`.
 
+Changes take effect immediately once the dialog is closed. Use this window to
+enable additional plugins, such as a dynamic `envvar` plugin that exposes
+environment variables through the `env` prefix. After placing the compiled
+plugin in one of the configured directories simply check its box in the dialog
+and close it to reload the plugin list.
+
 
 Example:
 
@@ -252,6 +260,7 @@ Example:
     "processes",
     "weather",
     "timer",
+    "envvar",
     "history",
     "help"
   ]
@@ -266,6 +275,8 @@ The bookmarks plugin uses the `bm` prefix. Use `bm add <url>` to save a link,
 `bm rm` to list and remove bookmarks (optionally filtering with a pattern) or
 `bm list` to show all bookmarks. Searching with `bm <term>` matches both URLs
 and aliases.
+The envvar plugin uses the `env` prefix and shows matching environment variables
+and their values.
 The system information plugin uses the `info` prefix. Type `info` to show CPU,
 memory and disk usage or `info cpu` for a single metric.
 ### Security Considerations
