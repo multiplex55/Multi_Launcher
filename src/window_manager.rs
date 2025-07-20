@@ -268,6 +268,21 @@ pub fn activate_process(pid: u32) {
 }
 
 #[cfg(target_os = "windows")]
+pub fn activate_window(hwnd: usize) {
+    use windows::Win32::Foundation::HWND;
+    crate::window_manager::force_restore_and_foreground(HWND(hwnd as *mut _));
+}
+
+#[cfg(target_os = "windows")]
+pub fn close_window(hwnd: usize) {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+    unsafe {
+        let _ = PostMessageW(HWND(hwnd as *mut _), WM_CLOSE, WPARAM(0), LPARAM(0));
+    }
+}
+
+#[cfg(target_os = "windows")]
 pub fn send_end_key() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
