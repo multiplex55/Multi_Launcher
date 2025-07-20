@@ -4,6 +4,18 @@ use sysinfo::Networks;
 use std::sync::Mutex;
 use std::time::Instant;
 
+fn fmt_speed(bytes_per_sec: f64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    if bytes_per_sec >= MB {
+        format!("{:.2} MB/s", bytes_per_sec / MB)
+    } else if bytes_per_sec >= KB {
+        format!("{:.1} kB/s", bytes_per_sec / KB)
+    } else {
+        format!("{:.0} B/s", bytes_per_sec)
+    }
+}
+
 /// Display network usage per interface using the `net` prefix.
 pub struct NetworkPlugin {
     state: Mutex<(Networks, Instant)>,
@@ -39,10 +51,10 @@ impl Plugin for NetworkPlugin {
         nets
             .iter()
             .map(|(name, data)| {
-                let rx = data.received() as f64 / dt / 1_048_576.0;
-                let tx = data.transmitted() as f64 / dt / 1_048_576.0;
+                let rx = data.received() as f64 / dt;
+                let tx = data.transmitted() as f64 / dt;
                 Action {
-                    label: format!("{name} Rx {:.1} MB/s Tx {:.1} MB/s", rx, tx),
+                    label: format!("{name} Rx {} Tx {}", fmt_speed(rx), fmt_speed(tx)),
                     desc: "Network".into(),
                     action: format!("net:{name}"),
                     args: None,
