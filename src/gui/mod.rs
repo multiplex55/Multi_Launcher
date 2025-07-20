@@ -751,6 +751,8 @@ impl LauncherApp {
             || self.volume_dialog.open
             || self.brightness_dialog.open
             || self.cpu_list_dialog.open
+            || self.help_window.open
+            || self.help_window.overlay_open
             || self.show_editor
             || self.show_settings
             || self.show_plugins
