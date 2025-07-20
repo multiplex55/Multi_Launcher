@@ -6,6 +6,12 @@ use std::path::PathBuf;
 
 #[cfg(target_os = "windows")]
 use crate::plugins::screenshot::screenshot_dir;
+#[cfg(target_os = "windows")]
+use screenshots::Screen;
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::RECT;
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -25,9 +31,33 @@ pub fn capture(mode: Mode, clipboard: bool) -> anyhow::Result<PathBuf> {
     let path = dir.join(filename);
     let path_str = path.to_string_lossy().to_string();
     match mode {
-        Mode::Window => screenshot::screenshot_window(path_str.clone()),
-        Mode::Region => screenshot::screenshot_area(path_str.clone(), false),
-        Mode::Desktop => screenshot::screenshot_full(path_str.clone()),
+        Mode::Desktop => {
+            let screen = Screen::from_point(0, 0)?;
+            let image = screen.capture()?;
+            image.save(&path)?;
+        }
+        Mode::Window => {
+            let hwnd = unsafe { GetForegroundWindow() };
+            if hwnd.0 != 0 {
+                let mut rect = RECT::default();
+                unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
+                let width = (rect.right - rect.left) as u32;
+                let height = (rect.bottom - rect.top) as u32;
+                let screen = Screen::from_point(rect.left + 1, rect.top + 1)?;
+                let image = screen.capture_area(
+                    rect.left - screen.display_info.x,
+                    rect.top - screen.display_info.y,
+                    width,
+                    height,
+                )?;
+                image.save(&path)?;
+            }
+        }
+        Mode::Region => {
+            let screen = Screen::from_point(0, 0)?;
+            let image = screen.capture()?;
+            image.save(&path)?;
+        }
     }
     if clipboard {
         let img = image::load_from_memory(&std::fs::read(&path)?)?.to_rgba8();
