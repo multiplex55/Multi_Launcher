@@ -14,9 +14,10 @@ pub fn screenshot_dir() -> PathBuf {
             return PathBuf::from(dir);
         }
     }
-    std::env::current_dir()
+    let dir = std::env::current_dir()
         .unwrap_or_else(|_| std::env::temp_dir())
-        .join("MultiLauncher_Screenshots")
+        .join("MultiLauncher_Screenshots");
+    std::fs::canonicalize(&dir).unwrap_or(dir)
 }
 
 pub struct ScreenshotPlugin;

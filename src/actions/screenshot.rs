@@ -26,7 +26,7 @@ pub fn capture(mode: Mode, clipboard: bool) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(&dir)?;
     let filename = format!(
         "multi_launcher_{}.png",
-        Local::now().format("%Y%m%d_%H%M%S")
+        Local::now().format("%Y%m%d_%H%M%S%.3f")
     );
     let path = dir.join(filename);
     let path_str = path.to_string_lossy().to_string();
@@ -35,6 +35,7 @@ pub fn capture(mode: Mode, clipboard: bool) -> anyhow::Result<PathBuf> {
             let screen = Screen::from_point(0, 0)?;
             let image = screen.capture()?;
             image.save(&path)?;
+            std::fs::File::open(&path)?.sync_all()?;
         }
         Mode::Window => {
             let hwnd = unsafe { GetForegroundWindow() };
@@ -51,6 +52,7 @@ pub fn capture(mode: Mode, clipboard: bool) -> anyhow::Result<PathBuf> {
                     height,
                 )?;
                 image.save(&path)?;
+                std::fs::File::open(&path)?.sync_all()?;
             }
         }
         Mode::Region => {
@@ -73,6 +75,7 @@ pub fn capture(mode: Mode, clipboard: bool) -> anyhow::Result<PathBuf> {
             )
             .ok_or_else(|| anyhow::anyhow!("invalid clipboard image"))?;
             buf.save(&path)?;
+            std::fs::File::open(&path)?.sync_all()?;
         }
     }
     if clipboard {
