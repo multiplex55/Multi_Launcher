@@ -38,11 +38,9 @@ pub fn capture(mode: Mode, clipboard: bool) -> anyhow::Result<PathBuf> {
         }
         Mode::Window => {
             let hwnd = unsafe { GetForegroundWindow() };
-            if hwnd.0 != std::ptr::null_mut() {
+            if !hwnd.is_invalid() {
                 let mut rect = RECT::default();
-                if !unsafe { GetWindowRect(hwnd, &mut rect) }.as_bool() {
-                    anyhow::bail!("GetWindowRect failed");
-                }
+                unsafe { GetWindowRect(hwnd, &mut rect) }?;
                 let width = (rect.right - rect.left) as u32;
                 let height = (rect.bottom - rect.top) as u32;
                 let screen = Screen::from_point(rect.left + 1, rect.top + 1)?;
