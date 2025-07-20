@@ -104,7 +104,7 @@ value as shown below:
   "static_location_enabled": false,
   "static_pos": [0, 0],
   "static_size": [400, 220],
-  "screenshot_dir": "C:/Users/YourName/Pictures",
+  "screenshot_dir": "./MultiLauncher_Screenshots",
   "screenshot_save_file": true
 }
 ```
@@ -148,7 +148,7 @@ Example: typing `test` will only list entries containing `test`. If an alias mat
 `clipboard_limit` sets how many clipboard entries are persisted for the clipboard plugin.
 `preserve_command` keeps the typed command prefix (like `bm add` or `f add`) in the search field after running an action.
 `enabled_capabilities` maps plugin names to capability identifiers so features can be toggled individually. The folders plugin, for example, exposes `show_full_path`.
-`screenshot_dir` sets the directory used when saving screenshots. If omitted, the Pictures or home folder is used by default.
+`screenshot_dir` sets the directory used when saving screenshots. If omitted, screenshots are stored in a `MultiLauncher_Screenshots` folder in the current working directory.
 `screenshot_save_file` determines whether screenshots copied to the clipboard are also written to disk. The default is `true`.
 
 
@@ -220,7 +220,7 @@ Built-in plugins and their command prefixes are:
 
 ### Screenshot Plugin (Windows only)
 Use `ss` to capture the active window, a custom region or the whole desktop. Add `clip` to copy the result to the clipboard.
-Screenshots are saved in a `screenshots` folder next to the executable by default or the path set in `screenshot_dir`.
+Screenshots are saved in a `MultiLauncher_Screenshots` folder in the current working directory by default or the path set in `screenshot_dir`.
 Set `screenshot_save_file` to `true` to always keep a file when copying to the clipboard.
 
 When the search box is empty the launcher shows these shortcuts along with `app <alias>` entries for saved actions.

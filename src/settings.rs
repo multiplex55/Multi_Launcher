@@ -181,9 +181,13 @@ impl Default for Settings {
             disable_timer_updates: false,
             preserve_command: false,
             show_examples: false,
-            screenshot_dir: dirs_next::picture_dir()
-                .or_else(dirs_next::home_dir)
-                .map(|p| p.to_string_lossy().to_string()),
+            screenshot_dir: Some(
+                std::env::current_dir()
+                    .unwrap_or_else(|_| std::env::temp_dir())
+                    .join("MultiLauncher_Screenshots")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
             screenshot_save_file: true,
         }
     }
