@@ -1,7 +1,7 @@
 use crate::actions::Action;
 
 #[cfg(target_os = "windows")]
-fn set_system_volume(percent: u32) {
+pub(crate) fn set_system_volume(percent: u32) {
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::Media::Audio::{
         eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
@@ -27,7 +27,7 @@ fn set_system_volume(percent: u32) {
 }
 
 #[cfg(target_os = "windows")]
-fn mute_active_window() {
+pub(crate) fn mute_active_window() {
     use windows::core::Interface;
     use windows::Win32::Media::Audio::{
         eMultimedia, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator,
@@ -73,7 +73,7 @@ fn mute_active_window() {
 }
 
 #[cfg(target_os = "windows")]
-fn set_display_brightness(percent: u32) {
+pub(crate) fn set_display_brightness(percent: u32) {
     use windows::Win32::Devices::Display::{
         DestroyPhysicalMonitors, GetNumberOfPhysicalMonitorsFromHMONITOR,
         GetPhysicalMonitorsFromHMONITOR, SetMonitorBrightness, PHYSICAL_MONITOR,
@@ -112,7 +112,7 @@ fn set_display_brightness(percent: u32) {
 }
 
 #[cfg(target_os = "windows")]
-fn clean_recycle_bin() {
+pub(crate) fn clean_recycle_bin() {
     use windows::Win32::UI::Shell::{
         SHEmptyRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND,
     };

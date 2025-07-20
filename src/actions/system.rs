@@ -15,14 +15,16 @@ pub fn process_kill(pid: u32) {
     }
 }
 
-pub fn process_switch(_pid: u32) {
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+pub fn process_switch(pid: u32) {
     #[cfg(target_os = "windows")]
     {
         super::super::window_manager::activate_process(pid);
     }
 }
 
-pub fn window_switch(_hwnd: isize) {
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+pub fn window_switch(hwnd: isize) {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::Foundation::HWND;
@@ -30,7 +32,8 @@ pub fn window_switch(_hwnd: isize) {
     }
 }
 
-pub fn window_close(_hwnd: isize) {
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+pub fn window_close(hwnd: isize) {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -41,12 +44,14 @@ pub fn window_close(_hwnd: isize) {
     }
 }
 
-pub fn set_brightness(_v: u32) {
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+pub fn set_brightness(v: u32) {
     #[cfg(target_os = "windows")]
     super::super::launcher::set_display_brightness(v);
 }
 
-pub fn set_volume(_v: u32) {
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+pub fn set_volume(v: u32) {
     #[cfg(target_os = "windows")]
     super::super::launcher::set_system_volume(v);
 }
