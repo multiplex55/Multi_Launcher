@@ -8,4 +8,5 @@ fn search_returns_actions() {
     thread::sleep(Duration::from_millis(10));
     let results = plugin.search("net");
     assert!(!results.is_empty());
+    assert!(results[0].label.contains("AvgRx"));
 }

@@ -1,6 +1,7 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
 use crate::settings::NetUnit;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Instant;
 use sysinfo::Networks;
@@ -26,7 +27,11 @@ fn fmt_speed(bytes_per_sec: f64, unit: NetUnit) -> String {
 
 /// Display network usage per interface using the `net` prefix.
 pub struct NetworkPlugin {
-    state: Mutex<(Networks, Instant)>,
+    state: Mutex<(
+        Networks,
+        Instant,
+        VecDeque<(Instant, HashMap<String, (u64, u64)>)>,
+    )>,
     unit: NetUnit,
 }
 
@@ -34,8 +39,18 @@ impl NetworkPlugin {
     pub fn new(unit: NetUnit) -> Self {
         let mut nets = Networks::new_with_refreshed_list();
         nets.refresh(true);
+        let now = Instant::now();
+        let mut totals = HashMap::new();
+        for (name, data) in nets.iter() {
+            totals.insert(
+                name.clone(),
+                (data.total_received(), data.total_transmitted()),
+            );
+        }
+        let mut history = VecDeque::new();
+        history.push_back((now, totals));
         Self {
-            state: Mutex::new((nets, Instant::now())),
+            state: Mutex::new((nets, now, history)),
             unit,
         }
     }
@@ -61,20 +76,52 @@ impl Plugin for NetworkPlugin {
             Ok(g) => g,
             Err(_) => return Vec::new(),
         };
-        let (nets, last) = &mut *guard;
+        let (nets, last, history) = &mut *guard;
         let now = Instant::now();
         nets.refresh(true);
         let dt = now.duration_since(*last).as_secs_f64().max(0.001);
         *last = now;
+
+        let mut totals = HashMap::new();
+        for (name, data) in nets.iter() {
+            totals.insert(
+                name.clone(),
+                (data.total_received(), data.total_transmitted()),
+            );
+        }
+        history.push_back((now, totals));
+        while let Some((t, _)) = history.front() {
+            if now.duration_since(*t).as_secs_f64() > 10.0 {
+                history.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        let (first_time, first_totals) = history.front().unwrap();
+        let avg_dt = now.duration_since(*first_time).as_secs_f64().max(0.001);
+
         nets.iter()
             .map(|(name, data)| {
                 let rx = data.received() as f64 / dt;
                 let tx = data.transmitted() as f64 / dt;
+                let (avg_rx, avg_tx) = match first_totals.get(name) {
+                    Some((rx0, tx0)) => (
+                        (data.total_received() - *rx0) as f64 / avg_dt,
+                        (data.total_transmitted() - *tx0) as f64 / avg_dt,
+                    ),
+                    None => (
+                        data.total_received() as f64 / avg_dt,
+                        data.total_transmitted() as f64 / avg_dt,
+                    ),
+                };
                 Action {
                     label: format!(
-                        "{name} Rx {} Tx {}",
+                        "{name} Rx {} Tx {} AvgRx {} AvgTx {}",
                         fmt_speed(rx, self.unit),
-                        fmt_speed(tx, self.unit)
+                        fmt_speed(tx, self.unit),
+                        fmt_speed(avg_rx, self.unit),
+                        fmt_speed(avg_tx, self.unit)
                     ),
                     desc: "Network".into(),
                     action: format!("net:{name}"),
