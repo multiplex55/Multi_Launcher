@@ -2,7 +2,7 @@ use chrono::Local;
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
     Window,
     Region,

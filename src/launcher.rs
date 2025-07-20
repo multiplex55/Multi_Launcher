@@ -197,6 +197,7 @@ enum ActionKind<'a> {
     BrightnessSet(u32),
     VolumeSet(u32),
     VolumeMuteActive,
+    Screenshot { mode: crate::actions::screenshot::Mode, clip: bool },
     MediaPlay,
     MediaPause,
     MediaNext,
@@ -390,6 +391,18 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if s == "volume:mute_active" {
         return ActionKind::VolumeMuteActive;
     }
+    if let Some(mode) = s.strip_prefix("screenshot:") {
+        use crate::actions::screenshot::Mode as ScreenshotMode;
+        return match mode {
+            "window" => ActionKind::Screenshot { mode: ScreenshotMode::Window, clip: false },
+            "region" => ActionKind::Screenshot { mode: ScreenshotMode::Region, clip: false },
+            "desktop" => ActionKind::Screenshot { mode: ScreenshotMode::Desktop, clip: false },
+            "window_clip" => ActionKind::Screenshot { mode: ScreenshotMode::Window, clip: true },
+            "region_clip" => ActionKind::Screenshot { mode: ScreenshotMode::Region, clip: true },
+            "desktop_clip" => ActionKind::Screenshot { mode: ScreenshotMode::Desktop, clip: true },
+            _ => ActionKind::ExecPath { path: s, args: action.args.as_deref() },
+        };
+    }
     if s == "media:play" {
         return ActionKind::MediaPlay;
     }
@@ -513,6 +526,10 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         }
         ActionKind::VolumeMuteActive => {
             system::mute_active_window();
+            Ok(())
+        }
+        ActionKind::Screenshot { mode, clip } => {
+            crate::actions::screenshot::capture(mode, clip)?;
             Ok(())
         }
         ActionKind::MediaPlay => {
