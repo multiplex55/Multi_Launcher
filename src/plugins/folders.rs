@@ -189,7 +189,12 @@ impl Plugin for FoldersPlugin {
         const RM_PREFIX: &str = "f rm ";
         if let Some(rest) = crate::common::strip_prefix_ci(query, RM_PREFIX) {
             let filter = rest.trim();
-            let folders = self.data.lock().unwrap().clone();
+            let folders = self
+                .data
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default();
             return folders
                 .into_iter()
                 .filter(|f| {
@@ -215,7 +220,12 @@ impl Plugin for FoldersPlugin {
             None => return Vec::new(),
         };
         let filter = rest.trim();
-        let folders = self.data.lock().unwrap().clone();
+        let folders = self
+            .data
+            .lock()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default();
         folders
             .into_iter()
             .filter(|f| {

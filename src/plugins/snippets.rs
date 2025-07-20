@@ -125,7 +125,12 @@ impl Plugin for SnippetsPlugin {
         }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs rm") {
             let filter = rest.trim();
-            let list = self.data.lock().unwrap().clone();
+            let list = self
+                .data
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default();
             return list
                 .into_iter()
                 .filter(|s| {
@@ -158,7 +163,12 @@ impl Plugin for SnippetsPlugin {
 
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs edit") {
             let filter = rest.trim();
-            let list = self.data.lock().unwrap().clone();
+            let list = self
+                .data
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default();
             return list
                 .into_iter()
                 .filter(|s| {
@@ -177,7 +187,12 @@ impl Plugin for SnippetsPlugin {
 
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs list") {
             let filter = rest.trim();
-            let list = self.data.lock().unwrap().clone();
+            let list = self
+                .data
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default();
             return list
                 .into_iter()
                 .filter(|s| {
@@ -195,7 +210,12 @@ impl Plugin for SnippetsPlugin {
 
         if let Some(filter) = crate::common::strip_prefix_ci(trimmed, "cs") {
             let filter = filter.trim();
-            let list = self.data.lock().unwrap().clone();
+            let list = self
+                .data
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default();
             return list
                 .into_iter()
                 .filter(|s| {

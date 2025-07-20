@@ -196,7 +196,12 @@ impl Plugin for BookmarksPlugin {
         const RM_PREFIX: &str = "bm rm";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, RM_PREFIX) {
             let filter = rest.trim();
-            let bookmarks = self.data.lock().unwrap().clone();
+            let bookmarks = self
+                .data
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default();
             return bookmarks
                 .into_iter()
                 .filter(|b| {
@@ -217,7 +222,12 @@ impl Plugin for BookmarksPlugin {
         const LIST_PREFIX: &str = "bm list";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
             let filter = rest.trim();
-            let bookmarks = self.data.lock().unwrap().clone();
+            let bookmarks = self
+                .data
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default();
             return bookmarks
                 .into_iter()
                 .filter(|b| {
@@ -244,7 +254,12 @@ impl Plugin for BookmarksPlugin {
             None => return Vec::new(),
         };
         let filter = rest.trim();
-        let bookmarks = self.data.lock().unwrap().clone();
+        let bookmarks = self
+            .data
+            .lock()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default();
         bookmarks
             .into_iter()
             .filter(|b| {

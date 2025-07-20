@@ -79,10 +79,16 @@ impl TimerManager {
     }
 
     fn run(inner: Arc<Inner>) {
-        let mut heap_guard = inner.heap.lock().unwrap();
+        let mut heap_guard = match inner.heap.lock().ok() {
+            Some(g) => g,
+            None => return,
+        };
         loop {
             while heap_guard.peek().is_none() {
-                heap_guard = inner.condvar.wait(heap_guard).unwrap();
+                heap_guard = match inner.condvar.wait(heap_guard).ok() {
+                    Some(g) => g,
+                    None => return,
+                };
             }
             let now = Instant::now();
             if let Some(Reverse((deadline, id, gen))) = heap_guard.peek().cloned() {
@@ -90,11 +96,17 @@ impl TimerManager {
                     heap_guard.pop();
                     drop(heap_guard);
                     Self::fire_timer(id, gen);
-                    heap_guard = inner.heap.lock().unwrap();
+                    heap_guard = match inner.heap.lock().ok() {
+                        Some(g) => g,
+                        None => return,
+                    };
                     continue;
                 } else {
                     let wait = deadline.saturating_duration_since(now);
-                    let res = inner.condvar.wait_timeout(heap_guard, wait).unwrap();
+                    let res = match inner.condvar.wait_timeout(heap_guard, wait).ok() {
+                        Some(r) => r,
+                        None => return,
+                    };
                     heap_guard = res.0;
                     continue;
                 }
@@ -103,7 +115,10 @@ impl TimerManager {
     }
 
     fn fire_timer(id: u64, gen: u64) {
-        let mut list = ACTIVE_TIMERS.lock().unwrap();
+        let mut list = match ACTIVE_TIMERS.lock().ok() {
+            Some(l) => l,
+            None => return,
+        };
         if let Some(entry) = list.get(&id) {
             if entry.generation == gen && !entry.paused {
                 let entry = list.remove(&id).unwrap();
@@ -118,15 +133,18 @@ impl TimerManager {
                 };
                 crate::sound::play_sound(&entry.sound);
                 notify(&msg);
-                FINISHED_MESSAGES.lock().unwrap().push(msg);
+                if let Some(mut msgs) = FINISHED_MESSAGES.lock().ok() {
+                    msgs.push(msg);
+                }
             }
         }
     }
 
     fn register(&self, deadline: Instant, id: u64, gen: u64) {
-        let mut heap = self.inner.heap.lock().unwrap();
-        heap.push(Reverse((deadline, id, gen)));
-        self.inner.condvar.notify_one();
+        if let Some(mut heap) = self.inner.heap.lock().ok() {
+            heap.push(Reverse((deadline, id, gen)));
+            self.inner.condvar.notify_one();
+        }
     }
 
     fn wakeup(&self) {
@@ -143,10 +161,13 @@ pub fn reset_alarms_loaded() {
 
 /// Retrieve and clear finished timer/alarm notifications.
 pub fn take_finished_messages() -> Vec<String> {
-    let mut list = FINISHED_MESSAGES.lock().unwrap();
-    let out = list.clone();
-    list.clear();
-    out
+    if let Some(mut list) = FINISHED_MESSAGES.lock().ok() {
+        let out = list.clone();
+        list.clear();
+        out
+    } else {
+        Vec::new()
+    }
 }
 
 /// Load persisted alarms from the alarms file if not already loaded.
@@ -237,9 +258,8 @@ pub fn parse_hhmm(input: &str) -> Option<(u32, u32)> {
 /// Return a list of active timers with remaining time.
 pub fn active_timers() -> Vec<(u64, String, Duration, u64)> {
     let now = Instant::now();
-    ACTIVE_TIMERS
-        .lock()
-        .unwrap()
+    let Some(timers) = ACTIVE_TIMERS.lock().ok() else { return Vec::new(); };
+    timers
         .values()
         .map(|t| {
             let remaining = if t.paused {
@@ -255,9 +275,8 @@ pub fn active_timers() -> Vec<(u64, String, Duration, u64)> {
 /// Return active timers that are currently running (not paused).
 pub fn running_timers() -> Vec<(u64, String, Duration, u64)> {
     let now = Instant::now();
-    ACTIVE_TIMERS
-        .lock()
-        .unwrap()
+    let Some(timers) = ACTIVE_TIMERS.lock().ok() else { return Vec::new(); };
+    timers
         .values()
         .filter(|t| !t.paused)
         .map(|t| {
@@ -273,9 +292,8 @@ pub fn running_timers() -> Vec<(u64, String, Duration, u64)> {
 
 /// Return timers that are currently paused.
 pub fn paused_timers() -> Vec<(u64, String, Duration, u64)> {
-    ACTIVE_TIMERS
-        .lock()
-        .unwrap()
+    let Some(timers) = ACTIVE_TIMERS.lock().ok() else { return Vec::new(); };
+    timers
         .values()
         .filter(|t| t.paused)
         .map(|t| (t.id, t.label.clone(), t.remaining, t.start_ts))
@@ -284,50 +302,53 @@ pub fn paused_timers() -> Vec<(u64, String, Duration, u64)> {
 
 /// Get the start timestamp of the timer with `id`.
 pub fn timer_start_ts(id: u64) -> Option<u64> {
-    let timers = ACTIVE_TIMERS.lock().unwrap();
+    let Some(timers) = ACTIVE_TIMERS.lock().ok() else { return None };
     timers.get(&id).map(|t| t.start_ts)
 }
 
 /// Cancel the timer with the given `id` if it exists.
 pub fn cancel_timer(id: u64) {
-    let mut timers = ACTIVE_TIMERS.lock().unwrap();
-    if let Some(entry) = timers.remove(&id) {
-        if entry.persist {
-            save_persistent_alarms_locked(&timers);
+    if let Some(mut timers) = ACTIVE_TIMERS.lock().ok() {
+        if let Some(entry) = timers.remove(&id) {
+            if entry.persist {
+                save_persistent_alarms_locked(&timers);
+            }
+            TIMER_MANAGER.wakeup();
         }
-        TIMER_MANAGER.wakeup();
     }
 }
 
 /// Pause the timer with the given `id` if it exists.
 pub fn pause_timer(id: u64) {
-    let mut timers = ACTIVE_TIMERS.lock().unwrap();
-    if let Some(t) = timers.get_mut(&id) {
-        if !t.paused {
-            t.remaining = t.deadline.saturating_duration_since(Instant::now());
-            t.paused = true;
-            t.generation = t.generation.wrapping_add(1);
-            if t.persist {
-                save_persistent_alarms_locked(&timers);
+    if let Some(mut timers) = ACTIVE_TIMERS.lock().ok() {
+        if let Some(t) = timers.get_mut(&id) {
+            if !t.paused {
+                t.remaining = t.deadline.saturating_duration_since(Instant::now());
+                t.paused = true;
+                t.generation = t.generation.wrapping_add(1);
+                if t.persist {
+                    save_persistent_alarms_locked(&timers);
+                }
+                TIMER_MANAGER.wakeup();
             }
-            TIMER_MANAGER.wakeup();
         }
     }
 }
 
 /// Resume the timer with the given `id` if it is paused.
 pub fn resume_timer(id: u64) {
-    let mut timers = ACTIVE_TIMERS.lock().unwrap();
-    if let Some(t) = timers.get_mut(&id) {
-        if t.paused {
-            t.paused = false;
-            t.deadline = Instant::now() + t.remaining;
-            t.generation = t.generation.wrapping_add(1);
-            TIMER_MANAGER.register(t.deadline, t.id, t.generation);
-            if t.persist {
-                save_persistent_alarms_locked(&timers);
+    if let Some(mut timers) = ACTIVE_TIMERS.lock().ok() {
+        if let Some(t) = timers.get_mut(&id) {
+            if t.paused {
+                t.paused = false;
+                t.deadline = Instant::now() + t.remaining;
+                t.generation = t.generation.wrapping_add(1);
+                TIMER_MANAGER.register(t.deadline, t.id, t.generation);
+                if t.persist {
+                    save_persistent_alarms_locked(&timers);
+                }
+                TIMER_MANAGER.wakeup();
             }
-            TIMER_MANAGER.wakeup();
         }
     }
 }
@@ -376,8 +397,8 @@ fn start_entry(
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
     let deadline = Instant::now() + duration;
     {
-        let mut list = ACTIVE_TIMERS.lock().unwrap();
-        list.insert(
+        if let Some(mut list) = ACTIVE_TIMERS.lock().ok() {
+            list.insert(
             id,
             TimerEntry {
                 id,
@@ -391,9 +412,10 @@ fn start_entry(
                 generation: 0,
                 sound: sound.clone(),
             },
-        );
-        if persist {
-            save_persistent_alarms_locked(&list);
+            );
+            if persist {
+                save_persistent_alarms_locked(&list);
+            }
         }
     }
     TIMER_MANAGER.register(deadline, id, 0);
