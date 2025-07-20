@@ -20,3 +20,16 @@ pub fn save_actions(path: &str, actions: &[Action]) -> anyhow::Result<()> {
     std::fs::write(path, json)?;
     Ok(())
 }
+
+pub mod clipboard;
+pub mod timer;
+pub mod shell;
+pub mod bookmarks;
+pub mod folders;
+pub mod history;
+pub mod notes;
+pub mod todo;
+pub mod snippets;
+pub mod tempfiles;
+pub mod system;
+pub mod exec;

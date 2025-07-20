@@ -1,17 +1,7 @@
 use crate::actions::Action;
-use crate::history;
-use crate::plugins::bookmarks::{append_bookmark, remove_bookmark};
-use crate::plugins::folders::{append_folder, remove_folder, FOLDERS_FILE};
-use crate::plugins::notes::{append_note, load_notes, remove_note, QUICK_NOTES_FILE};
-use crate::plugins::snippets::{append_snippet, remove_snippet, SNIPPETS_FILE};
-use crate::plugins::timer;
-use arboard::Clipboard;
-use shlex;
-use std::path::Path;
-use sysinfo::System;
 
 #[cfg(target_os = "windows")]
-fn set_system_volume(percent: u32) {
+pub(crate) fn set_system_volume(percent: u32) {
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::Media::Audio::{
         eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
@@ -37,7 +27,7 @@ fn set_system_volume(percent: u32) {
 }
 
 #[cfg(target_os = "windows")]
-fn mute_active_window() {
+pub(crate) fn mute_active_window() {
     use windows::core::Interface;
     use windows::Win32::Media::Audio::{
         eMultimedia, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator,
@@ -83,7 +73,7 @@ fn mute_active_window() {
 }
 
 #[cfg(target_os = "windows")]
-fn set_display_brightness(percent: u32) {
+pub(crate) fn set_display_brightness(percent: u32) {
     use windows::Win32::Devices::Display::{
         DestroyPhysicalMonitors, GetNumberOfPhysicalMonitorsFromHMONITOR,
         GetPhysicalMonitorsFromHMONITOR, SetMonitorBrightness, PHYSICAL_MONITOR,
@@ -122,7 +112,7 @@ fn set_display_brightness(percent: u32) {
 }
 
 #[cfg(target_os = "windows")]
-fn clean_recycle_bin() {
+pub(crate) fn clean_recycle_bin() {
     use windows::Win32::UI::Shell::{
         SHEmptyRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND,
     };
@@ -135,7 +125,7 @@ fn clean_recycle_bin() {
     }
 }
 
-fn system_command(action: &str) -> Option<std::process::Command> {
+pub(crate) fn system_command(action: &str) -> Option<std::process::Command> {
     #[cfg(target_os = "windows")]
     {
         use std::process::Command;
@@ -434,292 +424,90 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
 /// Returns an error if spawning an external process or interacting with the
 /// clipboard fails.
 pub fn launch_action(action: &Action) -> anyhow::Result<()> {
+    use crate::actions::*;
     match parse_action_kind(action) {
-        ActionKind::Shell(cmd) => {
-            #[cfg(target_os = "windows")]
-            {
-                let mut command = {
-                    let mut c = std::process::Command::new("cmd");
-                    c.arg("/C").arg(cmd);
-                    c
-                };
-                command.spawn().map(|_| ()).map_err(|e| e.into())
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let _ = cmd;
-                Ok(())
-            }
-        }
-        ActionKind::ShellAdd { name, args } => {
-            crate::plugins::shell::append_shell_cmd(
-                crate::plugins::shell::SHELL_CMDS_FILE,
-                name,
-                args,
-            )?;
-            Ok(())
-        }
-        ActionKind::ShellRemove(name) => {
-            crate::plugins::shell::remove_shell_cmd(
-                crate::plugins::shell::SHELL_CMDS_FILE,
-                name,
-            )?;
-            Ok(())
-        }
-        ActionKind::ClipboardClear => {
-            crate::plugins::clipboard::clear_history_file(
-                crate::plugins::clipboard::CLIPBOARD_FILE,
-            )?;
-            Ok(())
-        }
-        ActionKind::ClipboardCopy(i) => {
-            if let Some(entry) = crate::plugins::clipboard::load_history(
-                crate::plugins::clipboard::CLIPBOARD_FILE,
-            )
-            .unwrap_or_default()
-            .get(i)
-            .cloned()
-            {
-                let mut cb = Clipboard::new()?;
-                cb.set_text(entry)?;
-            }
-            Ok(())
-        }
-        ActionKind::ClipboardText(text) => {
-            let mut cb = Clipboard::new()?;
-            cb.set_text(text.to_string())?;
-            Ok(())
-        }
-        ActionKind::Calc(val) => {
-            let mut cb = Clipboard::new()?;
-            cb.set_text(val.to_string())?;
-            Ok(())
-        }
-        ActionKind::BookmarkAdd(url) => {
-            append_bookmark("bookmarks.json", url)?;
-            Ok(())
-        }
-        ActionKind::BookmarkRemove(url) => {
-            remove_bookmark("bookmarks.json", url)?;
-            Ok(())
-        }
-        ActionKind::FolderAdd(path) => {
-            append_folder(FOLDERS_FILE, path)?;
-            Ok(())
-        }
-        ActionKind::FolderRemove(path) => {
-            remove_folder(FOLDERS_FILE, path)?;
-            Ok(())
-        }
-        ActionKind::HistoryClear => {
-            history::clear_history()?;
-            Ok(())
-        }
-        ActionKind::HistoryIndex(i) => {
-            if let Some(entry) = history::get_history().get(i).cloned() {
-                launch_action(&entry.action)?;
-            }
-            Ok(())
-        }
-        ActionKind::System(cmd) => {
-            if let Some(mut command) = system_command(cmd) {
-                command.spawn().map(|_| ()).map_err(|e| e.into())
-            } else {
-                Ok(())
-            }
-        }
+        ActionKind::Shell(cmd) => shell::run(cmd),
+        ActionKind::ShellAdd { name, args } => shell::add(name, args),
+        ActionKind::ShellRemove(name) => shell::remove(name),
+        ActionKind::ClipboardClear => clipboard::clear_history(),
+        ActionKind::ClipboardCopy(i) => clipboard::copy_entry(i),
+        ActionKind::ClipboardText(text) => clipboard::set_text(text),
+        ActionKind::Calc(val) => clipboard::calc_to_clipboard(val),
+        ActionKind::BookmarkAdd(url) => bookmarks::add(url),
+        ActionKind::BookmarkRemove(url) => bookmarks::remove(url),
+        ActionKind::FolderAdd(path) => folders::add(path),
+        ActionKind::FolderRemove(path) => folders::remove(path),
+        ActionKind::HistoryClear => history::clear(),
+        ActionKind::HistoryIndex(i) => history::launch_index(i),
+        ActionKind::System(cmd) => system::run_system(cmd),
         ActionKind::ProcessKill(pid) => {
-            let system = System::new_all();
-            if let Some(process) = system.process(sysinfo::Pid::from_u32(pid)) {
-                let _ = process.kill();
-            }
+            system::process_kill(pid);
             Ok(())
         }
         ActionKind::ProcessSwitch(pid) => {
-            #[cfg(target_os = "windows")]
-            {
-                crate::window_manager::activate_process(pid);
-            }
+            system::process_switch(pid);
             Ok(())
         }
         ActionKind::WindowSwitch(hwnd) => {
-            #[cfg(target_os = "windows")]
-            {
-                use windows::Win32::Foundation::HWND;
-                crate::window_manager::force_restore_and_foreground(HWND(hwnd as _));
-            }
+            system::window_switch(hwnd);
             Ok(())
         }
         ActionKind::WindowClose(hwnd) => {
-            #[cfg(target_os = "windows")]
-            {
-                use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-                use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
-                unsafe {
-                    let _ = PostMessageW(HWND(hwnd as _), WM_CLOSE, WPARAM(0), LPARAM(0));
-                }
-            }
+            system::window_close(hwnd);
             Ok(())
         }
         ActionKind::TimerCancel(id) => {
-            timer::cancel_timer(id);
+            timer::cancel(id);
             Ok(())
         }
         ActionKind::TimerPause(id) => {
-            timer::pause_timer(id);
+            timer::pause(id);
             Ok(())
         }
         ActionKind::TimerResume(id) => {
-            timer::resume_timer(id);
+            timer::resume(id);
             Ok(())
         }
         ActionKind::TimerStart { dur, name } => {
-            if let Some(dur) = timer::parse_duration(dur) {
-                if name.is_empty() {
-                    timer::start_timer(dur, "None".to_string());
-                } else {
-                    timer::start_timer_named(dur, Some(name.to_string()), "None".to_string());
-                }
-            }
+            timer::start(dur, name);
             Ok(())
         }
         ActionKind::AlarmSet { time, name } => {
-            if let Some((h, m)) = timer::parse_hhmm(time) {
-                if name.is_empty() {
-                    timer::start_alarm(h, m, "None".to_string());
-                } else {
-                    timer::start_alarm_named(h, m, Some(name.to_string()), "None".to_string());
-                }
-            }
+            timer::set_alarm(time, name);
             Ok(())
         }
-        ActionKind::NoteAdd(text) => {
-            append_note(QUICK_NOTES_FILE, text)?;
-            Ok(())
-        }
-        ActionKind::NoteRemove(i) => {
-            remove_note(QUICK_NOTES_FILE, i)?;
-            Ok(())
-        }
-        ActionKind::NoteCopy(i) => {
-            if let Some(entry) = load_notes(QUICK_NOTES_FILE)?.get(i).cloned() {
-                let mut cb = Clipboard::new()?;
-                cb.set_text(entry.text)?;
-            }
-            Ok(())
-        }
-        ActionKind::TodoAdd { text, priority, tags } => {
-            crate::plugins::todo::append_todo(
-                crate::plugins::todo::TODO_FILE,
-                text,
-                priority,
-                &tags,
-            )?;
-            Ok(())
-        }
-        ActionKind::TodoSetPriority { idx, priority } => {
-            crate::plugins::todo::set_priority(
-                crate::plugins::todo::TODO_FILE,
-                idx,
-                priority,
-            )?;
-            Ok(())
-        }
-        ActionKind::TodoSetTags { idx, tags } => {
-            crate::plugins::todo::set_tags(
-                crate::plugins::todo::TODO_FILE,
-                idx,
-                &tags,
-            )?;
-            Ok(())
-        }
-        ActionKind::TodoRemove(i) => {
-            crate::plugins::todo::remove_todo(crate::plugins::todo::TODO_FILE, i)?;
-            Ok(())
-        }
-        ActionKind::TodoDone(i) => {
-            crate::plugins::todo::mark_done(crate::plugins::todo::TODO_FILE, i)?;
-            Ok(())
-        }
-        ActionKind::TodoClear => {
-            crate::plugins::todo::clear_done(crate::plugins::todo::TODO_FILE)?;
-            Ok(())
-        }
-        ActionKind::SnippetRemove(alias) => {
-            remove_snippet(SNIPPETS_FILE, alias)?;
-            Ok(())
-        }
-        ActionKind::SnippetAdd { alias, text } => {
-            append_snippet(SNIPPETS_FILE, alias, text)?;
-            Ok(())
-        }
+        ActionKind::NoteAdd(text) => notes::add(text),
+        ActionKind::NoteRemove(i) => notes::remove(i),
+        ActionKind::NoteCopy(i) => notes::copy(i),
+        ActionKind::TodoAdd { text, priority, tags } => todo::add(text, priority, &tags),
+        ActionKind::TodoSetPriority { idx, priority } => todo::set_priority(idx, priority),
+        ActionKind::TodoSetTags { idx, tags } => todo::set_tags(idx, &tags),
+        ActionKind::TodoRemove(i) => todo::remove(i),
+        ActionKind::TodoDone(i) => todo::mark_done(i),
+        ActionKind::TodoClear => todo::clear_done(),
+        ActionKind::SnippetRemove(alias) => snippets::remove(alias),
+        ActionKind::SnippetAdd { alias, text } => snippets::add(alias, text),
         ActionKind::BrightnessSet(v) => {
-            #[cfg(target_os = "windows")]
-            set_display_brightness(v);
+            system::set_brightness(v);
             Ok(())
         }
         ActionKind::VolumeSet(v) => {
-            #[cfg(target_os = "windows")]
-            set_system_volume(v);
+            system::set_volume(v);
             Ok(())
         }
         ActionKind::VolumeMuteActive => {
-            #[cfg(target_os = "windows")]
-            mute_active_window();
+            system::mute_active_window();
             Ok(())
         }
         ActionKind::RecycleClean => {
-            #[cfg(target_os = "windows")]
-            clean_recycle_bin();
+            system::recycle_clean();
             Ok(())
         }
-        ActionKind::TempfileNew(alias) => {
-            let path = if let Some(a) = alias {
-                crate::plugins::tempfile::create_named_file(a, "")?
-            } else {
-                crate::plugins::tempfile::create_file()?
-            };
-            open::that(&path)?;
-            Ok(())
-        }
-        ActionKind::TempfileOpen => {
-            let dir = crate::plugins::tempfile::storage_dir();
-            std::fs::create_dir_all(&dir)?;
-            open::that(dir)?;
-            Ok(())
-        }
-        ActionKind::TempfileClear => {
-            crate::plugins::tempfile::clear_files()?;
-            Ok(())
-        }
-        ActionKind::TempfileRemove(path) => {
-            crate::plugins::tempfile::remove_file(Path::new(path))?;
-            Ok(())
-        }
-        ActionKind::TempfileAlias { path, alias } => {
-            crate::plugins::tempfile::set_alias(Path::new(path), alias)?;
-            Ok(())
-        }
-        ActionKind::ExecPath { path, args } => {
-            let path = Path::new(path);
-            let is_exe = path
-                .extension()
-                .map(|e| e.eq_ignore_ascii_case("exe"))
-                .unwrap_or(false);
-
-            if is_exe || args.is_some() {
-                let mut command = std::process::Command::new(path);
-                if let Some(arg_str) = args {
-                    if let Some(list) = shlex::split(arg_str) {
-                        command.args(list);
-                    } else {
-                        command.args(arg_str.split_whitespace());
-                    }
-                }
-                command.spawn().map(|_| ()).map_err(|e| e.into())
-            } else {
-                open::that(path).map_err(|e| e.into())
-            }
-        }
+        ActionKind::TempfileNew(alias) => tempfiles::new(alias),
+        ActionKind::TempfileOpen => tempfiles::open_dir(),
+        ActionKind::TempfileClear => tempfiles::clear(),
+        ActionKind::TempfileRemove(path) => tempfiles::remove(path),
+        ActionKind::TempfileAlias { path, alias } => tempfiles::set_alias(path, alias),
+        ActionKind::ExecPath { path, args } => exec::launch(path, args),
     }
 }
