@@ -27,3 +27,4 @@ pub mod tempfile;
 pub mod asciiart;
 pub mod task_manager;
 pub mod windows;
+pub mod screenshot;
