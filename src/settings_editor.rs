@@ -45,6 +45,8 @@ pub struct SettingsEditor {
     preserve_command: bool,
     net_refresh: f32,
     net_unit: crate::settings::NetUnit,
+    screenshot_dir: String,
+    screenshot_save_file: bool,
 }
 
 impl SettingsEditor {
@@ -119,6 +121,8 @@ impl SettingsEditor {
             preserve_command: settings.preserve_command,
             net_refresh: settings.net_refresh,
             net_unit: settings.net_unit,
+            screenshot_dir: settings.screenshot_dir.clone().unwrap_or_default(),
+            screenshot_save_file: settings.screenshot_save_file,
         }
     }
 
@@ -167,6 +171,12 @@ impl SettingsEditor {
             preserve_command: self.preserve_command,
             net_refresh: self.net_refresh,
             net_unit: self.net_unit,
+            screenshot_dir: if self.screenshot_dir.trim().is_empty() {
+                None
+            } else {
+                Some(self.screenshot_dir.clone())
+            },
+            screenshot_save_file: self.screenshot_save_file,
             show_examples: current.show_examples,
         }
     }
@@ -388,6 +398,22 @@ impl SettingsEditor {
                             }
                         });
 
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("Screenshot dir");
+                            ui.text_edit_singleline(&mut self.screenshot_dir);
+                            if ui.button("Browse").clicked() {
+                                #[cfg(target_os = "windows")]
+                                if let Some(dir) = FileDialog::new().pick_folder() {
+                                    self.screenshot_dir = dir.display().to_string();
+                                }
+                            }
+                        });
+                        ui.checkbox(
+                            &mut self.screenshot_save_file,
+                            "Save file when copying screenshot",
+                        );
+
                         if ui.button("Save").clicked() {
                             if parse_hotkey(&self.hotkey).is_none() {
                                 self.hotkey = self.last_valid_hotkey.clone();
@@ -458,6 +484,8 @@ impl SettingsEditor {
                                                 Some(new_settings.preserve_command),
                                                 Some(new_settings.net_refresh),
                                                 Some(new_settings.net_unit),
+                                                new_settings.screenshot_dir.clone(),
+                                                Some(new_settings.screenshot_save_file),
                                             );
                                             app.hotkey_str = new_settings.hotkey.clone();
                                             app.quit_hotkey_str = new_settings.quit_hotkey.clone();
@@ -471,6 +499,8 @@ impl SettingsEditor {
                                             app.preserve_command = new_settings.preserve_command;
                                             app.net_refresh = new_settings.net_refresh;
                                             app.net_unit = new_settings.net_unit;
+                                            app.screenshot_dir = new_settings.screenshot_dir.clone();
+                                            app.screenshot_save_file = new_settings.screenshot_save_file;
                                             let dirs = new_settings
                                                 .plugin_dirs
                                                 .clone()

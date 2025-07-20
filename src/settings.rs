@@ -106,6 +106,12 @@ pub struct Settings {
     pub net_refresh: f32,
     #[serde(default)]
     pub net_unit: NetUnit,
+    /// Directory used for saving screenshots. If `None`, a platform default is
+    /// used.
+    pub screenshot_dir: Option<String>,
+    /// When capturing screenshots to the clipboard, also save them to disk.
+    #[serde(default)]
+    pub screenshot_save_file: bool,
 }
 
 fn default_toasts() -> bool {
@@ -175,6 +181,10 @@ impl Default for Settings {
             disable_timer_updates: false,
             preserve_command: false,
             show_examples: false,
+            screenshot_dir: dirs_next::picture_dir()
+                .or_else(dirs_next::home_dir)
+                .map(|p| p.to_string_lossy().to_string()),
+            screenshot_save_file: true,
         }
     }
 }

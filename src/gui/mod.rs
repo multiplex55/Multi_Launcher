@@ -170,6 +170,8 @@ pub struct LauncherApp {
     pub preserve_command: bool,
     pub net_refresh: f32,
     pub net_unit: crate::settings::NetUnit,
+    pub screenshot_dir: Option<String>,
+    pub screenshot_save_file: bool,
     last_timer_update: Instant,
     last_net_update: Instant,
 }
@@ -205,6 +207,8 @@ impl LauncherApp {
         preserve_command: Option<bool>,
         net_refresh: Option<f32>,
         net_unit: Option<crate::settings::NetUnit>,
+        screenshot_dir: Option<String>,
+        screenshot_save_file: Option<bool>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -251,6 +255,12 @@ impl LauncherApp {
         }
         if let Some(v) = net_unit {
             self.net_unit = v;
+        }
+        if screenshot_dir.is_some() {
+            self.screenshot_dir = screenshot_dir;
+        }
+        if let Some(v) = screenshot_save_file {
+            self.screenshot_save_file = v;
         }
     }
 
@@ -467,6 +477,8 @@ impl LauncherApp {
             preserve_command: settings.preserve_command,
             net_refresh: settings.net_refresh,
             net_unit: settings.net_unit,
+            screenshot_dir: settings.screenshot_dir.clone(),
+            screenshot_save_file: settings.screenshot_save_file,
             last_timer_update: Instant::now(),
             last_net_update: Instant::now(),
             action_cache: Vec::new(),
