@@ -161,6 +161,7 @@ impl SettingsEditor {
             timer_refresh: self.timer_refresh,
             disable_timer_updates: self.disable_timer_updates,
             preserve_command: self.preserve_command,
+            show_examples: current.show_examples,
         }
     }
 
