@@ -1,37 +1,39 @@
 use crate::actions::Action;
-use libloading::Library;
-use crate::plugins_builtin::{WebSearchPlugin, CalculatorPlugin};
-use crate::plugins::unit_convert::UnitConvertPlugin;
-use crate::plugins::dropcalc::DropCalcPlugin;
-use crate::plugins::clipboard::ClipboardPlugin;
-use crate::plugins::shell::ShellPlugin;
-use crate::plugins::bookmarks::BookmarksPlugin;
-use crate::plugins::runescape::RunescapeSearchPlugin;
-use crate::plugins::history::HistoryPlugin;
-use crate::plugins::folders::FoldersPlugin;
-use crate::plugins::system::SystemPlugin;
-use crate::plugins::processes::ProcessesPlugin;
-use crate::plugins::sysinfo::SysInfoPlugin;
-use crate::plugins::help::HelpPlugin;
-use crate::plugins::youtube::YoutubePlugin;
-use crate::plugins::reddit::RedditPlugin;
-use crate::plugins::wikipedia::WikipediaPlugin;
-use crate::plugins::weather::WeatherPlugin;
-use crate::plugins::timer::TimerPlugin;
-use crate::plugins::notes::NotesPlugin;
-use crate::plugins::todo::TodoPlugin;
-use crate::plugins::snippets::SnippetsPlugin;
-use crate::plugins::recycle::RecyclePlugin;
-use crate::plugins::tempfile::TempfilePlugin;
 use crate::plugins::asciiart::AsciiArtPlugin;
-#[cfg(target_os = "windows")]
-use crate::plugins::windows::WindowsPlugin;
-#[cfg(target_os = "windows")]
-use crate::plugins::volume::VolumePlugin;
+use crate::plugins::bookmarks::BookmarksPlugin;
 #[cfg(target_os = "windows")]
 use crate::plugins::brightness::BrightnessPlugin;
+use crate::plugins::clipboard::ClipboardPlugin;
+use crate::plugins::dropcalc::DropCalcPlugin;
+use crate::plugins::folders::FoldersPlugin;
+use crate::plugins::help::HelpPlugin;
+use crate::plugins::history::HistoryPlugin;
+use crate::plugins::network::NetworkPlugin;
+use crate::plugins::notes::NotesPlugin;
+use crate::plugins::processes::ProcessesPlugin;
+use crate::plugins::recycle::RecyclePlugin;
+use crate::plugins::reddit::RedditPlugin;
+use crate::plugins::runescape::RunescapeSearchPlugin;
+use crate::plugins::shell::ShellPlugin;
+use crate::plugins::snippets::SnippetsPlugin;
+use crate::plugins::sysinfo::SysInfoPlugin;
+use crate::plugins::system::SystemPlugin;
 #[cfg(target_os = "windows")]
 use crate::plugins::task_manager::TaskManagerPlugin;
+use crate::plugins::tempfile::TempfilePlugin;
+use crate::plugins::timer::TimerPlugin;
+use crate::plugins::todo::TodoPlugin;
+use crate::plugins::unit_convert::UnitConvertPlugin;
+#[cfg(target_os = "windows")]
+use crate::plugins::volume::VolumePlugin;
+use crate::plugins::weather::WeatherPlugin;
+use crate::plugins::wikipedia::WikipediaPlugin;
+#[cfg(target_os = "windows")]
+use crate::plugins::windows::WindowsPlugin;
+use crate::plugins::youtube::YoutubePlugin;
+use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
+use crate::settings::NetUnit;
+use libloading::Library;
 
 pub trait Plugin: Send + Sync {
     /// Return actions based on the query string
@@ -69,7 +71,13 @@ impl PluginManager {
     }
 
     /// Rebuild the plugin list, keeping previously loaded libraries alive.
-    pub fn reload_from_dirs(&mut self, dirs: &[String], clipboard_limit: usize, reset_alarm: bool) {
+    pub fn reload_from_dirs(
+        &mut self,
+        dirs: &[String],
+        clipboard_limit: usize,
+        net_unit: NetUnit,
+        reset_alarm: bool,
+    ) {
         self.clear_plugins();
         self.register(Box::new(WebSearchPlugin));
         self.register(Box::new(CalculatorPlugin));
@@ -85,6 +93,7 @@ impl PluginManager {
         self.register(Box::new(SystemPlugin));
         self.register(Box::new(ProcessesPlugin));
         self.register(Box::new(SysInfoPlugin));
+        self.register(Box::new(NetworkPlugin::new(net_unit)));
         self.register(Box::new(ShellPlugin));
         self.register(Box::new(HistoryPlugin));
         self.register(Box::new(NotesPlugin::default()));
@@ -164,7 +173,8 @@ impl PluginManager {
 
             unsafe {
                 let lib = Library::new(entry.path())?;
-                let constructor: libloading::Symbol<unsafe extern "C" fn() -> Box<dyn Plugin>> = lib.get(b"create_plugin")?;
+                let constructor: libloading::Symbol<unsafe extern "C" fn() -> Box<dyn Plugin>> =
+                    lib.get(b"create_plugin")?;
                 let plugin = constructor();
                 let name = plugin.name().to_string();
                 self.plugins.push(plugin);

@@ -14,7 +14,12 @@ fn new_app(ctx: &egui::Context, settings: Settings) -> LauncherApp {
     let custom_len = 0;
     let mut plugins = PluginManager::new();
     let dirs: Vec<String> = Vec::new();
-    plugins.reload_from_dirs(&dirs, Settings::default().clipboard_limit, false);
+    plugins.reload_from_dirs(
+        &dirs,
+        Settings::default().clipboard_limit,
+        Settings::default().net_unit,
+        false,
+    );
     LauncherApp::new(
         ctx,
         Vec::new(),
@@ -83,7 +88,10 @@ fn snippet_edit_command_unfiltered() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
-    let entries = vec![SnippetEntry { alias: "foo".into(), text: "bar".into() }];
+    let entries = vec![SnippetEntry {
+        alias: "foo".into(),
+        text: "bar".into(),
+    }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
     let mut settings = Settings::default();
     settings.fuzzy_weight = 0.0;
