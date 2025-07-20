@@ -70,6 +70,9 @@ pub struct Settings {
     /// Interval in seconds to refresh the timer list.
     #[serde(default = "default_timer_refresh")]
     pub timer_refresh: f32,
+    /// Interval in seconds to refresh the network usage display.
+    #[serde(default = "default_net_refresh")]
+    pub net_refresh: f32,
     /// When true, the timer list will not refresh automatically.
     #[serde(default)]
     pub disable_timer_updates: bool,
@@ -93,6 +96,8 @@ fn default_usage_weight() -> f32 { 1.0 }
 fn default_follow_mouse() -> bool { true }
 
 fn default_timer_refresh() -> f32 { 1.0 }
+
+fn default_net_refresh() -> f32 { 1.0 }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -120,6 +125,7 @@ impl Default for Settings {
             static_size: None,
             hide_after_run: false,
             timer_refresh: default_timer_refresh(),
+            net_refresh: default_net_refresh(),
             disable_timer_updates: false,
             preserve_command: false,
             show_examples: false,
