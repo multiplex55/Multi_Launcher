@@ -168,9 +168,11 @@ pub struct LauncherApp {
     pub static_size: Option<(i32, i32)>,
     pub hide_after_run: bool,
     pub timer_refresh: f32,
+    pub net_refresh: f32,
     pub disable_timer_updates: bool,
     pub preserve_command: bool,
     last_timer_update: Instant,
+    last_net_update: Instant,
 }
 
 impl LauncherApp {
@@ -200,6 +202,7 @@ impl LauncherApp {
         static_size: Option<(i32, i32)>,
         hide_after_run: Option<bool>,
         timer_refresh: Option<f32>,
+        net_refresh: Option<f32>,
         disable_timer_updates: Option<bool>,
         preserve_command: Option<bool>,
     ) {
@@ -236,6 +239,9 @@ impl LauncherApp {
         }
         if let Some(v) = timer_refresh {
             self.timer_refresh = v;
+        }
+        if let Some(v) = net_refresh {
+            self.net_refresh = v;
         }
         if let Some(v) = disable_timer_updates {
             self.disable_timer_updates = v;
@@ -452,9 +458,11 @@ impl LauncherApp {
             static_size,
             hide_after_run: settings.hide_after_run,
             timer_refresh: settings.timer_refresh,
+            net_refresh: settings.net_refresh,
             disable_timer_updates: settings.disable_timer_updates,
             preserve_command: settings.preserve_command,
             last_timer_update: Instant::now(),
+            last_net_update: Instant::now(),
             action_cache: Vec::new(),
         };
 
@@ -944,12 +952,22 @@ impl eframe::App for LauncherApp {
         }
 
         let trimmed = self.query.trim();
-        if (trimmed.starts_with("timer list") || trimmed.starts_with("alarm list"))
-            && !self.disable_timer_updates
-            && self.last_timer_update.elapsed().as_secs_f32() >= self.timer_refresh
-        {
+        let refresh_timer =
+            (trimmed.starts_with("timer list") || trimmed.starts_with("alarm list"))
+                && !self.disable_timer_updates
+                && self.last_timer_update.elapsed().as_secs_f32() >= self.timer_refresh;
+        let refresh_net =
+            trimmed.eq_ignore_ascii_case("net")
+                && self.last_net_update.elapsed().as_secs_f32() >= self.net_refresh;
+
+        if refresh_timer || refresh_net {
             self.search();
-            self.last_timer_update = Instant::now();
+            if refresh_timer {
+                self.last_timer_update = Instant::now();
+            }
+            if refresh_net {
+                self.last_net_update = Instant::now();
+            }
         }
 
         CentralPanel::default().show(ctx, |ui| {
