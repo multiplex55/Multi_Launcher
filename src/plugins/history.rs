@@ -27,7 +27,7 @@ impl Plugin for HistoryPlugin {
         get_history()
             .into_iter()
             .enumerate()
-            .filter(|(_, entry)| entry.query.to_lowercase().contains(&filter))
+            .filter(|(_, entry)| entry.query_lc.contains(&filter))
             .take(MAX_HISTORY_RESULTS)
             .map(|(idx, entry)| Action {
                 label: entry.query,
