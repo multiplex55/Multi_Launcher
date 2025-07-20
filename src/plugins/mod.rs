@@ -17,6 +17,7 @@ pub mod notes;
 pub mod todo;
 pub mod timer;
 pub mod snippets;
+pub mod media;
 pub mod volume;
 pub mod brightness;
 pub mod unit_convert;

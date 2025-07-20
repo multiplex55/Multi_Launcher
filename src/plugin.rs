@@ -8,6 +8,7 @@ use crate::plugins::dropcalc::DropCalcPlugin;
 use crate::plugins::folders::FoldersPlugin;
 use crate::plugins::help::HelpPlugin;
 use crate::plugins::history::HistoryPlugin;
+use crate::plugins::media::MediaPlugin;
 use crate::plugins::network::NetworkPlugin;
 use crate::plugins::notes::NotesPlugin;
 use crate::plugins::processes::ProcessesPlugin;
@@ -101,6 +102,7 @@ impl PluginManager {
         self.register(Box::new(SnippetsPlugin::default()));
         self.register(Box::new(RecyclePlugin));
         self.register(Box::new(TempfilePlugin));
+        self.register(Box::new(MediaPlugin));
         self.register(Box::new(AsciiArtPlugin::default()));
         #[cfg(target_os = "windows")]
         {
