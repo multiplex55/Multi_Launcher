@@ -7,6 +7,8 @@ use std::sync::Mutex;
 #[derive(Serialize, Deserialize, Clone)]
 pub struct HistoryEntry {
     pub query: String,
+    #[serde(skip)]
+    pub query_lc: String,
     pub action: Action,
 }
 
@@ -22,7 +24,10 @@ fn load_history_internal() -> anyhow::Result<VecDeque<HistoryEntry>> {
     if content.is_empty() {
         return Ok(VecDeque::new());
     }
-    let list: Vec<HistoryEntry> = serde_json::from_str(&content)?;
+    let mut list: Vec<HistoryEntry> = serde_json::from_str(&content)?;
+    for e in &mut list {
+        e.query_lc = e.query.to_lowercase();
+    }
     Ok(list.into())
 }
 
@@ -37,7 +42,8 @@ pub fn save_history() -> anyhow::Result<()> {
 
 /// Append an entry to the history and persist the list. The `limit` parameter
 /// specifies the maximum number of entries kept.
-pub fn append_history(entry: HistoryEntry, limit: usize) -> anyhow::Result<()> {
+pub fn append_history(mut entry: HistoryEntry, limit: usize) -> anyhow::Result<()> {
+    entry.query_lc = entry.query.to_lowercase();
     {
         let mut h = HISTORY.lock().unwrap();
         h.push_front(entry);

@@ -8,7 +8,7 @@ fn clear_history_empties_file() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    let entry = HistoryEntry { query: "test".into(), action: Action { label: "l".into(), desc: "".into(), action: "run".into(), args: None } };
+    let entry = HistoryEntry { query: "test".into(), query_lc: String::new(), action: Action { label: "l".into(), desc: "".into(), action: "run".into(), args: None } };
     append_history(entry, 10).unwrap();
     assert!(!get_history().is_empty());
 

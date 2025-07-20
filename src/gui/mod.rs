@@ -1063,6 +1063,7 @@ impl eframe::App for LauncherApp {
                                 let _ = history::append_history(
                                     HistoryEntry {
                                         query: current.clone(),
+                                        query_lc: String::new(),
                                         action: a.clone(),
                                     },
                                     self.history_limit,
@@ -1607,6 +1608,7 @@ impl eframe::App for LauncherApp {
                                         let _ = history::append_history(
                                             HistoryEntry {
                                                 query: current,
+                                                query_lc: String::new(),
                                                 action: a.clone(),
                                             },
                                             self.history_limit,

@@ -55,6 +55,11 @@ notify = ["notify-rust"]
 
 [dev-dependencies]
 tempfile = "3"
+criterion = "0.5"
 
 [build-dependencies]
 embed-resource = "2"
+
+[[bench]]
+name = "search"
+harness = false
