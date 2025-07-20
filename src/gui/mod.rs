@@ -491,10 +491,10 @@ impl LauncherApp {
     }
 
     pub fn search(&mut self) {
-        let mut res: Vec<(Action, f32)> = Vec::new();
-
         let trimmed = self.query.trim();
         let trimmed_lc = trimmed.to_lowercase();
+
+        let mut res: Vec<(Action, f32)> = Vec::new();
 
         if trimmed.is_empty() {
             for cmd in self.plugins.commands() {
@@ -530,13 +530,65 @@ impl LauncherApp {
         let action_query_lc = action_query.to_lowercase();
 
         if trimmed_lc.starts_with("g ") {
+            res.extend(self.search_plugins(trimmed, &trimmed_lc));
+        } else {
+            if search_actions {
+                res.extend(self.search_actions(&action_query, &action_query_lc));
+            }
+            res.extend(self.search_plugins(trimmed, &trimmed_lc));
+        }
+
+        self.apply_usage_weight(&mut res);
+
+        res.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        self.results = res.into_iter().map(|(a, _)| a).collect();
+        self.selected = None;
+    }
+
+    fn search_actions(&self, query: &str, query_lc: &str) -> Vec<(Action, f32)> {
+        let mut res = Vec::new();
+        if query.is_empty() {
+            res.extend(self.actions.iter().cloned().map(|a| (a, 0.0)));
+        } else {
+            for (i, a) in self.actions.iter().enumerate() {
+                let (ref label_lc, ref desc_lc) = self.action_cache[i];
+                if self.fuzzy_weight <= 0.0 {
+                    let alias_match = self
+                        .folder_aliases
+                        .get(&a.action)
+                        .or_else(|| self.bookmark_aliases.get(&a.action))
+                        .and_then(|v| v.as_ref())
+                        .map(|s| s.to_lowercase().contains(query_lc))
+                        .unwrap_or(false);
+                    let label_match = label_lc.contains(query_lc);
+                    let desc_match = desc_lc.contains(query_lc);
+                    if label_match || desc_match || alias_match {
+                        let score = if alias_match { 1.0 } else { 0.0 };
+                        res.push((a.clone(), score));
+                    }
+                } else {
+                    let s1 = self.matcher.fuzzy_match(&a.label, query);
+                    let s2 = self.matcher.fuzzy_match(&a.desc, query);
+                    if let Some(score) = s1.max(s2) {
+                        res.push((a.clone(), score as f32 * self.fuzzy_weight));
+                    }
+                }
+            }
+        }
+        res
+    }
+
+    fn search_plugins(&self, trimmed: &str, trimmed_lc: &str) -> Vec<(Action, f32)> {
+        let mut res = Vec::new();
+        if trimmed_lc.starts_with("g ") {
             let filter = vec!["web_search".to_string()];
             let plugin_results = self.plugins.search_filtered(
                 &self.query,
                 Some(&filter),
                 self.enabled_capabilities.as_ref(),
             );
-            let query_term = trimmed_lc.splitn(2, ' ').nth(1).unwrap_or("").to_string();
+            let query_term = trimmed_lc.splitn(2, ' ').nth(1).unwrap_or("");
             for a in plugin_results {
                 let label_lc = a.label.to_lowercase();
                 let desc_lc = a.desc.to_lowercase();
@@ -549,10 +601,10 @@ impl LauncherApp {
                             .get(&a.action)
                             .or_else(|| self.bookmark_aliases.get(&a.action))
                             .and_then(|v| v.as_ref())
-                            .map(|s| s.to_lowercase().contains(&query_term))
+                            .map(|s| s.to_lowercase().contains(query_term))
                             .unwrap_or(false);
-                        let label_match = label_lc.contains(&query_term);
-                        let desc_match = desc_lc.contains(&query_term);
+                        let label_match = label_lc.contains(query_term);
+                        let desc_match = desc_lc.contains(query_term);
                         if label_match || desc_match || alias_match {
                             let score = if alias_match { 1.0 } else { 0.0 };
                             res.push((a, score));
@@ -571,125 +623,96 @@ impl LauncherApp {
                     res.push((a, score));
                 }
             }
-        } else {
-            if search_actions {
-                if action_query.is_empty() {
-                    res.extend(self.actions.iter().cloned().map(|a| (a, 0.0)));
+            return res;
+        }
+
+        let plugin_results = self.plugins.search_filtered(
+            &self.query,
+            self.enabled_plugins.as_ref(),
+            self.enabled_capabilities.as_ref(),
+        );
+
+        if plugin_results.is_empty() && !trimmed.is_empty() {
+            for a in self.plugins.commands() {
+                let label_lc = a.label.to_lowercase();
+                let desc_lc = a.desc.to_lowercase();
+                if self.fuzzy_weight <= 0.0 {
+                    let alias_match = self
+                        .folder_aliases
+                        .get(&a.action)
+                        .or_else(|| self.bookmark_aliases.get(&a.action))
+                        .and_then(|v| v.as_ref())
+                        .map(|s| s.to_lowercase().contains(trimmed_lc))
+                        .unwrap_or(false);
+                    let label_match = label_lc.contains(trimmed_lc);
+                    let desc_match = desc_lc.contains(trimmed_lc);
+                    if label_match || desc_match || alias_match {
+                        let score = if alias_match { 1.0 } else { 0.0 };
+                        res.push((a, score));
+                    }
                 } else {
-                    for (i, a) in self.actions.iter().enumerate() {
-                        let (ref label_lc, ref desc_lc) = self.action_cache[i];
-                        if self.fuzzy_weight <= 0.0 {
-                            let alias_match = self
-                                .folder_aliases
-                                .get(&a.action)
-                                .or_else(|| self.bookmark_aliases.get(&a.action))
-                                .and_then(|v| v.as_ref())
-                                .map(|s| s.to_lowercase().contains(&action_query_lc))
-                                .unwrap_or(false);
-                            let label_match = label_lc.contains(&action_query_lc);
-                            let desc_match = desc_lc.contains(&action_query_lc);
-                            if label_match || desc_match || alias_match {
-                                let score = if alias_match { 1.0 } else { 0.0 };
-                                res.push((a.clone(), score));
-                            }
-                        } else {
-                            let s1 = self.matcher.fuzzy_match(&a.label, &action_query);
-                            let s2 = self.matcher.fuzzy_match(&a.desc, &action_query);
-                            if let Some(score) = s1.max(s2) {
-                                res.push((a.clone(), score as f32 * self.fuzzy_weight));
-                            }
-                        }
+                    let s1 = self.matcher.fuzzy_match(&a.label, trimmed);
+                    let s2 = self.matcher.fuzzy_match(&a.desc, trimmed);
+                    if let Some(score) = s1.max(s2) {
+                        res.push((a, score as f32 * self.fuzzy_weight));
                     }
                 }
             }
-
-            let plugin_results = self.plugins.search_filtered(
-                &self.query,
-                self.enabled_plugins.as_ref(),
-                self.enabled_capabilities.as_ref(),
-            );
-            if plugin_results.is_empty() && !trimmed.is_empty() {
-                for a in self.plugins.commands() {
-                    let label_lc = a.label.to_lowercase();
-                    let desc_lc = a.desc.to_lowercase();
-                    if self.fuzzy_weight <= 0.0 {
+        } else {
+            let tail = trimmed_lc.splitn(2, " ").nth(1).unwrap_or("");
+            let mut query_term = tail.splitn(3, " ").nth(1).unwrap_or("").to_string();
+            if query_term.is_empty() {
+                let parts: Vec<&str> = tail.split_whitespace().collect();
+                if parts.len() == 1 && !SUBCOMMANDS.contains(&parts[0]) {
+                    query_term = parts[0].to_string();
+                } else if parts.len() > 1 {
+                    query_term = parts[1..].join(" ");
+                }
+            }
+            let query_term_lc = query_term.to_lowercase();
+            for a in plugin_results {
+                let label_lc = a.label.to_lowercase();
+                let desc_lc = a.desc.to_lowercase();
+                if self.fuzzy_weight <= 0.0 {
+                    if query_term_lc.is_empty() {
+                        res.push((a, 0.0));
+                    } else {
                         let alias_match = self
                             .folder_aliases
                             .get(&a.action)
                             .or_else(|| self.bookmark_aliases.get(&a.action))
                             .and_then(|v| v.as_ref())
-                            .map(|s| s.to_lowercase().contains(&trimmed_lc))
+                            .map(|s| s.to_lowercase().contains(&query_term_lc))
                             .unwrap_or(false);
-                        let label_match = label_lc.contains(&trimmed_lc);
-                        let desc_match = desc_lc.contains(&trimmed_lc);
+                        let label_match = label_lc.contains(&query_term_lc);
+                        let desc_match = desc_lc.contains(&query_term_lc);
                         if label_match || desc_match || alias_match {
                             let score = if alias_match { 1.0 } else { 0.0 };
                             res.push((a, score));
                         }
+                    }
+                } else {
+                    let score = if self.query.is_empty() {
+                        0.0
                     } else {
-                        let s1 = self.matcher.fuzzy_match(&a.label, trimmed);
-                        let s2 = self.matcher.fuzzy_match(&a.desc, trimmed);
-                        if let Some(score) = s1.max(s2) {
-                            res.push((a, score as f32 * self.fuzzy_weight));
-                        }
-                    }
-                }
-            } else {
-                let tail = trimmed_lc.splitn(2, " ").nth(1).unwrap_or("");
-                let mut query_term = tail.splitn(3, " ").nth(1).unwrap_or("").to_string();
-                if query_term.is_empty() {
-                    let parts: Vec<&str> = tail.split_whitespace().collect();
-                    if parts.len() == 1 && !SUBCOMMANDS.contains(&parts[0]) {
-                        query_term = parts[0].to_string();
-                    } else if parts.len() > 1 {
-                        query_term = parts[1..].join(" ");
-                    }
-                }
-                for a in plugin_results {
-                    let label_lc = a.label.to_lowercase();
-                    let desc_lc = a.desc.to_lowercase();
-                    if self.fuzzy_weight <= 0.0 {
-                        if query_term.is_empty() {
-                            res.push((a, 0.0));
-                        } else {
-                            let alias_match = self
-                                .folder_aliases
-                                .get(&a.action)
-                                .or_else(|| self.bookmark_aliases.get(&a.action))
-                                .and_then(|v| v.as_ref())
-                                .map(|s| s.to_lowercase().contains(&query_term))
-                                .unwrap_or(false);
-                            let label_match = label_lc.contains(&query_term);
-                            let desc_match = desc_lc.contains(&query_term);
-                            if label_match || desc_match || alias_match {
-                                let score = if alias_match { 1.0 } else { 0.0 };
-                                res.push((a, score));
-                            }
-                        }
-                    } else {
-                        let score = if self.query.is_empty() {
-                            0.0
-                        } else {
-                            self.matcher
-                                .fuzzy_match(&a.label, &self.query)
-                                .max(self.matcher.fuzzy_match(&a.desc, &self.query))
-                                .unwrap_or(0) as f32
-                                * self.fuzzy_weight
-                        };
-                        res.push((a, score));
-                    }
+                        self.matcher
+                            .fuzzy_match(&a.label, &self.query)
+                            .max(self.matcher.fuzzy_match(&a.desc, &self.query))
+                            .unwrap_or(0) as f32
+                            * self.fuzzy_weight
+                    };
+                    res.push((a, score));
                 }
             }
         }
 
+        res
+    }
+
+    fn apply_usage_weight(&self, res: &mut Vec<(Action, f32)>) {
         for (a, score) in res.iter_mut() {
             *score += self.usage.get(&a.action).cloned().unwrap_or(0) as f32 * self.usage_weight;
         }
-
-        res.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        self.results = res.into_iter().map(|(a, _)| a).collect();
-        self.selected = None;
     }
 
     /// Handle a keyboard navigation key. Returns the index of a selected
