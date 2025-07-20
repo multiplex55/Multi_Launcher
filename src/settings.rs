@@ -30,6 +30,9 @@ pub struct Settings {
     /// Enable toast notifications in the UI.
     #[serde(default = "default_toasts")]
     pub enable_toasts: bool,
+    /// Remember whether the help window shows example queries.
+    #[serde(default)]
+    pub show_examples: bool,
     /// Scale factor for the search box. Defaults to `1.0`.
     #[serde(default = "default_scale")]
     pub query_scale: Option<f32>,
@@ -119,6 +122,7 @@ impl Default for Settings {
             timer_refresh: default_timer_refresh(),
             disable_timer_updates: false,
             preserve_command: false,
+            show_examples: false,
         }
     }
 }

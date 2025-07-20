@@ -422,7 +422,7 @@ impl LauncherApp {
             tempfile_alias_dialog: TempfileAliasDialog::default(),
             tempfile_dialog: TempfileDialog::default(),
             add_bookmark_dialog: AddBookmarkDialog::default(),
-            help_window: HelpWindow::default(),
+            help_window: HelpWindow { show_examples: settings.show_examples, ..Default::default() },
             timer_help: TimerHelpWindow::default(),
             timer_dialog: TimerDialog::default(),
             completion_dialog: TimerCompletionDialog::default(),
