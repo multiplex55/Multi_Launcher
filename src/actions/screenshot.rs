@@ -54,9 +54,42 @@ pub fn capture(mode: Mode, clipboard: bool) -> anyhow::Result<PathBuf> {
             }
         }
         Mode::Region => {
-            let screen = Screen::from_point(0, 0)?;
-            let image = screen.capture()?;
-            image.save(&path)?;
+            use std::process::Command;
+            use std::thread::sleep;
+            use std::time::{Duration, Instant};
+
+            // Wait for the snipping tool to provide a new clipboard image
+            let mut cb = arboard::Clipboard::new()?;
+            let old = cb.get_image().ok().map(|img| {
+                (img.width, img.height, img.bytes.into_owned())
+            });
+
+            let _ = Command::new("explorer").arg("ms-screenclip:").status();
+
+            let start = Instant::now();
+            let img = loop {
+                match cb.get_image() {
+                    Ok(img) => {
+                        let cur = (img.width, img.height, img.bytes.as_ref().to_vec());
+                        if Some(cur.clone()) != old {
+                            break img;
+                        }
+                    }
+                    Err(_) => {}
+                }
+                if start.elapsed() > Duration::from_secs(30) {
+                    anyhow::bail!("timed out waiting for snip");
+                }
+                sleep(Duration::from_millis(200));
+            };
+
+            let buf = image::RgbaImage::from_raw(
+                img.width as u32,
+                img.height as u32,
+                img.bytes.into_owned(),
+            )
+            .ok_or_else(|| anyhow::anyhow!("invalid clipboard image"))?;
+            buf.save(&path)?;
         }
     }
     if clipboard {
