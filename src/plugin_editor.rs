@@ -129,6 +129,8 @@ impl PluginEditor {
                         Some(s.preserve_command),
                         Some(s.net_refresh),
                         Some(s.net_unit),
+                        s.screenshot_dir.clone(),
+                        Some(s.screenshot_save_file),
                     );
                     app.plugins.reload_from_dirs(
                         &self.plugin_dirs,
