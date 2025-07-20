@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::plugins::asciiart::AsciiArtPlugin;
+use crate::plugins::screenshot::ScreenshotPlugin;
 use crate::plugins::bookmarks::BookmarksPlugin;
 #[cfg(target_os = "windows")]
 use crate::plugins::brightness::BrightnessPlugin;
@@ -104,6 +105,7 @@ impl PluginManager {
         self.register(Box::new(TempfilePlugin));
         self.register(Box::new(MediaPlugin));
         self.register(Box::new(AsciiArtPlugin::default()));
+        self.register(Box::new(ScreenshotPlugin));
         #[cfg(target_os = "windows")]
         {
             self.register(Box::new(VolumePlugin));
