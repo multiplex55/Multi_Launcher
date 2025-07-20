@@ -48,6 +48,8 @@ pub struct SettingsEditor {
     screenshot_dir: String,
     screenshot_save_file: bool,
     plugin_settings: std::collections::HashMap<String, serde_json::Value>,
+    plugins_expanded: bool,
+    expand_request: Option<bool>,
 }
 
 impl SettingsEditor {
@@ -125,6 +127,8 @@ impl SettingsEditor {
             screenshot_dir: settings.screenshot_dir.clone().unwrap_or_default(),
             screenshot_save_file: settings.screenshot_save_file,
             plugin_settings: settings.plugin_settings.clone(),
+            plugins_expanded: false,
+            expand_request: None,
         }
     }
 
@@ -418,6 +422,17 @@ impl SettingsEditor {
                         );
 
                         ui.separator();
+                        if ui
+                            .button(if self.plugins_expanded {
+                                "Collapse plugin sections"
+                            } else {
+                                "Expand plugin sections"
+                            })
+                            .clicked()
+                        {
+                            self.plugins_expanded = !self.plugins_expanded;
+                            self.expand_request = Some(self.plugins_expanded);
+                        }
                         let enabled_list = app.enabled_plugins_list();
                         for plugin in app.plugins.iter_mut() {
                             let name = plugin.name().to_string();
@@ -432,10 +447,20 @@ impl SettingsEditor {
                                 .plugin_settings
                                 .entry(name.clone())
                                 .or_insert_with(|| plugin.default_settings().unwrap_or(serde_json::Value::Null));
-                            ui.collapsing(format!("{name} settings"), |ui| {
-                                plugin.settings_ui(ui, entry);
-                            });
+                            let id = ui.make_persistent_id(format!("plugin_{name}"));
+                            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+                            if let Some(open) = self.expand_request {
+                                state.set_open(open);
+                            }
+                            state
+                                .show_header(ui, |ui| {
+                                    ui.label(format!("{name} settings"));
+                                })
+                                .body(|ui| {
+                                    plugin.settings_ui(ui, entry);
+                                });
                         }
+                        self.expand_request = None;
 
                         if ui.button("Save").clicked() {
                             if parse_hotkey(&self.hotkey).is_none() {
