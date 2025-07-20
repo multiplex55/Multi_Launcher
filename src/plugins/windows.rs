@@ -36,13 +36,13 @@ impl Plugin for WindowsPlugin {
                         ctx.out.push(Action {
                             label: format!("Switch to {title}"),
                             desc: "Windows".into(),
-                            action: format!("window:switch:{}", hwnd.0),
+                            action: format!("window:switch:{}", hwnd.0 as usize),
                             args: None,
                         });
                         ctx.out.push(Action {
                             label: format!("Close {title}"),
                             desc: "Windows".into(),
-                            action: format!("window:close:{}", hwnd.0),
+                            action: format!("window:close:{}", hwnd.0 as usize),
                             args: None,
                         });
                     }
