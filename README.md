@@ -218,6 +218,11 @@ Built-in plugins and their command prefixes are:
   completes.
 - Weather lookup (`weather Berlin`)
 
+### Screenshot Plugin (Windows only)
+Use `ss` to capture the active window, a custom region or the whole desktop. Add `clip` to copy the result to the clipboard.
+Screenshots are saved in a `screenshots` folder next to the executable by default or the path set in `screenshot_dir`.
+Set `screenshot_save_file` to `true` to always keep a file when copying to the clipboard.
+
 When the search box is empty the launcher shows these shortcuts along with `app <alias>` entries for saved actions.
 
 On Windows the optional `vol` and `bright` plugins allow changing system volume
