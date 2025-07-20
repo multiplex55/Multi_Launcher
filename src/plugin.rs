@@ -86,7 +86,7 @@ impl PluginManager {
         self.register(Box::new(SystemPlugin));
         self.register(Box::new(ProcessesPlugin));
         self.register(Box::new(SysInfoPlugin));
-        self.register(Box::new(NetworkPlugin));
+        self.register(Box::new(NetworkPlugin::default()));
         self.register(Box::new(ShellPlugin));
         self.register(Box::new(HistoryPlugin));
         self.register(Box::new(NotesPlugin::default()));
