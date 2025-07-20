@@ -1,6 +1,6 @@
-use crate::settings::Settings;
 use crate::gui::LauncherApp;
 use crate::hotkey::parse_hotkey;
+use crate::settings::Settings;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 #[cfg(target_os = "windows")]
@@ -43,6 +43,8 @@ pub struct SettingsEditor {
     timer_refresh: f32,
     disable_timer_updates: bool,
     preserve_command: bool,
+    net_refresh: f32,
+    net_unit: crate::settings::NetUnit,
 }
 
 impl SettingsEditor {
@@ -115,6 +117,8 @@ impl SettingsEditor {
             timer_refresh: settings.timer_refresh,
             disable_timer_updates: settings.disable_timer_updates,
             preserve_command: settings.preserve_command,
+            net_refresh: settings.net_refresh,
+            net_unit: settings.net_unit,
         }
     }
 
@@ -161,6 +165,8 @@ impl SettingsEditor {
             timer_refresh: self.timer_refresh,
             disable_timer_updates: self.disable_timer_updates,
             preserve_command: self.preserve_command,
+            net_refresh: self.net_refresh,
+            net_unit: self.net_unit,
             show_examples: current.show_examples,
         }
     }
@@ -173,264 +179,327 @@ impl SettingsEditor {
                 egui::ScrollArea::vertical()
                     .max_height(300.0)
                     .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Launcher hotkey");
-                let resp = ui.text_edit_singleline(&mut self.hotkey);
-                if resp.changed() {
-                    self.hotkey_valid = parse_hotkey(&self.hotkey).is_some();
-                    if self.hotkey_valid {
-                        self.last_valid_hotkey = self.hotkey.clone();
-                    }
-                }
-                let color = if self.hotkey_valid {
-                    egui::Color32::GREEN
-                } else {
-                    egui::Color32::RED
-                };
-                ui.add(egui::Label::new(
-                    egui::RichText::new("●").color(color),
-                ));
-            });
-            ui.checkbox(&mut self.quit_hotkey_enabled, "Enable quit hotkey");
-            if self.quit_hotkey_enabled {
-                ui.horizontal(|ui| {
-                    ui.label("Quit hotkey");
-                    let resp = ui.text_edit_singleline(&mut self.quit_hotkey);
-                    if resp.changed() {
-                        self.quit_hotkey_valid = parse_hotkey(&self.quit_hotkey).is_some();
-                        if self.quit_hotkey_valid {
-                            self.last_valid_quit_hotkey = self.quit_hotkey.clone();
-                        }
-                    }
-                    let color = if self.quit_hotkey_valid {
-                        egui::Color32::GREEN
-                    } else {
-                        egui::Color32::RED
-                    };
-                    ui.add(egui::Label::new(
-                        egui::RichText::new("●").color(color),
-                    ));
-                });
-            }
-
-            ui.checkbox(&mut self.help_hotkey_enabled, "Enable help hotkey");
-            if self.help_hotkey_enabled {
-                ui.horizontal(|ui| {
-                    ui.label("Help hotkey");
-                    let resp = ui.text_edit_singleline(&mut self.help_hotkey);
-                    if resp.changed() {
-                        self.help_hotkey_valid = parse_hotkey(&self.help_hotkey).is_some();
-                        if self.help_hotkey_valid {
-                            self.last_valid_help_hotkey = self.help_hotkey.clone();
-                        }
-                    }
-                    let color = if self.help_hotkey_valid {
-                        egui::Color32::GREEN
-                    } else {
-                        egui::Color32::RED
-                    };
-                    ui.add(egui::Label::new(
-                        egui::RichText::new("●").color(color),
-                    ));
-                });
-            }
-
-            ui.horizontal(|ui| {
-                egui::ComboBox::from_label("Debug logging")
-                    .selected_text(if self.debug_logging {
-                        "Enabled"
-                    } else {
-                        "Disabled"
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.debug_logging, false, "Disabled");
-                        ui.selectable_value(&mut self.debug_logging, true, "Enabled");
-                    });
-            });
-
-            ui.checkbox(&mut self.show_toasts, "Enable toast notifications");
-            ui.checkbox(&mut self.hide_after_run, "Hide window after running action");
-            ui.checkbox(&mut self.preserve_command, "Preserve command after run");
-            ui.checkbox(&mut self.disable_timer_updates, "Disable timer auto refresh");
-            ui.horizontal(|ui| {
-                ui.label("Timer refresh rate (s)");
-                ui.add_enabled_ui(!self.disable_timer_updates, |ui| {
-                    ui.add(egui::DragValue::new(&mut self.timer_refresh).clamp_range(0.1..=60.0).speed(0.1));
-                });
-            });
-
-            ui.horizontal(|ui| {
-                ui.label("Query scale");
-                ui.add(egui::Slider::new(&mut self.query_scale, 0.5..=5.0).text(""));
-            });
-            ui.horizontal(|ui| {
-                ui.label("List scale");
-                ui.add(egui::Slider::new(&mut self.list_scale, 0.5..=5.0).text(""));
-            });
-            ui.horizontal(|ui| {
-                ui.label("Fuzzy weight");
-                ui.add(egui::Slider::new(&mut self.fuzzy_weight, 0.0..=5.0).text(""));
-            });
-            ui.horizontal(|ui| {
-                ui.label("Usage weight");
-                ui.add(egui::Slider::new(&mut self.usage_weight, 0.0..=5.0).text(""));
-            });
-            ui.horizontal(|ui| {
-                ui.label("History limit");
-                ui.add(egui::Slider::new(&mut self.history_limit, 10..=500).text(""));
-            });
-            ui.horizontal(|ui| {
-                ui.label("Clipboard limit");
-                ui.add(egui::Slider::new(&mut self.clipboard_limit, 1..=100).text(""));
-            });
-
-            ui.horizontal(|ui| {
-                ui.label("Off-screen X");
-                ui.add(egui::DragValue::new(&mut self.offscreen_x));
-                ui.label("Y");
-                ui.add(egui::DragValue::new(&mut self.offscreen_y));
-            });
-
-            ui.checkbox(&mut self.follow_mouse, "Follow mouse");
-            ui.add_enabled_ui(!self.follow_mouse, |ui| {
-                ui.checkbox(&mut self.static_enabled, "Use static position");
-            });
-            if self.static_enabled {
-                ui.horizontal(|ui| {
-                    ui.label("X");
-                    ui.add(egui::DragValue::new(&mut self.static_x));
-                    ui.label("Y");
-                    ui.add(egui::DragValue::new(&mut self.static_y));
-                    ui.label("W");
-                    ui.add(egui::DragValue::new(&mut self.static_w));
-                    ui.label("H");
-                    ui.add(egui::DragValue::new(&mut self.static_h));
-                    if ui.button("Snapshot").clicked() {
-                        self.static_x = app.window_pos.0;
-                        self.static_y = app.window_pos.1;
-                        self.static_w = app.window_size.0;
-                        self.static_h = app.window_size.1;
-                    }
-                });
-            }
-
-            ui.separator();
-            ui.label("Index paths:");
-            let mut remove: Option<usize> = None;
-            for (idx, path) in self.index_paths.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(path);
-                    if ui.button("Remove").clicked() {
-                        remove = Some(idx);
-                    }
-                });
-            }
-            if let Some(i) = remove {
-                self.index_paths.remove(i);
-            }
-            ui.horizontal(|ui| {
-                ui.text_edit_singleline(&mut self.index_input);
-                if ui.button("Browse").clicked() {
-                    #[cfg(target_os = "windows")]
-                    if let Some(dir) = FileDialog::new().pick_folder() {
-                        self.index_input = dir.display().to_string();
-                    }
-                }
-                if ui.button("Add").clicked() {
-                    if !self.index_input.is_empty() {
-                        self.index_paths.push(self.index_input.clone());
-                        self.index_input.clear();
-                    }
-                }
-            });
-
-            if ui.button("Save").clicked() {
-                if parse_hotkey(&self.hotkey).is_none() {
-                    self.hotkey = self.last_valid_hotkey.clone();
-                    self.hotkey_valid = true;
-                    if app.enable_toasts {
-                        app.add_toast(Toast {
-                            text: "Failed to save settings: hotkey is invalid".into(),
-                            kind: ToastKind::Error,
-                            options: ToastOptions::default().duration_in_seconds(3.0),
-                        });
-                    }
-                } else if self.quit_hotkey_enabled && parse_hotkey(&self.quit_hotkey).is_none() {
-                    self.quit_hotkey = self.last_valid_quit_hotkey.clone();
-                    self.quit_hotkey_valid = true;
-                    if app.enable_toasts {
-                        app.add_toast(Toast {
-                            text: "Failed to save settings: quit hotkey is invalid".into(),
-                            kind: ToastKind::Error,
-                            options: ToastOptions::default().duration_in_seconds(3.0),
-                        });
-                    }
-                } else if self.help_hotkey_enabled && parse_hotkey(&self.help_hotkey).is_none() {
-                    self.help_hotkey = self.last_valid_help_hotkey.clone();
-                    self.help_hotkey_valid = true;
-                    if app.enable_toasts {
-                        app.add_toast(Toast {
-                            text: "Failed to save settings: help hotkey is invalid".into(),
-                            kind: ToastKind::Error,
-                            options: ToastOptions::default().duration_in_seconds(3.0),
-                        });
-                    }
-                } else {
-                    self.last_valid_hotkey = self.hotkey.clone();
-                    if self.quit_hotkey_enabled {
-                        self.last_valid_quit_hotkey = self.quit_hotkey.clone();
-                    }
-                    if self.help_hotkey_enabled {
-                        self.last_valid_help_hotkey = self.help_hotkey.clone();
-                    }
-                    match Settings::load(&app.settings_path) {
-                        Ok(current) => {
-                            let new_settings = self.to_settings(&current);
-                            if let Err(e) = new_settings.save(&app.settings_path) {
-                                app.error = Some(format!("Failed to save: {e}"));
+                        ui.horizontal(|ui| {
+                            ui.label("Launcher hotkey");
+                            let resp = ui.text_edit_singleline(&mut self.hotkey);
+                            if resp.changed() {
+                                self.hotkey_valid = parse_hotkey(&self.hotkey).is_some();
+                                if self.hotkey_valid {
+                                    self.last_valid_hotkey = self.hotkey.clone();
+                                }
+                            }
+                            let color = if self.hotkey_valid {
+                                egui::Color32::GREEN
                             } else {
-                                app.update_paths(
-                                    new_settings.plugin_dirs.clone(),
-                                    new_settings.index_paths.clone(),
-                                    new_settings.enabled_plugins.clone(),
-                                    new_settings.enabled_capabilities.clone(),
-                                    new_settings.offscreen_pos,
-                                    Some(new_settings.enable_toasts),
-                                    Some(new_settings.fuzzy_weight),
-                                    Some(new_settings.usage_weight),
-                                    Some(new_settings.follow_mouse),
-                                    Some(new_settings.static_location_enabled),
-                                    new_settings.static_pos,
-                                    new_settings.static_size,
-                                    Some(new_settings.hide_after_run),
-                                    Some(new_settings.timer_refresh),
-                                    Some(new_settings.disable_timer_updates),
-                                    Some(new_settings.preserve_command),
+                                egui::Color32::RED
+                            };
+                            ui.add(egui::Label::new(egui::RichText::new("●").color(color)));
+                        });
+                        ui.checkbox(&mut self.quit_hotkey_enabled, "Enable quit hotkey");
+                        if self.quit_hotkey_enabled {
+                            ui.horizontal(|ui| {
+                                ui.label("Quit hotkey");
+                                let resp = ui.text_edit_singleline(&mut self.quit_hotkey);
+                                if resp.changed() {
+                                    self.quit_hotkey_valid =
+                                        parse_hotkey(&self.quit_hotkey).is_some();
+                                    if self.quit_hotkey_valid {
+                                        self.last_valid_quit_hotkey = self.quit_hotkey.clone();
+                                    }
+                                }
+                                let color = if self.quit_hotkey_valid {
+                                    egui::Color32::GREEN
+                                } else {
+                                    egui::Color32::RED
+                                };
+                                ui.add(egui::Label::new(egui::RichText::new("●").color(color)));
+                            });
+                        }
+
+                        ui.checkbox(&mut self.help_hotkey_enabled, "Enable help hotkey");
+                        if self.help_hotkey_enabled {
+                            ui.horizontal(|ui| {
+                                ui.label("Help hotkey");
+                                let resp = ui.text_edit_singleline(&mut self.help_hotkey);
+                                if resp.changed() {
+                                    self.help_hotkey_valid =
+                                        parse_hotkey(&self.help_hotkey).is_some();
+                                    if self.help_hotkey_valid {
+                                        self.last_valid_help_hotkey = self.help_hotkey.clone();
+                                    }
+                                }
+                                let color = if self.help_hotkey_valid {
+                                    egui::Color32::GREEN
+                                } else {
+                                    egui::Color32::RED
+                                };
+                                ui.add(egui::Label::new(egui::RichText::new("●").color(color)));
+                            });
+                        }
+
+                        ui.horizontal(|ui| {
+                            egui::ComboBox::from_label("Debug logging")
+                                .selected_text(if self.debug_logging {
+                                    "Enabled"
+                                } else {
+                                    "Disabled"
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.debug_logging, false, "Disabled");
+                                    ui.selectable_value(&mut self.debug_logging, true, "Enabled");
+                                });
+                        });
+
+                        ui.checkbox(&mut self.show_toasts, "Enable toast notifications");
+                        ui.checkbox(&mut self.hide_after_run, "Hide window after running action");
+                        ui.checkbox(&mut self.preserve_command, "Preserve command after run");
+                        ui.checkbox(
+                            &mut self.disable_timer_updates,
+                            "Disable timer auto refresh",
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label("Timer refresh rate (s)");
+                            ui.add_enabled_ui(!self.disable_timer_updates, |ui| {
+                                ui.add(
+                                    egui::DragValue::new(&mut self.timer_refresh)
+                                        .clamp_range(0.1..=60.0)
+                                        .speed(0.1),
                                 );
-                                app.hotkey_str = new_settings.hotkey.clone();
-                                app.quit_hotkey_str = new_settings.quit_hotkey.clone();
-                                app.help_hotkey_str = new_settings.help_hotkey.clone();
-                                app.query_scale = new_settings.query_scale.unwrap_or(1.0).min(5.0);
-                                app.list_scale = new_settings.list_scale.unwrap_or(1.0).min(5.0);
-                                app.history_limit = new_settings.history_limit;
-                                app.clipboard_limit = new_settings.clipboard_limit;
-                                app.preserve_command = new_settings.preserve_command;
-                                crate::request_hotkey_restart(new_settings);
+                            });
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Net refresh rate (s)");
+                            ui.add(
+                                egui::DragValue::new(&mut self.net_refresh)
+                                    .clamp_range(0.1..=60.0)
+                                    .speed(0.1),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Net units");
+                            egui::ComboBox::from_id_source("net_units")
+                                .selected_text(self.net_unit.to_string())
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.net_unit,
+                                        crate::settings::NetUnit::Auto,
+                                        "Auto",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.net_unit,
+                                        crate::settings::NetUnit::B,
+                                        "B/s",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.net_unit,
+                                        crate::settings::NetUnit::Kb,
+                                        "kB/s",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.net_unit,
+                                        crate::settings::NetUnit::Mb,
+                                        "MB/s",
+                                    );
+                                });
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Query scale");
+                            ui.add(egui::Slider::new(&mut self.query_scale, 0.5..=5.0).text(""));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("List scale");
+                            ui.add(egui::Slider::new(&mut self.list_scale, 0.5..=5.0).text(""));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Fuzzy weight");
+                            ui.add(egui::Slider::new(&mut self.fuzzy_weight, 0.0..=5.0).text(""));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Usage weight");
+                            ui.add(egui::Slider::new(&mut self.usage_weight, 0.0..=5.0).text(""));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("History limit");
+                            ui.add(egui::Slider::new(&mut self.history_limit, 10..=500).text(""));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Clipboard limit");
+                            ui.add(egui::Slider::new(&mut self.clipboard_limit, 1..=100).text(""));
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Off-screen X");
+                            ui.add(egui::DragValue::new(&mut self.offscreen_x));
+                            ui.label("Y");
+                            ui.add(egui::DragValue::new(&mut self.offscreen_y));
+                        });
+
+                        ui.checkbox(&mut self.follow_mouse, "Follow mouse");
+                        ui.add_enabled_ui(!self.follow_mouse, |ui| {
+                            ui.checkbox(&mut self.static_enabled, "Use static position");
+                        });
+                        if self.static_enabled {
+                            ui.horizontal(|ui| {
+                                ui.label("X");
+                                ui.add(egui::DragValue::new(&mut self.static_x));
+                                ui.label("Y");
+                                ui.add(egui::DragValue::new(&mut self.static_y));
+                                ui.label("W");
+                                ui.add(egui::DragValue::new(&mut self.static_w));
+                                ui.label("H");
+                                ui.add(egui::DragValue::new(&mut self.static_h));
+                                if ui.button("Snapshot").clicked() {
+                                    self.static_x = app.window_pos.0;
+                                    self.static_y = app.window_pos.1;
+                                    self.static_w = app.window_size.0;
+                                    self.static_h = app.window_size.1;
+                                }
+                            });
+                        }
+
+                        ui.separator();
+                        ui.label("Index paths:");
+                        let mut remove: Option<usize> = None;
+                        for (idx, path) in self.index_paths.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.label(path);
+                                if ui.button("Remove").clicked() {
+                                    remove = Some(idx);
+                                }
+                            });
+                        }
+                        if let Some(i) = remove {
+                            self.index_paths.remove(i);
+                        }
+                        ui.horizontal(|ui| {
+                            ui.text_edit_singleline(&mut self.index_input);
+                            if ui.button("Browse").clicked() {
+                                #[cfg(target_os = "windows")]
+                                if let Some(dir) = FileDialog::new().pick_folder() {
+                                    self.index_input = dir.display().to_string();
+                                }
+                            }
+                            if ui.button("Add").clicked() {
+                                if !self.index_input.is_empty() {
+                                    self.index_paths.push(self.index_input.clone());
+                                    self.index_input.clear();
+                                }
+                            }
+                        });
+
+                        if ui.button("Save").clicked() {
+                            if parse_hotkey(&self.hotkey).is_none() {
+                                self.hotkey = self.last_valid_hotkey.clone();
+                                self.hotkey_valid = true;
                                 if app.enable_toasts {
                                     app.add_toast(Toast {
-                                        text: "Settings saved".into(),
-                                        kind: ToastKind::Success,
+                                        text: "Failed to save settings: hotkey is invalid".into(),
+                                        kind: ToastKind::Error,
                                         options: ToastOptions::default().duration_in_seconds(3.0),
                                     });
                                 }
+                            } else if self.quit_hotkey_enabled
+                                && parse_hotkey(&self.quit_hotkey).is_none()
+                            {
+                                self.quit_hotkey = self.last_valid_quit_hotkey.clone();
+                                self.quit_hotkey_valid = true;
+                                if app.enable_toasts {
+                                    app.add_toast(Toast {
+                                        text: "Failed to save settings: quit hotkey is invalid"
+                                            .into(),
+                                        kind: ToastKind::Error,
+                                        options: ToastOptions::default().duration_in_seconds(3.0),
+                                    });
+                                }
+                            } else if self.help_hotkey_enabled
+                                && parse_hotkey(&self.help_hotkey).is_none()
+                            {
+                                self.help_hotkey = self.last_valid_help_hotkey.clone();
+                                self.help_hotkey_valid = true;
+                                if app.enable_toasts {
+                                    app.add_toast(Toast {
+                                        text: "Failed to save settings: help hotkey is invalid"
+                                            .into(),
+                                        kind: ToastKind::Error,
+                                        options: ToastOptions::default().duration_in_seconds(3.0),
+                                    });
+                                }
+                            } else {
+                                self.last_valid_hotkey = self.hotkey.clone();
+                                if self.quit_hotkey_enabled {
+                                    self.last_valid_quit_hotkey = self.quit_hotkey.clone();
+                                }
+                                if self.help_hotkey_enabled {
+                                    self.last_valid_help_hotkey = self.help_hotkey.clone();
+                                }
+                                match Settings::load(&app.settings_path) {
+                                    Ok(current) => {
+                                        let new_settings = self.to_settings(&current);
+                                        if let Err(e) = new_settings.save(&app.settings_path) {
+                                            app.error = Some(format!("Failed to save: {e}"));
+                                        } else {
+                                            app.update_paths(
+                                                new_settings.plugin_dirs.clone(),
+                                                new_settings.index_paths.clone(),
+                                                new_settings.enabled_plugins.clone(),
+                                                new_settings.enabled_capabilities.clone(),
+                                                new_settings.offscreen_pos,
+                                                Some(new_settings.enable_toasts),
+                                                Some(new_settings.fuzzy_weight),
+                                                Some(new_settings.usage_weight),
+                                                Some(new_settings.follow_mouse),
+                                                Some(new_settings.static_location_enabled),
+                                                new_settings.static_pos,
+                                                new_settings.static_size,
+                                                Some(new_settings.hide_after_run),
+                                                Some(new_settings.timer_refresh),
+                                                Some(new_settings.disable_timer_updates),
+                                                Some(new_settings.preserve_command),
+                                                Some(new_settings.net_refresh),
+                                                Some(new_settings.net_unit),
+                                            );
+                                            app.hotkey_str = new_settings.hotkey.clone();
+                                            app.quit_hotkey_str = new_settings.quit_hotkey.clone();
+                                            app.help_hotkey_str = new_settings.help_hotkey.clone();
+                                            app.query_scale =
+                                                new_settings.query_scale.unwrap_or(1.0).min(5.0);
+                                            app.list_scale =
+                                                new_settings.list_scale.unwrap_or(1.0).min(5.0);
+                                            app.history_limit = new_settings.history_limit;
+                                            app.clipboard_limit = new_settings.clipboard_limit;
+                                            app.preserve_command = new_settings.preserve_command;
+                                            app.net_refresh = new_settings.net_refresh;
+                                            app.net_unit = new_settings.net_unit;
+                                            let dirs = new_settings
+                                                .plugin_dirs
+                                                .clone()
+                                                .unwrap_or_default();
+                                            app.plugins.reload_from_dirs(
+                                                &dirs,
+                                                app.clipboard_limit,
+                                                app.net_unit,
+                                                false,
+                                            );
+                                            crate::request_hotkey_restart(new_settings);
+                                            if app.enable_toasts {
+                                                app.add_toast(Toast {
+                                                    text: "Settings saved".into(),
+                                                    kind: ToastKind::Success,
+                                                    options: ToastOptions::default()
+                                                        .duration_in_seconds(3.0),
+                                                });
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        app.error = Some(format!("Failed to read settings: {e}"))
+                                    }
+                                }
                             }
                         }
-                        Err(e) => app.error = Some(format!("Failed to read settings: {e}")),
-                    }
-                }
-            }
+                    });
             });
-        });
         app.show_settings = open;
     }
 }

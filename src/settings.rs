@@ -3,6 +3,32 @@ use crate::hotkey::Key;
 use crate::hotkey::{parse_hotkey, Hotkey};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetUnit {
+    Auto,
+    B,
+    Kb,
+    Mb,
+}
+
+impl Default for NetUnit {
+    fn default() -> Self {
+        NetUnit::Auto
+    }
+}
+
+impl std::fmt::Display for NetUnit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NetUnit::Auto => write!(f, "Auto"),
+            NetUnit::B => write!(f, "B/s"),
+            NetUnit::Kb => write!(f, "kB/s"),
+            NetUnit::Mb => write!(f, "MB/s"),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Settings {
     pub hotkey: Option<String>,
@@ -76,23 +102,47 @@ pub struct Settings {
     /// Keep the command prefix in the query after running an action.
     #[serde(default)]
     pub preserve_command: bool,
+    #[serde(default = "default_net_refresh")]
+    pub net_refresh: f32,
+    #[serde(default)]
+    pub net_unit: NetUnit,
 }
 
-fn default_toasts() -> bool { true }
+fn default_toasts() -> bool {
+    true
+}
 
-fn default_scale() -> Option<f32> { Some(1.0) }
+fn default_scale() -> Option<f32> {
+    Some(1.0)
+}
 
-fn default_history_limit() -> usize { 100 }
+fn default_history_limit() -> usize {
+    100
+}
 
-fn default_clipboard_limit() -> usize { 20 }
+fn default_clipboard_limit() -> usize {
+    20
+}
 
-fn default_fuzzy_weight() -> f32 { 1.0 }
+fn default_fuzzy_weight() -> f32 {
+    1.0
+}
 
-fn default_usage_weight() -> f32 { 1.0 }
+fn default_usage_weight() -> f32 {
+    1.0
+}
 
-fn default_follow_mouse() -> bool { true }
+fn default_follow_mouse() -> bool {
+    true
+}
 
-fn default_timer_refresh() -> f32 { 1.0 }
+fn default_timer_refresh() -> f32 {
+    1.0
+}
+
+fn default_net_refresh() -> f32 {
+    1.0
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -120,6 +170,8 @@ impl Default for Settings {
             static_size: None,
             hide_after_run: false,
             timer_refresh: default_timer_refresh(),
+            net_refresh: default_net_refresh(),
+            net_unit: NetUnit::Auto,
             disable_timer_updates: false,
             preserve_command: false,
             show_examples: false,

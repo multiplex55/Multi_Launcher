@@ -43,7 +43,7 @@ fn spawn_gui(
     let mut plugins = PluginManager::new();
     let empty_dirs = Vec::new();
     let dirs = settings.plugin_dirs.as_ref().unwrap_or(&empty_dirs);
-    plugins.reload_from_dirs(dirs, settings.clipboard_limit, true);
+    plugins.reload_from_dirs(dirs, settings.clipboard_limit, settings.net_unit, true);
 
     let actions_path = "actions.json".to_string();
     let settings_path_for_window = settings_path.clone();
@@ -61,8 +61,9 @@ fn spawn_gui(
 
     let handle = thread::spawn(move || {
         let (w, h) = settings.window_size.unwrap_or((400, 220));
-        let icon = icon_data::from_png_bytes(include_bytes!("../Resources/Green_MultiLauncher.png"))
-            .expect("invalid icon");
+        let icon =
+            icon_data::from_png_bytes(include_bytes!("../Resources/Green_MultiLauncher.png"))
+                .expect("invalid icon");
         let native_options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([w as f32, h as f32])
