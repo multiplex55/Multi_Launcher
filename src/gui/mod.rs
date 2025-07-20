@@ -821,6 +821,16 @@ impl LauncherApp {
 
     #[cfg(not(target_os = "windows"))]
     pub fn unregister_all_hotkeys(&self) {}
+
+    /// Return the currently configured screenshot directory, if any.
+    pub fn get_screenshot_dir(&self) -> Option<&str> {
+        self.screenshot_dir.as_deref()
+    }
+
+    /// Whether screenshots copied to the clipboard are also saved to disk.
+    pub fn get_screenshot_save_file(&self) -> bool {
+        self.screenshot_save_file
+    }
 }
 
 impl eframe::App for LauncherApp {
