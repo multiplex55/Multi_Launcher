@@ -1,4 +1,5 @@
 use once_cell::sync::Lazy;
+#[cfg(target_os = "windows")]
 use std::io::Cursor;
 
 pub static SOUND_NAMES: &[&str] = &[
