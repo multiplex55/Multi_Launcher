@@ -103,7 +103,9 @@ value as shown below:
   "follow_mouse": true,
   "static_location_enabled": false,
   "static_pos": [0, 0],
-  "static_size": [400, 220]
+  "static_size": [400, 220],
+  "screenshot_dir": "C:/Users/YourName/Pictures",
+  "screenshot_save_file": true
 }
 ```
 
@@ -146,6 +148,8 @@ Example: typing `test` will only list entries containing `test`. If an alias mat
 `clipboard_limit` sets how many clipboard entries are persisted for the clipboard plugin.
 `preserve_command` keeps the typed command prefix (like `bm add` or `f add`) in the search field after running an action.
 `enabled_capabilities` maps plugin names to capability identifiers so features can be toggled individually. The folders plugin, for example, exposes `show_full_path`.
+`screenshot_dir` sets the directory used when saving screenshots. If omitted, the Pictures or home folder is used by default.
+`screenshot_save_file` determines whether screenshots copied to the clipboard are also written to disk. The default is `true`.
 
 
 If you choose `CapsLock` as the hotkey, the launcher suppresses the normal
@@ -204,6 +208,7 @@ Built-in plugins and their command prefixes are:
 - Brightness control (`bright 50`) *(Windows only)*
 - Task Manager (`tm`) *(Windows only)*
 - Window management (`win <title>` to switch or close) *(Windows only)*
+- Screenshot capture (`ss`, `ss clip`) *(Windows only)*
 - Command overview (`help`)
 - Timers and alarms (`timer add 5m tea`, `timer add 1:30`, `alarm 07:30`). Type `timer` or
   `alarm` and press <kbd>Enter</kbd> to open the creation dialog. Use `timer list` to view

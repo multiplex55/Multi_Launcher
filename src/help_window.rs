@@ -141,6 +141,7 @@ fn example_queries(name: &str) -> Option<&'static [&'static str]> {
         "volume" => Some(&["vol 50"]),
         "brightness" => Some(&["bright 50"]),
         "asciiart" => Some(&["ascii hello"]),
+        "screenshot" => Some(&["ss", "ss clip"]),
         "processes" => Some(&["ps", "ps firefox"]),
         "dropcalc" => Some(&["drop 1/128 25"]),
         "recycle" => Some(&["rec"]),
