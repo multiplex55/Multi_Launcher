@@ -2578,7 +2578,6 @@ dependencies = [
  "regex",
  "rfd",
  "rodio",
- "screenshot-rs",
  "serde",
  "serde_json",
  "shlex",
@@ -2587,6 +2586,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
+ "win-screenshot",
  "windows 0.58.0",
  "winit",
 ]
@@ -3613,12 +3613,6 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
-
-[[package]]
-name = "screenshot-rs"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b92a95d91fb5134630144a266e1bd3617548b4f1f6a3443e268a572d0c099a64"
 
 [[package]]
 name = "sctk-adwaita"
@@ -4669,6 +4663,15 @@ name = "widestring"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd7cf3379ca1aac9eea11fba24fd7e315d621f8dfe35c8d7d2be8b793726e07d"
+
+[[package]]
+name = "win-screenshot"
+version = "4.0.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "426c7222d0e70bc5ef5db8db62ebb03c8363a73dcb2eb8acea4e0f06845d3448"
+dependencies = [
+ "windows 0.61.3",
+]
 
 [[package]]
 name = "winapi"

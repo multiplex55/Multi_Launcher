@@ -40,7 +40,7 @@ dirs-next = "2"
 shlex = "1.3"
 sysinfo = "0.35"
 chrono = "0.4"
-screenshot = { package = "screenshot-rs", version = "0.1.5" }
+
 image = { version = "0.24", default-features = false, features = ["png"] }
 notify-rust = { version = "4", optional = true }
 
@@ -48,6 +48,7 @@ notify-rust = { version = "4", optional = true }
 rfd = { version = "0.15.3", default-features = false, features = ["common-controls-v6"] }
 rdev = { git = "https://github.com/Narsil/rdev", rev = "c14f2dc5c8100a96c5d7e3013de59d6aa0b9eae2" }
 rodio = { version = "0.17", default-features = false, features = ["wav"] }
+win-screenshot = "4"
 
 
 
