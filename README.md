@@ -179,55 +179,74 @@ graph TD
     L --> PM
 ```
 
-Built-in plugins and their command prefixes are:
+Built-in commands:
 
-- Google web search (`g rust`)
-- Calculator (`= 2+2`)
-- Unit conversions (`conv 10 km to mi`)
-- Drop rate calculator (`drop 1/128 128`)
-- RuneScape Wiki search (`rs item` or `osrs item`)
-- YouTube search (`yt rust`)
-- Reddit search (`red cats`)
-- Wikipedia search (`wiki rust`)
-- Clipboard history (`cb`) - entries persist in `clipboard_history.json`. Use `cb list` to show all entries or `cb clear` to wipe them. Right-click items to edit or delete.
-- Bookmarks (`bm add <url>`, `bm rm [pattern]` or `bm list`)
-- Folder shortcuts (`f`, `f add <path>`, `f rm <pattern>`)
-- System actions (`sys shutdown`)
-- Process list (`ps`), providing "Switch to" and "Kill" actions
-- System information (`info`, `info cpu`, `info mem`, `info disk`)
-- Shell commands (`sh echo hi`)
-- Search history (`hi`)
-- Quick notes (`note add <text>`, `note list`, `note rm <pattern>`)
-- Todo items (`todo add <task> p=<n> #tag`, `todo list`, `todo rm <pattern>`, `todo pset <idx> <n>`, `todo tag <idx> #tag`, `todo clear`)
-- Text snippets (`cs`, `cs list`, `cs rm`, `cs add <alias> <text>`, `cs edit`)
-- Recycle Bin cleanup (`rec`)
-- Temporary files (`tmp`, `tmp new [name]`, `tmp open`, `tmp clear`, `tmp list`, `tmp rm`)
-- ASCII art (`ascii text`)
-- Saved apps (`app <filter>` or just `app`)
-- Volume control (`vol 50`) *(Windows only)*
-- Brightness control (`bright 50`) *(Windows only)*
-- Task Manager (`tm`) *(Windows only)*
-- Window management (`win <title>` to switch or close) *(Windows only)*
-- Screenshot capture (`ss`, `ss clip`) *(Windows only)*
-- Command overview (`help`)
-- Timers and alarms (`timer add 5m tea`, `timer add 1:30`, `alarm 07:30`). Type `timer` or
-  `alarm` and press <kbd>Enter</kbd> to open the creation dialog. Use `timer list` to view
-  remaining time or `timer rm` to remove timers. Alarms are stored in `alarms.json`
-  and reload automatically when the launcher starts. The timer plugin exposes a
-  `completion_dialog` capability that toggles pop-up notifications when a timer
-  completes.
-- Weather lookup (`weather Berlin`)
+| Prefix | Example | Description |
+|-------|---------|-------------|
+| `g` | `g rust` | Google web search |
+| `=` | `= 2+2` | Calculator |
+| `conv` | `conv 10 km to mi` | Unit conversions |
+| `drop` | `drop 1/128 128` | Drop rate calculator |
+| `rs`/`osrs` | `rs item` | RuneScape Wiki search |
+| `yt` | `yt rust` | YouTube search |
+| `red` | `red cats` | Reddit search |
+| `wiki` | `wiki rust` | Wikipedia search |
+| `cb` | `cb list` | Clipboard history |
+| `bm` | `bm add <url>` | Manage bookmarks |
+| `f` | `f add <path>` | Folder shortcuts |
+| `sys` | `sys shutdown` | System actions |
+| `ps` | `ps` | Process list |
+| `info` | `info cpu` | System information |
+| `sh` | `sh echo hi` | Shell commands |
+| `hi` | `hi` | Search history |
+| `note` | `note add <text>` | Quick notes |
+| `todo` | `todo add <task>` | Todo items |
+| `cs` | `cs add <alias> <text>` | Text snippets |
+| `rec` | `rec` | Recycle Bin cleanup |
+| `tmp` | `tmp new [name]` | Temporary files |
+| `ascii` | `ascii text` | ASCII art |
+| `app` | `app <filter>` | Saved apps |
+| `vol` | `vol 50` | Volume control |
+| `bright` | `bright 50` | Adjust brightness |
+| `tm` | `tm` | Task Manager |
+| `win` | `win <title>` | Window management |
+| `ss` | `ss clip` | Screenshot capture |
+| `help` | `help` | Command overview |
+| `timer` | `timer add 5m tea` | Timers |
+| `alarm` | `alarm 07:30` | Alarms |
+| `weather` | `weather Berlin` | Weather lookup |
 
-### Screenshot Plugin (Windows only)
+Timers and alarms are stored in `alarms.json` and reload automatically when the launcher starts. The timer plugin exposes a `completion_dialog` capability that toggles pop-up notifications when a timer completes.
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant L as Launcher
+    participant T as Timer Plugin
+    U->>L: "timer add 5m tea"
+    L->>T: store timer
+    T-->>L: confirm
+    T->>L: timer finished
+    L->>U: show notification
+```
+
+### Screenshot Plugin
 Use `ss` to capture the active window, a custom region or the whole desktop. Add `clip` to copy the result to the clipboard.
 Screenshots are saved in a `MultiLauncher_Screenshots` folder in the current working directory by default or the path set in `screenshot_dir`.
 Set `screenshot_save_file` to `true` to always keep a file when copying to the clipboard.
 
-When the search box is empty the launcher shows these shortcuts along with `app <alias>` entries for saved actions.
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant L as Launcher
+    participant P as Screenshot Plugin
+    U->>L: "ss clip"
+    L->>P: capture screen
+    P-->>L: image path
+    L->>U: save/copy
+```
 
-On Windows the optional `vol` and `bright` plugins allow changing system volume
-and display brightness. These plugins are stubbed on other platforms and simply
-return no results.
+When the search box is empty the launcher shows these shortcuts along with `app <alias>` entries for saved actions.
 
 Selecting a clipboard entry copies it back to the clipboard. Type `help` and press <kbd>Enter</kbd> to open the command list. The help window groups commands by plugin name and can optionally display example queries. Additional plugins can be added by building
 shared libraries. Each plugin crate should be compiled as a `cdylib` and export
