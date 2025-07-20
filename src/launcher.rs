@@ -208,6 +208,8 @@ enum ActionKind<'a> {
     VolumeSet(u32),
     VolumeMuteActive,
     RecycleClean,
+    WindowSwitch(usize),
+    WindowClose(usize),
     TempfileNew(Option<&'a str>),
     TempfileOpen,
     TempfileClear,
@@ -274,6 +276,16 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if let Some(pid) = s.strip_prefix("process:switch:") {
         if let Ok(p) = pid.parse::<u32>() {
             return ActionKind::ProcessSwitch(p);
+        }
+    }
+    if let Some(hwnd) = s.strip_prefix("window:switch:") {
+        if let Ok(h) = hwnd.parse::<usize>() {
+            return ActionKind::WindowSwitch(h);
+        }
+    }
+    if let Some(hwnd) = s.strip_prefix("window:close:") {
+        if let Ok(h) = hwnd.parse::<usize>() {
+            return ActionKind::WindowClose(h);
         }
     }
     if let Some(id) = s.strip_prefix("timer:cancel:") {
@@ -527,6 +539,20 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
             #[cfg(target_os = "windows")]
             {
                 crate::window_manager::activate_process(pid);
+            }
+            Ok(())
+        }
+        ActionKind::WindowSwitch(hwnd) => {
+            #[cfg(target_os = "windows")]
+            {
+                crate::window_manager::activate_window(hwnd);
+            }
+            Ok(())
+        }
+        ActionKind::WindowClose(hwnd) => {
+            #[cfg(target_os = "windows")]
+            {
+                crate::window_manager::close_window(hwnd);
             }
             Ok(())
         }
