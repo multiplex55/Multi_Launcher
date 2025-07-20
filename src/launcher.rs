@@ -208,8 +208,8 @@ enum ActionKind<'a> {
     VolumeSet(u32),
     VolumeMuteActive,
     RecycleClean,
-    WindowSwitch(usize),
-    WindowClose(usize),
+    WindowSwitch(isize),
+    WindowClose(isize),
     TempfileNew(Option<&'a str>),
     TempfileOpen,
     TempfileClear,
@@ -279,12 +279,12 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
         }
     }
     if let Some(hwnd) = s.strip_prefix("window:switch:") {
-        if let Ok(h) = hwnd.parse::<usize>() {
+        if let Ok(h) = hwnd.parse::<isize>() {
             return ActionKind::WindowSwitch(h);
         }
     }
     if let Some(hwnd) = s.strip_prefix("window:close:") {
-        if let Ok(h) = hwnd.parse::<usize>() {
+        if let Ok(h) = hwnd.parse::<isize>() {
             return ActionKind::WindowClose(h);
         }
     }
@@ -545,14 +545,19 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         ActionKind::WindowSwitch(hwnd) => {
             #[cfg(target_os = "windows")]
             {
-                crate::window_manager::activate_window(hwnd);
+                use windows::Win32::Foundation::HWND;
+                crate::window_manager::force_restore_and_foreground(HWND(hwnd as _));
             }
             Ok(())
         }
         ActionKind::WindowClose(hwnd) => {
             #[cfg(target_os = "windows")]
             {
-                crate::window_manager::close_window(hwnd);
+                use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+                use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+                unsafe {
+                    let _ = PostMessageW(HWND(hwnd as _), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
             }
             Ok(())
         }
