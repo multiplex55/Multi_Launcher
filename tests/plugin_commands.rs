@@ -9,7 +9,12 @@ fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
     let custom_len = actions.len();
     let mut plugins = PluginManager::new();
     let dirs: Vec<String> = Vec::new();
-    plugins.reload_from_dirs(&dirs, Settings::default().clipboard_limit, false);
+    plugins.reload_from_dirs(
+        &dirs,
+        Settings::default().clipboard_limit,
+        Settings::default().net_unit,
+        false,
+    );
     LauncherApp::new(
         ctx,
         actions,

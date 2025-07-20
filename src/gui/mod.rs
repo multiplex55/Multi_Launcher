@@ -170,6 +170,8 @@ pub struct LauncherApp {
     pub timer_refresh: f32,
     pub disable_timer_updates: bool,
     pub preserve_command: bool,
+    pub net_refresh: f32,
+    pub net_unit: crate::settings::NetUnit,
     last_timer_update: Instant,
 }
 
@@ -202,6 +204,8 @@ impl LauncherApp {
         timer_refresh: Option<f32>,
         disable_timer_updates: Option<bool>,
         preserve_command: Option<bool>,
+        net_refresh: Option<f32>,
+        net_unit: Option<crate::settings::NetUnit>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -242,6 +246,12 @@ impl LauncherApp {
         }
         if let Some(v) = preserve_command {
             self.preserve_command = v;
+        }
+        if let Some(v) = net_refresh {
+            self.net_refresh = v;
+        }
+        if let Some(v) = net_unit {
+            self.net_unit = v;
         }
     }
 
@@ -422,7 +432,10 @@ impl LauncherApp {
             tempfile_alias_dialog: TempfileAliasDialog::default(),
             tempfile_dialog: TempfileDialog::default(),
             add_bookmark_dialog: AddBookmarkDialog::default(),
-            help_window: HelpWindow { show_examples: settings.show_examples, ..Default::default() },
+            help_window: HelpWindow {
+                show_examples: settings.show_examples,
+                ..Default::default()
+            },
             timer_help: TimerHelpWindow::default(),
             timer_dialog: TimerDialog::default(),
             completion_dialog: TimerCompletionDialog::default(),
@@ -454,6 +467,8 @@ impl LauncherApp {
             timer_refresh: settings.timer_refresh,
             disable_timer_updates: settings.disable_timer_updates,
             preserve_command: settings.preserve_command,
+            net_refresh: settings.net_refresh,
+            net_unit: settings.net_unit,
             last_timer_update: Instant::now(),
             action_cache: Vec::new(),
         };

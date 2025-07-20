@@ -1,6 +1,6 @@
-use crate::settings::Settings;
-use crate::plugin::PluginManager;
 use crate::gui::LauncherApp;
+use crate::plugin::PluginManager;
+use crate::settings::Settings;
 use eframe::egui;
 #[cfg(target_os = "windows")]
 use rfd::FileDialog;
@@ -51,7 +51,12 @@ impl PluginEditor {
 
     fn gather_available(plugin_dirs: &[String]) -> Vec<(String, String, Vec<String>)> {
         let mut pm = PluginManager::new();
-        pm.reload_from_dirs(plugin_dirs, Settings::default().clipboard_limit, false);
+        pm.reload_from_dirs(
+            plugin_dirs,
+            Settings::default().clipboard_limit,
+            Settings::default().net_unit,
+            false,
+        );
         let mut infos = pm.plugin_infos();
         infos.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
         infos
@@ -84,9 +89,7 @@ impl PluginEditor {
                     }
                     match self.enabled_capabilities.get(name) {
                         Some(en) => {
-                            if en.len() != caps.len()
-                                || !caps.iter().all(|c| en.contains(c))
-                            {
+                            if en.len() != caps.len() || !caps.iter().all(|c| en.contains(c)) {
                                 default_caps = false;
                                 break;
                             }
@@ -124,9 +127,15 @@ impl PluginEditor {
                         Some(s.timer_refresh),
                         Some(s.disable_timer_updates),
                         Some(s.preserve_command),
+                        Some(s.net_refresh),
+                        Some(s.net_unit),
                     );
-
-                    app.plugins.reload_from_dirs(&self.plugin_dirs, app.clipboard_limit, false);
+                    app.plugins.reload_from_dirs(
+                        &self.plugin_dirs,
+                        app.clipboard_limit,
+                        app.net_unit,
+                        false,
+                    );
                     tracing::debug!(available=?app.plugins.plugin_names(), "plugins reloaded");
                     self.available = Self::gather_available(&self.plugin_dirs);
                     app.search();
@@ -181,62 +190,67 @@ impl PluginEditor {
                     ui.label("Filter:");
                     ui.text_edit_singleline(&mut self.filter);
                 });
-                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                    for (name, desc, caps) in &self.available {
-                        if !self.filter.is_empty()
-                            && !name.to_lowercase().contains(&self.filter.to_lowercase())
-                            && !desc.to_lowercase().contains(&self.filter.to_lowercase())
-                        {
-                            continue;
-                        }
-                        let mut enabled = self.enabled_plugins.contains(name);
-                        ui.horizontal(|ui| {
-                            if ui.checkbox(&mut enabled, name).changed()
+                egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .show(ui, |ui| {
+                        for (name, desc, caps) in &self.available {
+                            if !self.filter.is_empty()
+                                && !name.to_lowercase().contains(&self.filter.to_lowercase())
+                                && !desc.to_lowercase().contains(&self.filter.to_lowercase())
                             {
-                                if enabled {
-                                    if !self.enabled_plugins.contains(name) {
-                                        self.enabled_plugins.push(name.clone());
-                                    }
-                                } else if let Some(pos) =
-                                    self.enabled_plugins.iter().position(|n| n == name)
-                                {
-                                    self.enabled_plugins.remove(pos);
-                                    self.enabled_capabilities.remove(name);
-                                }
-                                changed = true;
+                                continue;
                             }
-                            ui.label(desc);
-                        });
-                        ui.indent(name, |ui| {
-                            ui.add_enabled_ui(enabled, |ui| {
-                                for cap in caps {
-                                    let entry =
-                                        self.enabled_capabilities.entry(name.clone()).or_default();
-                                    let mut cap_enabled = entry.contains(cap);
-                                    let label = if cap == "show_full_path" {
-                                        "show full path always".to_string()
-                                    } else {
-                                        cap.to_string()
-                                    };
-                                    if ui
-                                        .checkbox(&mut cap_enabled, label)
-                                        .on_hover_text(cap)
-                                        .changed()
-                                    {
-                                        if cap_enabled {
-                                            if !entry.contains(cap) {
-                                                entry.push(cap.clone());
-                                            }
-                                        } else if let Some(pos) = entry.iter().position(|c| c == cap) {
-                                            entry.remove(pos);
+                            let mut enabled = self.enabled_plugins.contains(name);
+                            ui.horizontal(|ui| {
+                                if ui.checkbox(&mut enabled, name).changed() {
+                                    if enabled {
+                                        if !self.enabled_plugins.contains(name) {
+                                            self.enabled_plugins.push(name.clone());
                                         }
-                                        changed = true;
+                                    } else if let Some(pos) =
+                                        self.enabled_plugins.iter().position(|n| n == name)
+                                    {
+                                        self.enabled_plugins.remove(pos);
+                                        self.enabled_capabilities.remove(name);
                                     }
+                                    changed = true;
                                 }
+                                ui.label(desc);
                             });
-                        });
-                    }
-                });
+                            ui.indent(name, |ui| {
+                                ui.add_enabled_ui(enabled, |ui| {
+                                    for cap in caps {
+                                        let entry = self
+                                            .enabled_capabilities
+                                            .entry(name.clone())
+                                            .or_default();
+                                        let mut cap_enabled = entry.contains(cap);
+                                        let label = if cap == "show_full_path" {
+                                            "show full path always".to_string()
+                                        } else {
+                                            cap.to_string()
+                                        };
+                                        if ui
+                                            .checkbox(&mut cap_enabled, label)
+                                            .on_hover_text(cap)
+                                            .changed()
+                                        {
+                                            if cap_enabled {
+                                                if !entry.contains(cap) {
+                                                    entry.push(cap.clone());
+                                                }
+                                            } else if let Some(pos) =
+                                                entry.iter().position(|c| c == cap)
+                                            {
+                                                entry.remove(pos);
+                                            }
+                                            changed = true;
+                                        }
+                                    }
+                                });
+                            });
+                        }
+                    });
             });
         app.show_plugins = open;
         if changed {
