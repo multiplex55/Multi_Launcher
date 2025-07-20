@@ -2566,6 +2566,7 @@ dependencies = [
  "exmex",
  "figlet-rs",
  "fuzzy-matcher",
+ "image 0.24.9",
  "libloading 0.8.8",
  "log",
  "notify",

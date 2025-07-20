@@ -34,3 +34,4 @@ pub mod tempfiles;
 pub mod media;
 pub mod system;
 pub mod exec;
+pub mod screenshot;
