@@ -12,6 +12,12 @@ use screenshots::Screen;
 use windows::Win32::Foundation::RECT;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect};
+#[cfg(target_os = "windows")]
+use arboard::{Clipboard, Error as ClipboardError};
+#[cfg(target_os = "windows")]
+use std::process::Command;
+#[cfg(target_os = "windows")]
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -54,9 +60,32 @@ pub fn capture(mode: Mode, clipboard: bool) -> anyhow::Result<PathBuf> {
             }
         }
         Mode::Region => {
-            let screen = Screen::from_point(0, 0)?;
-            let image = screen.capture()?;
-            image.save(&path)?;
+            // Trigger the built-in Windows snipping tool to allow region selection
+            Command::new("explorer").arg("ms-screenclip:").spawn()?;
+            let mut cb_wait = Clipboard::new()?;
+            let start = Instant::now();
+            loop {
+                match cb_wait.get_image() {
+                    Ok(img) => {
+                        let data = img.bytes.into_owned();
+                        let image = image::RgbaImage::from_raw(
+                            img.width as u32,
+                            img.height as u32,
+                            data,
+                        )
+                        .ok_or_else(|| anyhow::anyhow!("invalid clipboard image"))?;
+                        image.save(&path)?;
+                        break;
+                    }
+                    Err(ClipboardError::ContentNotAvailable) => {
+                        if start.elapsed() > Duration::from_secs(10) {
+                            anyhow::bail!("timed out waiting for region capture");
+                        }
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
         }
     }
     if clipboard {
