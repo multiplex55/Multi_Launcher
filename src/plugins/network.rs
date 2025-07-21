@@ -1,6 +1,7 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
 use crate::settings::NetUnit;
+use eframe::egui;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -33,6 +34,21 @@ pub struct NetworkPlugin {
         VecDeque<(Instant, HashMap<String, (u64, u64)>)>,
     )>,
     unit: NetUnit,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct NetworkPluginSettings {
+    pub refresh_rate: f32,
+    pub unit: NetUnit,
+}
+
+impl Default for NetworkPluginSettings {
+    fn default() -> Self {
+        Self {
+            refresh_rate: 1.0,
+            unit: NetUnit::Auto,
+        }
+    }
 }
 
 impl NetworkPlugin {
@@ -150,5 +166,42 @@ impl Plugin for NetworkPlugin {
             action: "query:net".into(),
             args: None,
         }]
+    }
+
+    fn default_settings(&self) -> Option<serde_json::Value> {
+        Some(
+            serde_json::to_value(NetworkPluginSettings {
+                refresh_rate: 1.0,
+                unit: self.unit,
+            })
+            .unwrap(),
+        )
+    }
+
+    fn apply_settings(&mut self, value: &serde_json::Value) {
+        if let Ok(cfg) = serde_json::from_value::<NetworkPluginSettings>(value.clone()) {
+            self.unit = cfg.unit;
+        }
+    }
+
+    fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
+        let mut cfg: NetworkPluginSettings = serde_json::from_value(value.clone()).unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.label("Refresh rate (s)");
+            ui.add(egui::DragValue::new(&mut cfg.refresh_rate).clamp_range(0.1..=60.0).speed(0.1));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Units");
+            egui::ComboBox::from_id_source("net_units")
+                .selected_text(cfg.unit.to_string())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut cfg.unit, NetUnit::Auto, "Auto");
+                    ui.selectable_value(&mut cfg.unit, NetUnit::B, "B/s");
+                    ui.selectable_value(&mut cfg.unit, NetUnit::Kb, "kB/s");
+                    ui.selectable_value(&mut cfg.unit, NetUnit::Mb, "MB/s");
+                });
+        });
+        self.unit = cfg.unit;
+        *value = serde_json::to_value(&cfg).unwrap();
     }
 }

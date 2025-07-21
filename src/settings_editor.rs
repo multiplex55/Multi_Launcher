@@ -47,6 +47,9 @@ pub struct SettingsEditor {
     net_unit: crate::settings::NetUnit,
     screenshot_dir: String,
     screenshot_save_file: bool,
+    plugin_settings: std::collections::HashMap<String, serde_json::Value>,
+    plugins_expanded: bool,
+    expand_request: Option<bool>,
 }
 
 impl SettingsEditor {
@@ -123,6 +126,34 @@ impl SettingsEditor {
             net_unit: settings.net_unit,
             screenshot_dir: settings.screenshot_dir.clone().unwrap_or_default(),
             screenshot_save_file: settings.screenshot_save_file,
+            plugin_settings: settings.plugin_settings.clone(),
+            plugins_expanded: false,
+            expand_request: None,
+        }
+    }
+
+    pub fn new_with_plugins(settings: &Settings) -> Self {
+        let mut s = Self::new(settings);
+        s.sync_from_plugin_settings();
+        s
+    }
+
+    fn sync_from_plugin_settings(&mut self) {
+        if let Some(val) = self.plugin_settings.get("clipboard") {
+            if let Ok(cfg) = serde_json::from_value::<crate::plugins::clipboard::ClipboardPluginSettings>(val.clone()) {
+                self.clipboard_limit = cfg.max_entries;
+            }
+        }
+        if let Some(val) = self.plugin_settings.get("network") {
+            if let Ok(cfg) = serde_json::from_value::<crate::plugins::network::NetworkPluginSettings>(val.clone()) {
+                self.net_refresh = cfg.refresh_rate;
+                self.net_unit = cfg.unit;
+            }
+        }
+        if let Some(val) = self.plugin_settings.get("history") {
+            if let Ok(cfg) = serde_json::from_value::<crate::plugins::history::HistoryPluginSettings>(val.clone()) {
+                self.history_limit = cfg.max_entries;
+            }
         }
     }
 
@@ -177,6 +208,7 @@ impl SettingsEditor {
                 Some(self.screenshot_dir.clone())
             },
             screenshot_save_file: self.screenshot_save_file,
+            plugin_settings: self.plugin_settings.clone(),
             show_examples: current.show_examples,
         }
     }
@@ -277,41 +309,6 @@ impl SettingsEditor {
                                 );
                             });
                         });
-                        ui.horizontal(|ui| {
-                            ui.label("Net refresh rate (s)");
-                            ui.add(
-                                egui::DragValue::new(&mut self.net_refresh)
-                                    .clamp_range(0.1..=60.0)
-                                    .speed(0.1),
-                            );
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Net units");
-                            egui::ComboBox::from_id_source("net_units")
-                                .selected_text(self.net_unit.to_string())
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut self.net_unit,
-                                        crate::settings::NetUnit::Auto,
-                                        "Auto",
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.net_unit,
-                                        crate::settings::NetUnit::B,
-                                        "B/s",
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.net_unit,
-                                        crate::settings::NetUnit::Kb,
-                                        "kB/s",
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.net_unit,
-                                        crate::settings::NetUnit::Mb,
-                                        "MB/s",
-                                    );
-                                });
-                        });
 
                         ui.horizontal(|ui| {
                             ui.label("Query scale");
@@ -329,14 +326,7 @@ impl SettingsEditor {
                             ui.label("Usage weight");
                             ui.add(egui::Slider::new(&mut self.usage_weight, 0.0..=5.0).text(""));
                         });
-                        ui.horizontal(|ui| {
-                            ui.label("History limit");
-                            ui.add(egui::Slider::new(&mut self.history_limit, 10..=500).text(""));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Clipboard limit");
-                            ui.add(egui::Slider::new(&mut self.clipboard_limit, 1..=100).text(""));
-                        });
+
 
                         ui.horizontal(|ui| {
                             ui.label("Off-screen X");
@@ -414,6 +404,47 @@ impl SettingsEditor {
                             "Save file when copying screenshot",
                         );
 
+                        ui.separator();
+                        if ui
+                            .button(if self.plugins_expanded {
+                                "Collapse plugin sections"
+                            } else {
+                                "Expand plugin sections"
+                            })
+                            .clicked()
+                        {
+                            self.plugins_expanded = !self.plugins_expanded;
+                            self.expand_request = Some(self.plugins_expanded);
+                        }
+                        let enabled_list = app.enabled_plugins_list();
+                        for plugin in app.plugins.iter_mut() {
+                            let name = plugin.name().to_string();
+                            let enabled = match &enabled_list {
+                                Some(list) => list.contains(&name),
+                                None => true,
+                            };
+                            if !enabled {
+                                continue;
+                            }
+                            let entry = self
+                                .plugin_settings
+                                .entry(name.clone())
+                                .or_insert_with(|| plugin.default_settings().unwrap_or(serde_json::Value::Null));
+                            let id = ui.make_persistent_id(format!("plugin_{name}"));
+                            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+                            if let Some(open) = self.expand_request {
+                                state.set_open(open);
+                            }
+                            state
+                                .show_header(ui, |ui| {
+                                    ui.label(format!("{name} settings"));
+                                })
+                                .body(|ui| {
+                                    plugin.settings_ui(ui, entry);
+                                });
+                        }
+                        self.expand_request = None;
+
                         if ui.button("Save").clicked() {
                             if parse_hotkey(&self.hotkey).is_none() {
                                 self.hotkey = self.last_valid_hotkey.clone();
@@ -451,15 +482,16 @@ impl SettingsEditor {
                                         options: ToastOptions::default().duration_in_seconds(3.0),
                                     });
                                 }
-                            } else {
-                                self.last_valid_hotkey = self.hotkey.clone();
-                                if self.quit_hotkey_enabled {
-                                    self.last_valid_quit_hotkey = self.quit_hotkey.clone();
-                                }
-                                if self.help_hotkey_enabled {
-                                    self.last_valid_help_hotkey = self.help_hotkey.clone();
-                                }
-                                match Settings::load(&app.settings_path) {
+                        } else {
+                            self.last_valid_hotkey = self.hotkey.clone();
+                            if self.quit_hotkey_enabled {
+                                self.last_valid_quit_hotkey = self.quit_hotkey.clone();
+                            }
+                            if self.help_hotkey_enabled {
+                                self.last_valid_help_hotkey = self.help_hotkey.clone();
+                            }
+                            self.sync_from_plugin_settings();
+                            match Settings::load(&app.settings_path) {
                                     Ok(current) => {
                                         let new_settings = self.to_settings(&current);
                                         if let Err(e) = new_settings.save(&app.settings_path) {
@@ -510,6 +542,7 @@ impl SettingsEditor {
                                                 app.clipboard_limit,
                                                 app.net_unit,
                                                 false,
+                                                &new_settings.plugin_settings,
                                             );
                                             crate::request_hotkey_restart(new_settings);
                                             if app.enable_toasts {

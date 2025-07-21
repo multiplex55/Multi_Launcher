@@ -1,10 +1,22 @@
 use crate::actions::Action;
 use crate::history::get_history;
 use crate::plugin::Plugin;
+use eframe::egui;
 
 const MAX_HISTORY_RESULTS: usize = 10;
 
 pub struct HistoryPlugin;
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct HistoryPluginSettings {
+    pub max_entries: usize,
+}
+
+impl Default for HistoryPluginSettings {
+    fn default() -> Self {
+        Self { max_entries: 100 }
+    }
+}
 
 impl Plugin for HistoryPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
@@ -55,5 +67,20 @@ impl Plugin for HistoryPlugin {
             Action { label: "hi".into(), desc: "History".into(), action: "query:hi".into(), args: None },
             Action { label: "hi clear".into(), desc: "History".into(), action: "query:hi clear".into(), args: None },
         ]
+    }
+
+    fn default_settings(&self) -> Option<serde_json::Value> {
+        Some(serde_json::to_value(HistoryPluginSettings::default()).unwrap())
+    }
+
+    fn apply_settings(&mut self, _value: &serde_json::Value) {}
+
+    fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
+        let mut cfg: HistoryPluginSettings = serde_json::from_value(value.clone()).unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.label("History limit");
+            ui.add(egui::Slider::new(&mut cfg.max_entries, 10..=500).text(""));
+        });
+        *value = serde_json::to_value(&cfg).unwrap();
     }
 }

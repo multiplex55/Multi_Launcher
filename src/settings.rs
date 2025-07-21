@@ -112,6 +112,8 @@ pub struct Settings {
     /// When capturing screenshots to the clipboard, also save them to disk.
     #[serde(default)]
     pub screenshot_save_file: bool,
+    #[serde(default)]
+    pub plugin_settings: std::collections::HashMap<String, serde_json::Value>,
 }
 
 fn default_toasts() -> bool {
@@ -189,6 +191,7 @@ impl Default for Settings {
                     .to_string(),
             ),
             screenshot_save_file: true,
+            plugin_settings: std::collections::HashMap::new(),
         }
     }
 }
