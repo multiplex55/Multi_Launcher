@@ -116,16 +116,13 @@ impl Plugin for NetworkPlugin {
 
         let (avg_dt, first_totals) = match history.front() {
             Some((first_time, map)) => (
-                now.duration_since(*first_time)
-                    .as_secs_f64()
-                    .max(0.001),
+                now.duration_since(*first_time).as_secs_f64().max(0.001),
                 Some(map),
             ),
             None => (dt, None),
         };
 
-        nets
-            .iter()
+        nets.iter()
             .map(|(name, data)| {
                 let rx = data.received() as f64 / dt;
                 let tx = data.transmitted() as f64 / dt;
@@ -177,13 +174,11 @@ impl Plugin for NetworkPlugin {
     }
 
     fn default_settings(&self) -> Option<serde_json::Value> {
-        Some(
-            serde_json::to_value(NetworkPluginSettings {
-                refresh_rate: 1.0,
-                unit: self.unit,
-            })
-            .unwrap(),
-        )
+        serde_json::to_value(NetworkPluginSettings {
+            refresh_rate: 1.0,
+            unit: self.unit,
+        })
+        .ok()
     }
 
     fn apply_settings(&mut self, value: &serde_json::Value) {
@@ -193,10 +188,15 @@ impl Plugin for NetworkPlugin {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
-        let mut cfg: NetworkPluginSettings = serde_json::from_value(value.clone()).unwrap_or_default();
+        let mut cfg: NetworkPluginSettings =
+            serde_json::from_value(value.clone()).unwrap_or_default();
         ui.horizontal(|ui| {
             ui.label("Refresh rate (s)");
-            ui.add(egui::DragValue::new(&mut cfg.refresh_rate).clamp_range(0.1..=60.0).speed(0.1));
+            ui.add(
+                egui::DragValue::new(&mut cfg.refresh_rate)
+                    .clamp_range(0.1..=60.0)
+                    .speed(0.1),
+            );
         });
         ui.horizontal(|ui| {
             ui.label("Units");
@@ -210,7 +210,10 @@ impl Plugin for NetworkPlugin {
                 });
         });
         self.unit = cfg.unit;
-        *value = serde_json::to_value(&cfg).unwrap();
+        match serde_json::to_value(&cfg) {
+            Ok(v) => *value = v,
+            Err(e) => tracing::error!("failed to serialize network settings: {e}"),
+        }
     }
 }
 

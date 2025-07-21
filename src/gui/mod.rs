@@ -821,13 +821,16 @@ impl LauncherApp {
     #[cfg(target_os = "windows")]
     pub fn unregister_all_hotkeys(&self) {
         use windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
-        let mut registered_hotkeys = self.registered_hotkeys.lock().unwrap();
-        for id in registered_hotkeys.values() {
-            unsafe {
-                let _ = UnregisterHotKey(None, *id as i32);
+        if let Ok(mut registered_hotkeys) = self.registered_hotkeys.lock() {
+            for id in registered_hotkeys.values() {
+                unsafe {
+                    let _ = UnregisterHotKey(None, *id as i32);
+                }
             }
+            registered_hotkeys.clear();
+        } else {
+            tracing::error!("failed to lock registered_hotkeys");
         }
-        registered_hotkeys.clear();
     }
 
     #[cfg(not(target_os = "windows"))]

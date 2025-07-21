@@ -121,12 +121,12 @@ impl Plugin for TempfilePlugin {
         let trimmed = query.trim();
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp") {
             if rest.is_empty() {
-            return vec![Action {
-                label: "tmp: create".into(),
-                desc: "Tempfile".into(),
-                action: "tempfile:dialog".into(),
-                args: None,
-            }];
+                return vec![Action {
+                    label: "tmp: create".into(),
+                    desc: "Tempfile".into(),
+                    action: "tempfile:dialog".into(),
+                    args: None,
+                }];
             }
         }
         const NEW_PREFIX: &str = "tmp new ";
@@ -142,32 +142,32 @@ impl Plugin for TempfilePlugin {
             }
         } else if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp new") {
             if rest.is_empty() {
-            return vec![Action {
-                label: "Create temp file".into(),
-                desc: "Tempfile".into(),
-                action: "tempfile:new".into(),
-                args: None,
-            }];
+                return vec![Action {
+                    label: "Create temp file".into(),
+                    desc: "Tempfile".into(),
+                    action: "tempfile:new".into(),
+                    args: None,
+                }];
             }
         }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp open") {
             if rest.is_empty() {
-            return vec![Action {
-                label: "Open temp directory".into(),
-                desc: "Tempfile".into(),
-                action: "tempfile:open".into(),
-                args: None,
-            }];
+                return vec![Action {
+                    label: "Open temp directory".into(),
+                    desc: "Tempfile".into(),
+                    action: "tempfile:open".into(),
+                    args: None,
+                }];
             }
         }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp clear") {
             if rest.is_empty() {
-            return vec![Action {
-                label: "Clear temp files".into(),
-                desc: "Tempfile".into(),
-                action: "tempfile:clear".into(),
-                args: None,
-            }];
+                return vec![Action {
+                    label: "Clear temp files".into(),
+                    desc: "Tempfile".into(),
+                    action: "tempfile:clear".into(),
+                    args: None,
+                }];
             }
         }
         const RM_PREFIX: &str = "tmp rm";
@@ -183,11 +183,17 @@ impl Plugin for TempfilePlugin {
                             .map(|n| n.to_lowercase().contains(&filter))
                             .unwrap_or(false)
                 })
-                .map(|p| Action {
-                    label: format!("Remove {}", p.file_name().unwrap().to_string_lossy()),
-                    desc: "Tempfile".into(),
-                    action: format!("tempfile:remove:{}", p.to_string_lossy()),
-                    args: None,
+                .map(|p| {
+                    let name = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| p.to_string_lossy().into_owned());
+                    Action {
+                        label: format!("Remove {}", name),
+                        desc: "Tempfile".into(),
+                        action: format!("tempfile:remove:{}", p.to_string_lossy()),
+                        args: None,
+                    }
                 })
                 .collect();
         }
@@ -229,11 +235,17 @@ impl Plugin for TempfilePlugin {
                             .map(|n| n.to_lowercase().contains(&filter))
                             .unwrap_or(false)
                 })
-                .map(|p| Action {
-                    label: p.file_name().unwrap().to_string_lossy().into(),
-                    desc: "Tempfile".into(),
-                    action: p.to_string_lossy().into(),
-                    args: None,
+                .map(|p| {
+                    let name = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| p.to_string_lossy().into_owned());
+                    Action {
+                        label: name.into(),
+                        desc: "Tempfile".into(),
+                        action: p.to_string_lossy().into(),
+                        args: None,
+                    }
                 })
                 .collect();
         }
@@ -254,12 +266,42 @@ impl Plugin for TempfilePlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![
-            Action { label: "tmp".into(), desc: "Tempfile".into(), action: "query:tmp".into(), args: None },
-            Action { label: "tmp new".into(), desc: "Tempfile".into(), action: "query:tmp new ".into(), args: None },
-            Action { label: "tmp open".into(), desc: "Tempfile".into(), action: "query:tmp open".into(), args: None },
-            Action { label: "tmp clear".into(), desc: "Tempfile".into(), action: "query:tmp clear".into(), args: None },
-            Action { label: "tmp list".into(), desc: "Tempfile".into(), action: "query:tmp list".into(), args: None },
-            Action { label: "tmp rm".into(), desc: "Tempfile".into(), action: "query:tmp rm ".into(), args: None },
+            Action {
+                label: "tmp".into(),
+                desc: "Tempfile".into(),
+                action: "query:tmp".into(),
+                args: None,
+            },
+            Action {
+                label: "tmp new".into(),
+                desc: "Tempfile".into(),
+                action: "query:tmp new ".into(),
+                args: None,
+            },
+            Action {
+                label: "tmp open".into(),
+                desc: "Tempfile".into(),
+                action: "query:tmp open".into(),
+                args: None,
+            },
+            Action {
+                label: "tmp clear".into(),
+                desc: "Tempfile".into(),
+                action: "query:tmp clear".into(),
+                args: None,
+            },
+            Action {
+                label: "tmp list".into(),
+                desc: "Tempfile".into(),
+                action: "query:tmp list".into(),
+                args: None,
+            },
+            Action {
+                label: "tmp rm".into(),
+                desc: "Tempfile".into(),
+                action: "query:tmp rm ".into(),
+                args: None,
+            },
         ]
     }
 }

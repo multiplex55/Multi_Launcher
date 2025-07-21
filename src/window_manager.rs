@@ -6,12 +6,20 @@ static MOCK_MOUSE_POSITION: Lazy<Mutex<Option<Option<(f32, f32)>>>> =
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn set_mock_mouse_position(pos: Option<(f32, f32)>) {
-    *MOCK_MOUSE_POSITION.lock().unwrap() = Some(pos);
+    if let Ok(mut guard) = MOCK_MOUSE_POSITION.lock() {
+        *guard = Some(pos);
+    } else {
+        tracing::error!("failed to lock MOCK_MOUSE_POSITION");
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn clear_mock_mouse_position() {
-    *MOCK_MOUSE_POSITION.lock().unwrap() = None;
+    if let Ok(mut guard) = MOCK_MOUSE_POSITION.lock() {
+        *guard = None;
+    } else {
+        tracing::error!("failed to lock MOCK_MOUSE_POSITION");
+    }
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -147,8 +155,12 @@ pub fn virtual_key_from_string(key: &str) -> Option<u32> {
 
 /// Return the current mouse position in screen coordinates.
 pub fn current_mouse_position() -> Option<(f32, f32)> {
-    if let Some(pos) = *MOCK_MOUSE_POSITION.lock().unwrap() {
-        return pos;
+    if let Ok(guard) = MOCK_MOUSE_POSITION.lock() {
+        if let Some(pos) = *guard {
+            return pos;
+        }
+    } else {
+        tracing::error!("failed to lock MOCK_MOUSE_POSITION");
     }
 
     #[cfg(target_os = "windows")]
@@ -285,8 +297,8 @@ pub fn close_window(hwnd: usize) {
 #[cfg(target_os = "windows")]
 pub fn send_end_key() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-        KEYBD_EVENT_FLAGS, VIRTUAL_KEY, VK_END,
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        VIRTUAL_KEY, VK_END,
     };
     unsafe {
         let mut input = INPUT {

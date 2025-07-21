@@ -1,11 +1,11 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
 use arboard::Clipboard;
+use eframe::egui;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use serde_json;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use eframe::egui;
-use serde_json;
 
 pub const CLIPBOARD_FILE: &str = "clipboard_history.json";
 
@@ -258,7 +258,10 @@ impl Plugin for ClipboardPlugin {
     }
 
     fn default_settings(&self) -> Option<serde_json::Value> {
-        Some(serde_json::to_value(ClipboardPluginSettings { max_entries: self.max_entries }).unwrap())
+        serde_json::to_value(ClipboardPluginSettings {
+            max_entries: self.max_entries,
+        })
+        .ok()
     }
 
     fn apply_settings(&mut self, value: &serde_json::Value) {
@@ -268,12 +271,16 @@ impl Plugin for ClipboardPlugin {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
-        let mut cfg: ClipboardPluginSettings = serde_json::from_value(value.clone()).unwrap_or_default();
+        let mut cfg: ClipboardPluginSettings =
+            serde_json::from_value(value.clone()).unwrap_or_default();
         ui.horizontal(|ui| {
             ui.label("Clipboard limit");
             ui.add(egui::DragValue::new(&mut cfg.max_entries).clamp_range(1..=200));
         });
-        *value = serde_json::to_value(&cfg).unwrap();
+        match serde_json::to_value(&cfg) {
+            Ok(v) => *value = v,
+            Err(e) => tracing::error!("failed to serialize clipboard settings: {e}"),
+        }
         self.max_entries = cfg.max_entries;
     }
 }

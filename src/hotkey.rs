@@ -95,7 +95,10 @@ pub enum EventType {
     KeyPress(Key),
     KeyRelease(Key),
 }
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 #[cfg(target_os = "windows")]
 use std::thread;
 #[cfg(target_os = "windows")]
@@ -137,7 +140,7 @@ pub fn parse_hotkey(s: &str) -> Option<Hotkey> {
             "SHIFT" => shift = true,
             "ALT" => alt = true,
             "WIN" | "SUPER" => win = true,
-            "" => {},
+            "" => {}
             _ => {
                 if let Some(k) = parse_key(&upper) {
                     key = Some(k);
@@ -202,7 +205,9 @@ fn parse_key(upper: &str) -> Option<Key> {
             _ => None,
         },
         _ if upper.len() == 1 => {
-            let c = upper.chars().next().unwrap();
+            let Some(c) = upper.chars().next() else {
+                return None;
+            };
             if c.is_ascii_digit() {
                 Some(match c {
                     '0' => Key::Num0,
@@ -281,14 +286,18 @@ impl HotkeyTrigger {
         }
     }
 
-
     #[cfg(target_os = "windows")]
-    pub fn start_listener(triggers: Vec<Arc<HotkeyTrigger>>, _label: &'static str) -> HotkeyListener {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{
-            GetAsyncKeyState, VK_LCONTROL, VK_RCONTROL, VK_LSHIFT, VK_RSHIFT, VK_LMENU, VK_RMENU,
-            VK_LWIN, VK_RWIN,
+    pub fn start_listener(
+        triggers: Vec<Arc<HotkeyTrigger>>,
+        _label: &'static str,
+    ) -> HotkeyListener {
+        use windows::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
         };
-        use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            GetAsyncKeyState, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU,
+            VK_RSHIFT, VK_RWIN,
+        };
 
         fn is_down(vk: i32) -> bool {
             unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 }
@@ -393,7 +402,11 @@ impl HotkeyTrigger {
                             && !need_alt[i]
                             && !need_win[i]
                         {
-                            key_down && !ctrl_pressed && !shift_pressed && !alt_pressed && !win_pressed
+                            key_down
+                                && !ctrl_pressed
+                                && !shift_pressed
+                                && !alt_pressed
+                                && !win_pressed
                         } else {
                             key_down
                                 && (!need_ctrl[i] || ctrl_pressed)
@@ -421,12 +434,23 @@ impl HotkeyTrigger {
     }
 
     #[cfg(not(target_os = "windows"))]
-    pub fn start_listener(_triggers: Vec<Arc<HotkeyTrigger>>, _label: &'static str) -> HotkeyListener {
-        HotkeyListener { stop: Arc::new(AtomicBool::new(false)) }
+    pub fn start_listener(
+        _triggers: Vec<Arc<HotkeyTrigger>>,
+        _label: &'static str,
+    ) -> HotkeyListener {
+        HotkeyListener {
+            stop: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     pub fn take(&self) -> bool {
-        let mut open = self.open.lock().unwrap();
+        let mut open = match self.open.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("failed to lock hotkey trigger: {e}");
+                return false;
+            }
+        };
         if *open {
             *open = false;
             tracing::debug!("HotkeyTrigger fired!");
@@ -435,7 +459,6 @@ impl HotkeyTrigger {
             false
         }
     }
-
 }
 
 impl HotkeyListener {
