@@ -19,8 +19,6 @@ pub struct SettingsEditor {
     help_hotkey: String,
     help_hotkey_valid: bool,
     last_valid_help_hotkey: String,
-    index_paths: Vec<String>,
-    index_input: String,
     debug_logging: bool,
     show_toasts: bool,
     offscreen_x: i32,
@@ -98,8 +96,6 @@ impl SettingsEditor {
             help_hotkey,
             help_hotkey_valid,
             last_valid_help_hotkey,
-            index_paths: settings.index_paths.clone().unwrap_or_default(),
-            index_input: String::new(),
             debug_logging: settings.debug_logging,
             show_toasts: settings.enable_toasts,
             offscreen_x: settings.offscreen_pos.unwrap_or((2000, 2000)).0,
@@ -174,11 +170,7 @@ impl SettingsEditor {
             } else {
                 Some(self.help_hotkey.clone())
             },
-            index_paths: if self.index_paths.is_empty() {
-                None
-            } else {
-                Some(self.index_paths.clone())
-            },
+            index_paths: current.index_paths.clone(),
             plugin_dirs: current.plugin_dirs.clone(),
             enabled_plugins: current.enabled_plugins.clone(),
             enabled_capabilities: current.enabled_capabilities.clone(),
@@ -357,36 +349,6 @@ impl SettingsEditor {
                                 }
                             });
                         }
-
-                        ui.separator();
-                        ui.label("Index paths:");
-                        let mut remove: Option<usize> = None;
-                        for (idx, path) in self.index_paths.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                ui.label(path);
-                                if ui.button("Remove").clicked() {
-                                    remove = Some(idx);
-                                }
-                            });
-                        }
-                        if let Some(i) = remove {
-                            self.index_paths.remove(i);
-                        }
-                        ui.horizontal(|ui| {
-                            ui.text_edit_singleline(&mut self.index_input);
-                            if ui.button("Browse").clicked() {
-                                #[cfg(target_os = "windows")]
-                                if let Some(dir) = FileDialog::new().pick_folder() {
-                                    self.index_input = dir.display().to_string();
-                                }
-                            }
-                            if ui.button("Add").clicked() {
-                                if !self.index_input.is_empty() {
-                                    self.index_paths.push(self.index_input.clone());
-                                    self.index_input.clear();
-                                }
-                            }
-                        });
 
                         ui.separator();
                         ui.horizontal(|ui| {
