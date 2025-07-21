@@ -407,7 +407,7 @@ impl LauncherApp {
         let follow_mouse = settings.follow_mouse;
         let static_enabled = settings.static_location_enabled;
 
-        let settings_editor = SettingsEditor::new(&settings);
+        let settings_editor = SettingsEditor::new_with_plugins(&settings);
         let plugin_editor = PluginEditor::new(&settings);
         let mut app = Self {
             actions: actions.clone(),

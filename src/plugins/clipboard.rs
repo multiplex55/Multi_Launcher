@@ -270,7 +270,7 @@ impl Plugin for ClipboardPlugin {
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
         let mut cfg: ClipboardPluginSettings = serde_json::from_value(value.clone()).unwrap_or_default();
         ui.horizontal(|ui| {
-            ui.label("Max history entries");
+            ui.label("Clipboard limit");
             ui.add(egui::DragValue::new(&mut cfg.max_entries).clamp_range(1..=200));
         });
         *value = serde_json::to_value(&cfg).unwrap();
