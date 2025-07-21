@@ -152,10 +152,18 @@ fn default_net_refresh() -> f32 {
     1.0
 }
 
+fn default_launcher_hotkey() -> Option<String> {
+    if std::env::var("ML_DEFAULT_HOTKEY_NONE").is_ok() {
+        None
+    } else {
+        Some("F2".into())
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            hotkey: Some("F2".into()),
+            hotkey: default_launcher_hotkey(),
             quit_hotkey: None,
             help_hotkey: Some("F1".into()),
             index_paths: None,

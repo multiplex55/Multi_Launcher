@@ -54,7 +54,9 @@ impl SettingsEditor {
     pub fn new(settings: &Settings) -> Self {
         let hotkey = settings.hotkey.clone().unwrap_or_default();
         let hotkey_valid = parse_hotkey(&hotkey).is_some();
-        let default_hotkey = Settings::default().hotkey.unwrap();
+        let default_hotkey = Settings::default()
+            .hotkey
+            .unwrap_or_else(|| "F2".into());
         let last_valid_hotkey = if hotkey_valid {
             hotkey.clone()
         } else {
