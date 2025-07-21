@@ -114,14 +114,22 @@ impl Plugin for NetworkPlugin {
             }
         }
 
-        let (first_time, first_totals) = history.front().unwrap();
-        let avg_dt = now.duration_since(*first_time).as_secs_f64().max(0.001);
+        let (avg_dt, first_totals) = match history.front() {
+            Some((first_time, map)) => (
+                now.duration_since(*first_time)
+                    .as_secs_f64()
+                    .max(0.001),
+                Some(map),
+            ),
+            None => (dt, None),
+        };
 
-        nets.iter()
+        nets
+            .iter()
             .map(|(name, data)| {
                 let rx = data.received() as f64 / dt;
                 let tx = data.transmitted() as f64 / dt;
-                let (avg_rx, avg_tx) = match first_totals.get(name) {
+                let (avg_rx, avg_tx) = match first_totals.and_then(|m| m.get(name)) {
                     Some((rx0, tx0)) => (
                         (data.total_received() - *rx0) as f64 / avg_dt,
                         (data.total_transmitted() - *tx0) as f64 / avg_dt,
@@ -203,5 +211,15 @@ impl Plugin for NetworkPlugin {
         });
         self.unit = cfg.unit;
         *value = serde_json::to_value(&cfg).unwrap();
+    }
+}
+
+impl NetworkPlugin {
+    /// Clear the internal history of network statistics.
+    #[allow(dead_code)]
+    pub fn clear_history(&self) {
+        if let Ok(mut guard) = self.state.lock() {
+            guard.2.clear();
+        }
     }
 }

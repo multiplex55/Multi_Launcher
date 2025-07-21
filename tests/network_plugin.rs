@@ -10,3 +10,11 @@ fn search_returns_actions() {
     assert!(!results.is_empty());
     assert!(results[0].label.contains("AvgRx"));
 }
+
+#[test]
+fn search_no_panic_with_empty_history() {
+    let plugin = NetworkPlugin::default();
+    plugin.clear_history();
+    thread::sleep(Duration::from_millis(10));
+    plugin.search("net");
+}
