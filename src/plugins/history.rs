@@ -64,23 +64,37 @@ impl Plugin for HistoryPlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![
-            Action { label: "hi".into(), desc: "History".into(), action: "query:hi".into(), args: None },
-            Action { label: "hi clear".into(), desc: "History".into(), action: "query:hi clear".into(), args: None },
+            Action {
+                label: "hi".into(),
+                desc: "History".into(),
+                action: "query:hi".into(),
+                args: None,
+            },
+            Action {
+                label: "hi clear".into(),
+                desc: "History".into(),
+                action: "query:hi clear".into(),
+                args: None,
+            },
         ]
     }
 
     fn default_settings(&self) -> Option<serde_json::Value> {
-        Some(serde_json::to_value(HistoryPluginSettings::default()).unwrap())
+        serde_json::to_value(HistoryPluginSettings::default()).ok()
     }
 
     fn apply_settings(&mut self, _value: &serde_json::Value) {}
 
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
-        let mut cfg: HistoryPluginSettings = serde_json::from_value(value.clone()).unwrap_or_default();
+        let mut cfg: HistoryPluginSettings =
+            serde_json::from_value(value.clone()).unwrap_or_default();
         ui.horizontal(|ui| {
             ui.label("History limit");
             ui.add(egui::Slider::new(&mut cfg.max_entries, 10..=500).text(""));
         });
-        *value = serde_json::to_value(&cfg).unwrap();
+        match serde_json::to_value(&cfg) {
+            Ok(v) => *value = v,
+            Err(e) => tracing::error!("failed to serialize history settings: {e}"),
+        }
     }
 }

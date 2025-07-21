@@ -121,20 +121,21 @@ impl TimerManager {
         };
         if let Some(entry) = list.get(&id) {
             if entry.generation == gen && !entry.paused {
-                let entry = list.remove(&id).unwrap();
-                if entry.persist {
-                    save_persistent_alarms_locked(&list);
-                }
-                drop(list);
-                let msg = if entry.persist {
-                    format!("Alarm triggered: {}", entry.label)
-                } else {
-                    format!("Timer finished: {}", entry.label)
-                };
-                crate::sound::play_sound(&entry.sound);
-                notify(&msg);
-                if let Some(mut msgs) = FINISHED_MESSAGES.lock().ok() {
-                    msgs.push(msg);
+                if let Some(entry) = list.remove(&id) {
+                    if entry.persist {
+                        save_persistent_alarms_locked(&list);
+                    }
+                    drop(list);
+                    let msg = if entry.persist {
+                        format!("Alarm triggered: {}", entry.label)
+                    } else {
+                        format!("Timer finished: {}", entry.label)
+                    };
+                    crate::sound::play_sound(&entry.sound);
+                    notify(&msg);
+                    if let Some(mut msgs) = FINISHED_MESSAGES.lock().ok() {
+                        msgs.push(msg);
+                    }
                 }
             }
         }
@@ -186,10 +187,13 @@ pub fn load_saved_alarms() {
             return;
         }
     };
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(d) => d.as_secs(),
+        Err(e) => {
+            tracing::error!("system time error: {e}");
+            return;
+        }
+    };
     for alarm in list {
         if alarm.end_ts > now {
             let dur = Duration::from_secs(alarm.end_ts - now);
@@ -258,7 +262,9 @@ pub fn parse_hhmm(input: &str) -> Option<(u32, u32)> {
 /// Return a list of active timers with remaining time.
 pub fn active_timers() -> Vec<(u64, String, Duration, u64)> {
     let now = Instant::now();
-    let Some(timers) = ACTIVE_TIMERS.lock().ok() else { return Vec::new(); };
+    let Some(timers) = ACTIVE_TIMERS.lock().ok() else {
+        return Vec::new();
+    };
     timers
         .values()
         .map(|t| {
@@ -275,7 +281,9 @@ pub fn active_timers() -> Vec<(u64, String, Duration, u64)> {
 /// Return active timers that are currently running (not paused).
 pub fn running_timers() -> Vec<(u64, String, Duration, u64)> {
     let now = Instant::now();
-    let Some(timers) = ACTIVE_TIMERS.lock().ok() else { return Vec::new(); };
+    let Some(timers) = ACTIVE_TIMERS.lock().ok() else {
+        return Vec::new();
+    };
     timers
         .values()
         .filter(|t| !t.paused)
@@ -292,7 +300,9 @@ pub fn running_timers() -> Vec<(u64, String, Duration, u64)> {
 
 /// Return timers that are currently paused.
 pub fn paused_timers() -> Vec<(u64, String, Duration, u64)> {
-    let Some(timers) = ACTIVE_TIMERS.lock().ok() else { return Vec::new(); };
+    let Some(timers) = ACTIVE_TIMERS.lock().ok() else {
+        return Vec::new();
+    };
     timers
         .values()
         .filter(|t| t.paused)
@@ -302,7 +312,9 @@ pub fn paused_timers() -> Vec<(u64, String, Duration, u64)> {
 
 /// Get the start timestamp of the timer with `id`.
 pub fn timer_start_ts(id: u64) -> Option<u64> {
-    let Some(timers) = ACTIVE_TIMERS.lock().ok() else { return None };
+    let Some(timers) = ACTIVE_TIMERS.lock().ok() else {
+        return None;
+    };
     timers.get(&id).map(|t| t.start_ts)
 }
 
@@ -403,19 +415,19 @@ fn start_entry(
     {
         if let Some(mut list) = ACTIVE_TIMERS.lock().ok() {
             list.insert(
-            id,
-            TimerEntry {
                 id,
-                label: label.clone(),
-                deadline,
-                persist,
-                end_ts,
-                start_ts,
-                paused: false,
-                remaining: duration,
-                generation: 0,
-                sound: sound.clone(),
-            },
+                TimerEntry {
+                    id,
+                    label: label.clone(),
+                    deadline,
+                    persist,
+                    end_ts,
+                    start_ts,
+                    paused: false,
+                    remaining: duration,
+                    generation: 0,
+                    sound: sound.clone(),
+                },
             );
             if persist {
                 save_persistent_alarms_locked(&list);
@@ -428,10 +440,13 @@ fn start_entry(
 /// Start a timer that lasts `duration` with an optional `name`.
 pub fn start_timer_named(duration: Duration, name: Option<String>, sound: String) {
     let label = name.unwrap_or_else(|| format!("Timer {:?}", duration));
-    let start_ts = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let start_ts = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(d) => d.as_secs(),
+        Err(e) => {
+            tracing::error!("system time error: {e}");
+            return;
+        }
+    };
     let end_ts = start_ts + duration.as_secs();
     start_entry(duration, label, false, start_ts, end_ts, sound);
 }
@@ -445,7 +460,10 @@ pub fn start_timer(duration: Duration, sound: String) {
 pub fn start_alarm_named(hour: u32, minute: u32, name: Option<String>, sound: String) {
     use chrono::{Duration as ChronoDuration, Local};
     let now = Local::now();
-    let mut target = now.date_naive().and_hms_opt(hour, minute, 0).unwrap();
+    let Some(mut target) = now.date_naive().and_hms_opt(hour, minute, 0) else {
+        tracing::error!("invalid alarm time: {hour}:{minute}");
+        return;
+    };
     if target <= now.naive_local() {
         target += ChronoDuration::days(1);
     }
@@ -453,10 +471,13 @@ pub fn start_alarm_named(hour: u32, minute: u32, name: Option<String>, sound: St
         .to_std()
         .unwrap_or(Duration::from_secs(0));
     let label = name.unwrap_or_else(|| format!("Alarm {:02}:{:02}", hour, minute));
-    let start_ts = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let start_ts = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(d) => d.as_secs(),
+        Err(e) => {
+            tracing::error!("system time error: {e}");
+            return;
+        }
+    };
     let end_ts = start_ts + duration.as_secs();
     start_entry(duration, label, true, start_ts, end_ts, sound);
 }
@@ -473,22 +494,22 @@ impl Plugin for TimerPlugin {
         let trimmed = query.trim();
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "timer") {
             if rest.is_empty() {
-            return vec![Action {
-                label: "Open timer dialog".into(),
-                desc: "Timer".into(),
-                action: "timer:dialog:timer".into(),
-                args: None,
-            }];
+                return vec![Action {
+                    label: "Open timer dialog".into(),
+                    desc: "Timer".into(),
+                    action: "timer:dialog:timer".into(),
+                    args: None,
+                }];
             }
         }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "alarm") {
             if rest.is_empty() {
-            return vec![Action {
-                label: "Open alarm dialog".into(),
-                desc: "Timer".into(),
-                action: "timer:dialog:alarm".into(),
-                args: None,
-            }];
+                return vec![Action {
+                    label: "Open alarm dialog".into(),
+                    desc: "Timer".into(),
+                    action: "timer:dialog:alarm".into(),
+                    args: None,
+                }];
             }
         }
         if crate::common::strip_prefix_ci(trimmed, "timer list").is_some()
@@ -633,14 +654,54 @@ impl Plugin for TimerPlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![
-            Action { label: "timer".into(), desc: "Timer".into(), action: "query:timer".into(), args: None },
-            Action { label: "timer add".into(), desc: "Timer".into(), action: "query:timer add ".into(), args: None },
-            Action { label: "timer list".into(), desc: "Timer".into(), action: "query:timer list".into(), args: None },
-            Action { label: "timer pause".into(), desc: "Timer".into(), action: "query:timer pause".into(), args: None },
-            Action { label: "timer resume".into(), desc: "Timer".into(), action: "query:timer resume".into(), args: None },
-            Action { label: "timer cancel".into(), desc: "Timer".into(), action: "query:timer cancel".into(), args: None },
-            Action { label: "timer rm".into(), desc: "Timer".into(), action: "query:timer rm".into(), args: None },
-            Action { label: "alarm".into(), desc: "Timer".into(), action: "query:alarm".into(), args: None },
+            Action {
+                label: "timer".into(),
+                desc: "Timer".into(),
+                action: "query:timer".into(),
+                args: None,
+            },
+            Action {
+                label: "timer add".into(),
+                desc: "Timer".into(),
+                action: "query:timer add ".into(),
+                args: None,
+            },
+            Action {
+                label: "timer list".into(),
+                desc: "Timer".into(),
+                action: "query:timer list".into(),
+                args: None,
+            },
+            Action {
+                label: "timer pause".into(),
+                desc: "Timer".into(),
+                action: "query:timer pause".into(),
+                args: None,
+            },
+            Action {
+                label: "timer resume".into(),
+                desc: "Timer".into(),
+                action: "query:timer resume".into(),
+                args: None,
+            },
+            Action {
+                label: "timer cancel".into(),
+                desc: "Timer".into(),
+                action: "query:timer cancel".into(),
+                args: None,
+            },
+            Action {
+                label: "timer rm".into(),
+                desc: "Timer".into(),
+                action: "query:timer rm".into(),
+                args: None,
+            },
+            Action {
+                label: "alarm".into(),
+                desc: "Timer".into(),
+                action: "query:alarm".into(),
+                args: None,
+            },
         ]
     }
 }

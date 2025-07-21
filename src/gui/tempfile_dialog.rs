@@ -58,7 +58,9 @@ impl TempfileDialog {
                                             app.add_toast(Toast {
                                                 text: format!(
                                                     "Created {}",
-                                                    path.file_name().unwrap().to_string_lossy()
+                                                    path.file_name()
+                                                        .map(|n| n.to_string_lossy())
+                                                        .unwrap_or_else(|| path.to_string_lossy())
                                                 )
                                                 .into(),
                                                 kind: ToastKind::Success,

@@ -55,8 +55,11 @@ impl Hotkey {
             unsafe {
                 if RegisterHotKey(None, id, HOT_KEY_MODIFIERS(modifiers), vk).is_ok() {
                     self.id = Some(id);
-                    let mut registered_hotkeys = app.registered_hotkeys.lock().unwrap();
-                    registered_hotkeys.insert(self.key_sequence.clone(), id as usize);
+                    if let Ok(mut registered_hotkeys) = app.registered_hotkeys.lock() {
+                        registered_hotkeys.insert(self.key_sequence.clone(), id as usize);
+                    } else {
+                        error!("failed to lock registered_hotkeys");
+                    }
                     info!("Registered hotkey '{}' with ID {}.", self.key_sequence, id);
                     return true;
                 } else {

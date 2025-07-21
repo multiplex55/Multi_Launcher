@@ -20,8 +20,15 @@ use std::thread;
 static RESTART_TX: Lazy<Mutex<Option<Sender<Settings>>>> = Lazy::new(|| Mutex::new(None));
 
 pub fn request_hotkey_restart(settings: Settings) {
-    if let Some(tx) = RESTART_TX.lock().unwrap().as_ref() {
-        let _ = tx.send(settings);
+    match RESTART_TX.lock() {
+        Ok(guard) => {
+            if let Some(tx) = guard.as_ref() {
+                let _ = tx.send(settings);
+            }
+        }
+        Err(e) => {
+            tracing::error!("failed to lock RESTART_TX: {e}");
+        }
     }
 }
 
@@ -91,7 +98,11 @@ fn spawn_gui(
             "Multi_LNCHR",
             native_options,
             Box::new(move |cc| {
-                *ctx_clone.lock().unwrap() = Some(cc.egui_ctx.clone());
+                if let Ok(mut guard) = ctx_clone.lock() {
+                    *guard = Some(cc.egui_ctx.clone());
+                } else {
+                    tracing::error!("failed to lock ctx_clone");
+                }
                 tracing::debug!("egui context stored");
                 Box::new(LauncherApp::new(
                     &cc.egui_ctx,
@@ -125,7 +136,11 @@ fn main() -> anyhow::Result<()> {
     tracing::debug!("{} actions loaded", actions.len());
 
     let (restart_tx, restart_rx) = channel::<Settings>();
-    *RESTART_TX.lock().unwrap() = Some(restart_tx);
+    if let Ok(mut guard) = RESTART_TX.lock() {
+        *guard = Some(restart_tx);
+    } else {
+        tracing::error!("failed to lock RESTART_TX while starting");
+    }
 
     if let Some(paths) = &settings.index_paths {
         actions.extend(indexer::index_paths(paths));
