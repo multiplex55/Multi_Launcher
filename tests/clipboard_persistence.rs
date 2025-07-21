@@ -1,5 +1,6 @@
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::clipboard::{save_history, ClipboardPlugin, CLIPBOARD_FILE};
+use arboard::Clipboard;
 use once_cell::sync::Lazy;
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -16,6 +17,11 @@ fn history_survives_instances() {
     let mut list = VecDeque::new();
     list.push_back("first".into());
     save_history(CLIPBOARD_FILE, &list).unwrap();
+
+    let mut cb = Clipboard::new().ok();
+    if let Some(ref mut clipboard) = cb {
+        let _ = clipboard.set_text("first".to_string());
+    }
 
     let plugin1 = ClipboardPlugin::new(20);
     let results1 = plugin1.search("cb first");
@@ -38,6 +44,11 @@ fn cb_list_returns_all_entries() {
     list.push_back("alpha".into());
     list.push_back("beta".into());
     save_history(CLIPBOARD_FILE, &list).unwrap();
+
+    let mut cb = Clipboard::new().ok();
+    if let Some(ref mut clipboard) = cb {
+        let _ = clipboard.set_text("alpha".to_string());
+    }
 
     let plugin = ClipboardPlugin::new(20);
     let results = plugin.search("cb list");
