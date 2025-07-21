@@ -18,7 +18,6 @@ fn new_app_with_settings(ctx: &egui::Context, actions: Vec<Action>, settings: Se
         None,
         None,
         None,
-        None,
         Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicBool::new(false)),

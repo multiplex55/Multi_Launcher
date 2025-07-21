@@ -9,18 +9,15 @@ use std::collections::HashMap;
 #[derive(Default)]
 
 pub struct PluginEditor {
-    plugin_dirs: Vec<String>,
     enabled_plugins: Vec<String>,
     enabled_capabilities: HashMap<String, Vec<String>>,
-    plugin_input: String,
     available: Vec<(String, String, Vec<String>)>,
     filter: String,
 }
 
 impl PluginEditor {
     pub fn new(settings: &Settings) -> Self {
-        let plugin_dirs = settings.plugin_dirs.clone().unwrap_or_default();
-        let info = Self::gather_available(&plugin_dirs);
+        let info = Self::gather_available(&settings.plugin_dirs.clone().unwrap_or_default());
 
         // If settings don't specify enabled plugins, enable all gathered ones by
         // default.
@@ -40,10 +37,8 @@ impl PluginEditor {
         };
 
         Self {
-            plugin_dirs,
             enabled_plugins,
             enabled_capabilities,
-            plugin_input: String::new(),
             available: info,
             filter: String::new(),
         }
@@ -64,14 +59,9 @@ impl PluginEditor {
     }
 
     fn save_settings(&mut self, app: &mut LauncherApp) {
-        tracing::debug!(?self.plugin_dirs, ?self.enabled_plugins, "saving plugin settings");
+        tracing::debug!(?self.enabled_plugins, "saving plugin settings");
         match Settings::load(&app.settings_path) {
             Ok(mut s) => {
-                s.plugin_dirs = if self.plugin_dirs.is_empty() {
-                    None
-                } else {
-                    Some(self.plugin_dirs.clone())
-                };
                 let all_plugins_enabled = self.enabled_plugins.len() == self.available.len()
                     && self
                         .available
@@ -112,8 +102,6 @@ impl PluginEditor {
                     app.error = Some(format!("Failed to save: {e}"));
                 } else {
                     app.update_paths(
-                        s.plugin_dirs.clone(),
-                        s.index_paths.clone(),
                         s.enabled_plugins.clone(),
                         s.enabled_capabilities.clone(),
                         s.offscreen_pos,
@@ -133,15 +121,16 @@ impl PluginEditor {
                         s.screenshot_dir.clone(),
                         Some(s.screenshot_save_file),
                     );
+                    let dirs = s.plugin_dirs.clone().unwrap_or_default();
                     app.plugins.reload_from_dirs(
-                        &self.plugin_dirs,
+                        &dirs,
                         app.clipboard_limit,
                         app.net_unit,
                         false,
                         &s.plugin_settings,
                     );
                     tracing::debug!(available=?app.plugins.plugin_names(), "plugins reloaded");
-                    self.available = Self::gather_available(&self.plugin_dirs);
+                    self.available = Self::gather_available(&dirs);
                     app.search();
 
                     crate::request_hotkey_restart(s);
@@ -157,36 +146,7 @@ impl PluginEditor {
         egui::Window::new("Plugin Settings")
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.label("Plugin directories:");
-                let mut remove: Option<usize> = None;
-                for (idx, path) in self.plugin_dirs.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.label(path);
-                        if ui.button("Remove").clicked() {
-                            remove = Some(idx);
-                        }
-                    });
-                }
-                if let Some(i) = remove {
-                    self.plugin_dirs.remove(i);
-                    changed = true;
-                }
-                ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.plugin_input);
-                    if ui.button("Browse").clicked() {
-                        #[cfg(target_os = "windows")]
-                        if let Some(dir) = FileDialog::new().pick_folder() {
-                            self.plugin_input = dir.display().to_string();
-                        }
-                    }
-                    if ui.button("Add").clicked() {
-                        if !self.plugin_input.is_empty() {
-                            self.plugin_dirs.push(self.plugin_input.clone());
-                            self.plugin_input.clear();
-                            changed = true;
-                        }
-                    }
-                });
+
 
                 ui.separator();
                 ui.label("Plugins:");

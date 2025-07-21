@@ -32,7 +32,6 @@ fn new_app(ctx: &egui::Context, settings: Settings) -> LauncherApp {
         None,
         None,
         None,
-        None,
         Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicBool::new(false)),

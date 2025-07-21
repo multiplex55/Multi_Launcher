@@ -27,7 +27,6 @@ fn new_app_with_plugins(ctx: &egui::Context, actions: Vec<Action>) -> LauncherAp
         None,
         None,
         None,
-        None,
         Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicBool::new(false)),

@@ -117,7 +117,6 @@ pub struct LauncherApp {
     rx: Receiver<WatchEvent>,
     folder_aliases: HashMap<String, Option<String>>,
     bookmark_aliases: HashMap<String, Option<String>>,
-    plugin_dirs: Option<Vec<String>>,
     index_paths: Option<Vec<String>>,
     enabled_plugins: Option<Vec<String>>,
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
@@ -200,8 +199,6 @@ impl LauncherApp {
     }
     pub fn update_paths(
         &mut self,
-        plugin_dirs: Option<Vec<String>>,
-        index_paths: Option<Vec<String>>,
         enabled_plugins: Option<Vec<String>>,
         enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
         offscreen_pos: Option<(i32, i32)>,
@@ -221,8 +218,6 @@ impl LauncherApp {
         screenshot_dir: Option<String>,
         screenshot_save_file: Option<bool>,
     ) {
-        self.plugin_dirs = plugin_dirs;
-        self.index_paths = index_paths;
         self.enabled_plugins = enabled_plugins;
         self.enabled_capabilities = enabled_capabilities;
         if let Some((x, y)) = offscreen_pos {
@@ -283,7 +278,6 @@ impl LauncherApp {
         actions_path: String,
         settings_path: String,
         settings: Settings,
-        plugin_dirs: Option<Vec<String>>,
         index_paths: Option<Vec<String>>,
         enabled_plugins: Option<Vec<String>>,
         enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
@@ -433,7 +427,6 @@ impl LauncherApp {
             rx,
             folder_aliases,
             bookmark_aliases,
-            plugin_dirs,
             index_paths,
             enabled_plugins,
             enabled_capabilities,

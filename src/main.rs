@@ -53,7 +53,6 @@ fn spawn_gui(
 
     let actions_path = "actions.json".to_string();
     let settings_path_for_window = settings_path.clone();
-    let plugin_dirs = settings.plugin_dirs.clone();
     let index_paths = settings.index_paths.clone();
     let enabled_plugins = settings.enabled_plugins.clone();
     let visible_flag = Arc::new(AtomicBool::new(true));
@@ -101,7 +100,6 @@ fn spawn_gui(
                     actions_path,
                     settings_path_for_window,
                     settings.clone(),
-                    plugin_dirs,
                     index_paths,
                     enabled_plugins,
                     enabled_capabilities,

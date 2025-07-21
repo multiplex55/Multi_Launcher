@@ -2,8 +2,6 @@
     "hotkey": "F2",
     "quit_hotkey": "Shift+Escape",
     "help_hotkey": "F1",
-    "index_paths": null,
-    "plugin_dirs": null,
     "debug_logging": false,
     "enable_toasts": true,
     "show_examples": false,

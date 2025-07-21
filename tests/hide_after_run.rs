@@ -27,7 +27,6 @@ fn new_app_with_settings(
             None,
             None,
             None,
-            None,
             visible.clone(),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
@@ -46,8 +45,6 @@ fn run_action(action: &str) -> bool {
     }];
     let (mut app, flag) = new_app_with_settings(&ctx, actions, Settings::default());
     app.update_paths(
-        None,
-        None,
         None,
         None,
         None,
