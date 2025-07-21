@@ -252,3 +252,17 @@ fn search_timer_hms_format() {
     assert_eq!(results.len(), 1);
     assert!(results[0].action.starts_with("timer:start:1:30"));
 }
+
+#[test]
+fn format_ts_invalid_timestamp() {
+    use multi_launcher::plugins::timer::format_ts;
+    use chrono::{Local, TimeZone};
+    let invalid_ts = 10_000_000_000_000u64;
+    let expected = Local
+        .timestamp_opt(0, 0)
+        .single()
+        .unwrap()
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    assert_eq!(format_ts(invalid_ts), expected);
+}

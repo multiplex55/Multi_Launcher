@@ -1,5 +1,6 @@
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::notes::{append_note, remove_note, load_notes, NotesPlugin, QUICK_NOTES_FILE};
+use chrono::TimeZone;
 use tempfile::tempdir;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
@@ -65,4 +66,26 @@ fn search_plain_note_opens_dialog() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "note:dialog");
     assert_eq!(results[0].label, "note: edit notes");
+}
+
+#[test]
+fn list_handles_invalid_timestamp() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    use multi_launcher::plugins::notes::{save_notes, NoteEntry};
+    let notes = vec![NoteEntry { ts: 10_000_000_000_000u64, text: "demo".into() }];
+    save_notes(QUICK_NOTES_FILE, &notes).unwrap();
+
+    let plugin = NotesPlugin::default();
+    let results = plugin.search("note list");
+    assert_eq!(results.len(), 1);
+    let expected_ts = chrono::Local
+        .timestamp_opt(0, 0)
+        .single()
+        .unwrap()
+        .format("%Y-%m-%d %H:%M")
+        .to_string();
+    assert_eq!(results[0].label, format!("{expected_ts} - demo"));
 }

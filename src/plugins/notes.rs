@@ -53,12 +53,16 @@ pub fn remove_note(path: &str, index: usize) -> anyhow::Result<()> {
 }
 
 fn format_ts(ts: u64) -> String {
-    Local
-        .timestamp_opt(ts as i64, 0)
-        .single()
-        .unwrap_or_else(|| Local.timestamp_opt(0, 0).single().unwrap())
-        .format("%Y-%m-%d %H:%M")
-        .to_string()
+    match Local.timestamp_opt(ts as i64, 0).single() {
+        Some(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
+        None => {
+            tracing::warn!("invalid timestamp {ts}");
+            match Local.timestamp_opt(0, 0).single() {
+                Some(fallback) => fallback.format("%Y-%m-%d %H:%M").to_string(),
+                None => "1970-01-01 00:00".to_string(),
+            }
+        }
+    }
 }
 
 pub struct NotesPlugin {
