@@ -19,6 +19,13 @@ static HISTORY: Lazy<Mutex<VecDeque<HistoryEntry>>> = Lazy::new(|| {
     Mutex::new(hist)
 });
 
+pub fn poison_history_lock() {
+    let _ = std::panic::catch_unwind(|| {
+        let _guard = HISTORY.lock().unwrap();
+        panic!("poison");
+    });
+}
+
 fn load_history_internal() -> anyhow::Result<VecDeque<HistoryEntry>> {
     let content = std::fs::read_to_string(HISTORY_FILE).unwrap_or_default();
     if content.is_empty() {
@@ -33,7 +40,7 @@ fn load_history_internal() -> anyhow::Result<VecDeque<HistoryEntry>> {
 
 /// Save the current HISTORY list to `history.json`.
 pub fn save_history() -> anyhow::Result<()> {
-    let h = HISTORY.lock().unwrap();
+    let Some(h) = HISTORY.lock().ok() else { return Ok(()); };
     let list: Vec<HistoryEntry> = h.iter().cloned().collect();
     let json = serde_json::to_string_pretty(&list)?;
     std::fs::write(HISTORY_FILE, json)?;
@@ -45,7 +52,7 @@ pub fn save_history() -> anyhow::Result<()> {
 pub fn append_history(mut entry: HistoryEntry, limit: usize) -> anyhow::Result<()> {
     entry.query_lc = entry.query.to_lowercase();
     {
-        let mut h = HISTORY.lock().unwrap();
+        let Some(mut h) = HISTORY.lock().ok() else { return Ok(()); };
         h.push_front(entry);
         while h.len() > limit {
             h.pop_back();
@@ -56,13 +63,13 @@ pub fn append_history(mut entry: HistoryEntry, limit: usize) -> anyhow::Result<(
 
 /// Return a clone of the current history list.
 pub fn get_history() -> VecDeque<HistoryEntry> {
-    HISTORY.lock().unwrap().clone()
+    HISTORY.lock().ok().map(|h| h.clone()).unwrap_or_default()
 }
 
 /// Clear all history entries and persist the empty list to `history.json`.
 pub fn clear_history() -> anyhow::Result<()> {
     {
-        let mut h = HISTORY.lock().unwrap();
+        let Some(mut h) = HISTORY.lock().ok() else { return Ok(()); };
         h.clear();
     }
     save_history()
