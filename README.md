@@ -264,7 +264,7 @@ Place the resulting library file in one of the directories listed under
 
 Plugins can be enabled or disabled from the **Settings** window. The list of
 active plugins is stored in the `enabled_plugins` section of `settings.json`.
-The **Plugin Settings** dialog provides a graphical way to manage plugin directories, enable or disable plugins and toggle capabilities like `show_full_path`.
+The **Plugin Settings** dialog provides a graphical way to enable or disable plugins and toggle capabilities like `show_full_path`.
 
 Changes take effect immediately once the dialog is closed. Use this window to
 enable additional plugins, such as a dynamic `envvar` plugin that exposes

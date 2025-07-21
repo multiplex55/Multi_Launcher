@@ -19,8 +19,6 @@ pub struct SettingsEditor {
     help_hotkey: String,
     help_hotkey_valid: bool,
     last_valid_help_hotkey: String,
-    index_paths: Vec<String>,
-    index_input: String,
     debug_logging: bool,
     show_toasts: bool,
     offscreen_x: i32,
@@ -98,8 +96,6 @@ impl SettingsEditor {
             help_hotkey,
             help_hotkey_valid,
             last_valid_help_hotkey,
-            index_paths: settings.index_paths.clone().unwrap_or_default(),
-            index_input: String::new(),
             debug_logging: settings.debug_logging,
             show_toasts: settings.enable_toasts,
             offscreen_x: settings.offscreen_pos.unwrap_or((2000, 2000)).0,
@@ -140,18 +136,25 @@ impl SettingsEditor {
 
     fn sync_from_plugin_settings(&mut self) {
         if let Some(val) = self.plugin_settings.get("clipboard") {
-            if let Ok(cfg) = serde_json::from_value::<crate::plugins::clipboard::ClipboardPluginSettings>(val.clone()) {
+            if let Ok(cfg) = serde_json::from_value::<
+                crate::plugins::clipboard::ClipboardPluginSettings,
+            >(val.clone())
+            {
                 self.clipboard_limit = cfg.max_entries;
             }
         }
         if let Some(val) = self.plugin_settings.get("network") {
-            if let Ok(cfg) = serde_json::from_value::<crate::plugins::network::NetworkPluginSettings>(val.clone()) {
+            if let Ok(cfg) = serde_json::from_value::<crate::plugins::network::NetworkPluginSettings>(
+                val.clone(),
+            ) {
                 self.net_refresh = cfg.refresh_rate;
                 self.net_unit = cfg.unit;
             }
         }
         if let Some(val) = self.plugin_settings.get("history") {
-            if let Ok(cfg) = serde_json::from_value::<crate::plugins::history::HistoryPluginSettings>(val.clone()) {
+            if let Ok(cfg) = serde_json::from_value::<crate::plugins::history::HistoryPluginSettings>(
+                val.clone(),
+            ) {
                 self.history_limit = cfg.max_entries;
             }
         }
@@ -174,11 +177,7 @@ impl SettingsEditor {
             } else {
                 Some(self.help_hotkey.clone())
             },
-            index_paths: if self.index_paths.is_empty() {
-                None
-            } else {
-                Some(self.index_paths.clone())
-            },
+            index_paths: current.index_paths.clone(),
             plugin_dirs: current.plugin_dirs.clone(),
             enabled_plugins: current.enabled_plugins.clone(),
             enabled_capabilities: current.enabled_capabilities.clone(),
@@ -327,7 +326,6 @@ impl SettingsEditor {
                             ui.add(egui::Slider::new(&mut self.usage_weight, 0.0..=5.0).text(""));
                         });
 
-
                         ui.horizontal(|ui| {
                             ui.label("Off-screen X");
                             ui.add(egui::DragValue::new(&mut self.offscreen_x));
@@ -357,36 +355,6 @@ impl SettingsEditor {
                                 }
                             });
                         }
-
-                        ui.separator();
-                        ui.label("Index paths:");
-                        let mut remove: Option<usize> = None;
-                        for (idx, path) in self.index_paths.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                ui.label(path);
-                                if ui.button("Remove").clicked() {
-                                    remove = Some(idx);
-                                }
-                            });
-                        }
-                        if let Some(i) = remove {
-                            self.index_paths.remove(i);
-                        }
-                        ui.horizontal(|ui| {
-                            ui.text_edit_singleline(&mut self.index_input);
-                            if ui.button("Browse").clicked() {
-                                #[cfg(target_os = "windows")]
-                                if let Some(dir) = FileDialog::new().pick_folder() {
-                                    self.index_input = dir.display().to_string();
-                                }
-                            }
-                            if ui.button("Add").clicked() {
-                                if !self.index_input.is_empty() {
-                                    self.index_paths.push(self.index_input.clone());
-                                    self.index_input.clear();
-                                }
-                            }
-                        });
 
                         ui.separator();
                         ui.horizontal(|ui| {
@@ -426,12 +394,17 @@ impl SettingsEditor {
                             if !enabled {
                                 continue;
                             }
-                            let entry = self
-                                .plugin_settings
-                                .entry(name.clone())
-                                .or_insert_with(|| plugin.default_settings().unwrap_or(serde_json::Value::Null));
+                            let entry =
+                                self.plugin_settings.entry(name.clone()).or_insert_with(|| {
+                                    plugin.default_settings().unwrap_or(serde_json::Value::Null)
+                                });
                             let id = ui.make_persistent_id(format!("plugin_{name}"));
-                            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+                            let mut state =
+                                egui::collapsing_header::CollapsingState::load_with_default_open(
+                                    ui.ctx(),
+                                    id,
+                                    false,
+                                );
                             if let Some(open) = self.expand_request {
                                 state.set_open(open);
                             }
@@ -482,16 +455,16 @@ impl SettingsEditor {
                                         options: ToastOptions::default().duration_in_seconds(3.0),
                                     });
                                 }
-                        } else {
-                            self.last_valid_hotkey = self.hotkey.clone();
-                            if self.quit_hotkey_enabled {
-                                self.last_valid_quit_hotkey = self.quit_hotkey.clone();
-                            }
-                            if self.help_hotkey_enabled {
-                                self.last_valid_help_hotkey = self.help_hotkey.clone();
-                            }
-                            self.sync_from_plugin_settings();
-                            match Settings::load(&app.settings_path) {
+                            } else {
+                                self.last_valid_hotkey = self.hotkey.clone();
+                                if self.quit_hotkey_enabled {
+                                    self.last_valid_quit_hotkey = self.quit_hotkey.clone();
+                                }
+                                if self.help_hotkey_enabled {
+                                    self.last_valid_help_hotkey = self.help_hotkey.clone();
+                                }
+                                self.sync_from_plugin_settings();
+                                match Settings::load(&app.settings_path) {
                                     Ok(current) => {
                                         let new_settings = self.to_settings(&current);
                                         if let Err(e) = new_settings.save(&app.settings_path) {
@@ -531,8 +504,10 @@ impl SettingsEditor {
                                             app.preserve_command = new_settings.preserve_command;
                                             app.net_refresh = new_settings.net_refresh;
                                             app.net_unit = new_settings.net_unit;
-                                            app.screenshot_dir = new_settings.screenshot_dir.clone();
-                                            app.screenshot_save_file = new_settings.screenshot_save_file;
+                                            app.screenshot_dir =
+                                                new_settings.screenshot_dir.clone();
+                                            app.screenshot_save_file =
+                                                new_settings.screenshot_save_file;
                                             let dirs = new_settings
                                                 .plugin_dirs
                                                 .clone()
