@@ -164,12 +164,12 @@ impl Plugin for TodoPlugin {
 
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "todo") {
             if rest.is_empty() {
-            return vec![Action {
-                label: "todo: edit todos".into(),
-                desc: "Todo".into(),
-                action: "todo:dialog".into(),
-                args: None,
-            }];
+                return vec![Action {
+                    label: "todo: edit todos".into(),
+                    desc: "Todo".into(),
+                    action: "todo:dialog".into(),
+                    args: None,
+                }];
             }
         }
 
@@ -238,7 +238,9 @@ impl Plugin for TodoPlugin {
             let rest = rest.trim();
             let mut parts = rest.split_whitespace();
             if let (Some(idx_str), Some(priority_str)) = (parts.next(), parts.next()) {
-                if let (Ok(idx), Ok(priority)) = (idx_str.parse::<usize>(), priority_str.parse::<u8>()) {
+                if let (Ok(idx), Ok(priority)) =
+                    (idx_str.parse::<usize>(), priority_str.parse::<u8>())
+                {
                     return vec![Action {
                         label: format!("Set priority {priority} for todo {idx}"),
                         desc: "Todo".into(),
@@ -277,12 +279,7 @@ impl Plugin for TodoPlugin {
         const RM_PREFIX: &str = "todo rm ";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, RM_PREFIX) {
             let filter = rest.trim();
-            let todos = self
-                .data
-                .lock()
-                .ok()
-                .map(|g| g.clone())
-                .unwrap_or_default();
+            let todos = self.data.lock().ok().map(|g| g.clone()).unwrap_or_default();
             return todos
                 .into_iter()
                 .enumerate()
@@ -299,12 +296,7 @@ impl Plugin for TodoPlugin {
         const LIST_PREFIX: &str = "todo list";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
             let filter = rest.trim();
-            let todos = self
-                .data
-                .lock()
-                .ok()
-                .map(|g| g.clone())
-                .unwrap_or_default();
+            let todos = self.data.lock().ok().map(|g| g.clone()).unwrap_or_default();
             let mut entries: Vec<(usize, TodoEntry)> = todos.into_iter().enumerate().collect();
 
             let tag_filter = filter.starts_with('#');
@@ -347,13 +339,54 @@ impl Plugin for TodoPlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![
-            Action { label: "todo".into(), desc: "Todo".into(), action: "query:todo".into(), args: None },
-            Action { label: "todo add".into(), desc: "Todo".into(), action: "query:todo add ".into(), args: None },
-            Action { label: "todo list".into(), desc: "Todo".into(), action: "query:todo list".into(), args: None },
-            Action { label: "todo rm".into(), desc: "Todo".into(), action: "query:todo rm ".into(), args: None },
-            Action { label: "todo clear".into(), desc: "Todo".into(), action: "query:todo clear".into(), args: None },
-            Action { label: "todo pset".into(), desc: "Todo".into(), action: "query:todo pset ".into(), args: None },
-            Action { label: "todo tag".into(), desc: "Todo".into(), action: "query:todo tag ".into(), args: None },
+            Action {
+                label: "todo".into(),
+                desc: "Todo".into(),
+                action: "query:todo".into(),
+                args: None,
+            },
+            Action {
+                label: "todo add".into(),
+                desc: "Todo".into(),
+                action: "query:todo add ".into(),
+                args: None,
+            },
+            Action {
+                label: "todo list".into(),
+                desc: "Todo".into(),
+                action: "query:todo list".into(),
+                args: None,
+            },
+            Action {
+                label: "todo rm".into(),
+                desc: "Todo".into(),
+                action: "query:todo rm ".into(),
+                args: None,
+            },
+            Action {
+                label: "todo clear".into(),
+                desc: "Todo".into(),
+                action: "query:todo clear".into(),
+                args: None,
+            },
+            Action {
+                label: "todo pset".into(),
+                desc: "Todo".into(),
+                action: "query:todo pset ".into(),
+                args: None,
+            },
+            Action {
+                label: "todo tag".into(),
+                desc: "Todo".into(),
+                action: "query:todo tag ".into(),
+                args: None,
+            },
+            Action {
+                label: "todo view".into(),
+                desc: "Todo".into(),
+                action: "query:todo view ".into(),
+                args: None,
+            },
         ]
     }
 }
