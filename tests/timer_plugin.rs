@@ -266,3 +266,26 @@ fn format_ts_invalid_timestamp() {
         .to_string();
     assert_eq!(format_ts(invalid_ts), expected);
 }
+
+#[test]
+fn pause_resume_does_not_grow_heap() {
+    use multi_launcher::plugins::timer::{
+        cancel_timer, heap_len, pause_timer, resume_timer, start_timer, ACTIVE_TIMERS,
+    };
+    let _lock = TEST_MUTEX.lock().unwrap();
+    ACTIVE_TIMERS.lock().unwrap().clear();
+
+    start_timer(Duration::from_secs(3600), "None".into());
+    let id = ACTIVE_TIMERS.lock().unwrap().keys().cloned().next().unwrap();
+    assert_eq!(heap_len(), 1);
+
+    for _ in 0..5 {
+        pause_timer(id);
+        assert_eq!(heap_len(), 0);
+        resume_timer(id);
+        assert_eq!(heap_len(), 1);
+    }
+
+    cancel_timer(id);
+    assert_eq!(heap_len(), 0);
+}
