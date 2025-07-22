@@ -22,7 +22,7 @@ impl PluginEditor {
         // If settings don't specify enabled plugins, enable all gathered ones by
         // default.
         let enabled_plugins = match &settings.enabled_plugins {
-            Some(list) => list.clone(),
+            Some(set) => set.iter().cloned().collect(),
             None => info.iter().map(|(n, _, _)| n.clone()).collect(),
         };
 
@@ -70,7 +70,7 @@ impl PluginEditor {
                 s.enabled_plugins = if all_plugins_enabled {
                     None
                 } else {
-                    Some(self.enabled_plugins.clone())
+                    Some(self.enabled_plugins.iter().cloned().collect())
                 };
 
                 let mut default_caps = true;

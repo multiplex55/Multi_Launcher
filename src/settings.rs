@@ -2,6 +2,7 @@ use crate::hotkey::Key;
 
 use crate::hotkey::{parse_hotkey, Hotkey};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -37,9 +38,9 @@ pub struct Settings {
     pub help_hotkey: Option<String>,
     pub index_paths: Option<Vec<String>>,
     pub plugin_dirs: Option<Vec<String>>,
-    /// List of plugin names which should be enabled. If `None`, all loaded
+    /// Set of plugin names which should be enabled. If `None`, all loaded
     /// plugins are enabled.
-    pub enabled_plugins: Option<Vec<String>>,
+    pub enabled_plugins: Option<HashSet<String>>,
     /// Map of plugin capability identifiers enabled per plugin.
     pub enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
     /// When enabled the application initialises the logger at debug level.

@@ -50,7 +50,7 @@ use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver};
 #[cfg(target_os = "windows")]
 use std::sync::Mutex;
@@ -119,7 +119,7 @@ pub struct LauncherApp {
     bookmark_aliases: HashMap<String, Option<String>>,
     plugin_dirs: Option<Vec<String>>,
     index_paths: Option<Vec<String>>,
-    enabled_plugins: Option<Vec<String>>,
+    enabled_plugins: Option<HashSet<String>>,
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
     visible_flag: Arc<AtomicBool>,
     restore_flag: Arc<AtomicBool>,
@@ -187,13 +187,15 @@ impl LauncherApp {
 
     pub fn plugin_enabled(&self, name: &str) -> bool {
         match &self.enabled_plugins {
-            Some(list) => list.contains(&name.to_string()),
+            Some(set) => set.contains(name),
             None => true,
         }
     }
 
     pub fn enabled_plugins_list(&self) -> Option<Vec<String>> {
-        self.enabled_plugins.clone()
+        self.enabled_plugins
+            .as_ref()
+            .map(|set| set.iter().cloned().collect())
     }
     pub fn add_toast(&mut self, toast: Toast) {
         self.toasts.add(toast);
@@ -202,7 +204,7 @@ impl LauncherApp {
         &mut self,
         plugin_dirs: Option<Vec<String>>,
         index_paths: Option<Vec<String>>,
-        enabled_plugins: Option<Vec<String>>,
+        enabled_plugins: Option<HashSet<String>>,
         enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
         offscreen_pos: Option<(i32, i32)>,
         enable_toasts: Option<bool>,
@@ -285,7 +287,7 @@ impl LauncherApp {
         settings: Settings,
         plugin_dirs: Option<Vec<String>>,
         index_paths: Option<Vec<String>>,
-        enabled_plugins: Option<Vec<String>>,
+        enabled_plugins: Option<HashSet<String>>,
         enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
         visible_flag: Arc<AtomicBool>,
         restore_flag: Arc<AtomicBool>,
@@ -619,7 +621,7 @@ impl LauncherApp {
     fn search_plugins(&self, trimmed: &str, trimmed_lc: &str) -> Vec<(Action, f32)> {
         let mut res = Vec::new();
         if trimmed_lc.starts_with("g ") {
-            let filter = vec!["web_search".to_string()];
+            let filter = std::collections::HashSet::from(["web_search".to_string()]);
             let plugin_results = self.plugins.search_filtered(
                 &self.query,
                 Some(&filter),
