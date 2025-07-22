@@ -2,8 +2,7 @@ use crate::actions::Action;
 use crate::plugin::Plugin;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Condvar, Mutex,
@@ -62,15 +61,131 @@ struct TimerManager {
     inner: Arc<Inner>,
 }
 
+struct HeapEntry {
+    deadline: Instant,
+    id: u64,
+    gen: u64,
+}
+
+struct TimerHeap {
+    entries: Vec<HeapEntry>,
+    positions: HashMap<u64, usize>,
+}
+
+impl TimerHeap {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            positions: HashMap::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn peek(&self) -> Option<&HeapEntry> {
+        self.entries.first()
+    }
+
+    fn push(&mut self, entry: HeapEntry) {
+        let idx = self.entries.len();
+        self.entries.push(entry);
+        self.positions.insert(self.entries[idx].id, idx);
+        self.sift_up(idx);
+    }
+
+    fn remove(&mut self, id: u64) {
+        if let Some(&idx) = self.positions.get(&id) {
+            self.remove_at(idx);
+        }
+    }
+
+    fn pop(&mut self) -> Option<HeapEntry> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let last = self.entries.len() - 1;
+        self.entries.swap(0, last);
+        let entry = self.entries.pop().unwrap();
+        self.positions.remove(&entry.id);
+        if !self.entries.is_empty() {
+            self.positions.insert(self.entries[0].id, 0);
+            self.sift_down(0);
+        }
+        Some(entry)
+    }
+
+    fn remove_at(&mut self, idx: usize) {
+        let last = self.entries.len() - 1;
+        if idx != last {
+            self.entries.swap(idx, last);
+            let id = self.entries[idx].id;
+            self.positions.insert(id, idx);
+        }
+        let removed = self.entries.pop().unwrap();
+        self.positions.remove(&removed.id);
+        if idx < self.entries.len() {
+            if !self.sift_down(idx) {
+                self.sift_up(idx);
+            }
+        }
+    }
+
+    fn sift_up(&mut self, mut idx: usize) {
+        while idx > 0 {
+            let parent = (idx - 1) / 2;
+            if self.entries[idx].deadline < self.entries[parent].deadline {
+                self.entries.swap(idx, parent);
+                let id = self.entries[idx].id;
+                let pid = self.entries[parent].id;
+                self.positions.insert(id, idx);
+                self.positions.insert(pid, parent);
+                idx = parent;
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn sift_down(&mut self, mut idx: usize) -> bool {
+        let len = self.entries.len();
+        let mut moved = false;
+        loop {
+            let left = idx * 2 + 1;
+            let right = left + 1;
+            let mut smallest = idx;
+            if left < len && self.entries[left].deadline < self.entries[smallest].deadline {
+                smallest = left;
+            }
+            if right < len && self.entries[right].deadline < self.entries[smallest].deadline {
+                smallest = right;
+            }
+            if smallest != idx {
+                self.entries.swap(idx, smallest);
+                let id = self.entries[idx].id;
+                let sid = self.entries[smallest].id;
+                self.positions.insert(id, idx);
+                self.positions.insert(sid, smallest);
+                idx = smallest;
+                moved = true;
+            } else {
+                break;
+            }
+        }
+        moved
+    }
+}
+
 struct Inner {
-    heap: Mutex<BinaryHeap<Reverse<(Instant, u64, u64)>>>,
+    heap: Mutex<TimerHeap>,
     condvar: Condvar,
 }
 
 impl TimerManager {
     fn new() -> Self {
         let inner = Arc::new(Inner {
-            heap: Mutex::new(BinaryHeap::new()),
+            heap: Mutex::new(TimerHeap::new()),
             condvar: Condvar::new(),
         });
         let thread_inner = inner.clone();
@@ -91,18 +206,18 @@ impl TimerManager {
                 };
             }
             let now = Instant::now();
-            if let Some(Reverse((deadline, id, gen))) = heap_guard.peek().cloned() {
-                if deadline <= now {
-                    heap_guard.pop();
+            if let Some(entry) = heap_guard.peek() {
+                if entry.deadline <= now {
+                    let popped = heap_guard.pop().unwrap();
                     drop(heap_guard);
-                    Self::fire_timer(id, gen);
+                    Self::fire_timer(popped.id, popped.gen);
                     heap_guard = match inner.heap.lock().ok() {
                         Some(g) => g,
                         None => return,
                     };
                     continue;
                 } else {
-                    let wait = deadline.saturating_duration_since(now);
+                    let wait = entry.deadline.saturating_duration_since(now);
                     let res = match inner.condvar.wait_timeout(heap_guard, wait).ok() {
                         Some(r) => r,
                         None => return,
@@ -143,7 +258,8 @@ impl TimerManager {
 
     fn register(&self, deadline: Instant, id: u64, gen: u64) {
         if let Some(mut heap) = self.inner.heap.lock().ok() {
-            heap.push(Reverse((deadline, id, gen)));
+            heap.remove(id);
+            heap.push(HeapEntry { deadline, id, gen });
             self.inner.condvar.notify_one();
         }
     }
@@ -151,9 +267,25 @@ impl TimerManager {
     fn wakeup(&self) {
         self.inner.condvar.notify_one();
     }
+
+    fn remove(&self, id: u64) {
+        if let Some(mut heap) = self.inner.heap.lock().ok() {
+            heap.remove(id);
+            self.inner.condvar.notify_one();
+        }
+    }
 }
 
 static TIMER_MANAGER: Lazy<TimerManager> = Lazy::new(|| TimerManager::new());
+
+pub fn heap_len() -> usize {
+    TIMER_MANAGER
+        .inner
+        .heap
+        .lock()
+        .map(|h| h.len())
+        .unwrap_or(0)
+}
 
 /// Reset the flag tracking whether saved alarms have been loaded.
 pub fn reset_alarms_loaded() {
@@ -325,7 +457,7 @@ pub fn cancel_timer(id: u64) {
             if entry.persist {
                 save_persistent_alarms_locked(&timers);
             }
-            TIMER_MANAGER.wakeup();
+            TIMER_MANAGER.remove(id);
         }
     }
 }
@@ -341,6 +473,7 @@ pub fn pause_timer(id: u64) {
                 if t.persist {
                     save_persistent_alarms_locked(&timers);
                 }
+                TIMER_MANAGER.remove(id);
                 TIMER_MANAGER.wakeup();
             }
         }
