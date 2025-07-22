@@ -21,6 +21,7 @@ pub struct SettingsEditor {
     last_valid_help_hotkey: String,
     debug_logging: bool,
     show_toasts: bool,
+    toast_duration: f32,
     offscreen_x: i32,
     offscreen_y: i32,
     window_w: i32,
@@ -54,9 +55,7 @@ impl SettingsEditor {
     pub fn new(settings: &Settings) -> Self {
         let hotkey = settings.hotkey.clone().unwrap_or_default();
         let hotkey_valid = parse_hotkey(&hotkey).is_some();
-        let default_hotkey = Settings::default()
-            .hotkey
-            .unwrap_or_else(|| "F2".into());
+        let default_hotkey = Settings::default().hotkey.unwrap_or_else(|| "F2".into());
         let last_valid_hotkey = if hotkey_valid {
             hotkey.clone()
         } else {
@@ -100,6 +99,7 @@ impl SettingsEditor {
             last_valid_help_hotkey,
             debug_logging: settings.debug_logging,
             show_toasts: settings.enable_toasts,
+            toast_duration: settings.toast_duration,
             offscreen_x: settings.offscreen_pos.unwrap_or((2000, 2000)).0,
             offscreen_y: settings.offscreen_pos.unwrap_or((2000, 2000)).1,
             window_w: settings.window_size.unwrap_or((400, 220)).0,
@@ -138,18 +138,25 @@ impl SettingsEditor {
 
     fn sync_from_plugin_settings(&mut self) {
         if let Some(val) = self.plugin_settings.get("clipboard") {
-            if let Ok(cfg) = serde_json::from_value::<crate::plugins::clipboard::ClipboardPluginSettings>(val.clone()) {
+            if let Ok(cfg) = serde_json::from_value::<
+                crate::plugins::clipboard::ClipboardPluginSettings,
+            >(val.clone())
+            {
                 self.clipboard_limit = cfg.max_entries;
             }
         }
         if let Some(val) = self.plugin_settings.get("network") {
-            if let Ok(cfg) = serde_json::from_value::<crate::plugins::network::NetworkPluginSettings>(val.clone()) {
+            if let Ok(cfg) = serde_json::from_value::<crate::plugins::network::NetworkPluginSettings>(
+                val.clone(),
+            ) {
                 self.net_refresh = cfg.refresh_rate;
                 self.net_unit = cfg.unit;
             }
         }
         if let Some(val) = self.plugin_settings.get("history") {
-            if let Ok(cfg) = serde_json::from_value::<crate::plugins::history::HistoryPluginSettings>(val.clone()) {
+            if let Ok(cfg) = serde_json::from_value::<crate::plugins::history::HistoryPluginSettings>(
+                val.clone(),
+            ) {
                 self.history_limit = cfg.max_entries;
             }
         }
@@ -178,6 +185,7 @@ impl SettingsEditor {
             enabled_capabilities: current.enabled_capabilities.clone(),
             debug_logging: self.debug_logging,
             enable_toasts: self.show_toasts,
+            toast_duration: self.toast_duration,
             offscreen_pos: Some((self.offscreen_x, self.offscreen_y)),
             window_size: Some((self.window_w, self.window_h)),
             query_scale: Some(self.query_scale),
@@ -287,6 +295,14 @@ impl SettingsEditor {
                         });
 
                         ui.checkbox(&mut self.show_toasts, "Enable toast notifications");
+                        if self.show_toasts {
+                            ui.horizontal(|ui| {
+                                ui.label("Toast duration (s)");
+                                ui.add(
+                                    egui::Slider::new(&mut self.toast_duration, 0.1..=5.0).text(""),
+                                );
+                            });
+                        }
                         ui.checkbox(&mut self.hide_after_run, "Hide window after running action");
                         ui.checkbox(&mut self.preserve_command, "Preserve command after run");
                         ui.checkbox(
@@ -320,7 +336,6 @@ impl SettingsEditor {
                             ui.label("Usage weight");
                             ui.add(egui::Slider::new(&mut self.usage_weight, 0.0..=5.0).text(""));
                         });
-
 
                         ui.horizontal(|ui| {
                             ui.label("Off-screen X");
@@ -390,12 +405,17 @@ impl SettingsEditor {
                             if !enabled {
                                 continue;
                             }
-                            let entry = self
-                                .plugin_settings
-                                .entry(name.clone())
-                                .or_insert_with(|| plugin.default_settings().unwrap_or(serde_json::Value::Null));
+                            let entry =
+                                self.plugin_settings.entry(name.clone()).or_insert_with(|| {
+                                    plugin.default_settings().unwrap_or(serde_json::Value::Null)
+                                });
                             let id = ui.make_persistent_id(format!("plugin_{name}"));
-                            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+                            let mut state =
+                                egui::collapsing_header::CollapsingState::load_with_default_open(
+                                    ui.ctx(),
+                                    id,
+                                    false,
+                                );
                             if let Some(open) = self.expand_request {
                                 state.set_open(open);
                             }
@@ -417,7 +437,8 @@ impl SettingsEditor {
                                     app.add_toast(Toast {
                                         text: "Failed to save settings: hotkey is invalid".into(),
                                         kind: ToastKind::Error,
-                                        options: ToastOptions::default().duration_in_seconds(3.0),
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(app.toast_duration as f64),
                                     });
                                 }
                             } else if self.quit_hotkey_enabled
@@ -430,7 +451,8 @@ impl SettingsEditor {
                                         text: "Failed to save settings: quit hotkey is invalid"
                                             .into(),
                                         kind: ToastKind::Error,
-                                        options: ToastOptions::default().duration_in_seconds(3.0),
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(app.toast_duration as f64),
                                     });
                                 }
                             } else if self.help_hotkey_enabled
@@ -443,19 +465,20 @@ impl SettingsEditor {
                                         text: "Failed to save settings: help hotkey is invalid"
                                             .into(),
                                         kind: ToastKind::Error,
-                                        options: ToastOptions::default().duration_in_seconds(3.0),
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(app.toast_duration as f64),
                                     });
                                 }
-                        } else {
-                            self.last_valid_hotkey = self.hotkey.clone();
-                            if self.quit_hotkey_enabled {
-                                self.last_valid_quit_hotkey = self.quit_hotkey.clone();
-                            }
-                            if self.help_hotkey_enabled {
-                                self.last_valid_help_hotkey = self.help_hotkey.clone();
-                            }
-                            self.sync_from_plugin_settings();
-                            match Settings::load(&app.settings_path) {
+                            } else {
+                                self.last_valid_hotkey = self.hotkey.clone();
+                                if self.quit_hotkey_enabled {
+                                    self.last_valid_quit_hotkey = self.quit_hotkey.clone();
+                                }
+                                if self.help_hotkey_enabled {
+                                    self.last_valid_help_hotkey = self.help_hotkey.clone();
+                                }
+                                self.sync_from_plugin_settings();
+                                match Settings::load(&app.settings_path) {
                                     Ok(current) => {
                                         let new_settings = self.to_settings(&current);
                                         if let Err(e) = new_settings.save(&app.settings_path) {
@@ -468,6 +491,7 @@ impl SettingsEditor {
                                                 new_settings.enabled_capabilities.clone(),
                                                 new_settings.offscreen_pos,
                                                 Some(new_settings.enable_toasts),
+                                                Some(new_settings.toast_duration),
                                                 Some(new_settings.fuzzy_weight),
                                                 Some(new_settings.usage_weight),
                                                 Some(new_settings.follow_mouse),
@@ -495,8 +519,11 @@ impl SettingsEditor {
                                             app.preserve_command = new_settings.preserve_command;
                                             app.net_refresh = new_settings.net_refresh;
                                             app.net_unit = new_settings.net_unit;
-                                            app.screenshot_dir = new_settings.screenshot_dir.clone();
-                                            app.screenshot_save_file = new_settings.screenshot_save_file;
+                                            app.screenshot_dir =
+                                                new_settings.screenshot_dir.clone();
+                                            app.screenshot_save_file =
+                                                new_settings.screenshot_save_file;
+                                            app.toast_duration = new_settings.toast_duration;
                                             let dirs = new_settings
                                                 .plugin_dirs
                                                 .clone()
@@ -514,7 +541,9 @@ impl SettingsEditor {
                                                     text: "Settings saved".into(),
                                                     kind: ToastKind::Success,
                                                     options: ToastOptions::default()
-                                                        .duration_in_seconds(3.0),
+                                                        .duration_in_seconds(
+                                                            app.toast_duration as f64,
+                                                        ),
                                                 });
                                             }
                                         }

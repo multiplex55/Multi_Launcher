@@ -131,6 +131,7 @@ pub struct LauncherApp {
     move_cursor_end: bool,
     toasts: egui_toast::Toasts,
     pub enable_toasts: bool,
+    pub toast_duration: f32,
     alias_dialog: AliasDialog,
     bookmark_alias_dialog: BookmarkAliasDialog,
     tempfile_alias_dialog: TempfileAliasDialog,
@@ -208,6 +209,7 @@ impl LauncherApp {
         enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
         offscreen_pos: Option<(i32, i32)>,
         enable_toasts: Option<bool>,
+        toast_duration: Option<f32>,
         fuzzy_weight: Option<f32>,
         usage_weight: Option<f32>,
         follow_mouse: Option<bool>,
@@ -232,6 +234,9 @@ impl LauncherApp {
         }
         if let Some(v) = enable_toasts {
             self.enable_toasts = v;
+        }
+        if let Some(v) = toast_duration {
+            self.toast_duration = v;
         }
         if let Some(v) = fuzzy_weight {
             self.fuzzy_weight = v;
@@ -297,6 +302,7 @@ impl LauncherApp {
         let mut watchers = Vec::new();
         let toasts = Toasts::new().anchor(egui::Align2::RIGHT_TOP, [10.0, 10.0]);
         let enable_toasts = settings.enable_toasts;
+        let toast_duration = settings.toast_duration;
         use std::path::Path;
 
         let folder_aliases =
@@ -449,6 +455,7 @@ impl LauncherApp {
             move_cursor_end: false,
             toasts,
             enable_toasts,
+            toast_duration,
             alias_dialog: AliasDialog::default(),
             bookmark_alias_dialog: BookmarkAliasDialog::default(),
             tempfile_alias_dialog: TempfileAliasDialog::default(),
@@ -1121,7 +1128,7 @@ impl eframe::App for LauncherApp {
                                 self.toasts.add(Toast {
                                     text: format!("Failed: {e}").into(),
                                     kind: ToastKind::Error,
-                                    options: ToastOptions::default().duration_in_seconds(3.0),
+                                    options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
                                 });
                             }
                         } else {
@@ -1136,7 +1143,7 @@ impl eframe::App for LauncherApp {
                                 self.toasts.add(Toast {
                                     text: msg.into(),
                                     kind: ToastKind::Success,
-                                    options: ToastOptions::default().duration_in_seconds(3.0),
+                                    options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
                                 });
                             }
                             if a.action != "help:show" {
@@ -1190,7 +1197,7 @@ impl eframe::App for LauncherApp {
                                         self.toasts.add(Toast {
                                             text: format!("Added todo {text}").into(),
                                             kind: ToastKind::Success,
-                                            options: ToastOptions::default().duration_in_seconds(3.0),
+                                            options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
                                         });
                                     }
                                 }
@@ -1203,7 +1210,7 @@ impl eframe::App for LauncherApp {
                                     self.toasts.add(Toast {
                                         text: format!("Removed todo {label}").into(),
                                         kind: ToastKind::Success,
-                                        options: ToastOptions::default().duration_in_seconds(3.0),
+                                        options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
                                     });
                                 }
                             } else if a.action.starts_with("todo:done:") {
@@ -1217,7 +1224,7 @@ impl eframe::App for LauncherApp {
                                     self.toasts.add(Toast {
                                         text: format!("Toggled todo {label}").into(),
                                         kind: ToastKind::Success,
-                                        options: ToastOptions::default().duration_in_seconds(3.0),
+                                        options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
                                     });
                                 }
                             } else if a.action.starts_with("todo:pset:") {
@@ -1227,7 +1234,7 @@ impl eframe::App for LauncherApp {
                                     self.toasts.add(Toast {
                                         text: "Updated todo priority".into(),
                                         kind: ToastKind::Success,
-                                        options: ToastOptions::default().duration_in_seconds(3.0),
+                                        options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
                                     });
                                 }
                             } else if a.action.starts_with("todo:tag:") {
@@ -1237,7 +1244,7 @@ impl eframe::App for LauncherApp {
                                     self.toasts.add(Toast {
                                         text: "Updated todo tags".into(),
                                         kind: ToastKind::Success,
-                                        options: ToastOptions::default().duration_in_seconds(3.0),
+                                        options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
                                     });
                                 }
                             } else if a.action == "todo:clear" {
@@ -1247,7 +1254,7 @@ impl eframe::App for LauncherApp {
                                     self.toasts.add(Toast {
                                         text: "Cleared completed todos".into(),
                                         kind: ToastKind::Success,
-                                        options: ToastOptions::default().duration_in_seconds(3.0),
+                                        options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
                                     });
                                 }
                             } else if a.action.starts_with("snippet:remove:") {
@@ -1257,7 +1264,7 @@ impl eframe::App for LauncherApp {
                                     self.toasts.add(Toast {
                                         text: format!("Removed snippet {}", a.label).into(),
                                         kind: ToastKind::Success,
-                                        options: ToastOptions::default().duration_in_seconds(3.0),
+                                        options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
                                     });
                                 }
                             } else if a.action.starts_with("tempfile:remove:") {
@@ -1399,7 +1406,7 @@ impl eframe::App for LauncherApp {
                                                         .into(),
                                                     kind: ToastKind::Success,
                                                     options: ToastOptions::default()
-                                                        .duration_in_seconds(3.0),
+                                                        .duration_in_seconds(self.toast_duration as f64),
                                                 });
                                             }
                                         }
@@ -1428,7 +1435,7 @@ impl eframe::App for LauncherApp {
                                                         .into(),
                                                     kind: ToastKind::Success,
                                                     options: ToastOptions::default()
-                                                        .duration_in_seconds(3.0),
+                                                        .duration_in_seconds(self.toast_duration as f64),
                                                 });
                                             }
                                         }
@@ -1450,7 +1457,7 @@ impl eframe::App for LauncherApp {
                                                             .into(),
                                                         kind: ToastKind::Success,
                                                         options: ToastOptions::default()
-                                                            .duration_in_seconds(3.0),
+                                                            .duration_in_seconds(self.toast_duration as f64),
                                                     });
                                                 }
                                             }
@@ -1467,7 +1474,7 @@ impl eframe::App for LauncherApp {
                                                             .into(),
                                                         kind: ToastKind::Success,
                                                         options: ToastOptions::default()
-                                                            .duration_in_seconds(3.0),
+                                                            .duration_in_seconds(self.toast_duration as f64),
                                                     });
                                                 }
                                             }
@@ -1494,7 +1501,7 @@ impl eframe::App for LauncherApp {
                                                         .into(),
                                                     kind: ToastKind::Success,
                                                     options: ToastOptions::default()
-                                                        .duration_in_seconds(3.0),
+                                                        .duration_in_seconds(self.toast_duration as f64),
                                                 });
                                             }
                                         }
@@ -1523,7 +1530,7 @@ impl eframe::App for LauncherApp {
                                                         .into(),
                                                     kind: ToastKind::Success,
                                                     options: ToastOptions::default()
-                                                        .duration_in_seconds(3.0),
+                                                        .duration_in_seconds(self.toast_duration as f64),
                                                 });
                                             }
                                         }
@@ -1561,7 +1568,7 @@ impl eframe::App for LauncherApp {
                                                         .into(),
                                                         kind: ToastKind::Success,
                                                         options: ToastOptions::default()
-                                                            .duration_in_seconds(3.0),
+                                                            .duration_in_seconds(self.toast_duration as f64),
                                                     });
                                                 }
                                             }
@@ -1596,7 +1603,7 @@ impl eframe::App for LauncherApp {
                                                             .into(),
                                                         kind: ToastKind::Success,
                                                         options: ToastOptions::default()
-                                                            .duration_in_seconds(3.0),
+                                                            .duration_in_seconds(self.toast_duration as f64),
                                                     });
                                                 }
                                             }
@@ -1665,7 +1672,7 @@ impl eframe::App for LauncherApp {
                                             text: format!("Failed: {e}").into(),
                                             kind: ToastKind::Error,
                                             options: ToastOptions::default()
-                                                .duration_in_seconds(3.0),
+                                                .duration_in_seconds(self.toast_duration as f64),
                                         });
                                     }
                                 } else {
@@ -1681,7 +1688,7 @@ impl eframe::App for LauncherApp {
                                             text: msg.into(),
                                             kind: ToastKind::Success,
                                             options: ToastOptions::default()
-                                                .duration_in_seconds(3.0),
+                                                .duration_in_seconds(self.toast_duration as f64),
                                         });
                                     }
                                     if a.action != "help:show" {
@@ -1735,7 +1742,7 @@ impl eframe::App for LauncherApp {
                                                 self.toasts.add(Toast {
                                                     text: format!("Added todo {text}").into(),
                                                     kind: ToastKind::Success,
-                                                    options: ToastOptions::default().duration_in_seconds(3.0),
+                                                    options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
                                                 });
                                             }
                                         }
@@ -1751,7 +1758,7 @@ impl eframe::App for LauncherApp {
                                                 text: format!("Removed todo {label}").into(),
                                                 kind: ToastKind::Success,
                                                 options: ToastOptions::default()
-                                                    .duration_in_seconds(3.0),
+                                                    .duration_in_seconds(self.toast_duration as f64),
                                             });
                                         }
                                     } else if a.action.starts_with("todo:done:") {
@@ -1766,7 +1773,7 @@ impl eframe::App for LauncherApp {
                                                 text: format!("Toggled todo {label}").into(),
                                                 kind: ToastKind::Success,
                                                 options: ToastOptions::default()
-                                                    .duration_in_seconds(3.0),
+                                                    .duration_in_seconds(self.toast_duration as f64),
                                             });
                                         }
                                     } else if a.action.starts_with("todo:pset:") {
@@ -1776,7 +1783,7 @@ impl eframe::App for LauncherApp {
                                             self.toasts.add(Toast {
                                                 text: "Updated todo priority".into(),
                                                 kind: ToastKind::Success,
-                                                options: ToastOptions::default().duration_in_seconds(3.0),
+                                                options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
                                             });
                                         }
                                     } else if a.action.starts_with("todo:tag:") {
@@ -1786,7 +1793,7 @@ impl eframe::App for LauncherApp {
                                             self.toasts.add(Toast {
                                                 text: "Updated todo tags".into(),
                                                 kind: ToastKind::Success,
-                                                options: ToastOptions::default().duration_in_seconds(3.0),
+                                                options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
                                             });
                                         }
                                     } else if a.action == "todo:clear" {
@@ -1797,7 +1804,7 @@ impl eframe::App for LauncherApp {
                                                 text: "Cleared completed todos".into(),
                                                 kind: ToastKind::Success,
                                                 options: ToastOptions::default()
-                                                    .duration_in_seconds(3.0),
+                                                    .duration_in_seconds(self.toast_duration as f64),
                                             });
                                         }
                                     } else if a.action.starts_with("snippet:remove:") {
@@ -1808,7 +1815,7 @@ impl eframe::App for LauncherApp {
                                                 text: format!("Removed snippet {}", a.label).into(),
                                                 kind: ToastKind::Success,
                                                 options: ToastOptions::default()
-                                                    .duration_in_seconds(3.0),
+                                                    .duration_in_seconds(self.toast_duration as f64),
                                             });
                                         }
                                     } else if a.action.starts_with("tempfile:remove:") {

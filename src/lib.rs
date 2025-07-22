@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod actions_editor;
 
+pub mod common;
 pub mod help_window;
 pub mod history;
 pub mod hotkey;
@@ -11,10 +12,10 @@ pub mod plugin;
 pub mod plugin_editor;
 pub mod plugins;
 pub mod plugins_builtin;
-pub mod common;
-pub mod sound;
 pub mod settings;
 pub mod settings_editor;
+pub mod sound;
+pub mod toast_log;
 pub mod usage;
 pub mod visibility;
 
