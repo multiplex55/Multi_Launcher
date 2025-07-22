@@ -35,6 +35,7 @@ use crate::plugins::windows::WindowsPlugin;
 use crate::plugins::youtube::YoutubePlugin;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::NetUnit;
+use std::collections::HashSet;
 use libloading::Library;
 use serde_json::Value;
 use eframe::egui;
@@ -233,14 +234,14 @@ impl PluginManager {
     pub fn search_filtered(
         &self,
         query: &str,
-        enabled_plugins: Option<&Vec<String>>,
+        enabled_plugins: Option<&HashSet<String>>,
         enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
         for p in &self.plugins {
             let name = p.name();
             if let Some(list) = enabled_plugins {
-                if !list.contains(&name.to_string()) {
+                if !list.contains(name) {
                     continue;
                 }
             }
