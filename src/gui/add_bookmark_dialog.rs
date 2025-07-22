@@ -11,7 +11,11 @@ pub struct AddBookmarkDialog {
 
 impl Default for AddBookmarkDialog {
     fn default() -> Self {
-        Self { open: false, url: String::new(), alias: String::new() }
+        Self {
+            open: false,
+            url: String::new(),
+            alias: String::new(),
+        }
     }
 }
 
@@ -23,7 +27,9 @@ impl AddBookmarkDialog {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
-        if !self.open { return; }
+        if !self.open {
+            return;
+        }
         let mut close = false;
         egui::Window::new("Add Bookmark")
             .open(&mut self.open)
@@ -43,7 +49,8 @@ impl AddBookmarkDialog {
                         } else {
                             if let Err(e) = append_bookmark(BOOKMARKS_FILE, &self.url) {
                                 app.error = Some(format!("Failed to save: {e}"));
-                            } else if let Err(e) = set_alias(BOOKMARKS_FILE, &self.url, &self.alias) {
+                            } else if let Err(e) = set_alias(BOOKMARKS_FILE, &self.url, &self.alias)
+                            {
                                 app.error = Some(format!("Failed to save alias: {e}"));
                             } else {
                                 close = true;
@@ -51,7 +58,8 @@ impl AddBookmarkDialog {
                                     app.add_toast(Toast {
                                         text: format!("Saved bookmark {}", self.url).into(),
                                         kind: ToastKind::Success,
-                                        options: ToastOptions::default().duration_in_seconds(3.0),
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(app.toast_duration as f64),
                                     });
                                 }
                                 app.search();
@@ -59,10 +67,13 @@ impl AddBookmarkDialog {
                             }
                         }
                     }
-                    if ui.button("Cancel").clicked() { close = true; }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
                 });
             });
-        if close { self.open = false; }
+        if close {
+            self.open = false;
+        }
     }
 }
-

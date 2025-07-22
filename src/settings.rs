@@ -57,6 +57,9 @@ pub struct Settings {
     /// Enable toast notifications in the UI.
     #[serde(default = "default_toasts")]
     pub enable_toasts: bool,
+    /// Duration of toast notifications in seconds.
+    #[serde(default = "default_toast_duration")]
+    pub toast_duration: f32,
     /// Remember whether the help window shows example queries.
     #[serde(default)]
     pub show_examples: bool,
@@ -121,6 +124,10 @@ fn default_toasts() -> bool {
     true
 }
 
+fn default_toast_duration() -> f32 {
+    3.0
+}
+
 fn default_scale() -> Option<f32> {
     Some(1.0)
 }
@@ -175,6 +182,7 @@ impl Default for Settings {
             offscreen_pos: Some((2000, 2000)),
             window_size: Some((400, 220)),
             enable_toasts: true,
+            toast_duration: default_toast_duration(),
             query_scale: Some(1.0),
             list_scale: Some(1.0),
             fuzzy_weight: default_fuzzy_weight(),

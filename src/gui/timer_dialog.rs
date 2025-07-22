@@ -37,92 +37,108 @@ impl TimerDialog {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
-        if !self.open { return; }
+        if !self.open {
+            return;
+        }
         let mut open_val = self.open;
         let mut close = false;
-        egui::Window::new(match self.mode { Mode::Timer => "Create Timer", Mode::Alarm => "Set Alarm" })
-            .open(&mut open_val)
-            .resizable(false)
-            .show(ctx, |ui| {
-                match self.mode {
-                    Mode::Timer => {
-                        ui.horizontal(|ui| {
-                            ui.label("Duration (Ns/Nm/Nh or hh:mm:ss)");
-                            ui.text_edit_singleline(&mut self.duration);
-                        });
-                    }
-                    Mode::Alarm => {
-                        ui.horizontal(|ui| {
-                            ui.label("Time (HH:MM)");
-                            ui.text_edit_singleline(&mut self.time);
-                        });
+        egui::Window::new(match self.mode {
+            Mode::Timer => "Create Timer",
+            Mode::Alarm => "Set Alarm",
+        })
+        .open(&mut open_val)
+        .resizable(false)
+        .show(ctx, |ui| {
+            match self.mode {
+                Mode::Timer => {
+                    ui.horizontal(|ui| {
+                        ui.label("Duration (Ns/Nm/Nh or hh:mm:ss)");
+                        ui.text_edit_singleline(&mut self.duration);
+                    });
+                }
+                Mode::Alarm => {
+                    ui.horizontal(|ui| {
+                        ui.label("Time (HH:MM)");
+                        ui.text_edit_singleline(&mut self.time);
+                    });
+                }
+            }
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.text_edit_singleline(&mut self.label);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Sound");
+                egui::ComboBox::from_id_source("sound_select")
+                    .selected_text(crate::sound::SOUND_NAMES[self.sound_idx])
+                    .show_ui(ui, |ui| {
+                        for (idx, name) in crate::sound::SOUND_NAMES.iter().enumerate() {
+                            ui.selectable_value(&mut self.sound_idx, idx, *name);
+                        }
+                    });
+                if ui.button("Play").clicked() {
+                    let name = crate::sound::SOUND_NAMES[self.sound_idx];
+                    if name == "None" {
+                        if app.enable_toasts {
+                            app.add_toast(Toast {
+                                text: "'None' is not a valid sound".into(),
+                                kind: ToastKind::Error,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(app.toast_duration as f64),
+                            });
+                        }
+                    } else {
+                        crate::sound::play_sound(name);
                     }
                 }
-                ui.horizontal(|ui| {
-                    ui.label("Name");
-                    ui.text_edit_singleline(&mut self.label);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Sound");
-                    egui::ComboBox::from_id_source("sound_select")
-                        .selected_text(crate::sound::SOUND_NAMES[self.sound_idx])
-                        .show_ui(ui, |ui| {
-                            for (idx, name) in crate::sound::SOUND_NAMES.iter().enumerate() {
-                                ui.selectable_value(&mut self.sound_idx, idx, *name);
-                            }
-                        });
-                    if ui.button("Play").clicked() {
-                        let name = crate::sound::SOUND_NAMES[self.sound_idx];
-                        if name == "None" {
-                            if app.enable_toasts {
-                                app.add_toast(Toast {
-                                    text: "'None' is not a valid sound".into(),
-                                    kind: ToastKind::Error,
-                                    options: ToastOptions::default().duration_in_seconds(3.0),
-                                });
-                            }
-                        } else {
-                            crate::sound::play_sound(name);
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Start").clicked() {
-                        match self.mode {
-                            Mode::Timer => {
-                                if let Some(d) = parse_duration(&self.duration) {
-                                    start_timer_named(
-                                        d,
-                                        if self.label.is_empty() { None } else { Some(self.label.clone()) },
-                                        crate::sound::SOUND_NAMES[self.sound_idx].to_string(),
-                                    );
-                                    close = true;
-                                    app.focus_input();
-                                } else {
-                                    app.error = Some("Invalid duration".into());
-                                }
-                            }
-                            Mode::Alarm => {
-                                if let Some((h,m)) = parse_hhmm(&self.time) {
-                                    start_alarm_named(
-                                        h,
-                                        m,
-                                        if self.label.is_empty(){None}else{Some(self.label.clone())},
-                                        crate::sound::SOUND_NAMES[self.sound_idx].to_string(),
-                                    );
-                                    close = true;
-                                } else {
-                                    app.error = Some("Invalid time".into());
-                                }
-                            }
-                        }
-                    }
-                    if ui.button("Cancel").clicked() {
-                        close = true;
-                    }
-                });
             });
-        if close { open_val = false; }
+            ui.horizontal(|ui| {
+                if ui.button("Start").clicked() {
+                    match self.mode {
+                        Mode::Timer => {
+                            if let Some(d) = parse_duration(&self.duration) {
+                                start_timer_named(
+                                    d,
+                                    if self.label.is_empty() {
+                                        None
+                                    } else {
+                                        Some(self.label.clone())
+                                    },
+                                    crate::sound::SOUND_NAMES[self.sound_idx].to_string(),
+                                );
+                                close = true;
+                                app.focus_input();
+                            } else {
+                                app.error = Some("Invalid duration".into());
+                            }
+                        }
+                        Mode::Alarm => {
+                            if let Some((h, m)) = parse_hhmm(&self.time) {
+                                start_alarm_named(
+                                    h,
+                                    m,
+                                    if self.label.is_empty() {
+                                        None
+                                    } else {
+                                        Some(self.label.clone())
+                                    },
+                                    crate::sound::SOUND_NAMES[self.sound_idx].to_string(),
+                                );
+                                close = true;
+                            } else {
+                                app.error = Some("Invalid time".into());
+                            }
+                        }
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if close {
+            open_val = false;
+        }
         self.open = open_val;
     }
 }
@@ -140,7 +156,9 @@ impl TimerCompletionDialog {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context) {
-        if !self.open { return; }
+        if !self.open {
+            return;
+        }
         let mut open_val = self.open;
         let mut close = false;
         egui::Window::new("Timer Finished")
@@ -153,7 +171,9 @@ impl TimerCompletionDialog {
                     close = true;
                 }
             });
-        if close { open_val = false; }
+        if close {
+            open_val = false;
+        }
         self.open = open_val;
     }
 }
