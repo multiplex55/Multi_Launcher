@@ -3,6 +3,7 @@ use crate::hotkey::Key;
 use crate::hotkey::{parse_hotkey, Hotkey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -30,6 +31,14 @@ impl std::fmt::Display for NetUnit {
     }
 }
 
+/// Configuration for writing log output to a file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LogFile {
+    Flag(bool),
+    Path(String),
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Settings {
     pub hotkey: Option<String>,
@@ -47,6 +56,10 @@ pub struct Settings {
     /// Defaults to `false` when the field is missing in the settings file.
     #[serde(default)]
     pub debug_logging: bool,
+    /// Enable logging to a file. Use `true` for the default `launcher.log` next
+    /// to the executable or provide a custom path.
+    #[serde(default)]
+    pub log_file: Option<LogFile>,
     /// Position used to hide the window off-screen when not visible.
     /// Defaults to `(2000, 2000)` if missing.
     #[serde(default)]
@@ -160,6 +173,13 @@ fn default_net_refresh() -> f32 {
     1.0
 }
 
+fn default_log_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("launcher.log")))
+        .unwrap_or_else(|| PathBuf::from("launcher.log"))
+}
+
 fn default_launcher_hotkey() -> Option<String> {
     if std::env::var("ML_DEFAULT_HOTKEY_NONE").is_ok() {
         None
@@ -179,6 +199,7 @@ impl Default for Settings {
             enabled_plugins: None,
             enabled_capabilities: None,
             debug_logging: false,
+            log_file: None,
             offscreen_pos: Some((2000, 2000)),
             window_size: Some((400, 220)),
             enable_toasts: true,
@@ -278,5 +299,14 @@ impl Settings {
             }
         }
         None
+    }
+
+    /// Determine the path for file logging if enabled.
+    pub fn log_file_path(&self) -> Option<PathBuf> {
+        match &self.log_file {
+            Some(LogFile::Flag(true)) => Some(default_log_path()),
+            Some(LogFile::Path(p)) => Some(PathBuf::from(p)),
+            _ => None,
+        }
     }
 }

@@ -54,6 +54,10 @@ option is active, you can further adjust the verbosity by setting the
 RUST_LOG=info cargo run --release --features unstable_grab
 ```
 
+Enable persistent log files by adding a `log_file` entry to `settings.json`.
+Set it to `true` to create `launcher.log` next to the executable or supply a
+custom path.
+
 If hotkeys do nothing, check the output for warnings starting with
 `Hotkey listener failed`. When using `CapsLock` as the hotkey you almost
 always need to build with `--features unstable_grab` so the listener can
@@ -91,6 +95,7 @@ value as shown below:
   "fuzzy_weight": 1.0,
   "usage_weight": 1.0,
   "debug_logging": false,
+  "log_file": true,
   "offscreen_pos": [2000, 2000],
   "window_size": [400, 220],
   "query_scale": 1.0,

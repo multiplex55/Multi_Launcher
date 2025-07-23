@@ -184,6 +184,7 @@ impl SettingsEditor {
             enabled_plugins: current.enabled_plugins.clone(),
             enabled_capabilities: current.enabled_capabilities.clone(),
             debug_logging: self.debug_logging,
+            log_file: current.log_file.clone(),
             enable_toasts: self.show_toasts,
             toast_duration: self.toast_duration,
             offscreen_pos: Some((self.offscreen_x, self.offscreen_y)),
