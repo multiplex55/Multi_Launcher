@@ -51,7 +51,8 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::{channel, Receiver};
+use std::path::Path;
+use std::sync::mpsc::{channel, Receiver, Sender};
 #[cfg(target_os = "windows")]
 use std::sync::Mutex;
 use std::sync::{
@@ -84,10 +85,60 @@ fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egu
     .inner
 }
 
-enum WatchEvent {
+#[derive(Clone, Copy)]
+pub enum WatchEvent {
     Actions,
     Folders,
     Bookmarks,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TestWatchEvent {
+    Actions,
+    Folders,
+    Bookmarks,
+}
+
+impl From<WatchEvent> for TestWatchEvent {
+    fn from(value: WatchEvent) -> Self {
+        match value {
+            WatchEvent::Actions => TestWatchEvent::Actions,
+            WatchEvent::Folders => TestWatchEvent::Folders,
+            WatchEvent::Bookmarks => TestWatchEvent::Bookmarks,
+        }
+    }
+}
+
+fn watch_file(
+    path: &Path,
+    tx: Sender<WatchEvent>,
+    event: WatchEvent,
+) -> Option<RecommendedWatcher> {
+    if let Ok(mut watcher) = RecommendedWatcher::new(
+        move |res: notify::Result<notify::Event>| match res {
+            Ok(ev) => {
+                if matches!(
+                    ev.kind,
+                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                ) {
+                    let _ = tx.send(event);
+                }
+            }
+            Err(e) => tracing::error!("watch error: {:?}", e),
+        },
+        Config::default(),
+    ) {
+        let res = watcher
+            .watch(path, RecursiveMode::NonRecursive)
+            .or_else(|_| {
+                let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                watcher.watch(parent, RecursiveMode::NonRecursive)
+            });
+        if res.is_ok() {
+            return Some(watcher);
+        }
+    }
+    None
 }
 
 pub struct LauncherApp {
@@ -318,87 +369,24 @@ impl LauncherApp {
                 .map(|b| (b.url, b.alias))
                 .collect::<HashMap<_, _>>();
 
-        if let Ok(mut watcher) = RecommendedWatcher::new(
-            {
-                let tx = tx.clone();
-                move |res: notify::Result<notify::Event>| match res {
-                    Ok(event) => {
-                        if matches!(
-                            event.kind,
-                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                        ) {
-                            let _ = tx.send(WatchEvent::Actions);
-                        }
-                    }
-                    Err(e) => tracing::error!("watch error: {:?}", e),
-                }
-            },
-            Config::default(),
-        ) {
-            if watcher
-                .watch(Path::new(&actions_path), RecursiveMode::NonRecursive)
-                .is_ok()
-            {
-                watchers.push(watcher);
-            }
+        if let Some(w) = watch_file(Path::new(&actions_path), tx.clone(), WatchEvent::Actions) {
+            watchers.push(w);
         }
 
-        if let Ok(mut watcher) = RecommendedWatcher::new(
-            {
-                let tx = tx.clone();
-                move |res: notify::Result<notify::Event>| match res {
-                    Ok(event) => {
-                        if matches!(
-                            event.kind,
-                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                        ) {
-                            let _ = tx.send(WatchEvent::Folders);
-                        }
-                    }
-                    Err(e) => tracing::error!("watch error: {:?}", e),
-                }
-            },
-            Config::default(),
+        if let Some(w) = watch_file(
+            Path::new(crate::plugins::folders::FOLDERS_FILE),
+            tx.clone(),
+            WatchEvent::Folders,
         ) {
-            let path = Path::new(crate::plugins::folders::FOLDERS_FILE);
-            let res = watcher
-                .watch(path, RecursiveMode::NonRecursive)
-                .or_else(|_| {
-                    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-                    watcher.watch(parent, RecursiveMode::NonRecursive)
-                });
-            if res.is_ok() {
-                watchers.push(watcher);
-            }
+            watchers.push(w);
         }
 
-        if let Ok(mut watcher) = RecommendedWatcher::new(
-            {
-                let tx = tx.clone();
-                move |res: notify::Result<notify::Event>| match res {
-                    Ok(event) => {
-                        if matches!(
-                            event.kind,
-                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                        ) {
-                            let _ = tx.send(WatchEvent::Bookmarks);
-                        }
-                    }
-                    Err(e) => tracing::error!("watch error: {:?}", e),
-                }
-            },
-            Config::default(),
+        if let Some(w) = watch_file(
+            Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE),
+            tx.clone(),
+            WatchEvent::Bookmarks,
         ) {
-            let path = Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE);
-            let res = watcher
-                .watch(path, RecursiveMode::NonRecursive)
-                .or_else(|_| {
-                    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-                    watcher.watch(parent, RecursiveMode::NonRecursive)
-                });
-            if res.is_ok() {
-                watchers.push(watcher);
-            }
+            watchers.push(w);
         }
 
         let initial_visible = visible_flag.load(Ordering::SeqCst);
@@ -1982,4 +1970,14 @@ impl eframe::App for LauncherApp {
         #[cfg(not(test))]
         std::process::exit(0);
     }
+}
+
+impl LauncherApp {
+    pub fn watch_receiver(&self) -> &Receiver<WatchEvent> {
+        &self.rx
+    }
+}
+
+pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
+    rx.try_recv().ok().map(Into::into)
 }
