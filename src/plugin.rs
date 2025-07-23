@@ -177,13 +177,23 @@ impl PluginManager {
             .collect()
     }
 
-    /// Collect command shortcuts from all plugins.
-    pub fn commands(&self) -> Vec<Action> {
+    /// Collect command shortcuts from plugins filtered by `enabled_plugins`.
+    pub fn commands_filtered(&self, enabled_plugins: Option<&HashSet<String>>) -> Vec<Action> {
         let mut out = Vec::new();
         for p in &self.plugins {
+            if let Some(set) = enabled_plugins {
+                if !set.contains(p.name()) {
+                    continue;
+                }
+            }
             out.extend(p.commands());
         }
         out
+    }
+
+    /// Collect command shortcuts from all plugins.
+    pub fn commands(&self) -> Vec<Action> {
+        self.commands_filtered(None)
     }
 
     pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Box<dyn Plugin>> {
