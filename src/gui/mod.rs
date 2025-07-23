@@ -1115,6 +1115,10 @@ impl eframe::App for LauncherApp {
                             self.todo_dialog.open();
                         } else if a.action == "todo:view" {
                             self.todo_view_dialog.open();
+                        } else if let Some(idx) = a.action.strip_prefix("todo:edit:") {
+                            if let Ok(i) = idx.parse::<usize>() {
+                                self.todo_view_dialog.open_edit(i);
+                            }
                         } else if a.action == "clipboard:dialog" {
                             self.clipboard_dialog.open();
                         } else if a.action == "tempfile:dialog" {
@@ -1617,6 +1621,16 @@ impl eframe::App for LauncherApp {
                                         }
                                     });
                                 }
+                            } else if a.desc == "Todo" && a.action.starts_with("todo:done:") {
+                                let idx_str = a.action.rsplit(':').next().unwrap_or("");
+                                if let Ok(todo_idx) = idx_str.parse::<usize>() {
+                                    menu_resp.clone().context_menu(|ui| {
+                                        if ui.button("Edit Todo").clicked() {
+                                            self.todo_view_dialog.open_edit(todo_idx);
+                                            ui.close_menu();
+                                        }
+                                    });
+                                }
                             }
                             if let Some(idx_act) = custom_idx {
                                 menu_resp.clone().context_menu(|ui| {
@@ -1658,6 +1672,10 @@ impl eframe::App for LauncherApp {
                             self.todo_dialog.open();
                         } else if a.action == "todo:view" {
                             self.todo_view_dialog.open();
+                        } else if let Some(idx) = a.action.strip_prefix("todo:edit:") {
+                            if let Ok(i) = idx.parse::<usize>() {
+                                self.todo_view_dialog.open_edit(i);
+                            }
                         } else if a.action == "clipboard:dialog" {
                             self.clipboard_dialog.open();
                         } else if a.action == "tempfile:dialog" {
