@@ -23,6 +23,21 @@ impl TodoViewDialog {
         self.editing_idx = None;
     }
 
+    pub fn open_edit(&mut self, idx: usize) {
+        self.entries = load_todos(TODO_FILE).unwrap_or_default();
+        if let Some(e) = self.entries.get(idx) {
+            self.editing_idx = Some(idx);
+            self.editing_text = e.text.clone();
+            self.editing_priority = e.priority;
+            self.editing_tags = e.tags.join(", ");
+        } else {
+            self.editing_idx = None;
+        }
+        self.open = true;
+        self.filter.clear();
+        self.sort_by_priority = true;
+    }
+
     fn save(&mut self, app: &mut LauncherApp) {
         if let Err(e) = save_todos(TODO_FILE, &self.entries) {
             app.error = Some(format!("Failed to save todos: {e}"));
@@ -123,7 +138,17 @@ impl TodoViewDialog {
                                     if ui.checkbox(&mut entry.done, "").changed() {
                                         save_now = true;
                                     }
-                                    ui.label(entry.text.replace('\n', " "));
+                                    let resp = ui.label(entry.text.replace('\n', " "));
+                                    let idx_copy = idx;
+                                    resp.clone().context_menu(|ui| {
+                                        if ui.button("Edit Todo").clicked() {
+                                            self.editing_idx = Some(idx_copy);
+                                            self.editing_text = entry.text.clone();
+                                            self.editing_priority = entry.priority;
+                                            self.editing_tags = entry.tags.join(", ");
+                                            ui.close_menu();
+                                        }
+                                    });
                                     ui.label(format!("p{}", entry.priority));
                                     if !entry.tags.is_empty() {
                                         ui.label(format!("#{:?}", entry.tags.join(", ")));

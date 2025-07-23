@@ -173,6 +173,35 @@ impl Plugin for TodoPlugin {
             }
         }
 
+        const EDIT_PREFIX: &str = "todo edit";
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, EDIT_PREFIX) {
+            let filter = rest.trim();
+            let todos = self.data.lock().ok().map(|g| g.clone()).unwrap_or_default();
+            let mut entries: Vec<(usize, TodoEntry)> = todos.into_iter().enumerate().collect();
+
+            let tag_filter = filter.starts_with('#');
+            if tag_filter {
+                let tag = filter.trim_start_matches('#');
+                entries.retain(|(_, t)| t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(tag)));
+            } else if !filter.is_empty() {
+                entries.retain(|(_, t)| self.matcher.fuzzy_match(&t.text, filter).is_some());
+            }
+
+            if filter.is_empty() || tag_filter {
+                entries.sort_by(|a, b| b.1.priority.cmp(&a.1.priority));
+            }
+
+            return entries
+                .into_iter()
+                .map(|(idx, t)| Action {
+                    label: format!("{} {}", if t.done { "[x]" } else { "[ ]" }, t.text),
+                    desc: "Todo".into(),
+                    action: format!("todo:edit:{idx}"),
+                    args: None,
+                })
+                .collect();
+        }
+
         if trimmed.eq_ignore_ascii_case("todo view") {
             return vec![Action {
                 label: "todo: view list".into(),
@@ -379,6 +408,12 @@ impl Plugin for TodoPlugin {
                 label: "todo tag".into(),
                 desc: "Todo".into(),
                 action: "query:todo tag ".into(),
+                args: None,
+            },
+            Action {
+                label: "todo edit".into(),
+                desc: "Todo".into(),
+                action: "query:todo edit".into(),
                 args: None,
             },
             Action {
