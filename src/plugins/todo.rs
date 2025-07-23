@@ -176,8 +176,11 @@ impl Plugin for TodoPlugin {
         const EDIT_PREFIX: &str = "todo edit";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, EDIT_PREFIX) {
             let filter = rest.trim();
-            let todos = self.data.lock().ok().map(|g| g.clone()).unwrap_or_default();
-            let mut entries: Vec<(usize, TodoEntry)> = todos.into_iter().enumerate().collect();
+            let guard = match self.data.lock() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+            let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
 
             let tag_filter = filter.starts_with('#');
             if tag_filter {
@@ -194,7 +197,7 @@ impl Plugin for TodoPlugin {
             return entries
                 .into_iter()
                 .map(|(idx, t)| Action {
-                    label: format!("{} {}", if t.done { "[x]" } else { "[ ]" }, t.text),
+                    label: format!("{} {}", if t.done { "[x]" } else { "[ ]" }, t.text.clone()),
                     desc: "Todo".into(),
                     action: format!("todo:edit:{idx}"),
                     args: None,
@@ -308,13 +311,16 @@ impl Plugin for TodoPlugin {
         const RM_PREFIX: &str = "todo rm ";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, RM_PREFIX) {
             let filter = rest.trim();
-            let todos = self.data.lock().ok().map(|g| g.clone()).unwrap_or_default();
-            return todos
-                .into_iter()
+            let guard = match self.data.lock() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+            return guard
+                .iter()
                 .enumerate()
                 .filter(|(_, t)| self.matcher.fuzzy_match(&t.text, filter).is_some())
                 .map(|(idx, t)| Action {
-                    label: format!("Remove todo {}", t.text),
+                    label: format!("Remove todo {}", t.text.clone()),
                     desc: "Todo".into(),
                     action: format!("todo:remove:{idx}"),
                     args: None,
@@ -325,8 +331,11 @@ impl Plugin for TodoPlugin {
         const LIST_PREFIX: &str = "todo list";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
             let filter = rest.trim();
-            let todos = self.data.lock().ok().map(|g| g.clone()).unwrap_or_default();
-            let mut entries: Vec<(usize, TodoEntry)> = todos.into_iter().enumerate().collect();
+            let guard = match self.data.lock() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+            let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
 
             let tag_filter = filter.starts_with('#');
             if tag_filter {
@@ -343,7 +352,7 @@ impl Plugin for TodoPlugin {
             return entries
                 .into_iter()
                 .map(|(idx, t)| Action {
-                    label: format!("{} {}", if t.done { "[x]" } else { "[ ]" }, t.text),
+                    label: format!("{} {}", if t.done { "[x]" } else { "[ ]" }, t.text.clone()),
                     desc: "Todo".into(),
                     action: format!("todo:done:{idx}"),
                     args: None,
