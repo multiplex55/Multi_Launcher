@@ -33,6 +33,8 @@ pub struct NetworkPlugin {
         Instant,
         VecDeque<(Instant, HashMap<String, (u64, u64)>)>,
     )>,
+    last_update: Mutex<Instant>,
+    refresh_rate: Mutex<f32>,
     unit: NetUnit,
 }
 
@@ -67,6 +69,8 @@ impl NetworkPlugin {
         history.push_back((now, totals));
         Self {
             state: Mutex::new((nets, now, history)),
+            last_update: Mutex::new(now),
+            refresh_rate: Mutex::new(1.0),
             unit,
         }
     }
@@ -94,25 +98,47 @@ impl Plugin for NetworkPlugin {
         };
         let (nets, last, history) = &mut *guard;
         let now = Instant::now();
-        nets.refresh(true);
-        let dt = now.duration_since(*last).as_secs_f64().max(0.001);
-        *last = now;
 
-        let mut totals = HashMap::new();
-        for (name, data) in nets.iter() {
-            totals.insert(
-                name.clone(),
-                (data.total_received(), data.total_transmitted()),
-            );
-        }
-        history.push_back((now, totals));
-        while let Some((t, _)) = history.front() {
-            if now.duration_since(*t).as_secs_f64() > 10.0 {
-                history.pop_front();
-            } else {
-                break;
+        let refresh_rate = match self.refresh_rate.lock() {
+            Ok(r) => *r,
+            Err(_) => 1.0,
+        };
+        let should_refresh = match self.last_update.lock() {
+            Ok(mut t) => {
+                if now.duration_since(*t).as_secs_f32() >= refresh_rate {
+                    *t = now;
+                    true
+                } else {
+                    false
+                }
             }
-        }
+            Err(_) => true,
+        };
+
+        let dt = if should_refresh {
+            nets.refresh(true);
+            let dt = now.duration_since(*last).as_secs_f64().max(0.001);
+            *last = now;
+
+            let mut totals = HashMap::new();
+            for (name, data) in nets.iter() {
+                totals.insert(
+                    name.clone(),
+                    (data.total_received(), data.total_transmitted()),
+                );
+            }
+            history.push_back((now, totals));
+            while let Some((t, _)) = history.front() {
+                if now.duration_since(*t).as_secs_f64() > 10.0 {
+                    history.pop_front();
+                } else {
+                    break;
+                }
+            }
+            dt
+        } else {
+            now.duration_since(*last).as_secs_f64().max(0.001)
+        };
 
         let (avg_dt, first_totals) = match history.front() {
             Some((first_time, map)) => (
@@ -175,7 +201,10 @@ impl Plugin for NetworkPlugin {
 
     fn default_settings(&self) -> Option<serde_json::Value> {
         serde_json::to_value(NetworkPluginSettings {
-            refresh_rate: 1.0,
+            refresh_rate: match self.refresh_rate.lock() {
+                Ok(r) => *r,
+                Err(_) => 1.0,
+            },
             unit: self.unit,
         })
         .ok()
@@ -184,6 +213,9 @@ impl Plugin for NetworkPlugin {
     fn apply_settings(&mut self, value: &serde_json::Value) {
         if let Ok(cfg) = serde_json::from_value::<NetworkPluginSettings>(value.clone()) {
             self.unit = cfg.unit;
+            if let Ok(mut r) = self.refresh_rate.lock() {
+                *r = cfg.refresh_rate;
+            }
         }
     }
 
@@ -210,6 +242,9 @@ impl Plugin for NetworkPlugin {
                 });
         });
         self.unit = cfg.unit;
+        if let Ok(mut r) = self.refresh_rate.lock() {
+            *r = cfg.refresh_rate;
+        }
         match serde_json::to_value(&cfg) {
             Ok(v) => *value = v,
             Err(e) => tracing::error!("failed to serialize network settings: {e}"),
