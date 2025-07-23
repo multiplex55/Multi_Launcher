@@ -129,7 +129,7 @@ fn spawn_gui(
 
 fn main() -> anyhow::Result<()> {
     let mut settings = Settings::load("settings.json").unwrap_or_default();
-    logging::init(settings.debug_logging);
+    logging::init(settings.debug_logging, settings.log_file_path());
     tracing::debug!(?settings, "settings loaded");
     let mut actions = load_actions("actions.json").unwrap_or_default();
     let custom_len = actions.len();
