@@ -2,8 +2,6 @@ use crate::gui::LauncherApp;
 use crate::plugin::PluginManager;
 use crate::settings::Settings;
 use eframe::egui;
-#[cfg(target_os = "windows")]
-use rfd::FileDialog;
 use std::collections::HashMap;
 
 #[derive(Default)]
