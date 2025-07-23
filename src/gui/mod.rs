@@ -543,7 +543,10 @@ impl LauncherApp {
         let mut res: Vec<(Action, f32)> = Vec::new();
 
         if trimmed.is_empty() {
-            for cmd in self.plugins.commands() {
+            for cmd in self
+                .plugins
+                .commands_filtered(self.enabled_plugins.as_ref())
+            {
                 res.push((cmd, 0.0));
             }
             for a in &self.actions {
@@ -679,7 +682,10 @@ impl LauncherApp {
         );
 
         if plugin_results.is_empty() && !trimmed.is_empty() {
-            for a in self.plugins.commands() {
+            for a in self
+                .plugins
+                .commands_filtered(self.enabled_plugins.as_ref())
+            {
                 let label_lc = a.label.to_lowercase();
                 let desc_lc = a.desc.to_lowercase();
                 if self.fuzzy_weight <= 0.0 {
