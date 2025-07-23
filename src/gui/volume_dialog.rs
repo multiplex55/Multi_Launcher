@@ -71,8 +71,7 @@ fn get_system_volume() -> Option<u8> {
         {
             if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
                 if let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
-                    let mut val = 0f32;
-                    if vol.GetMasterVolumeLevelScalar(&mut val).is_ok() {
+                    if let Ok(val) = vol.GetMasterVolumeLevelScalar() {
                         percent = Some((val * 100.0).round() as u8);
                     }
                 }
