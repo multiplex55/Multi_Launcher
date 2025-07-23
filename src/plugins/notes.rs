@@ -138,18 +138,16 @@ impl Plugin for NotesPlugin {
         const RM_PREFIX: &str = "note rm ";
         if let Some(rest) = crate::common::strip_prefix_ci(query, RM_PREFIX) {
             let filter = rest.trim();
-            let notes = self
-                .data
-                .lock()
-                .ok()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            return notes
-                .into_iter()
+            let guard = match self.data.lock() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+            return guard
+                .iter()
                 .enumerate()
                 .filter(|(_, n)| self.matcher.fuzzy_match(&n.text, filter).is_some())
                 .map(|(idx, n)| Action {
-                    label: format!("Remove note {} - {}", format_ts(n.ts), n.text),
+                    label: format!("Remove note {} - {}", format_ts(n.ts), n.text.clone()),
                     desc: "Note".into(),
                     action: format!("note:remove:{idx}"),
                     args: None,
@@ -160,18 +158,16 @@ impl Plugin for NotesPlugin {
         const LIST_PREFIX: &str = "note list";
         if let Some(rest) = crate::common::strip_prefix_ci(query, LIST_PREFIX) {
             let filter = rest.trim();
-            let notes = self
-                .data
-                .lock()
-                .ok()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            return notes
-                .into_iter()
+            let guard = match self.data.lock() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+            return guard
+                .iter()
                 .enumerate()
                 .filter(|(_, n)| self.matcher.fuzzy_match(&n.text, filter).is_some())
                 .map(|(idx, n)| Action {
-                    label: format!("{} - {}", format_ts(n.ts), n.text),
+                    label: format!("{} - {}", format_ts(n.ts), n.text.clone()),
                     desc: "Note".into(),
                     action: format!("note:copy:{idx}"),
                     args: None,
@@ -181,13 +177,13 @@ impl Plugin for NotesPlugin {
 
         if let Some(rest) = crate::common::strip_prefix_ci(query.trim(), "note") {
             if rest.is_empty() {
-            return vec![Action {
-                label: "note: edit notes".into(),
-                desc: "Note".into(),
-                action: "note:dialog".into(),
-                args: None,
-            }];
-        }
+                return vec![Action {
+                    label: "note: edit notes".into(),
+                    desc: "Note".into(),
+                    action: "note:dialog".into(),
+                    args: None,
+                }];
+            }
         }
 
         Vec::new()
@@ -207,10 +203,30 @@ impl Plugin for NotesPlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![
-            Action { label: "note".into(), desc: "Note".into(), action: "query:note".into(), args: None },
-            Action { label: "note add".into(), desc: "Note".into(), action: "query:note add ".into(), args: None },
-            Action { label: "note list".into(), desc: "Note".into(), action: "query:note list".into(), args: None },
-            Action { label: "note rm".into(), desc: "Note".into(), action: "query:note rm ".into(), args: None },
+            Action {
+                label: "note".into(),
+                desc: "Note".into(),
+                action: "query:note".into(),
+                args: None,
+            },
+            Action {
+                label: "note add".into(),
+                desc: "Note".into(),
+                action: "query:note add ".into(),
+                args: None,
+            },
+            Action {
+                label: "note list".into(),
+                desc: "Note".into(),
+                action: "query:note list".into(),
+                args: None,
+            },
+            Action {
+                label: "note rm".into(),
+                desc: "Note".into(),
+                action: "query:note rm ".into(),
+                args: None,
+            },
         ]
     }
 }

@@ -189,14 +189,12 @@ impl Plugin for FoldersPlugin {
         const RM_PREFIX: &str = "f rm ";
         if let Some(rest) = crate::common::strip_prefix_ci(query, RM_PREFIX) {
             let filter = rest.trim();
-            let folders = self
-                .data
-                .lock()
-                .ok()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            return folders
-                .into_iter()
+            let guard = match self.data.lock() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+            return guard
+                .iter()
                 .filter(|f| {
                     self.matcher.fuzzy_match(&f.label, filter).is_some()
                         || self.matcher.fuzzy_match(&f.path, filter).is_some()
@@ -206,9 +204,9 @@ impl Plugin for FoldersPlugin {
                             .unwrap_or(false)
                 })
                 .map(|f| Action {
-                    label: format!("Remove folder {} ({})", f.label, f.path),
+                    label: format!("Remove folder {} ({})", f.label.clone(), f.path.clone()),
                     desc: f.path.clone(),
-                    action: format!("folder:remove:{}", f.path),
+                    action: format!("folder:remove:{}", f.path.clone()),
                     args: None,
                 })
                 .collect();
@@ -220,14 +218,12 @@ impl Plugin for FoldersPlugin {
             None => return Vec::new(),
         };
         let filter = rest.trim();
-        let folders = self
-            .data
-            .lock()
-            .ok()
-            .map(|g| g.clone())
-            .unwrap_or_default();
-        folders
-            .into_iter()
+        let guard = match self.data.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        guard
+            .iter()
             .filter(|f| {
                 self.matcher.fuzzy_match(&f.label, filter).is_some()
                     || self.matcher.fuzzy_match(&f.path, filter).is_some()
@@ -241,7 +237,7 @@ impl Plugin for FoldersPlugin {
                 Action {
                     label,
                     desc: f.path.clone(),
-                    action: f.path,
+                    action: f.path.clone(),
                     args: None,
                 }
             })
@@ -262,9 +258,24 @@ impl Plugin for FoldersPlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![
-            Action { label: "f".into(), desc: "Folder".into(), action: "query:f ".into(), args: None },
-            Action { label: "f add".into(), desc: "Folder".into(), action: "query:f add ".into(), args: None },
-            Action { label: "f rm".into(), desc: "Folder".into(), action: "query:f rm ".into(), args: None },
+            Action {
+                label: "f".into(),
+                desc: "Folder".into(),
+                action: "query:f ".into(),
+                args: None,
+            },
+            Action {
+                label: "f add".into(),
+                desc: "Folder".into(),
+                action: "query:f add ".into(),
+                args: None,
+            },
+            Action {
+                label: "f rm".into(),
+                desc: "Folder".into(),
+                action: "query:f rm ".into(),
+                args: None,
+            },
         ]
     }
 }

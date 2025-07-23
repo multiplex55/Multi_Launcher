@@ -196,14 +196,12 @@ impl Plugin for BookmarksPlugin {
         const RM_PREFIX: &str = "bm rm";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, RM_PREFIX) {
             let filter = rest.trim();
-            let bookmarks = self
-                .data
-                .lock()
-                .ok()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            return bookmarks
-                .into_iter()
+            let guard = match self.data.lock() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+            return guard
+                .iter()
                 .filter(|b| {
                     self.matcher.fuzzy_match(&b.url, filter).is_some()
                         || b.alias
@@ -212,9 +210,9 @@ impl Plugin for BookmarksPlugin {
                             .unwrap_or(false)
                 })
                 .map(|b| Action {
-                    label: format!("Remove bookmark {}", b.url),
+                    label: format!("Remove bookmark {}", b.url.clone()),
                     desc: "Bookmark".into(),
-                    action: format!("bookmark:remove:{}", b.url),
+                    action: format!("bookmark:remove:{}", b.url.clone()),
                     args: None,
                 })
                 .collect();
@@ -222,14 +220,12 @@ impl Plugin for BookmarksPlugin {
         const LIST_PREFIX: &str = "bm list";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
             let filter = rest.trim();
-            let bookmarks = self
-                .data
-                .lock()
-                .ok()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            return bookmarks
-                .into_iter()
+            let guard = match self.data.lock() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+            return guard
+                .iter()
                 .filter(|b| {
                     self.matcher.fuzzy_match(&b.url, filter).is_some()
                         || b.alias
@@ -242,7 +238,7 @@ impl Plugin for BookmarksPlugin {
                     Action {
                         label,
                         desc: "Bookmark".into(),
-                        action: b.url,
+                        action: b.url.clone(),
                         args: None,
                     }
                 })
@@ -254,14 +250,12 @@ impl Plugin for BookmarksPlugin {
             None => return Vec::new(),
         };
         let filter = rest.trim();
-        let bookmarks = self
-            .data
-            .lock()
-            .ok()
-            .map(|g| g.clone())
-            .unwrap_or_default();
-        bookmarks
-            .into_iter()
+        let guard = match self.data.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        guard
+            .iter()
             .filter(|b| {
                 self.matcher.fuzzy_match(&b.url, filter).is_some()
                     || b.alias
@@ -274,7 +268,7 @@ impl Plugin for BookmarksPlugin {
                 Action {
                     label,
                     desc: "Bookmark".into(),
-                    action: b.url,
+                    action: b.url.clone(),
                     args: None,
                 }
             })

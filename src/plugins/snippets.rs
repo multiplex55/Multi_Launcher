@@ -115,33 +115,31 @@ impl Plugin for SnippetsPlugin {
         let trimmed = query.trim();
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs") {
             if rest.is_empty() {
-            return vec![Action {
-                label: "cs: edit snippets".into(),
-                desc: "Snippet".into(),
-                action: "snippet:dialog".into(),
-                args: None,
-            }];
+                return vec![Action {
+                    label: "cs: edit snippets".into(),
+                    desc: "Snippet".into(),
+                    action: "snippet:dialog".into(),
+                    args: None,
+                }];
             }
         }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs rm") {
             let filter = rest.trim();
-            let list = self
-                .data
-                .lock()
-                .ok()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            return list
-                .into_iter()
+            let guard = match self.data.lock() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+            return guard
+                .iter()
                 .filter(|s| {
                     filter.is_empty()
                         || self.matcher.fuzzy_match(&s.alias, filter).is_some()
                         || self.matcher.fuzzy_match(&s.text, filter).is_some()
                 })
                 .map(|s| Action {
-                    label: format!("Remove snippet {}", s.alias),
+                    label: format!("Remove snippet {}", s.alias.clone()),
                     desc: "Snippet".into(),
-                    action: format!("snippet:remove:{}", s.alias),
+                    action: format!("snippet:remove:{}", s.alias.clone()),
                     args: None,
                 })
                 .collect();
@@ -163,23 +161,21 @@ impl Plugin for SnippetsPlugin {
 
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs edit") {
             let filter = rest.trim();
-            let list = self
-                .data
-                .lock()
-                .ok()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            return list
-                .into_iter()
+            let guard = match self.data.lock() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+            return guard
+                .iter()
                 .filter(|s| {
                     filter.is_empty()
                         || self.matcher.fuzzy_match(&s.alias, filter).is_some()
                         || self.matcher.fuzzy_match(&s.text, filter).is_some()
                 })
                 .map(|s| Action {
-                    label: format!("Edit snippet {}", s.alias),
+                    label: format!("Edit snippet {}", s.alias.clone()),
                     desc: "Snippet".into(),
-                    action: format!("snippet:edit:{}", s.alias),
+                    action: format!("snippet:edit:{}", s.alias.clone()),
                     args: None,
                 })
                 .collect();
@@ -187,22 +183,20 @@ impl Plugin for SnippetsPlugin {
 
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs list") {
             let filter = rest.trim();
-            let list = self
-                .data
-                .lock()
-                .ok()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            return list
-                .into_iter()
+            let guard = match self.data.lock() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+            return guard
+                .iter()
                 .filter(|s| {
                     self.matcher.fuzzy_match(&s.alias, filter).is_some()
                         || self.matcher.fuzzy_match(&s.text, filter).is_some()
                 })
                 .map(|s| Action {
-                    label: s.alias,
+                    label: s.alias.clone(),
                     desc: "Snippet".into(),
-                    action: format!("clipboard:{}", s.text),
+                    action: format!("clipboard:{}", s.text.clone()),
                     args: None,
                 })
                 .collect();
@@ -210,22 +204,20 @@ impl Plugin for SnippetsPlugin {
 
         if let Some(filter) = crate::common::strip_prefix_ci(trimmed, "cs") {
             let filter = filter.trim();
-            let list = self
-                .data
-                .lock()
-                .ok()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            return list
-                .into_iter()
+            let guard = match self.data.lock() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+            return guard
+                .iter()
                 .filter(|s| {
                     self.matcher.fuzzy_match(&s.alias, filter).is_some()
                         || self.matcher.fuzzy_match(&s.text, filter).is_some()
                 })
                 .map(|s| Action {
-                    label: s.alias,
+                    label: s.alias.clone(),
                     desc: "Snippet".into(),
-                    action: format!("clipboard:{}", s.text),
+                    action: format!("clipboard:{}", s.text.clone()),
                     args: None,
                 })
                 .collect();
@@ -247,11 +239,36 @@ impl Plugin for SnippetsPlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![
-            Action { label: "cs".into(), desc: "Snippet".into(), action: "query:cs".into(), args: None },
-            Action { label: "cs add".into(), desc: "Snippet".into(), action: "query:cs add ".into(), args: None },
-            Action { label: "cs rm".into(), desc: "Snippet".into(), action: "query:cs rm ".into(), args: None },
-            Action { label: "cs list".into(), desc: "Snippet".into(), action: "query:cs list".into(), args: None },
-            Action { label: "cs edit".into(), desc: "Snippet".into(), action: "query:cs edit".into(), args: None },
+            Action {
+                label: "cs".into(),
+                desc: "Snippet".into(),
+                action: "query:cs".into(),
+                args: None,
+            },
+            Action {
+                label: "cs add".into(),
+                desc: "Snippet".into(),
+                action: "query:cs add ".into(),
+                args: None,
+            },
+            Action {
+                label: "cs rm".into(),
+                desc: "Snippet".into(),
+                action: "query:cs rm ".into(),
+                args: None,
+            },
+            Action {
+                label: "cs list".into(),
+                desc: "Snippet".into(),
+                action: "query:cs list".into(),
+                args: None,
+            },
+            Action {
+                label: "cs edit".into(),
+                desc: "Snippet".into(),
+                action: "query:cs edit".into(),
+                args: None,
+            },
         ]
     }
 }
