@@ -67,18 +67,27 @@ impl TodoDialog {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("New");
-                    ui.text_edit_singleline(&mut self.text);
+                    let text_resp = ui.text_edit_singleline(&mut self.text);
                     ui.label("Priority");
-                    if ui
-                        .add(egui::DragValue::new(&mut self.priority).clamp_range(0..=255))
-                        .changed()
-                    {
-                        // no action
-                    }
+                    let prio_resp = ui
+                        .add(egui::DragValue::new(&mut self.priority).clamp_range(0..=255));
                     ui.label("Tags");
-                    ui.text_edit_singleline(&mut self.tags);
+                    let tags_resp = ui.text_edit_singleline(&mut self.tags);
                     ui.checkbox(&mut self.persist_tags, "Persist Tags");
-                    if ui.button("Add").clicked() {
+
+                    let mut add_clicked = ui.button("Add").clicked();
+                    if !add_clicked
+                        && (text_resp.has_focus()
+                            || tags_resp.has_focus()
+                            || prio_resp.has_focus())
+                        && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+                    {
+                        add_clicked = true;
+                        let modifiers = ctx.input(|i| i.modifiers);
+                        ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+                    }
+
+                    if add_clicked {
                         if !self.text.trim().is_empty() {
                             let tag_list: Vec<String> = self
                                 .tags
