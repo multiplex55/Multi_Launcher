@@ -289,3 +289,49 @@ fn pause_resume_does_not_grow_heap() {
     cancel_timer(id);
     assert_eq!(heap_len(), 0);
 }
+
+#[test]
+fn parse_hhmm_with_day_offset() {
+    use multi_launcher::plugins::timer::parse_hhmm;
+    use chrono::{Local, Duration as ChronoDuration};
+    let (h, m, date) = parse_hhmm("2d 07:30").unwrap();
+    assert_eq!((h, m), (7, 30));
+    let expected = Local::now().date_naive() + ChronoDuration::days(2);
+    assert_eq!(date.unwrap(), expected);
+}
+
+#[test]
+fn parse_hhmm_with_absolute_date() {
+    use multi_launcher::plugins::timer::parse_hhmm;
+    use chrono::NaiveDate;
+    let (h, m, date) = parse_hhmm("2024-01-31 05:15").unwrap();
+    assert_eq!((h, m), (5, 15));
+    assert_eq!(date.unwrap(), NaiveDate::from_ymd_opt(2024, 1, 31).unwrap());
+}
+
+#[test]
+fn start_alarm_multi_day() {
+    use multi_launcher::plugins::timer::{
+        cancel_timer, start_alarm_named, ACTIVE_TIMERS,
+    };
+    use chrono::{Local, Duration as ChronoDuration, Timelike};
+    let _lock = TEST_MUTEX.lock().unwrap();
+    ACTIVE_TIMERS.lock().unwrap().clear();
+
+    let now = Local::now();
+    let date = now.date_naive() + ChronoDuration::days(2);
+    let hour = now.hour();
+    let minute = now.minute();
+
+    start_alarm_named(hour, minute, Some(date), Some("test".into()), "None".into());
+    let (id, remaining) = {
+        let list = ACTIVE_TIMERS.lock().unwrap();
+        assert_eq!(list.len(), 1);
+        let t = list.values().next().unwrap();
+        (t.id, t.deadline.saturating_duration_since(std::time::Instant::now()).as_secs())
+    };
+
+    let expected = (date.and_hms_opt(hour, minute, 0).unwrap() - now.naive_local()).num_seconds() as u64;
+    assert!((remaining as i64 - expected as i64).abs() <= 2);
+    cancel_timer(id);
+}

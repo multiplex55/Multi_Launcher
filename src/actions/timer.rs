@@ -21,11 +21,11 @@ pub fn start(dur: &str, name: &str) {
 }
 
 pub fn set_alarm(time: &str, name: &str) {
-    if let Some((h, m)) = crate::plugins::timer::parse_hhmm(time) {
+    if let Some((h, m, date)) = crate::plugins::timer::parse_hhmm(time) {
         if name.is_empty() {
-            crate::plugins::timer::start_alarm(h, m, "None".to_string());
+            crate::plugins::timer::start_alarm(h, m, date, "None".to_string());
         } else {
-            crate::plugins::timer::start_alarm_named(h, m, Some(name.to_string()), "None".to_string());
+            crate::plugins::timer::start_alarm_named(h, m, date, Some(name.to_string()), "None".to_string());
         }
     }
 }

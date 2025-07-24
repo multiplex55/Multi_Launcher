@@ -58,7 +58,7 @@ impl TimerDialog {
                 }
                 Mode::Alarm => {
                     ui.horizontal(|ui| {
-                        ui.label("Time (HH:MM)");
+                        ui.label("Time (HH:MM, Nd HH:MM or YYYY-MM-DD HH:MM)");
                         ui.text_edit_singleline(&mut self.time);
                     });
                 }
@@ -113,10 +113,11 @@ impl TimerDialog {
                             }
                         }
                         Mode::Alarm => {
-                            if let Some((h, m)) = parse_hhmm(&self.time) {
+                            if let Some((h, m, date)) = parse_hhmm(&self.time) {
                                 start_alarm_named(
                                     h,
                                     m,
+                                    date,
                                     if self.label.is_empty() {
                                         None
                                     } else {

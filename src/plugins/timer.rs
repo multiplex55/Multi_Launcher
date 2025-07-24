@@ -376,19 +376,43 @@ pub fn parse_duration(input: &str) -> Option<Duration> {
     }
 }
 
-/// Parse a time of day in `HH:MM` format.
-pub fn parse_hhmm(input: &str) -> Option<(u32, u32)> {
-    let parts: Vec<&str> = input.split(':').collect();
-    if parts.len() != 2 {
-        return None;
+/// Parse a time of day.
+///
+/// Accepts plain `HH:MM`, `Nd HH:MM` for a day offset and
+/// `YYYY-MM-DD HH:MM` for an absolute date.
+pub fn parse_hhmm(input: &str) -> Option<(u32, u32, Option<chrono::NaiveDate>)> {
+    use chrono::{Duration as ChronoDuration, Local, NaiveDate};
+
+    fn parse_time(t: &str) -> Option<(u32, u32)> {
+        let parts: Vec<&str> = t.split(':').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let h: u32 = parts[0].parse().ok()?;
+        let m: u32 = parts[1].parse().ok()?;
+        if h < 24 && m < 60 {
+            Some((h, m))
+        } else {
+            None
+        }
     }
-    let h: u32 = parts[0].parse().ok()?;
-    let m: u32 = parts[1].parse().ok()?;
-    if h < 24 && m < 60 {
-        Some((h, m))
-    } else {
-        None
+
+    let trimmed = input.trim();
+    if let Some((first, rest)) = trimmed.split_once(' ') {
+        if let Some((h, m)) = parse_time(rest.trim()) {
+            if let Some(days_str) = first.strip_suffix(['d', 'D']) {
+                if let Ok(offset) = days_str.parse::<i64>() {
+                    let date = Local::now().date_naive() + ChronoDuration::days(offset);
+                    return Some((h, m, Some(date)));
+                }
+            }
+            if let Ok(date) = NaiveDate::parse_from_str(first, "%Y-%m-%d") {
+                return Some((h, m, Some(date)));
+            }
+        }
     }
+
+    parse_time(trimmed).map(|(h, m)| (h, m, None))
 }
 
 /// Return a list of active timers with remaining time.
@@ -590,14 +614,21 @@ pub fn start_timer(duration: Duration, sound: String) {
 }
 
 /// Set an alarm for the specified time with an optional `name`.
-pub fn start_alarm_named(hour: u32, minute: u32, name: Option<String>, sound: String) {
+pub fn start_alarm_named(
+    hour: u32,
+    minute: u32,
+    date: Option<chrono::NaiveDate>,
+    name: Option<String>,
+    sound: String,
+) {
     use chrono::{Duration as ChronoDuration, Local};
     let now = Local::now();
-    let Some(mut target) = now.date_naive().and_hms_opt(hour, minute, 0) else {
+    let base_date = date.unwrap_or_else(|| now.date_naive());
+    let Some(mut target) = base_date.and_hms_opt(hour, minute, 0) else {
         tracing::error!("invalid alarm time: {hour}:{minute}");
         return;
     };
-    if target <= now.naive_local() {
+    if date.is_none() && target <= now.naive_local() {
         target += ChronoDuration::days(1);
     }
     let duration = (target - now.naive_local())
@@ -616,8 +647,8 @@ pub fn start_alarm_named(hour: u32, minute: u32, name: Option<String>, sound: St
 }
 
 /// Convenience wrapper for [`start_alarm_named`] without a name.
-pub fn start_alarm(hour: u32, minute: u32, sound: String) {
-    start_alarm_named(hour, minute, None, sound);
+pub fn start_alarm(hour: u32, minute: u32, date: Option<chrono::NaiveDate>, sound: String) {
+    start_alarm_named(hour, minute, date, None, sound);
 }
 
 pub struct TimerPlugin;
