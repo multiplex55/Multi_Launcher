@@ -1,7 +1,6 @@
 use eframe::egui;
 use multi_launcher::hotkey::{Hotkey, HotkeyTrigger};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
 use std::thread;
@@ -24,7 +23,7 @@ fn run_quit_loop(
         }
 
         if quit_requested {
-            if let Ok(mut guard) = ctx_handle.lock() {
+            if let Ok(guard) = ctx_handle.lock() {
                 if let Some(c) = &*guard {
                     c.send_viewport_cmd(egui::ViewportCommand::Close);
                     c.request_repaint();

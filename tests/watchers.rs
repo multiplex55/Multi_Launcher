@@ -50,7 +50,7 @@ fn actions_watcher_sends_event() {
     save_bookmarks(BOOKMARKS_FILE, &[]).unwrap();
 
     let ctx = egui::Context::default();
-    let mut app = new_app(&ctx, acts);
+    let app = new_app(&ctx, acts);
 
     save_actions("actions.json", &[]).unwrap();
     sleep(Duration::from_millis(200));
@@ -69,7 +69,7 @@ fn folders_watcher_sends_event() {
     save_bookmarks(BOOKMARKS_FILE, &[]).unwrap();
 
     let ctx = egui::Context::default();
-    let mut app = new_app(&ctx, Vec::new());
+    let app = new_app(&ctx, Vec::new());
 
     save_folders(
         FOLDERS_FILE,
@@ -96,7 +96,7 @@ fn bookmarks_watcher_sends_event() {
     save_bookmarks(BOOKMARKS_FILE, &[]).unwrap();
 
     let ctx = egui::Context::default();
-    let mut app = new_app(&ctx, Vec::new());
+    let app = new_app(&ctx, Vec::new());
 
     save_bookmarks(
         BOOKMARKS_FILE,
