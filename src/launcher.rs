@@ -192,6 +192,7 @@ enum ActionKind<'a> {
     TodoRemove(usize),
     TodoDone(usize),
     TodoClear,
+    TodoExport,
     SnippetRemove(&'a str),
     SnippetAdd { alias: &'a str, text: &'a str },
     BrightnessSet(u32),
@@ -370,6 +371,9 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if s == "todo:clear" {
         return ActionKind::TodoClear;
     }
+    if s == "todo:export" {
+        return ActionKind::TodoExport;
+    }
     if let Some(alias) = s.strip_prefix("snippet:remove:") {
         return ActionKind::SnippetRemove(alias);
     }
@@ -514,6 +518,10 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         ActionKind::TodoRemove(i) => todo::remove(i),
         ActionKind::TodoDone(i) => todo::mark_done(i),
         ActionKind::TodoClear => todo::clear_done(),
+        ActionKind::TodoExport => {
+            todo::export()?;
+            Ok(())
+        }
         ActionKind::SnippetRemove(alias) => snippets::remove(alias),
         ActionKind::SnippetAdd { alias, text } => snippets::add(alias, text),
         ActionKind::BrightnessSet(v) => {

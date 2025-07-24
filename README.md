@@ -205,6 +205,7 @@ Built-in commands:
 | `note` | `note add <text>` | Quick notes |
 | `todo` | `todo add <task>` | Todo items |
 | `todo edit` | `todo edit` | Edit todos |
+| `todo export` | `todo export` | Export todos |
 | `cs` | `cs add <alias> <text>` | Text snippets |
 | `rec` | `rec` | Recycle Bin cleanup |
 | `tmp` | `tmp new [name]` | Temporary files |
