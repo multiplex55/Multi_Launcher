@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
+use urlencoding::encode;
 
 /// Simple plugin that opens weather.com for a given location using the `weather` prefix.
 pub struct WeatherPlugin;
@@ -14,7 +15,10 @@ impl Plugin for WeatherPlugin {
                 return vec![Action {
                     label: format!("Show weather for {q}"),
                     desc: "Web search".into(),
-                    action: format!("https://www.weather.com/weather/today/l/{q}"),
+                    action: format!(
+                        "https://www.weather.com/weather/today/l/{}",
+                        encode(q)
+                    ),
                     args: None,
                 }];
             }

@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
+use urlencoding::encode;
 
 pub struct YoutubePlugin;
 
@@ -14,7 +15,8 @@ impl Plugin for YoutubePlugin {
                     label: format!("Search YouTube for {q}"),
                     desc: "Web search".into(),
                     action: format!(
-                        "https://www.youtube.com/results?search_query={q}"
+                        "https://www.youtube.com/results?search_query={}",
+                        encode(q)
                     ),
                     args: None,
                 }];
