@@ -5,6 +5,7 @@ mod bookmark_alias_dialog;
 mod brightness_dialog;
 mod clipboard_dialog;
 mod cpu_list_dialog;
+mod toast_log_dialog;
 mod notes_dialog;
 mod shell_cmd_dialog;
 mod snippet_dialog;
@@ -22,6 +23,7 @@ pub use bookmark_alias_dialog::BookmarkAliasDialog;
 pub use brightness_dialog::BrightnessDialog;
 pub use clipboard_dialog::ClipboardDialog;
 pub use cpu_list_dialog::CpuListDialog;
+pub use toast_log_dialog::ToastLogDialog;
 pub use notes_dialog::NotesDialog;
 pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;
@@ -60,6 +62,7 @@ use std::sync::{
     Arc,
 };
 use std::time::Instant;
+use crate::toast_log::{append_toast_log, TOAST_LOG_FILE};
 
 const SUBCOMMANDS: &[&str] = &[
     "add", "rm", "list", "clear", "open", "new", "alias", "set", "pause", "resume", "cancel",
@@ -141,6 +144,11 @@ fn watch_file(
     None
 }
 
+fn push_toast(toasts: &mut Toasts, toast: Toast) {
+    append_toast_log(toast.text.text());
+    toasts.add(toast);
+}
+
 pub struct LauncherApp {
     pub actions: Vec<Action>,
     action_cache: Vec<(String, String)>,
@@ -200,6 +208,7 @@ pub struct LauncherApp {
     volume_dialog: VolumeDialog,
     brightness_dialog: BrightnessDialog,
     cpu_list_dialog: CpuListDialog,
+    toast_log_dialog: ToastLogDialog,
     pub help_flag: Arc<AtomicBool>,
     pub hotkey_str: Option<String>,
     pub quit_hotkey_str: Option<String>,
@@ -250,7 +259,7 @@ impl LauncherApp {
             .map(|set| set.iter().cloned().collect())
     }
     pub fn add_toast(&mut self, toast: Toast) {
-        self.toasts.add(toast);
+        push_toast(&mut self.toasts, toast);
     }
     pub fn update_paths(
         &mut self,
@@ -464,6 +473,7 @@ impl LauncherApp {
             volume_dialog: VolumeDialog::default(),
             brightness_dialog: BrightnessDialog::default(),
             cpu_list_dialog: CpuListDialog::default(),
+            toast_log_dialog: ToastLogDialog::default(),
             help_flag: help_flag.clone(),
             hotkey_str: settings.hotkey.clone(),
             quit_hotkey_str: settings.quit_hotkey.clone(),
@@ -814,6 +824,7 @@ impl LauncherApp {
             || self.volume_dialog.open
             || self.brightness_dialog.open
             || self.cpu_list_dialog.open
+            || self.toast_log_dialog.open
             || self.help_window.open
             || self.help_window.overlay_open
             || self.show_editor
@@ -952,6 +963,14 @@ impl eframe::App for LauncherApp {
                 ui.menu_button("Help", |ui| {
                     if ui.button("Command List").clicked() {
                         self.help_window.open = true;
+                    }
+                    if ui.button("Open Toast Log").clicked() {
+                        if let Err(e) = open::that(TOAST_LOG_FILE) {
+                            self.error = Some(format!("Failed to open log: {e}"));
+                        }
+                    }
+                    if ui.button("View Toast Log").clicked() {
+                        self.toast_log_dialog.open();
                     }
                 });
             });
@@ -1123,7 +1142,7 @@ impl eframe::App for LauncherApp {
                             self.error = Some(format!("Failed: {e}"));
                             self.error_time = Some(Instant::now());
                             if self.enable_toasts {
-                                self.toasts.add(Toast {
+                                push_toast(&mut self.toasts, Toast {
                                     text: format!("Failed: {e}").into(),
                                     kind: ToastKind::Error,
                                     options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
@@ -1138,7 +1157,7 @@ impl eframe::App for LauncherApp {
                                 } else {
                                     format!("Launched {}", a.label)
                                 };
-                                self.toasts.add(Toast {
+                                push_toast(&mut self.toasts, Toast {
                                     text: msg.into(),
                                     kind: ToastKind::Success,
                                     options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
@@ -1192,7 +1211,7 @@ impl eframe::App for LauncherApp {
                                         .strip_prefix("todo:add:")
                                         .and_then(|r| r.split('|').next())
                                     {
-                                        self.toasts.add(Toast {
+                                        push_toast(&mut self.toasts, Toast {
                                             text: format!("Added todo {text}").into(),
                                             kind: ToastKind::Success,
                                             options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
@@ -1205,7 +1224,7 @@ impl eframe::App for LauncherApp {
                                 if self.enable_toasts {
                                     let label =
                                         a.label.strip_prefix("Remove todo ").unwrap_or(&a.label);
-                                    self.toasts.add(Toast {
+                                    push_toast(&mut self.toasts, Toast {
                                         text: format!("Removed todo {label}").into(),
                                         kind: ToastKind::Success,
                                         options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
@@ -1219,7 +1238,7 @@ impl eframe::App for LauncherApp {
                                         .label
                                         .trim_start_matches("[x] ")
                                         .trim_start_matches("[ ] ");
-                                    self.toasts.add(Toast {
+                                    push_toast(&mut self.toasts, Toast {
                                         text: format!("Toggled todo {label}").into(),
                                         kind: ToastKind::Success,
                                         options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
@@ -1229,7 +1248,7 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                                 set_focus = true;
                                 if self.enable_toasts {
-                                    self.toasts.add(Toast {
+                                    push_toast(&mut self.toasts, Toast {
                                         text: "Updated todo priority".into(),
                                         kind: ToastKind::Success,
                                         options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
@@ -1239,7 +1258,7 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                                 set_focus = true;
                                 if self.enable_toasts {
-                                    self.toasts.add(Toast {
+                                    push_toast(&mut self.toasts, Toast {
                                         text: "Updated todo tags".into(),
                                         kind: ToastKind::Success,
                                         options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
@@ -1249,7 +1268,7 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                                 set_focus = true;
                                 if self.enable_toasts {
-                                    self.toasts.add(Toast {
+                                    push_toast(&mut self.toasts, Toast {
                                         text: "Cleared completed todos".into(),
                                         kind: ToastKind::Success,
                                         options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
@@ -1259,7 +1278,7 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                                 set_focus = true;
                                 if self.enable_toasts {
-                                    self.toasts.add(Toast {
+                                    push_toast(&mut self.toasts, Toast {
                                         text: format!("Removed snippet {}", a.label).into(),
                                         kind: ToastKind::Success,
                                         options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
@@ -1399,7 +1418,7 @@ impl eframe::App for LauncherApp {
                                             refresh = true;
                                             set_focus = true;
                                             if self.enable_toasts {
-                                                self.toasts.add(Toast {
+                                                push_toast(&mut self.toasts, Toast {
                                                     text: format!("Removed folder {}", a.label)
                                                         .into(),
                                                     kind: ToastKind::Success,
@@ -1428,7 +1447,7 @@ impl eframe::App for LauncherApp {
                                             refresh = true;
                                             set_focus = true;
                                             if self.enable_toasts {
-                                                self.toasts.add(Toast {
+                                                push_toast(&mut self.toasts, Toast {
                                                     text: format!("Removed bookmark {}", a.label)
                                                         .into(),
                                                     kind: ToastKind::Success,
@@ -1450,7 +1469,7 @@ impl eframe::App for LauncherApp {
                                                 refresh = true;
                                                 set_focus = true;
                                                 if self.enable_toasts {
-                                                    self.toasts.add(Toast {
+                                                    push_toast(&mut self.toasts, Toast {
                                                         text: format!("Paused timer {}", a.label)
                                                             .into(),
                                                         kind: ToastKind::Success,
@@ -1467,7 +1486,7 @@ impl eframe::App for LauncherApp {
                                                 refresh = true;
                                                 set_focus = true;
                                                 if self.enable_toasts {
-                                                    self.toasts.add(Toast {
+                                                    push_toast(&mut self.toasts, Toast {
                                                         text: format!("Removed timer {}", a.label)
                                                             .into(),
                                                         kind: ToastKind::Success,
@@ -1494,7 +1513,7 @@ impl eframe::App for LauncherApp {
                                             refresh = true;
                                             set_focus = true;
                                             if self.enable_toasts {
-                                                self.toasts.add(Toast {
+                                                push_toast(&mut self.toasts, Toast {
                                                     text: format!("Removed snippet {}", a.label)
                                                         .into(),
                                                     kind: ToastKind::Success,
@@ -1523,7 +1542,7 @@ impl eframe::App for LauncherApp {
                                             refresh = true;
                                             set_focus = true;
                                             if self.enable_toasts {
-                                                self.toasts.add(Toast {
+                                                push_toast(&mut self.toasts, Toast {
                                                     text: format!("Removed file {}", a.label)
                                                         .into(),
                                                     kind: ToastKind::Success,
@@ -1558,7 +1577,7 @@ impl eframe::App for LauncherApp {
                                                 refresh = true;
                                                 set_focus = true;
                                                 if self.enable_toasts {
-                                                    self.toasts.add(Toast {
+                                                    push_toast(&mut self.toasts, Toast {
                                                         text: format!(
                                                             "Removed note {}",
                                                             note_label
@@ -1596,7 +1615,7 @@ impl eframe::App for LauncherApp {
                                                 refresh = true;
                                                 set_focus = true;
                                                 if self.enable_toasts {
-                                                    self.toasts.add(Toast {
+                                                    push_toast(&mut self.toasts, Toast {
                                                         text: format!("Removed entry {}", cb_label)
                                                             .into(),
                                                         kind: ToastKind::Success,
@@ -1680,7 +1699,7 @@ impl eframe::App for LauncherApp {
                                     self.error = Some(format!("Failed: {e}"));
                                     self.error_time = Some(Instant::now());
                                     if self.enable_toasts {
-                                        self.toasts.add(Toast {
+                                        push_toast(&mut self.toasts, Toast {
                                             text: format!("Failed: {e}").into(),
                                             kind: ToastKind::Error,
                                             options: ToastOptions::default()
@@ -1696,7 +1715,7 @@ impl eframe::App for LauncherApp {
                                         } else {
                                             format!("Launched {}", a.label)
                                         };
-                                        self.toasts.add(Toast {
+                                        push_toast(&mut self.toasts, Toast {
                                             text: msg.into(),
                                             kind: ToastKind::Success,
                                             options: ToastOptions::default()
@@ -1751,7 +1770,7 @@ impl eframe::App for LauncherApp {
                                                 .strip_prefix("todo:add:")
                                                 .and_then(|r| r.split('|').next())
                                             {
-                                                self.toasts.add(Toast {
+                                                push_toast(&mut self.toasts, Toast {
                                                     text: format!("Added todo {text}").into(),
                                                     kind: ToastKind::Success,
                                                     options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
@@ -1766,7 +1785,7 @@ impl eframe::App for LauncherApp {
                                                 .label
                                                 .strip_prefix("Remove todo ")
                                                 .unwrap_or(&a.label);
-                                            self.toasts.add(Toast {
+                                            push_toast(&mut self.toasts, Toast {
                                                 text: format!("Removed todo {label}").into(),
                                                 kind: ToastKind::Success,
                                                 options: ToastOptions::default()
@@ -1781,7 +1800,7 @@ impl eframe::App for LauncherApp {
                                                 .label
                                                 .trim_start_matches("[x] ")
                                                 .trim_start_matches("[ ] ");
-                                            self.toasts.add(Toast {
+                                            push_toast(&mut self.toasts, Toast {
                                                 text: format!("Toggled todo {label}").into(),
                                                 kind: ToastKind::Success,
                                                 options: ToastOptions::default()
@@ -1792,7 +1811,7 @@ impl eframe::App for LauncherApp {
                                         refresh = true;
                                         set_focus = true;
                                         if self.enable_toasts {
-                                            self.toasts.add(Toast {
+                                            push_toast(&mut self.toasts, Toast {
                                                 text: "Updated todo priority".into(),
                                                 kind: ToastKind::Success,
                                                 options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
@@ -1802,7 +1821,7 @@ impl eframe::App for LauncherApp {
                                         refresh = true;
                                         set_focus = true;
                                         if self.enable_toasts {
-                                            self.toasts.add(Toast {
+                                            push_toast(&mut self.toasts, Toast {
                                                 text: "Updated todo tags".into(),
                                                 kind: ToastKind::Success,
                                                 options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
@@ -1812,7 +1831,7 @@ impl eframe::App for LauncherApp {
                                         refresh = true;
                                         set_focus = true;
                                         if self.enable_toasts {
-                                            self.toasts.add(Toast {
+                                            push_toast(&mut self.toasts, Toast {
                                                 text: "Cleared completed todos".into(),
                                                 kind: ToastKind::Success,
                                                 options: ToastOptions::default()
@@ -1823,7 +1842,7 @@ impl eframe::App for LauncherApp {
                                         refresh = true;
                                         set_focus = true;
                                         if self.enable_toasts {
-                                            self.toasts.add(Toast {
+                                            push_toast(&mut self.toasts, Toast {
                                                 text: format!("Removed snippet {}", a.label).into(),
                                                 kind: ToastKind::Success,
                                                 options: ToastOptions::default()
@@ -1956,6 +1975,9 @@ impl eframe::App for LauncherApp {
         let mut cpu_dlg = std::mem::take(&mut self.cpu_list_dialog);
         cpu_dlg.ui(ctx, self);
         self.cpu_list_dialog = cpu_dlg;
+        let mut toast_dlg = std::mem::take(&mut self.toast_log_dialog);
+        toast_dlg.ui(ctx, self);
+        self.toast_log_dialog = toast_dlg;
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
