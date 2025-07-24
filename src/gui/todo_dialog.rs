@@ -9,6 +9,7 @@ pub struct TodoDialog {
     text: String,
     priority: u8,
     tags: String,
+    pub persist_tags: bool,
 }
 
 impl TodoDialog {
@@ -54,6 +55,7 @@ impl TodoDialog {
                     }
                     ui.label("Tags");
                     ui.text_edit_singleline(&mut self.tags);
+                    ui.checkbox(&mut self.persist_tags, "Persist Tags");
                     if ui.button("Add").clicked() {
                         if !self.text.trim().is_empty() {
                             let tag_list: Vec<String> = self
@@ -71,7 +73,9 @@ impl TodoDialog {
                             });
                             self.text.clear();
                             self.priority = 0;
-                            self.tags.clear();
+                            if !self.persist_tags {
+                                self.tags.clear();
+                            }
                             save_now = true;
                         }
                     }
