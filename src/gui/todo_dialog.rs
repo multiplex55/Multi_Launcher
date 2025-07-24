@@ -20,12 +20,14 @@ impl TodoDialog {
         self.tags.clear();
     }
 
-    fn save(&mut self, app: &mut LauncherApp) {
+    fn save(&mut self, app: &mut LauncherApp, focus: bool) {
         if let Err(e) = save_todos(TODO_FILE, &self.entries) {
             app.error = Some(format!("Failed to save todos: {e}"));
         } else {
             app.search();
-            app.focus_input();
+            if focus {
+                app.focus_input();
+            }
         }
     }
 
@@ -114,7 +116,10 @@ impl TodoDialog {
                     save_now = true;
                 }
             });
-        if save_now { self.save(app); }
-        if close { self.open = false; }
+        if save_now { self.save(app, false); }
+        if close {
+            self.open = false;
+            app.focus_input();
+        }
     }
 }
