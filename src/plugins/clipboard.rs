@@ -2,7 +2,7 @@ use crate::actions::Action;
 use crate::plugin::Plugin;
 use arboard::Clipboard;
 use eframe::egui;
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use crate::common::json_watch::{watch_json, JsonWatcher};
 use serde_json;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -50,7 +50,7 @@ pub struct ClipboardPlugin {
     history: Arc<Mutex<VecDeque<String>>>,
     clipboard: Mutex<Option<Clipboard>>,
     #[allow(dead_code)]
-    watcher: Option<RecommendedWatcher>,
+    watcher: Option<JsonWatcher>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -70,34 +70,18 @@ impl ClipboardPlugin {
         let path = CLIPBOARD_FILE.to_string();
         let history = Arc::new(Mutex::new(load_history(&path).unwrap_or_default()));
         let history_clone = history.clone();
-        let mut watcher = RecommendedWatcher::new(
-            {
-                let path = path.clone();
-                move |res: notify::Result<notify::Event>| {
-                    if let Ok(event) = res {
-                        if matches!(
-                            event.kind,
-                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                        ) {
-                            if let Ok(list) = load_history(&path) {
-                                if let Ok(mut lock) = history_clone.lock() {
-                                    *lock = list;
-                                }
-                            }
-                        }
+        let watch_path = path.clone();
+        let watcher = watch_json(&watch_path, {
+            let watch_path = watch_path.clone();
+            move || {
+                if let Ok(list) = load_history(&watch_path) {
+                    if let Ok(mut lock) = history_clone.lock() {
+                        *lock = list;
                     }
                 }
-            },
-            Config::default(),
-        )
-        .ok();
-        if let Some(w) = watcher.as_mut() {
-            let p = std::path::Path::new(&path);
-            if w.watch(p, RecursiveMode::NonRecursive).is_err() {
-                let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
-                let _ = w.watch(parent, RecursiveMode::NonRecursive);
             }
-        }
+        })
+        .ok();
         let clipboard = Mutex::new(Clipboard::new().ok());
         Self {
             max_entries,

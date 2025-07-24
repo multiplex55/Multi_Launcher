@@ -5,3 +5,5 @@ pub fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
         None
     }
 }
+
+pub mod json_watch;

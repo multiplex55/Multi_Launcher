@@ -2,7 +2,7 @@ use crate::actions::Action;
 use crate::plugin::Plugin;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use crate::common::json_watch::{watch_json, JsonWatcher};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -107,7 +107,7 @@ pub struct TodoPlugin {
     matcher: SkimMatcherV2,
     data: Arc<Mutex<Vec<TodoEntry>>>,
     #[allow(dead_code)]
-    watcher: Option<RecommendedWatcher>,
+    watcher: Option<JsonWatcher>,
 }
 
 impl TodoPlugin {
@@ -116,34 +116,18 @@ impl TodoPlugin {
         let data = Arc::new(Mutex::new(load_todos(TODO_FILE).unwrap_or_default()));
         let data_clone = data.clone();
         let path = TODO_FILE.to_string();
-        let mut watcher = RecommendedWatcher::new(
-            {
-                let path = path.clone();
-                move |res: notify::Result<notify::Event>| {
-                    if let Ok(event) = res {
-                        if matches!(
-                            event.kind,
-                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                        ) {
-                            if let Ok(list) = load_todos(&path) {
-                                if let Ok(mut lock) = data_clone.lock() {
-                                    *lock = list;
-                                }
-                            }
-                        }
+        let watch_path = path.clone();
+        let watcher = watch_json(&watch_path, {
+            let watch_path = watch_path.clone();
+            move || {
+                if let Ok(list) = load_todos(&watch_path) {
+                    if let Ok(mut lock) = data_clone.lock() {
+                        *lock = list;
                     }
                 }
-            },
-            Config::default(),
-        )
-        .ok();
-        if let Some(w) = watcher.as_mut() {
-            let p = std::path::Path::new(&path);
-            if w.watch(p, RecursiveMode::NonRecursive).is_err() {
-                let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
-                let _ = w.watch(parent, RecursiveMode::NonRecursive);
             }
-        }
+        })
+        .ok();
         Self {
             matcher: SkimMatcherV2::default(),
             data,
