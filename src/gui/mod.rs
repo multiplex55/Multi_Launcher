@@ -116,8 +116,8 @@ fn watch_file(
     path: &Path,
     tx: Sender<WatchEvent>,
     event: WatchEvent,
-) -> Option<RecommendedWatcher> {
-    if let Ok(mut watcher) = RecommendedWatcher::new(
+) -> notify::Result<RecommendedWatcher> {
+    let mut watcher = RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| match res {
             Ok(ev) => {
                 if matches!(
@@ -130,18 +130,14 @@ fn watch_file(
             Err(e) => tracing::error!("watch error: {:?}", e),
         },
         Config::default(),
-    ) {
-        let res = watcher
-            .watch(path, RecursiveMode::NonRecursive)
-            .or_else(|_| {
-                let parent = path.parent().unwrap_or_else(|| Path::new("."));
-                watcher.watch(parent, RecursiveMode::NonRecursive)
-            });
-        if res.is_ok() {
-            return Some(watcher);
-        }
-    }
-    None
+    )?;
+    watcher
+        .watch(path, RecursiveMode::NonRecursive)
+        .or_else(|_| {
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            watcher.watch(parent, RecursiveMode::NonRecursive)
+        })?;
+    Ok(watcher)
 }
 
 fn push_toast(toasts: &mut Toasts, toast: Toast) {
@@ -360,7 +356,7 @@ impl LauncherApp {
     ) -> Self {
         let (tx, rx) = channel();
         let mut watchers = Vec::new();
-        let toasts = Toasts::new().anchor(egui::Align2::RIGHT_TOP, [10.0, 10.0]);
+        let mut toasts = Toasts::new().anchor(egui::Align2::RIGHT_TOP, [10.0, 10.0]);
         let enable_toasts = settings.enable_toasts;
         let toast_duration = settings.toast_duration;
         use std::path::Path;
@@ -378,24 +374,60 @@ impl LauncherApp {
                 .map(|b| (b.url, b.alias))
                 .collect::<HashMap<_, _>>();
 
-        if let Some(w) = watch_file(Path::new(&actions_path), tx.clone(), WatchEvent::Actions) {
-            watchers.push(w);
+        match watch_file(Path::new(&actions_path), tx.clone(), WatchEvent::Actions) {
+            Ok(w) => watchers.push(w),
+            Err(e) => {
+                tracing::error!("watch error: {:?}", e);
+                push_toast(
+                    &mut toasts,
+                    Toast {
+                        text: format!("Failed to watch {}", actions_path).into(),
+                        kind: ToastKind::Error,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(toast_duration as f64),
+                    },
+                );
+            }
         }
 
-        if let Some(w) = watch_file(
+        match watch_file(
             Path::new(crate::plugins::folders::FOLDERS_FILE),
             tx.clone(),
             WatchEvent::Folders,
         ) {
-            watchers.push(w);
+            Ok(w) => watchers.push(w),
+            Err(e) => {
+                tracing::error!("watch error: {:?}", e);
+                push_toast(
+                    &mut toasts,
+                    Toast {
+                        text: "Failed to watch folders.json".into(),
+                        kind: ToastKind::Error,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(toast_duration as f64),
+                    },
+                );
+            }
         }
 
-        if let Some(w) = watch_file(
+        match watch_file(
             Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE),
             tx.clone(),
             WatchEvent::Bookmarks,
         ) {
-            watchers.push(w);
+            Ok(w) => watchers.push(w),
+            Err(e) => {
+                tracing::error!("watch error: {:?}", e);
+                push_toast(
+                    &mut toasts,
+                    Toast {
+                        text: "Failed to watch bookmarks.json".into(),
+                        kind: ToastKind::Error,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(toast_duration as f64),
+                    },
+                );
+            }
         }
 
         let initial_visible = visible_flag.load(Ordering::SeqCst);
