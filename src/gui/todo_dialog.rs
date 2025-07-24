@@ -9,6 +9,7 @@ pub struct TodoDialog {
     text: String,
     priority: u8,
     tags: String,
+    filter: String,
     pub persist_tags: bool,
 }
 
@@ -19,6 +20,7 @@ impl TodoDialog {
         self.text.clear();
         self.priority = 0;
         self.tags.clear();
+        self.filter.clear();
     }
 
     fn save(&mut self, app: &mut LauncherApp, focus: bool) {
@@ -30,6 +32,26 @@ impl TodoDialog {
                 app.focus_input();
             }
         }
+    }
+
+    pub fn filtered_indices(entries: &[TodoEntry], filter: &str) -> Vec<usize> {
+        let filter = filter.trim().to_lowercase();
+        entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                if filter.is_empty() {
+                    true
+                } else if filter.starts_with('#') {
+                    let tag = filter.trim_start_matches('#');
+                    e.tags.iter().any(|t| t.to_lowercase().contains(tag))
+                } else {
+                    e.text.to_lowercase().contains(&filter)
+                        || e.tags.iter().any(|t| t.to_lowercase().contains(&filter))
+                }
+            })
+            .map(|(i, _)| i)
+            .collect()
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
@@ -87,11 +109,16 @@ impl TodoDialog {
                     }
                     if ui.button("Close").clicked() { close = true; }
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Filter");
+                    ui.text_edit_singleline(&mut self.filter);
+                });
                 ui.separator();
                 let mut remove: Option<usize> = None;
                 let area_height = ui.available_height();
+                let indices = Self::filtered_indices(&self.entries, &self.filter);
                 egui::ScrollArea::both().max_height(area_height).show(ui, |ui| {
-                    for idx in 0..self.entries.len() {
+                    for idx in indices {
                         ui.horizontal(|ui| {
                             let entry = &mut self.entries[idx];
                             if ui.checkbox(&mut entry.done, "").changed() {
