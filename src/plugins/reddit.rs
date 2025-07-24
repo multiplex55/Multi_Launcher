@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
+use urlencoding::encode;
 
 pub struct RedditPlugin;
 
@@ -12,7 +13,10 @@ impl Plugin for RedditPlugin {
                 return vec![Action {
                     label: format!("Search Reddit for {q}"),
                     desc: "Web search".into(),
-                    action: format!("https://www.reddit.com/search/?q={q}"),
+                    action: format!(
+                        "https://www.reddit.com/search/?q={}",
+                        encode(q)
+                    ),
                     args: None,
                 }];
             }

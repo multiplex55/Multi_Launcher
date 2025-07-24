@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
+use urlencoding::encode;
 
 pub struct WikipediaPlugin;
 
@@ -14,7 +15,8 @@ impl Plugin for WikipediaPlugin {
                     label: format!("Search Wikipedia for {q}"),
                     desc: "Web search".into(),
                     action: format!(
-                        "https://en.wikipedia.org/wiki/Special:Search?search={q}"
+                        "https://en.wikipedia.org/wiki/Special:Search?search={}",
+                        encode(q)
                     ),
                     args: None,
                 }];

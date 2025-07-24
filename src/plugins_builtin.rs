@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
+use urlencoding::encode;
 
 pub struct WebSearchPlugin;
 
@@ -10,7 +11,7 @@ impl Plugin for WebSearchPlugin {
             vec![Action {
                 label: format!("Search Google for {q}"),
                 desc: "Web search".into(),
-                action: format!("https://www.google.com/search?q={}", q),
+                action: format!("https://www.google.com/search?q={}", encode(q)),
                 args: None,
             }]
         } else {

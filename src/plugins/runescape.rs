@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
+use urlencoding::encode;
 
 pub struct RunescapeSearchPlugin;
 
@@ -12,7 +13,7 @@ impl Plugin for RunescapeSearchPlugin {
                 return vec![Action {
                     label: format!("Search RuneScape Wiki for {q}"),
                     desc: "Web search".into(),
-                    action: format!("https://runescape.wiki/?search={q}"),
+                    action: format!("https://runescape.wiki/?search={}", encode(q)),
                     args: None,
                 }];
             }
@@ -24,7 +25,10 @@ impl Plugin for RunescapeSearchPlugin {
                 return vec![Action {
                     label: format!("Search Old School RuneScape Wiki for {q}"),
                     desc: "Web search".into(),
-                    action: format!("https://oldschool.runescape.wiki/?search={q}"),
+                    action: format!(
+                        "https://oldschool.runescape.wiki/?search={}",
+                        encode(q)
+                    ),
                     args: None,
                 }];
             }
