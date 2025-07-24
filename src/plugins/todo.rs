@@ -198,6 +198,15 @@ impl Plugin for TodoPlugin {
             }];
         }
 
+        if trimmed.eq_ignore_ascii_case("todo export") {
+            return vec![Action {
+                label: "Export todo list".into(),
+                desc: "Todo".into(),
+                action: "todo:export".into(),
+                args: None,
+            }];
+        }
+
         if trimmed.eq_ignore_ascii_case("todo clear") {
             return vec![Action {
                 label: "Clear completed todos".into(),
@@ -413,6 +422,12 @@ impl Plugin for TodoPlugin {
                 label: "todo view".into(),
                 desc: "Todo".into(),
                 action: "query:todo view ".into(),
+                args: None,
+            },
+            Action {
+                label: "todo export".into(),
+                desc: "Todo".into(),
+                action: "query:todo export".into(),
                 args: None,
             },
         ]

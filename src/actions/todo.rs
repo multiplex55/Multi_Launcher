@@ -40,3 +40,26 @@ pub fn clear_done() -> anyhow::Result<()> {
     crate::plugins::todo::clear_done(crate::plugins::todo::TODO_FILE)?;
     Ok(())
 }
+
+pub fn export() -> anyhow::Result<std::path::PathBuf> {
+    use std::fmt::Write as _;
+
+    let list = crate::plugins::todo::load_todos(crate::plugins::todo::TODO_FILE)?;
+
+    let mut content = String::new();
+    for entry in list {
+        let done = if entry.done { "[x]" } else { "[ ]" };
+        write!(content, "{done} {}", entry.text)?;
+        if !entry.tags.is_empty() {
+            write!(content, " #{}", entry.tags.join(" #"))?;
+        }
+        if entry.priority > 0 {
+            write!(content, " p={}", entry.priority)?;
+        }
+        writeln!(content)?;
+    }
+
+    let path = crate::plugins::tempfile::create_named_file("todo_export", &content)?;
+    open::that(&path)?;
+    Ok(path)
+}

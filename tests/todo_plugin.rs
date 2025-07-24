@@ -210,3 +210,12 @@ fn search_view_opens_dialog() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "todo:view");
 }
+
+#[test]
+fn search_export_returns_action() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let plugin = TodoPlugin::default();
+    let results = plugin.search("todo export");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "todo:export");
+}
