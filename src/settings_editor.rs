@@ -406,6 +406,14 @@ impl SettingsEditor {
                             if !enabled {
                                 continue;
                             }
+
+                            let has_settings =
+                                plugin.default_settings().is_some()
+                                    || self.plugin_settings.contains_key(&name);
+                            if !has_settings {
+                                continue;
+                            }
+
                             let entry =
                                 self.plugin_settings.entry(name.clone()).or_insert_with(|| {
                                     plugin.default_settings().unwrap_or(serde_json::Value::Null)
