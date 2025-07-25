@@ -12,6 +12,10 @@ pub struct TodoViewDialog {
     editing_text: String,
     editing_priority: u8,
     editing_tags: String,
+    new_text: String,
+    new_priority: u8,
+    new_tags: String,
+    persist_tags: bool,
 }
 
 impl TodoViewDialog {
@@ -21,6 +25,9 @@ impl TodoViewDialog {
         self.filter.clear();
         self.sort_by_priority = true;
         self.editing_idx = None;
+        self.new_text.clear();
+        self.new_priority = 0;
+        self.new_tags.clear();
     }
 
     pub fn open_edit(&mut self, idx: usize) {
@@ -36,6 +43,9 @@ impl TodoViewDialog {
         self.open = true;
         self.filter.clear();
         self.sort_by_priority = true;
+        self.new_text.clear();
+        self.new_priority = 0;
+        self.new_tags.clear();
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
@@ -60,6 +70,50 @@ impl TodoViewDialog {
             .min_width(200.0)
             .min_height(150.0)
             .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("New");
+                    let text_resp = ui.text_edit_singleline(&mut self.new_text);
+                    ui.label("Priority");
+                    let prio_resp =
+                        ui.add(egui::DragValue::new(&mut self.new_priority).clamp_range(0..=255));
+                    ui.label("Tags");
+                    let tags_resp = ui.text_edit_singleline(&mut self.new_tags);
+                    ui.checkbox(&mut self.persist_tags, "Persist Tags");
+
+                    let mut add_clicked = ui.button("Add").clicked();
+                    if !add_clicked
+                        && (text_resp.has_focus() || tags_resp.has_focus() || prio_resp.has_focus())
+                        && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+                    {
+                        add_clicked = true;
+                        let modifiers = ctx.input(|i| i.modifiers);
+                        ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+                    }
+
+                    if add_clicked {
+                        if !self.new_text.trim().is_empty() {
+                            let tag_list: Vec<String> = self
+                                .new_tags
+                                .split(',')
+                                .map(|t| t.trim())
+                                .filter(|t| !t.is_empty())
+                                .map(|t| t.to_string())
+                                .collect();
+                            self.entries.push(TodoEntry {
+                                text: self.new_text.clone(),
+                                done: false,
+                                priority: self.new_priority,
+                                tags: tag_list,
+                            });
+                            self.new_text.clear();
+                            self.new_priority = 0;
+                            if !self.persist_tags {
+                                self.new_tags.clear();
+                            }
+                            save_now = true;
+                        }
+                    }
+                });
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.sort_by_priority, "Sort by priority");
                     ui.label("Filter");
@@ -97,21 +151,32 @@ impl TodoViewDialog {
                                 ui.vertical(|ui| {
                                     ui.horizontal(|ui| {
                                         ui.label("Text:");
-                                        ui.text_edit_singleline(&mut self.editing_text);
-                                    });
-                                    ui.horizontal(|ui| {
+                                        let text_resp =
+                                            ui.text_edit_singleline(&mut self.editing_text);
                                         ui.label("Priority:");
-                                        ui.add(
+                                        let prio_resp = ui.add(
                                             egui::DragValue::new(&mut self.editing_priority)
                                                 .clamp_range(0..=255),
                                         );
-                                    });
-                                    ui.horizontal(|ui| {
                                         ui.label("Tags:");
-                                        ui.text_edit_singleline(&mut self.editing_tags);
-                                    });
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Save").clicked() {
+                                        let tags_resp =
+                                            ui.text_edit_singleline(&mut self.editing_tags);
+
+                                        let mut save_clicked = ui.button("Save").clicked();
+                                        if !save_clicked
+                                            && (text_resp.has_focus()
+                                                || tags_resp.has_focus()
+                                                || prio_resp.has_focus())
+                                            && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+                                        {
+                                            save_clicked = true;
+                                            let modifiers = ctx.input(|i| i.modifiers);
+                                            ctx.input_mut(|i| {
+                                                i.consume_key(modifiers, egui::Key::Enter)
+                                            });
+                                        }
+
+                                        if save_clicked {
                                             let tags: Vec<String> = self
                                                 .editing_tags
                                                 .split(',')
