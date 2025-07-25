@@ -61,56 +61,60 @@ impl TodoDialog {
         egui::Window::new("Todos")
             .open(&mut self.open)
             .resizable(true)
-            .default_size((360.0, 240.0))
+            .default_size((320.0, 240.0))
             .min_width(200.0)
             .min_height(150.0)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("New");
-                    let text_resp = ui.text_edit_singleline(&mut self.text);
-                    ui.label("Priority");
-                    let prio_resp = ui
-                        .add(egui::DragValue::new(&mut self.priority).clamp_range(0..=255));
-                    ui.label("Tags");
-                    let tags_resp = ui.text_edit_singleline(&mut self.tags);
-                    ui.checkbox(&mut self.persist_tags, "Persist Tags");
+                let mut add_clicked = ui.ctx().input(|i| i.key_pressed(egui::Key::Enter));
 
-                    let mut add_clicked = ui.button("Add").clicked();
-                    if !add_clicked
-                        && (text_resp.has_focus()
-                            || tags_resp.has_focus()
-                            || prio_resp.has_focus())
-                        && ctx.input(|i| i.key_pressed(egui::Key::Enter))
-                    {
-                        add_clicked = true;
-                        let modifiers = ctx.input(|i| i.modifiers);
-                        ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
-                    }
-
-                    if add_clicked {
-                        if !self.text.trim().is_empty() {
-                            let tag_list: Vec<String> = self
-                                .tags
-                                .split(',')
-                                .map(|t| t.trim())
-                                .filter(|t| !t.is_empty())
-                                .map(|t| t.to_string())
-                                .collect();
-                            self.entries.push(TodoEntry {
-                                text: self.text.clone(),
-                                done: false,
-                                priority: self.priority,
-                                tags: tag_list,
-                            });
-                            self.text.clear();
-                            self.priority = 0;
-                            if !self.persist_tags {
-                                self.tags.clear();
-                            }
-                            save_now = true;
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("New");
+                        ui.text_edit_singleline(&mut self.text);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Priority");
+                        ui.add(egui::DragValue::new(&mut self.priority).clamp_range(0..=255));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Tags");
+                        ui.text_edit_singleline(&mut self.tags);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.persist_tags, "Persist Tags");
+                        if ui.button("Add").clicked() {
+                            add_clicked = true;
                         }
-                    }
+                    });
                 });
+
+                if add_clicked {
+                    let modifiers = ctx.input(|i| i.modifiers);
+                    ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+                    if !self.text.trim().is_empty() {
+                        let tag_list: Vec<String> = self
+                            .tags
+                            .split(',')
+                            .map(|t| t.trim())
+                            .filter(|t| !t.is_empty())
+                            .map(|t| t.to_string())
+                            .collect();
+                        self.entries.push(TodoEntry {
+                            text: self.text.clone(),
+                            done: false,
+                            priority: self.priority,
+                            tags: tag_list,
+                        });
+                        self.text.clear();
+                        self.priority = 0;
+                        if !self.persist_tags {
+                            self.tags.clear();
+                        }
+                        save_now = true;
+                    } else {
+                        app.error = Some("Text required".into());
+                    }
+                }
                 ui.horizontal(|ui| {
                     if ui.button("Clear Completed").clicked() {
                         self.entries.retain(|e| !e.done);
