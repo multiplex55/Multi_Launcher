@@ -97,21 +97,26 @@ impl TodoViewDialog {
                                 ui.vertical(|ui| {
                                     ui.horizontal(|ui| {
                                         ui.label("Text:");
-                                        ui.text_edit_singleline(&mut self.editing_text);
-                                    });
-                                    ui.horizontal(|ui| {
+                                        let text_resp = ui.text_edit_singleline(&mut self.editing_text);
                                         ui.label("Priority:");
-                                        ui.add(
-                                            egui::DragValue::new(&mut self.editing_priority)
-                                                .clamp_range(0..=255),
-                                        );
-                                    });
-                                    ui.horizontal(|ui| {
+                                        let prio_resp = ui
+                                            .add(egui::DragValue::new(&mut self.editing_priority).clamp_range(0..=255));
                                         ui.label("Tags:");
-                                        ui.text_edit_singleline(&mut self.editing_tags);
-                                    });
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Save").clicked() {
+                                        let tags_resp = ui.text_edit_singleline(&mut self.editing_tags);
+
+                                        let mut save_clicked = ui.button("Save").clicked();
+                                        if !save_clicked
+                                            && (text_resp.has_focus()
+                                                || tags_resp.has_focus()
+                                                || prio_resp.has_focus())
+                                            && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+                                        {
+                                            save_clicked = true;
+                                            let modifiers = ctx.input(|i| i.modifiers);
+                                            ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+                                        }
+
+                                        if save_clicked {
                                             let tags: Vec<String> = self
                                                 .editing_tags
                                                 .split(',')
