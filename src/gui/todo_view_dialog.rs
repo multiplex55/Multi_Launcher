@@ -95,23 +95,46 @@ impl TodoViewDialog {
                         for idx in indices {
                             if Some(idx) == self.editing_idx {
                                 ui.vertical(|ui| {
+                                    let mut text_focus = false;
+                                    let mut prio_focus = false;
+                                    let mut tags_focus = false;
                                     ui.horizontal(|ui| {
                                         ui.label("Text:");
-                                        ui.text_edit_singleline(&mut self.editing_text);
+                                        let resp = ui.text_edit_singleline(&mut self.editing_text);
+                                        if resp.has_focus() {
+                                            text_focus = true;
+                                        }
                                     });
                                     ui.horizontal(|ui| {
                                         ui.label("Priority:");
-                                        ui.add(
+                                        let resp = ui.add(
                                             egui::DragValue::new(&mut self.editing_priority)
                                                 .clamp_range(0..=255),
                                         );
+                                        if resp.has_focus() {
+                                            prio_focus = true;
+                                        }
                                     });
                                     ui.horizontal(|ui| {
                                         ui.label("Tags:");
-                                        ui.text_edit_singleline(&mut self.editing_tags);
+                                        let resp = ui.text_edit_singleline(&mut self.editing_tags);
+                                        if resp.has_focus() {
+                                            tags_focus = true;
+                                        }
                                     });
                                     ui.horizontal(|ui| {
-                                        if ui.button("Save").clicked() {
+                                        let mut save_clicked = ui.button("Save").clicked();
+                                        if !save_clicked
+                                            && (text_focus || prio_focus || tags_focus)
+                                            && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+                                        {
+                                            save_clicked = true;
+                                            let modifiers = ctx.input(|i| i.modifiers);
+                                            ctx.input_mut(|i| {
+                                                i.consume_key(modifiers, egui::Key::Enter)
+                                            });
+                                        }
+                                        if save_clicked {
                                             let tags: Vec<String> = self
                                                 .editing_tags
                                                 .split(',')
