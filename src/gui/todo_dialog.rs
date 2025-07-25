@@ -65,52 +65,50 @@ impl TodoDialog {
             .min_width(200.0)
             .min_height(150.0)
             .show(ctx, |ui| {
+                let mut add_clicked = false;
                 ui.horizontal(|ui| {
                     ui.label("New");
-                    let text_resp = ui.text_edit_singleline(&mut self.text);
+                    ui.text_edit_singleline(&mut self.text);
                     ui.label("Priority");
-                    let prio_resp = ui
-                        .add(egui::DragValue::new(&mut self.priority).clamp_range(0..=255));
+                    ui.add(egui::DragValue::new(&mut self.priority).clamp_range(0..=255));
                     ui.label("Tags");
-                    let tags_resp = ui.text_edit_singleline(&mut self.tags);
+                    ui.text_edit_singleline(&mut self.tags);
                     ui.checkbox(&mut self.persist_tags, "Persist Tags");
 
-                    let mut add_clicked = ui.button("Add").clicked();
-                    if !add_clicked
-                        && (text_resp.has_focus()
-                            || tags_resp.has_focus()
-                            || prio_resp.has_focus())
-                        && ctx.input(|i| i.key_pressed(egui::Key::Enter))
-                    {
+                    if ui.button("Add").clicked() {
                         add_clicked = true;
-                        let modifiers = ctx.input(|i| i.modifiers);
-                        ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
-                    }
-
-                    if add_clicked {
-                        if !self.text.trim().is_empty() {
-                            let tag_list: Vec<String> = self
-                                .tags
-                                .split(',')
-                                .map(|t| t.trim())
-                                .filter(|t| !t.is_empty())
-                                .map(|t| t.to_string())
-                                .collect();
-                            self.entries.push(TodoEntry {
-                                text: self.text.clone(),
-                                done: false,
-                                priority: self.priority,
-                                tags: tag_list,
-                            });
-                            self.text.clear();
-                            self.priority = 0;
-                            if !self.persist_tags {
-                                self.tags.clear();
-                            }
-                            save_now = true;
-                        }
                     }
                 });
+
+                if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    let modifiers = ctx.input(|i| i.modifiers);
+                    ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+                    add_clicked = true;
+                }
+
+                if add_clicked {
+                    if !self.text.trim().is_empty() {
+                        let tag_list: Vec<String> = self
+                            .tags
+                            .split(',')
+                            .map(|t| t.trim())
+                            .filter(|t| !t.is_empty())
+                            .map(|t| t.to_string())
+                            .collect();
+                        self.entries.push(TodoEntry {
+                            text: self.text.clone(),
+                            done: false,
+                            priority: self.priority,
+                            tags: tag_list,
+                        });
+                        self.text.clear();
+                        self.priority = 0;
+                        if !self.persist_tags {
+                            self.tags.clear();
+                        }
+                        save_now = true;
+                    }
+                }
                 ui.horizontal(|ui| {
                     if ui.button("Clear Completed").clicked() {
                         self.entries.retain(|e| !e.done);
