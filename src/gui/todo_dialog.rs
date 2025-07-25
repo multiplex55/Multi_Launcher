@@ -69,10 +69,11 @@ impl TodoDialog {
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
                 egui::Grid::new("todo_add_grid")
-                    .num_columns(5)
+                    .num_columns(6)
                     .spacing([4.0, 2.0])
                     .show(ui, |ui| {
                         ui.checkbox(&mut self.persist_tags, "Persist Tags");
+                        ui.label("New");
                         let text_resp = ui.text_edit_singleline(&mut self.text);
                         let prio_resp =
                             ui.add(egui::DragValue::new(&mut self.priority).clamp_range(0..=255));
