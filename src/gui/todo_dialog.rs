@@ -58,7 +58,6 @@ impl TodoDialog {
         if !self.open {
             return;
         }
-        let mut close = false;
         let mut save_now = false;
         egui::Window::new("Todos")
             .open(&mut self.open)
@@ -69,15 +68,23 @@ impl TodoDialog {
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
                 egui::Grid::new("todo_add_grid")
-                    .num_columns(6)
+                    .num_columns(5)
                     .spacing([4.0, 2.0])
                     .show(ui, |ui| {
                         ui.checkbox(&mut self.persist_tags, "Persist Tags");
-                        ui.label("New");
-                        let text_resp = ui.text_edit_singleline(&mut self.text);
+                        ui.end_row();
+                        ui.label("New Todo");
+                        let text_resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.text).desired_width(f32::INFINITY),
+                        );
+                        ui.end_row();
+                        ui.label("Tags");
+                        let tags_resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.tags).desired_width(f32::INFINITY),
+                        );
+                        ui.label("Priority");
                         let prio_resp =
                             ui.add(egui::DragValue::new(&mut self.priority).clamp_range(0..=255));
-                        let tags_resp = ui.text_edit_singleline(&mut self.tags);
                         let mut add_clicked = ui.button("Add").clicked();
                         if !add_clicked
                             && (text_resp.has_focus()
@@ -120,15 +127,12 @@ impl TodoDialog {
                         self.entries.retain(|e| !e.done);
                         save_now = true;
                     }
-                    if ui.button("Close").clicked() {
-                        close = true;
-                    }
                 });
+                ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("Filter");
                     ui.text_edit_singleline(&mut self.filter);
                 });
-                ui.separator();
                 let mut remove: Option<usize> = None;
                 let area_height = ui.available_height();
                 let indices = Self::filtered_indices(&self.entries, &self.filter);
@@ -168,10 +172,6 @@ impl TodoDialog {
             });
         if save_now {
             self.save(app, false);
-        }
-        if close {
-            self.open = false;
-            app.focus_input();
         }
     }
 }
