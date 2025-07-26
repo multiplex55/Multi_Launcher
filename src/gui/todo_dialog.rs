@@ -23,6 +23,22 @@ impl TodoDialog {
         self.filter.clear();
     }
 
+    pub fn set_text(&mut self, text: &str) {
+        self.text = text.to_string();
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn entry_text(&self, idx: usize) -> &str {
+        &self.entries[idx].text
+    }
+
+    pub fn entries_len(&self) -> usize {
+        self.entries.len()
+    }
+
     fn save(&mut self, app: &mut LauncherApp, focus: bool) {
         if let Err(e) = save_todos(TODO_FILE, &self.entries) {
             app.error = Some(format!("Failed to save todos: {e}"));
@@ -180,6 +196,33 @@ impl TodoDialog {
                     save_now = true;
                 }
             });
+        if self.open
+            && !app.todo_view_dialog.open
+            && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+            && !self.text.trim().is_empty()
+        {
+            let tag_list: Vec<String> = self
+                .tags
+                .split(',')
+                .map(|t| t.trim())
+                .filter(|t| !t.is_empty())
+                .map(|t| t.to_string())
+                .collect();
+            self.entries.push(TodoEntry {
+                text: self.text.clone(),
+                done: false,
+                priority: self.priority,
+                tags: tag_list,
+            });
+            self.text.clear();
+            self.priority = 0;
+            if !self.persist_tags {
+                self.tags.clear();
+            }
+            save_now = true;
+            let modifiers = ctx.input(|i| i.modifiers);
+            ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+        }
         if save_now {
             self.save(app, false);
         }
