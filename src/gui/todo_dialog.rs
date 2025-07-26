@@ -59,6 +59,9 @@ impl TodoDialog {
             return;
         }
         let mut save_now = false;
+        let mut enter_handled = false;
+        let mut add_via_enter = false;
+        let mut add_now = false;
         egui::Window::new("Todos")
             .open(&mut self.open)
             .resizable(true)
@@ -97,38 +100,25 @@ impl TodoDialog {
                                 )
                             })
                             .inner;
-                        let mut add_clicked = add_resp.clicked();
-                        if !add_clicked
+                        add_now |= add_resp.clicked();
+                        let enter_pressed = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+                        if !add_now
                             && (text_resp.has_focus()
                                 || tags_resp.has_focus()
                                 || prio_resp.has_focus())
-                            && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+                            && enter_pressed
                         {
-                            add_clicked = true;
+                            add_now = true;
                             let modifiers = ctx.input(|i| i.modifiers);
                             ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+                            enter_handled = true;
+                            add_via_enter = true;
                         }
-
-                        if add_clicked && !self.text.trim().is_empty() {
-                            let tag_list: Vec<String> = self
-                                .tags
-                                .split(',')
-                                .map(|t| t.trim())
-                                .filter(|t| !t.is_empty())
-                                .map(|t| t.to_string())
-                                .collect();
-                            self.entries.push(TodoEntry {
-                                text: self.text.clone(),
-                                done: false,
-                                priority: self.priority,
-                                tags: tag_list,
-                            });
-                            self.text.clear();
-                            self.priority = 0;
-                            if !self.persist_tags {
-                                self.tags.clear();
+                        if add_now {
+                            add_via_enter |= enter_pressed;
+                            if !enter_pressed {
+                                add_via_enter = false;
                             }
-                            save_now = true;
                         }
                         ui.end_row();
                     });
@@ -141,7 +131,17 @@ impl TodoDialog {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("Filter");
-                    ui.text_edit_singleline(&mut self.filter);
+                    let filter_resp = ui.text_edit_singleline(&mut self.filter);
+                    if !enter_handled
+                        && filter_resp.has_focus()
+                        && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+                    {
+                        let modifiers = ctx.input(|i| i.modifiers);
+                        ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+                        enter_handled = true;
+                        add_now = true;
+                        add_via_enter = true;
+                    }
                 });
                 let mut remove: Option<usize> = None;
                 let area_height = ui.available_height();
@@ -180,6 +180,31 @@ impl TodoDialog {
                     save_now = true;
                 }
             });
+
+        if add_now && !self.text.trim().is_empty() {
+            let tag_list: Vec<String> = self
+                .tags
+                .split(',')
+                .map(|t| t.trim())
+                .filter(|t| !t.is_empty())
+                .map(|t| t.to_string())
+                .collect();
+            if add_via_enter {
+                tracing::debug!("Adding todo via Enter: '{}', tags={:?}", self.text, tag_list);
+            }
+            self.entries.push(TodoEntry {
+                text: self.text.clone(),
+                done: false,
+                priority: self.priority,
+                tags: tag_list,
+            });
+            self.text.clear();
+            self.priority = 0;
+            if !self.persist_tags {
+                self.tags.clear();
+            }
+            save_now = true;
+        }
         if self.open && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
             let modifiers = ctx.input(|i| i.modifiers);
             ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
