@@ -25,27 +25,17 @@ impl OmniSearchPlugin {
 
 impl Plugin for OmniSearchPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
+        const LIST_PREFIX: &str = "o list";
+        if let Some(rest) = crate::common::strip_prefix_ci(query, LIST_PREFIX) {
+            return self.search_all(rest.trim_start());
+        }
+
         const PREFIX: &str = "o";
         let rest = match crate::common::strip_prefix_ci(query, PREFIX) {
             Some(r) => r.trim_start(),
             None => return Vec::new(),
         };
-        let mut out = Vec::new();
-        out.extend(self.folders.search(&format!("f {rest}")));
-        out.extend(self.bookmarks.search(&format!("bm {rest}")));
-        let q = rest.trim();
-        if q.is_empty() {
-            out.extend(self.actions.iter().cloned());
-        } else {
-            for a in &self.actions {
-                if self.matcher.fuzzy_match(&a.label, q).is_some()
-                    || self.matcher.fuzzy_match(&a.desc, q).is_some()
-                {
-                    out.push(a.clone());
-                }
-            }
-        }
-        out
+        self.search_all(rest)
     }
 
     fn name(&self) -> &str {
@@ -61,11 +51,44 @@ impl Plugin for OmniSearchPlugin {
     }
 
     fn commands(&self) -> Vec<Action> {
-        vec![Action {
-            label: "o".into(),
-            desc: "Omni".into(),
-            action: "query:o ".into(),
-            args: None,
-        }]
+        vec![
+            Action {
+                label: "o".into(),
+                desc: "Omni".into(),
+                action: "query:o ".into(),
+                args: None,
+            },
+            Action {
+                label: "o list".into(),
+                desc: "Omni".into(),
+                action: "query:o list".into(),
+                args: None,
+            },
+        ]
+    }
+}
+
+impl OmniSearchPlugin {
+    fn search_all(&self, rest: &str) -> Vec<Action> {
+        let mut out = Vec::new();
+        out.extend(self.folders.search(&format!("f {rest}")));
+        if rest.trim().is_empty() {
+            out.extend(self.bookmarks.search("bm list"));
+        } else {
+            out.extend(self.bookmarks.search(&format!("bm {rest}")));
+        }
+        let q = rest.trim();
+        if q.is_empty() {
+            out.extend(self.actions.iter().cloned());
+        } else {
+            for a in &self.actions {
+                if self.matcher.fuzzy_match(&a.label, q).is_some()
+                    || self.matcher.fuzzy_match(&a.desc, q).is_some()
+                {
+                    out.push(a.clone());
+                }
+            }
+        }
+        out
     }
 }
