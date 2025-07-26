@@ -99,6 +99,20 @@ impl TodoDialog {
                             })
                             .inner;
                         add_now |= add_resp.clicked();
+                        if (text_resp.has_focus()
+                            || tags_resp.has_focus()
+                            || prio_resp.has_focus())
+                            && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+                        {
+                            let modifiers = ctx.input(|i| i.modifiers);
+                            ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+                            tracing::debug!(
+                                "Enter pressed in TodoDialog fields: text='{}', tags='{}'",
+                                self.text,
+                                self.tags
+                            );
+                            add_now = true;
+                        }
                         ui.end_row();
                     });
                 ui.horizontal(|ui| {
