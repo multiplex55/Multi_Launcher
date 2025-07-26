@@ -75,15 +75,13 @@ impl TodoDialog {
                     .show(ui, |ui| {
                         ui.label(egui::RichText::new("New Todo").strong());
                         let text_resp = ui.add(
-                            egui::TextEdit::singleline(&mut self.text)
-                                .desired_width(f32::INFINITY),
+                            egui::TextEdit::singleline(&mut self.text).desired_width(f32::INFINITY),
                         );
                         ui.end_row();
 
                         ui.label("Tags");
                         let tags_resp = ui.add(
-                            egui::TextEdit::singleline(&mut self.tags)
-                                .desired_width(f32::INFINITY),
+                            egui::TextEdit::singleline(&mut self.tags).desired_width(f32::INFINITY),
                         );
                         ui.end_row();
 
@@ -111,28 +109,26 @@ impl TodoDialog {
                             ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
                         }
 
-                        if add_clicked {
-                            if !self.text.trim().is_empty() {
-                                let tag_list: Vec<String> = self
-                                    .tags
-                                    .split(',')
-                                    .map(|t| t.trim())
-                                    .filter(|t| !t.is_empty())
-                                    .map(|t| t.to_string())
-                                    .collect();
-                                self.entries.push(TodoEntry {
-                                    text: self.text.clone(),
-                                    done: false,
-                                    priority: self.priority,
-                                    tags: tag_list,
-                                });
-                                self.text.clear();
-                                self.priority = 0;
-                                if !self.persist_tags {
-                                    self.tags.clear();
-                                }
-                                save_now = true;
+                        if add_clicked && !self.text.trim().is_empty() {
+                            let tag_list: Vec<String> = self
+                                .tags
+                                .split(',')
+                                .map(|t| t.trim())
+                                .filter(|t| !t.is_empty())
+                                .map(|t| t.to_string())
+                                .collect();
+                            self.entries.push(TodoEntry {
+                                text: self.text.clone(),
+                                done: false,
+                                priority: self.priority,
+                                tags: tag_list,
+                            });
+                            self.text.clear();
+                            self.priority = 0;
+                            if !self.persist_tags {
+                                self.tags.clear();
                             }
+                            save_now = true;
                         }
                         ui.end_row();
                     });
