@@ -58,6 +58,29 @@ impl TodoDialog {
         if !self.open {
             return;
         }
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && !self.text.trim().is_empty() {
+            let modifiers = ctx.input(|i| i.modifiers);
+            ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+            let tag_list: Vec<String> = self
+                .tags
+                .split(',')
+                .map(|t| t.trim())
+                .filter(|t| !t.is_empty())
+                .map(|t| t.to_string())
+                .collect();
+            self.entries.push(TodoEntry {
+                text: self.text.clone(),
+                done: false,
+                priority: self.priority,
+                tags: tag_list,
+            });
+            self.text.clear();
+            self.priority = 0;
+            if !self.persist_tags {
+                self.tags.clear();
+            }
+            self.save(app, false);
+        }
         let mut save_now = false;
         egui::Window::new("Todos")
             .open(&mut self.open)
@@ -180,32 +203,6 @@ impl TodoDialog {
                     save_now = true;
                 }
             });
-        if self.open
-            && ctx.input(|i| i.key_pressed(egui::Key::Enter))
-            && !self.text.trim().is_empty()
-        {
-            let modifiers = ctx.input(|i| i.modifiers);
-            ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
-            let tag_list: Vec<String> = self
-                .tags
-                .split(',')
-                .map(|t| t.trim())
-                .filter(|t| !t.is_empty())
-                .map(|t| t.to_string())
-                .collect();
-            self.entries.push(TodoEntry {
-                text: self.text.clone(),
-                done: false,
-                priority: self.priority,
-                tags: tag_list,
-            });
-            self.text.clear();
-            self.priority = 0;
-            if !self.persist_tags {
-                self.tags.clear();
-            }
-            self.save(app, false);
-        }
         if save_now {
             self.save(app, false);
         }
