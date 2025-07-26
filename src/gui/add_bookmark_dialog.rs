@@ -45,13 +45,13 @@ impl AddBookmarkDialog {
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
                         if self.url.trim().is_empty() {
-                            app.error = Some("URL required".into());
+                            app.set_error("URL required".into());
                         } else {
                             if let Err(e) = append_bookmark(BOOKMARKS_FILE, &self.url) {
-                                app.error = Some(format!("Failed to save: {e}"));
+                                app.set_error(format!("Failed to save: {e}"));
                             } else if let Err(e) = set_alias(BOOKMARKS_FILE, &self.url, &self.alias)
                             {
-                                app.error = Some(format!("Failed to save alias: {e}"));
+                                app.set_error(format!("Failed to save alias: {e}"));
                             } else {
                                 close = true;
                                 if app.enable_toasts {

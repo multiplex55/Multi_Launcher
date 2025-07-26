@@ -257,6 +257,11 @@ impl LauncherApp {
     pub fn add_toast(&mut self, toast: Toast) {
         push_toast(&mut self.toasts, toast);
     }
+
+    pub fn set_error(&mut self, msg: String) {
+        self.error = Some(msg);
+        self.error_time = Some(Instant::now());
+    }
     pub fn update_paths(
         &mut self,
         plugin_dirs: Option<Vec<String>>,
@@ -998,7 +1003,7 @@ impl eframe::App for LauncherApp {
                     }
                     if ui.button("Open Toast Log").clicked() {
                         if let Err(e) = open::that(TOAST_LOG_FILE) {
-                            self.error = Some(format!("Failed to open log: {e}"));
+                            self.set_error(format!("Failed to open log: {e}"));
                         }
                     }
                     if ui.button("View Toast Log").clicked() {
@@ -1173,8 +1178,7 @@ impl eframe::App for LauncherApp {
                                 self.cpu_list_dialog.open(count);
                             }
                         } else if let Err(e) = launch_action(&a) {
-                            self.error = Some(format!("Failed: {e}"));
-                            self.error_time = Some(Instant::now());
+                            self.set_error(format!("Failed: {e}"));
                             if self.enable_toasts {
                                 push_toast(&mut self.toasts, Toast {
                                     text: format!("Failed: {e}").into(),

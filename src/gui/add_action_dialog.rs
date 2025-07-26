@@ -128,7 +128,7 @@ impl AddActionDialog {
                         if ui.button(button).clicked() {
                             use std::path::Path;
                             if self.path.is_empty() || !Path::new(&self.path).exists() {
-                                app.error = Some("Path does not exist".into());
+                                app.set_error("Path does not exist".into());
                             } else {
                                 match self.mode {
                                     DialogMode::Add => {
@@ -167,7 +167,7 @@ impl AddActionDialog {
                                 should_close = true;
                                 app.search();
                                 if let Err(e) = save_actions(&app.actions_path, &app.actions[..app.custom_len]) {
-                                    app.error = Some(format!("Failed to save: {e}"));
+                                    app.set_error(format!("Failed to save: {e}"));
                                 }
                             }
                         }
