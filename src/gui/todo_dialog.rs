@@ -59,7 +59,6 @@ impl TodoDialog {
             return;
         }
         let mut save_now = false;
-        let mut add_via_enter = false;
         let mut add_now = false;
         egui::Window::new("Todos")
             .open(&mut self.open)
@@ -100,17 +99,6 @@ impl TodoDialog {
                             })
                             .inner;
                         add_now |= add_resp.clicked();
-                        let enter_pressed = ctx.input(|i| i.key_pressed(egui::Key::Enter));
-                        if enter_pressed
-                            && (text_resp.lost_focus()
-                                || tags_resp.lost_focus()
-                                || prio_resp.lost_focus())
-                        {
-                            add_now = true;
-                            add_via_enter = true;
-                            let modifiers = ctx.input(|i| i.modifiers);
-                            ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
-                        }
                         ui.end_row();
                     });
                 ui.horizontal(|ui| {
@@ -122,13 +110,7 @@ impl TodoDialog {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("Filter");
-                    let filter_resp = ui.text_edit_singleline(&mut self.filter);
-                    if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && filter_resp.lost_focus() {
-                        let modifiers = ctx.input(|i| i.modifiers);
-                        ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
-                        add_now = true;
-                        add_via_enter = true;
-                    }
+                    ui.text_edit_singleline(&mut self.filter);
                 });
                 let mut remove: Option<usize> = None;
                 let area_height = ui.available_height();
@@ -168,11 +150,18 @@ impl TodoDialog {
                 }
             });
 
-        if self.open && ctx.input(|i| i.key_pressed(egui::Key::Enter)) && !add_now {
+        if self.open
+            && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+            && !app.todo_view_dialog.open
+        {
             let modifiers = ctx.input(|i| i.modifiers);
             ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+            tracing::debug!(
+                "Enter pressed in TodoDialog: text='{}', tags='{}'",
+                self.text,
+                self.tags
+            );
             add_now = true;
-            add_via_enter = true;
         }
 
         if add_now && !self.text.trim().is_empty() {
@@ -183,10 +172,7 @@ impl TodoDialog {
                 .filter(|t| !t.is_empty())
                 .map(|t| t.to_string())
                 .collect();
-            if add_via_enter {
-                tracing::debug!("Enter pressed in TodoDialog: text='{}', tags='{}'", self.text, self.tags);
-                tracing::debug!("Adding todo via Enter: '{}', tags={:?}", self.text, tag_list);
-            }
+            tracing::debug!("Adding todo via Enter: '{}', tags={:?}", self.text, tag_list);
             self.entries.push(TodoEntry {
                 text: self.text.clone(),
                 done: false,
@@ -199,7 +185,7 @@ impl TodoDialog {
                 self.tags.clear();
             }
             save_now = true;
-        } else if add_now && add_via_enter {
+        } else if add_now {
             tracing::debug!("Enter pressed but todo text empty; ignoring");
         }
         if save_now {
