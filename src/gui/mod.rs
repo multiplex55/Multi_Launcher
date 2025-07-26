@@ -1117,6 +1117,8 @@ impl eframe::App for LauncherApp {
                     && !self.tempfile_alias_dialog.open
                     && !self.tempfile_dialog.open
                     && !self.notes_dialog.open
+                    && !self.todo_dialog.open
+                    && !self.todo_view_dialog.open
                 {
                     launch_idx = self.handle_key(egui::Key::Enter);
                 }
