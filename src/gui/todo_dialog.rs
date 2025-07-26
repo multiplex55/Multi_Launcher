@@ -185,6 +185,7 @@ impl TodoDialog {
             ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
             tracing::debug!("Enter pressed in TodoDialog: text='{}', tags='{}'", self.text, self.tags);
             if !self.text.trim().is_empty() {
+                let text = self.text.clone();
                 let tag_list: Vec<String> = self
                     .tags
                     .split(',')
@@ -192,11 +193,12 @@ impl TodoDialog {
                     .filter(|t| !t.is_empty())
                     .map(|t| t.to_string())
                     .collect();
+                tracing::debug!("Adding todo via Enter: '{}', tags={:?}", text, tag_list);
                 self.entries.push(TodoEntry {
-                    text: self.text.clone(),
+                    text,
                     done: false,
                     priority: self.priority,
-                    tags: tag_list,
+                    tags: tag_list.clone(),
                 });
                 self.text.clear();
                 self.priority = 0;
@@ -204,6 +206,8 @@ impl TodoDialog {
                     self.tags.clear();
                 }
                 save_now = true;
+            } else {
+                tracing::debug!("Enter pressed but todo text empty; ignoring");
             }
         }
         if save_now {
