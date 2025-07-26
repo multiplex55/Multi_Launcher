@@ -14,6 +14,30 @@ pub struct TodoDialog {
 }
 
 impl TodoDialog {
+    fn add_entry(&mut self) -> bool {
+        if self.text.trim().is_empty() {
+            return false;
+        }
+        let tag_list: Vec<String> = self
+            .tags
+            .split(',')
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+            .collect();
+        self.entries.push(TodoEntry {
+            text: self.text.clone(),
+            done: false,
+            priority: self.priority,
+            tags: tag_list,
+        });
+        self.text.clear();
+        self.priority = 0;
+        if !self.persist_tags {
+            self.tags.clear();
+        }
+        true
+    }
     pub fn open(&mut self) {
         self.entries = load_todos(TODO_FILE).unwrap_or_default();
         self.open = true;
@@ -59,6 +83,7 @@ impl TodoDialog {
             return;
         }
         let mut save_now = false;
+        let mut add_entry_flag = false;
         egui::Window::new("Todos")
             .open(&mut self.open)
             .resizable(true)
@@ -109,26 +134,8 @@ impl TodoDialog {
                             ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
                         }
 
-                        if add_clicked && !self.text.trim().is_empty() {
-                            let tag_list: Vec<String> = self
-                                .tags
-                                .split(',')
-                                .map(|t| t.trim())
-                                .filter(|t| !t.is_empty())
-                                .map(|t| t.to_string())
-                                .collect();
-                            self.entries.push(TodoEntry {
-                                text: self.text.clone(),
-                                done: false,
-                                priority: self.priority,
-                                tags: tag_list,
-                            });
-                            self.text.clear();
-                            self.priority = 0;
-                            if !self.persist_tags {
-                                self.tags.clear();
-                            }
-                            save_now = true;
+                        if add_clicked {
+                            add_entry_flag = true;
                         }
                         ui.end_row();
                     });
@@ -180,8 +187,38 @@ impl TodoDialog {
                     save_now = true;
                 }
             });
+        if add_entry_flag {
+            save_now |= self.add_entry();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            let modifiers = ctx.input(|i| i.modifiers);
+            ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+            save_now |= self.add_entry();
+        }
         if save_now {
             self.save(app, false);
         }
+    }
+}
+
+impl TodoDialog {
+    pub fn set_text(&mut self, text: &str) {
+        self.text = text.into();
+    }
+
+    pub fn set_tags(&mut self, tags: &str) {
+        self.tags = tags.into();
+    }
+
+    pub fn set_priority(&mut self, priority: u8) {
+        self.priority = priority;
+    }
+
+    pub fn set_filter(&mut self, filter: &str) {
+        self.filter = filter.into();
+    }
+
+    pub fn entries_len(&self) -> usize {
+        self.entries.len()
     }
 }
