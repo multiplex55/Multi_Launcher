@@ -183,5 +183,90 @@ impl TodoDialog {
         if save_now {
             self.save(app, false);
         }
+
+        if self.open && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if !self.text.trim().is_empty() {
+                let tag_list: Vec<String> = self
+                    .tags
+                    .split(',')
+                    .map(|t| t.trim())
+                    .filter(|t| !t.is_empty())
+                    .map(|t| t.to_string())
+                    .collect();
+                self.entries.push(TodoEntry {
+                    text: self.text.clone(),
+                    done: false,
+                    priority: self.priority,
+                    tags: tag_list,
+                });
+                self.text.clear();
+                self.priority = 0;
+                if !self.persist_tags {
+                    self.tags.clear();
+                }
+                self.save(app, false);
+            }
+            let modifiers = ctx.input(|i| i.modifiers);
+            ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gui::LauncherApp;
+    use crate::plugin::PluginManager;
+    use crate::actions::Action;
+    use crate::settings::Settings;
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    fn new_app(ctx: &egui::Context) -> LauncherApp {
+        let actions: Vec<Action> = Vec::new();
+        let custom_len = actions.len();
+        LauncherApp::new(
+            ctx,
+            actions,
+            custom_len,
+            PluginManager::new(),
+            "actions.json".into(),
+            "settings.json".into(),
+            Settings::default(),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    #[test]
+    fn enter_adds_when_not_focused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut dlg = TodoDialog::default();
+        dlg.open();
+        dlg.text = "task".into();
+
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: Some(egui::Key::Enter),
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+            repeat: false,
+        });
+        ctx.begin_frame(input);
+        dlg.ui(&ctx, &mut app);
+        let _ = ctx.end_frame();
+
+        let saved = crate::plugins::todo::load_todos(crate::plugins::todo::TODO_FILE).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].text, "task");
     }
 }
