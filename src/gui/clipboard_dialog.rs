@@ -33,7 +33,7 @@ impl ClipboardDialog {
     fn save(&mut self, app: &mut LauncherApp) {
         let history: VecDeque<String> = self.entries.clone().into();
         if let Err(e) = save_history(CLIPBOARD_FILE, &history) {
-            app.error = Some(format!("Failed to save clipboard history: {e}"));
+            app.set_error(format!("Failed to save clipboard history: {e}"));
         } else {
             app.search();
             app.focus_input();
@@ -70,7 +70,7 @@ impl ClipboardDialog {
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.text.trim().is_empty() {
-                                app.error = Some("Text required".into());
+                                app.set_error("Text required".into());
                             } else {
                                 if idx < self.entries.len() {
                                     self.entries[idx] = self.text.clone();

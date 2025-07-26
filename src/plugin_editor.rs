@@ -97,7 +97,7 @@ impl PluginEditor {
                     s.enabled_capabilities = Some(self.enabled_capabilities.clone());
                 }
                 if let Err(e) = s.save(&app.settings_path) {
-                    app.error = Some(format!("Failed to save: {e}"));
+                    app.set_error(format!("Failed to save: {e}"));
                 } else {
                     app.update_paths(
                         s.plugin_dirs.clone(),
@@ -137,7 +137,7 @@ impl PluginEditor {
                     crate::request_hotkey_restart(s);
                 }
             }
-            Err(e) => app.error = Some(format!("Failed to read settings: {e}")),
+            Err(e) => app.set_error(format!("Failed to read settings: {e}")),
         }
     }
 

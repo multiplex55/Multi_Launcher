@@ -491,7 +491,7 @@ impl SettingsEditor {
                                     Ok(current) => {
                                         let new_settings = self.to_settings(&current);
                                         if let Err(e) = new_settings.save(&app.settings_path) {
-                                            app.error = Some(format!("Failed to save: {e}"));
+                                            app.set_error(format!("Failed to save: {e}"));
                                         } else {
                                             app.update_paths(
                                                 new_settings.plugin_dirs.clone(),
@@ -558,7 +558,7 @@ impl SettingsEditor {
                                         }
                                     }
                                     Err(e) => {
-                                        app.error = Some(format!("Failed to read settings: {e}"))
+                                        app.set_error(format!("Failed to read settings: {e}"))
                                     }
                                 }
                             }

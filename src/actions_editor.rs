@@ -82,7 +82,7 @@ impl ActionsEditor {
                 }
                 app.search();
                 if let Err(e) = save_actions(&app.actions_path, &app.actions[..app.custom_len]) {
-                    app.error = Some(format!("Failed to save: {e}"));
+                    app.set_error(format!("Failed to save: {e}"));
                 }
             }
 

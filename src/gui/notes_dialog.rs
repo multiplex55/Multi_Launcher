@@ -32,7 +32,7 @@ impl NotesDialog {
 
     fn save(&mut self, app: &mut LauncherApp) {
         if let Err(e) = save_notes(QUICK_NOTES_FILE, &self.entries) {
-            app.error = Some(format!("Failed to save notes: {e}"));
+            app.set_error(format!("Failed to save notes: {e}"));
         } else {
             app.search();
             app.focus_input();
@@ -66,7 +66,7 @@ impl NotesDialog {
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.text.trim().is_empty() {
-                                app.error = Some("Text required".into());
+                                app.set_error("Text required".into());
                             } else {
                                 if idx == self.entries.len() {
                                     self.entries.push(NoteEntry {

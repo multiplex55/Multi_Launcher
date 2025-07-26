@@ -25,7 +25,7 @@ impl TodoDialog {
 
     fn save(&mut self, app: &mut LauncherApp, focus: bool) {
         if let Err(e) = save_todos(TODO_FILE, &self.entries) {
-            app.error = Some(format!("Failed to save todos: {e}"));
+            app.set_error(format!("Failed to save todos: {e}"));
         } else {
             app.search();
             if focus {
