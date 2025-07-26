@@ -98,10 +98,18 @@ impl TodoDialog {
                                 )
                             })
                             .inner;
+
+                        if text_resp.changed() {
+                            tracing::debug!("Todo text updated: '{}'", self.text);
+                        }
+                        if tags_resp.changed() {
+                            tracing::debug!("Todo tags updated: '{}'", self.tags);
+                        }
+
                         add_now |= add_resp.clicked();
-                        if (text_resp.has_focus()
-                            || tags_resp.has_focus()
-                            || prio_resp.has_focus())
+                        if (text_resp.lost_focus()
+                            || tags_resp.lost_focus()
+                            || prio_resp.lost_focus())
                             && ctx.input(|i| i.key_pressed(egui::Key::Enter))
                         {
                             let modifiers = ctx.input(|i| i.modifiers);
