@@ -15,6 +15,7 @@ fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
         Settings::default().net_unit,
         false,
         &std::collections::HashMap::new(),
+        &actions,
     );
     LauncherApp::new(
         ctx,
@@ -49,6 +50,7 @@ fn new_app_with_settings(
         settings.net_unit,
         false,
         &plugin_settings,
+        &actions,
     );
     let enabled_plugins = settings.enabled_plugins.clone();
     LauncherApp::new(

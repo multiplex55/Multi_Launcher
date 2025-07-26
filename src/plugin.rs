@@ -18,6 +18,7 @@ use crate::plugins::reddit::RedditPlugin;
 use crate::plugins::runescape::RunescapeSearchPlugin;
 use crate::plugins::shell::ShellPlugin;
 use crate::plugins::snippets::SnippetsPlugin;
+use crate::plugins::omni_search::OmniSearchPlugin;
 use crate::plugins::sysinfo::SysInfoPlugin;
 use crate::plugins::system::SystemPlugin;
 #[cfg(target_os = "windows")]
@@ -94,6 +95,7 @@ impl PluginManager {
         net_unit: NetUnit,
         reset_alarm: bool,
         plugin_settings: &std::collections::HashMap<String, Value>,
+        actions: &[Action],
     ) {
         self.clear_plugins();
         self.register_with_settings(WebSearchPlugin, plugin_settings);
@@ -107,6 +109,7 @@ impl PluginManager {
         self.register_with_settings(ClipboardPlugin::new(clipboard_limit), plugin_settings);
         self.register_with_settings(BookmarksPlugin::default(), plugin_settings);
         self.register_with_settings(FoldersPlugin::default(), plugin_settings);
+        self.register_with_settings(OmniSearchPlugin::new(actions.to_vec()), plugin_settings);
         self.register_with_settings(SystemPlugin, plugin_settings);
         self.register_with_settings(ProcessesPlugin, plugin_settings);
         self.register_with_settings(SysInfoPlugin, plugin_settings);

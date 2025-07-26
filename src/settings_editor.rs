@@ -543,6 +543,7 @@ impl SettingsEditor {
                                                 app.net_unit,
                                                 false,
                                                 &new_settings.plugin_settings,
+                                                &app.actions,
                                             );
                                             crate::request_hotkey_restart(new_settings);
                                             if app.enable_toasts {
