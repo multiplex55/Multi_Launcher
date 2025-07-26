@@ -897,7 +897,7 @@ impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use egui::*;
 
-        tracing::debug!("LauncherApp::update called");
+        // tracing::debug!("LauncherApp::update called");
         if self.enable_toasts {
             self.toasts.show(ctx);
         }
@@ -1117,6 +1117,8 @@ impl eframe::App for LauncherApp {
                     && !self.tempfile_alias_dialog.open
                     && !self.tempfile_dialog.open
                     && !self.notes_dialog.open
+                    && !self.todo_dialog.open
+                    && !self.todo_view_dialog.open
                 {
                     launch_idx = self.handle_key(egui::Key::Enter);
                 }

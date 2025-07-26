@@ -30,3 +30,4 @@ fn empty_filter_returns_all() {
     let idx = TodoDialog::filtered_indices(&entries, "");
     assert_eq!(idx, vec![0, 1]);
 }
+
