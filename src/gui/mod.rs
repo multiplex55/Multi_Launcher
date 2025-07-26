@@ -896,6 +896,59 @@ impl LauncherApp {
     pub fn get_screenshot_save_file(&self) -> bool {
         self.screenshot_save_file
     }
+
+    /// Close the top-most open dialog if any is visible.
+    /// Returns `true` when a dialog was closed.
+    fn close_front_dialog(&mut self) -> bool {
+        if self.toast_log_dialog.open {
+            self.toast_log_dialog.open = false;
+        } else if self.cpu_list_dialog.open {
+            self.cpu_list_dialog.open = false;
+        } else if self.brightness_dialog.open {
+            self.brightness_dialog.open = false;
+        } else if self.volume_dialog.open {
+            self.volume_dialog.open = false;
+        } else if self.clipboard_dialog.open {
+            self.clipboard_dialog.open = false;
+        } else if self.todo_view_dialog.open {
+            self.todo_view_dialog.open = false;
+        } else if self.todo_dialog.open {
+            self.todo_dialog.open = false;
+        } else if self.notes_dialog.open {
+            self.notes_dialog.open = false;
+        } else if self.snippet_dialog.open {
+            self.snippet_dialog.open = false;
+        } else if self.shell_cmd_dialog.open {
+            self.shell_cmd_dialog.open = false;
+        } else if self.completion_dialog.open {
+            self.completion_dialog.open = false;
+        } else if self.timer_dialog.open {
+            self.timer_dialog.open = false;
+        } else if self.help_window.overlay_open {
+            self.help_window.overlay_open = false;
+        } else if self.help_window.open {
+            self.help_window.open = false;
+        } else if self.add_bookmark_dialog.open {
+            self.add_bookmark_dialog.open = false;
+        } else if self.tempfile_dialog.open {
+            self.tempfile_dialog.open = false;
+        } else if self.tempfile_alias_dialog.open {
+            self.tempfile_alias_dialog.open = false;
+        } else if self.bookmark_alias_dialog.open {
+            self.bookmark_alias_dialog.open = false;
+        } else if self.alias_dialog.open {
+            self.alias_dialog.open = false;
+        } else if self.show_plugins {
+            self.show_plugins = false;
+        } else if self.show_settings {
+            self.show_settings = false;
+        } else if self.show_editor {
+            self.show_editor = false;
+        } else {
+            return false;
+        }
+        true
+    }
 }
 
 impl eframe::App for LauncherApp {
@@ -1104,8 +1157,19 @@ impl eframe::App for LauncherApp {
                     input.request_focus();
                     self.focus_query = false;
                 }
+
                 if input.changed() {
                     self.search();
+                }
+
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    if self.any_panel_open() {
+                        if self.close_front_dialog() {
+                            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+                        }
+                    } else {
+                        self.visible_flag.store(false, Ordering::SeqCst);
+                    }
                 }
 
                 if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
