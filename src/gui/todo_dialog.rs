@@ -180,8 +180,119 @@ impl TodoDialog {
                     save_now = true;
                 }
             });
+        if self.open && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            let modifiers = ctx.input(|i| i.modifiers);
+            ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+            tracing::debug!("Enter pressed in TodoDialog: text='{}', tags='{}'", self.text, self.tags);
+            if !self.text.trim().is_empty() {
+                let tag_list: Vec<String> = self
+                    .tags
+                    .split(',')
+                    .map(|t| t.trim())
+                    .filter(|t| !t.is_empty())
+                    .map(|t| t.to_string())
+                    .collect();
+                self.entries.push(TodoEntry {
+                    text: self.text.clone(),
+                    done: false,
+                    priority: self.priority,
+                    tags: tag_list,
+                });
+                self.text.clear();
+                self.priority = 0;
+                if !self.persist_tags {
+                    self.tags.clear();
+                }
+                save_now = true;
+            }
+        }
         if save_now {
             self.save(app, false);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugin::PluginManager;
+    use crate::settings::Settings;
+    use std::sync::{Arc, atomic::AtomicBool};
+    use tempfile::tempdir;
+
+    fn new_app(ctx: &egui::Context) -> LauncherApp {
+        LauncherApp::new(
+            ctx,
+            Vec::new(),
+            0,
+            PluginManager::new(),
+            "actions.json".into(),
+            "settings.json".into(),
+            Settings::default(),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    #[test]
+    fn enter_adds_todo_with_filter_focus() {
+        let dir = tempdir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut dlg = TodoDialog::default();
+        dlg.open();
+        dlg.text = "task".into();
+        dlg.filter = "something".into();
+
+        ctx.begin_frame(egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        });
+        dlg.ui(&ctx, &mut app);
+        let _ = ctx.end_frame();
+
+        assert_eq!(dlg.entries.len(), 1);
+        assert_eq!(dlg.entries[0].text, "task");
+    }
+
+    #[test]
+    fn enter_adds_todo_with_tags() {
+        let dir = tempdir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut dlg = TodoDialog::default();
+        dlg.open();
+        dlg.text = "tagged".into();
+        dlg.tags = "a, b".into();
+
+        ctx.begin_frame(egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        });
+        dlg.ui(&ctx, &mut app);
+        let _ = ctx.end_frame();
+
+        assert_eq!(dlg.entries.len(), 1);
+        assert_eq!(dlg.entries[0].text, "tagged");
+        assert_eq!(dlg.entries[0].tags, vec!["a", "b"]);
     }
 }
