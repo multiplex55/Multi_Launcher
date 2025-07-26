@@ -180,8 +180,56 @@ impl TodoDialog {
                     save_now = true;
                 }
             });
+        if self.open
+            && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+            && !self.text.trim().is_empty()
+        {
+            let modifiers = ctx.input(|i| i.modifiers);
+            ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+            let tag_list: Vec<String> = self
+                .tags
+                .split(',')
+                .map(|t| t.trim())
+                .filter(|t| !t.is_empty())
+                .map(|t| t.to_string())
+                .collect();
+            self.entries.push(TodoEntry {
+                text: self.text.clone(),
+                done: false,
+                priority: self.priority,
+                tags: tag_list,
+            });
+            self.text.clear();
+            self.priority = 0;
+            if !self.persist_tags {
+                self.tags.clear();
+            }
+            self.save(app, false);
+        }
         if save_now {
             self.save(app, false);
         }
+    }
+}
+
+impl TodoDialog {
+    pub fn set_text(&mut self, text: &str) {
+        self.text = text.into();
+    }
+
+    pub fn set_tags(&mut self, tags: &str) {
+        self.tags = tags.into();
+    }
+
+    pub fn set_priority(&mut self, priority: u8) {
+        self.priority = priority;
+    }
+
+    pub fn set_filter(&mut self, filter: &str) {
+        self.filter = filter.into();
+    }
+
+    pub fn entries_len(&self) -> usize {
+        self.entries.len()
     }
 }
