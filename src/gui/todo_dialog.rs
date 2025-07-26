@@ -59,7 +59,6 @@ impl TodoDialog {
             return;
         }
         let mut save_now = false;
-        let mut enter_handled = false;
         let mut add_via_enter = false;
         let mut add_now = false;
         egui::Window::new("Todos")
@@ -102,23 +101,15 @@ impl TodoDialog {
                             .inner;
                         add_now |= add_resp.clicked();
                         let enter_pressed = ctx.input(|i| i.key_pressed(egui::Key::Enter));
-                        if !add_now
-                            && (text_resp.has_focus()
-                                || tags_resp.has_focus()
-                                || prio_resp.has_focus())
-                            && enter_pressed
+                        if enter_pressed
+                            && (text_resp.lost_focus()
+                                || tags_resp.lost_focus()
+                                || prio_resp.lost_focus())
                         {
                             add_now = true;
+                            add_via_enter = true;
                             let modifiers = ctx.input(|i| i.modifiers);
                             ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
-                            enter_handled = true;
-                            add_via_enter = true;
-                        }
-                        if add_now {
-                            add_via_enter |= enter_pressed;
-                            if !enter_pressed {
-                                add_via_enter = false;
-                            }
                         }
                         ui.end_row();
                     });
@@ -132,13 +123,9 @@ impl TodoDialog {
                 ui.horizontal(|ui| {
                     ui.label("Filter");
                     let filter_resp = ui.text_edit_singleline(&mut self.filter);
-                    if !enter_handled
-                        && filter_resp.has_focus()
-                        && ctx.input(|i| i.key_pressed(egui::Key::Enter))
-                    {
+                    if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && filter_resp.lost_focus() {
                         let modifiers = ctx.input(|i| i.modifiers);
                         ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
-                        enter_handled = true;
                         add_now = true;
                         add_via_enter = true;
                     }
@@ -181,7 +168,7 @@ impl TodoDialog {
                 }
             });
 
-        if !add_now && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+        if self.open && ctx.input(|i| i.key_pressed(egui::Key::Enter)) && !add_now {
             let modifiers = ctx.input(|i| i.modifiers);
             ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
             add_now = true;
@@ -212,6 +199,8 @@ impl TodoDialog {
                 self.tags.clear();
             }
             save_now = true;
+        } else if add_now && add_via_enter {
+            tracing::debug!("Enter pressed but todo text empty; ignoring");
         }
         if save_now {
             self.save(app, false);
