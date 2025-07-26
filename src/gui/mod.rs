@@ -897,7 +897,7 @@ impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use egui::*;
 
-        tracing::debug!("LauncherApp::update called");
+        // tracing::debug!("LauncherApp::update called");
         if self.enable_toasts {
             self.toasts.show(ctx);
         }
