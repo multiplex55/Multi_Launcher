@@ -145,6 +145,58 @@ fn push_toast(toasts: &mut Toasts, toast: Toast) {
     toasts.add(toast);
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Panel {
+    AliasDialog,
+    BookmarkAliasDialog,
+    TempfileAliasDialog,
+    TempfileDialog,
+    AddBookmarkDialog,
+    HelpOverlay,
+    HelpWindow,
+    TimerDialog,
+    CompletionDialog,
+    ShellCmdDialog,
+    SnippetDialog,
+    NotesDialog,
+    TodoDialog,
+    TodoViewDialog,
+    ClipboardDialog,
+    VolumeDialog,
+    BrightnessDialog,
+    CpuListDialog,
+    ToastLogDialog,
+    Editor,
+    Settings,
+    Plugins,
+}
+
+#[derive(Default)]
+struct PanelStates {
+    alias_dialog: bool,
+    bookmark_alias_dialog: bool,
+    tempfile_alias_dialog: bool,
+    tempfile_dialog: bool,
+    add_bookmark_dialog: bool,
+    help_overlay: bool,
+    help_window: bool,
+    timer_dialog: bool,
+    completion_dialog: bool,
+    shell_cmd_dialog: bool,
+    snippet_dialog: bool,
+    notes_dialog: bool,
+    todo_dialog: bool,
+    todo_view_dialog: bool,
+    clipboard_dialog: bool,
+    volume_dialog: bool,
+    brightness_dialog: bool,
+    cpu_list_dialog: bool,
+    toast_log_dialog: bool,
+    editor: bool,
+    settings: bool,
+    plugins: bool,
+}
+
 pub struct LauncherApp {
     pub actions: Vec<Action>,
     action_cache: Vec<(String, String)>,
@@ -205,6 +257,8 @@ pub struct LauncherApp {
     brightness_dialog: BrightnessDialog,
     cpu_list_dialog: CpuListDialog,
     toast_log_dialog: ToastLogDialog,
+    panel_stack: Vec<Panel>,
+    panel_states: PanelStates,
     pub help_flag: Arc<AtomicBool>,
     pub hotkey_str: Option<String>,
     pub quit_hotkey_str: Option<String>,
@@ -511,6 +565,8 @@ impl LauncherApp {
             brightness_dialog: BrightnessDialog::default(),
             cpu_list_dialog: CpuListDialog::default(),
             toast_log_dialog: ToastLogDialog::default(),
+            panel_stack: Vec::new(),
+            panel_states: PanelStates::default(),
             help_flag: help_flag.clone(),
             hotkey_str: settings.hotkey.clone(),
             quit_hotkey_str: settings.quit_hotkey.clone(),
@@ -900,54 +956,73 @@ impl LauncherApp {
     /// Close the top-most open dialog if any is visible.
     /// Returns `true` when a dialog was closed.
     fn close_front_dialog(&mut self) -> bool {
-        if self.toast_log_dialog.open {
-            self.toast_log_dialog.open = false;
-        } else if self.cpu_list_dialog.open {
-            self.cpu_list_dialog.open = false;
-        } else if self.brightness_dialog.open {
-            self.brightness_dialog.open = false;
-        } else if self.volume_dialog.open {
-            self.volume_dialog.open = false;
-        } else if self.clipboard_dialog.open {
-            self.clipboard_dialog.open = false;
-        } else if self.todo_view_dialog.open {
-            self.todo_view_dialog.open = false;
-        } else if self.todo_dialog.open {
-            self.todo_dialog.open = false;
-        } else if self.notes_dialog.open {
-            self.notes_dialog.open = false;
-        } else if self.snippet_dialog.open {
-            self.snippet_dialog.open = false;
-        } else if self.shell_cmd_dialog.open {
-            self.shell_cmd_dialog.open = false;
-        } else if self.completion_dialog.open {
-            self.completion_dialog.open = false;
-        } else if self.timer_dialog.open {
-            self.timer_dialog.open = false;
-        } else if self.help_window.overlay_open {
-            self.help_window.overlay_open = false;
-        } else if self.help_window.open {
-            self.help_window.open = false;
-        } else if self.add_bookmark_dialog.open {
-            self.add_bookmark_dialog.open = false;
-        } else if self.tempfile_dialog.open {
-            self.tempfile_dialog.open = false;
-        } else if self.tempfile_alias_dialog.open {
-            self.tempfile_alias_dialog.open = false;
-        } else if self.bookmark_alias_dialog.open {
-            self.bookmark_alias_dialog.open = false;
-        } else if self.alias_dialog.open {
-            self.alias_dialog.open = false;
-        } else if self.show_plugins {
-            self.show_plugins = false;
-        } else if self.show_settings {
-            self.show_settings = false;
-        } else if self.show_editor {
-            self.show_editor = false;
-        } else {
-            return false;
+        let panel = match self.panel_stack.pop() {
+            Some(p) => p,
+            None => return false,
+        };
+        match panel {
+            Panel::AliasDialog => { self.alias_dialog.open = false; self.panel_states.alias_dialog = false; }
+            Panel::BookmarkAliasDialog => { self.bookmark_alias_dialog.open = false; self.panel_states.bookmark_alias_dialog = false; }
+            Panel::TempfileAliasDialog => { self.tempfile_alias_dialog.open = false; self.panel_states.tempfile_alias_dialog = false; }
+            Panel::TempfileDialog => { self.tempfile_dialog.open = false; self.panel_states.tempfile_dialog = false; }
+            Panel::AddBookmarkDialog => { self.add_bookmark_dialog.open = false; self.panel_states.add_bookmark_dialog = false; }
+            Panel::HelpOverlay => { self.help_window.overlay_open = false; self.panel_states.help_overlay = false; }
+            Panel::HelpWindow => { self.help_window.open = false; self.panel_states.help_window = false; }
+            Panel::TimerDialog => { self.timer_dialog.open = false; self.panel_states.timer_dialog = false; }
+            Panel::CompletionDialog => { self.completion_dialog.open = false; self.panel_states.completion_dialog = false; }
+            Panel::ShellCmdDialog => { self.shell_cmd_dialog.open = false; self.panel_states.shell_cmd_dialog = false; }
+            Panel::SnippetDialog => { self.snippet_dialog.open = false; self.panel_states.snippet_dialog = false; }
+            Panel::NotesDialog => { self.notes_dialog.open = false; self.panel_states.notes_dialog = false; }
+            Panel::TodoDialog => { self.todo_dialog.open = false; self.panel_states.todo_dialog = false; }
+            Panel::TodoViewDialog => { self.todo_view_dialog.open = false; self.panel_states.todo_view_dialog = false; }
+            Panel::ClipboardDialog => { self.clipboard_dialog.open = false; self.panel_states.clipboard_dialog = false; }
+            Panel::VolumeDialog => { self.volume_dialog.open = false; self.panel_states.volume_dialog = false; }
+            Panel::BrightnessDialog => { self.brightness_dialog.open = false; self.panel_states.brightness_dialog = false; }
+            Panel::CpuListDialog => { self.cpu_list_dialog.open = false; self.panel_states.cpu_list_dialog = false; }
+            Panel::ToastLogDialog => { self.toast_log_dialog.open = false; self.panel_states.toast_log_dialog = false; }
+            Panel::Editor => { self.show_editor = false; self.panel_states.editor = false; }
+            Panel::Settings => { self.show_settings = false; self.panel_states.settings = false; }
+            Panel::Plugins => { self.show_plugins = false; self.panel_states.plugins = false; }
         }
         true
+    }
+
+    fn update_panel_stack(&mut self) {
+        macro_rules! check {
+            ($cond:expr, $field:ident, $kind:expr) => {
+                if $cond && !self.panel_states.$field {
+                    self.panel_stack.retain(|p| *p != $kind);
+                    self.panel_stack.push($kind);
+                    self.panel_states.$field = true;
+                } else if !$cond && self.panel_states.$field {
+                    self.panel_stack.retain(|p| *p != $kind);
+                    self.panel_states.$field = false;
+                }
+            };
+        }
+
+        check!(self.alias_dialog.open, alias_dialog, Panel::AliasDialog);
+        check!(self.bookmark_alias_dialog.open, bookmark_alias_dialog, Panel::BookmarkAliasDialog);
+        check!(self.tempfile_alias_dialog.open, tempfile_alias_dialog, Panel::TempfileAliasDialog);
+        check!(self.tempfile_dialog.open, tempfile_dialog, Panel::TempfileDialog);
+        check!(self.add_bookmark_dialog.open, add_bookmark_dialog, Panel::AddBookmarkDialog);
+        check!(self.help_window.overlay_open, help_overlay, Panel::HelpOverlay);
+        check!(self.help_window.open, help_window, Panel::HelpWindow);
+        check!(self.timer_dialog.open, timer_dialog, Panel::TimerDialog);
+        check!(self.completion_dialog.open, completion_dialog, Panel::CompletionDialog);
+        check!(self.shell_cmd_dialog.open, shell_cmd_dialog, Panel::ShellCmdDialog);
+        check!(self.snippet_dialog.open, snippet_dialog, Panel::SnippetDialog);
+        check!(self.notes_dialog.open, notes_dialog, Panel::NotesDialog);
+        check!(self.todo_dialog.open, todo_dialog, Panel::TodoDialog);
+        check!(self.todo_view_dialog.open, todo_view_dialog, Panel::TodoViewDialog);
+        check!(self.clipboard_dialog.open, clipboard_dialog, Panel::ClipboardDialog);
+        check!(self.volume_dialog.open, volume_dialog, Panel::VolumeDialog);
+        check!(self.brightness_dialog.open, brightness_dialog, Panel::BrightnessDialog);
+        check!(self.cpu_list_dialog.open, cpu_list_dialog, Panel::CpuListDialog);
+        check!(self.toast_log_dialog.open, toast_log_dialog, Panel::ToastLogDialog);
+        check!(self.show_editor, editor, Panel::Editor);
+        check!(self.show_settings, settings, Panel::Settings);
+        check!(self.show_plugins, plugins, Panel::Plugins);
     }
 }
 
@@ -2080,6 +2155,7 @@ impl eframe::App for LauncherApp {
         let mut toast_dlg = std::mem::take(&mut self.toast_log_dialog);
         toast_dlg.ui(ctx, self);
         self.toast_log_dialog = toast_dlg;
+        self.update_panel_stack();
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
