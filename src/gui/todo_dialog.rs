@@ -181,6 +181,13 @@ impl TodoDialog {
                 }
             });
 
+        if !add_now && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            let modifiers = ctx.input(|i| i.modifiers);
+            ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+            add_now = true;
+            add_via_enter = true;
+        }
+
         if add_now && !self.text.trim().is_empty() {
             let tag_list: Vec<String> = self
                 .tags
@@ -190,6 +197,7 @@ impl TodoDialog {
                 .map(|t| t.to_string())
                 .collect();
             if add_via_enter {
+                tracing::debug!("Enter pressed in TodoDialog: text='{}', tags='{}'", self.text, self.tags);
                 tracing::debug!("Adding todo via Enter: '{}', tags={:?}", self.text, tag_list);
             }
             self.entries.push(TodoEntry {
@@ -204,36 +212,6 @@ impl TodoDialog {
                 self.tags.clear();
             }
             save_now = true;
-        }
-        if self.open && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-            let modifiers = ctx.input(|i| i.modifiers);
-            ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
-            tracing::debug!("Enter pressed in TodoDialog: text='{}', tags='{}'", self.text, self.tags);
-            if !self.text.trim().is_empty() {
-                let text = self.text.clone();
-                let tag_list: Vec<String> = self
-                    .tags
-                    .split(',')
-                    .map(|t| t.trim())
-                    .filter(|t| !t.is_empty())
-                    .map(|t| t.to_string())
-                    .collect();
-                tracing::debug!("Adding todo via Enter: '{}', tags={:?}", text, tag_list);
-                self.entries.push(TodoEntry {
-                    text,
-                    done: false,
-                    priority: self.priority,
-                    tags: tag_list.clone(),
-                });
-                self.text.clear();
-                self.priority = 0;
-                if !self.persist_tags {
-                    self.tags.clear();
-                }
-                save_now = true;
-            } else {
-                tracing::debug!("Enter pressed but todo text empty; ignoring");
-            }
         }
         if save_now {
             self.save(app, false);
