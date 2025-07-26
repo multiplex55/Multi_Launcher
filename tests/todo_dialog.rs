@@ -63,7 +63,7 @@ fn enter_adds_todo_without_focus() {
     std::env::set_current_dir(dir.path()).unwrap();
 
     let ctx = egui::Context::default();
-    ctx.run(Default::default(), |_| {});
+    let _ = ctx.run(Default::default(), |_| {});
     let mut app = new_app(&ctx);
     let mut dlg = TodoDialog::default();
     dlg.open();
