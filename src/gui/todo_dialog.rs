@@ -54,6 +54,32 @@ impl TodoDialog {
             .collect()
     }
 
+    fn add_todo(&mut self) -> bool {
+        if self.text.trim().is_empty() {
+            return false;
+        }
+        let tag_list: Vec<String> = self
+            .tags
+            .split(',')
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+            .collect();
+        tracing::debug!("Adding todo: '{}' tags={:?}", self.text, tag_list);
+        self.entries.push(TodoEntry {
+            text: self.text.clone(),
+            done: false,
+            priority: self.priority,
+            tags: tag_list,
+        });
+        self.text.clear();
+        self.priority = 0;
+        if !self.persist_tags {
+            self.tags.clear();
+        }
+        true
+    }
+
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         if !self.open {
             return;
@@ -186,29 +212,12 @@ impl TodoDialog {
             add_now = true;
         }
 
-        if add_now && !self.text.trim().is_empty() {
-            let tag_list: Vec<String> = self
-                .tags
-                .split(',')
-                .map(|t| t.trim())
-                .filter(|t| !t.is_empty())
-                .map(|t| t.to_string())
-                .collect();
-            tracing::debug!("Adding todo via Enter: '{}', tags={:?}", self.text, tag_list);
-            self.entries.push(TodoEntry {
-                text: self.text.clone(),
-                done: false,
-                priority: self.priority,
-                tags: tag_list,
-            });
-            self.text.clear();
-            self.priority = 0;
-            if !self.persist_tags {
-                self.tags.clear();
+        if add_now {
+            if self.add_todo() {
+                save_now = true;
+            } else {
+                tracing::debug!("Enter pressed but todo text empty; ignoring");
             }
-            save_now = true;
-        } else if add_now {
-            tracing::debug!("Enter pressed but todo text empty; ignoring");
         }
         if save_now {
             self.save(app, false);
