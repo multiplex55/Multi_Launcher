@@ -14,6 +14,47 @@ pub struct TodoDialog {
 }
 
 impl TodoDialog {
+    fn push_current_entry(&mut self) -> bool {
+        if self.text.trim().is_empty() {
+            return false;
+        }
+        let tag_list: Vec<String> = self
+            .tags
+            .split(',')
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+            .collect();
+        self.entries.push(TodoEntry {
+            text: self.text.clone(),
+            done: false,
+            priority: self.priority,
+            tags: tag_list,
+        });
+        self.text.clear();
+        self.priority = 0;
+        if !self.persist_tags {
+            self.tags.clear();
+        }
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_fields(&mut self, text: &str, priority: u8, tags: &str) {
+        self.text = text.to_string();
+        self.priority = priority;
+        self.tags = tags.to_string();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entry_text(&self, idx: usize) -> &str {
+        &self.entries[idx].text
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
     pub fn open(&mut self) {
         self.entries = load_todos(TODO_FILE).unwrap_or_default();
         self.open = true;
@@ -180,6 +221,18 @@ impl TodoDialog {
                     save_now = true;
                 }
             });
+
+        if self.open
+            && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+            && !app.todo_view_dialog.open
+        {
+            let modifiers = ctx.input(|i| i.modifiers);
+            ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+            if self.push_current_entry() {
+                self.save(app, false);
+            }
+        }
+
         if save_now {
             self.save(app, false);
         }
