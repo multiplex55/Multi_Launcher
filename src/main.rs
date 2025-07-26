@@ -56,6 +56,7 @@ fn spawn_gui(
         settings.net_unit,
         true,
         &settings.plugin_settings,
+        &actions_for_window,
     );
 
     let actions_path = "actions.json".to_string();

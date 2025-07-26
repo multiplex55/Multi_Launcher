@@ -15,6 +15,7 @@ fn new_app_with_plugins(ctx: &egui::Context, actions: Vec<Action>) -> LauncherAp
         Settings::default().net_unit,
         false,
         &std::collections::HashMap::new(),
+        &actions,
     );
     LauncherApp::new(
         ctx,

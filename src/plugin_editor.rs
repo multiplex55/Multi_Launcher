@@ -50,6 +50,7 @@ impl PluginEditor {
             Settings::default().net_unit,
             false,
             &std::collections::HashMap::new(),
+            &[],
         );
         let mut infos = pm.plugin_infos();
         infos.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
@@ -129,6 +130,7 @@ impl PluginEditor {
                         app.net_unit,
                         false,
                         &s.plugin_settings,
+                        &app.actions,
                     );
                     tracing::debug!(available=?app.plugins.plugin_names(), "plugins reloaded");
                     self.available = Self::gather_available(&dirs);

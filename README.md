@@ -197,6 +197,7 @@ Built-in commands:
 | `cb` | `cb list` | Clipboard history |
 | `bm` | `bm add <url>` | Manage bookmarks |
 | `f` | `f add <path>` | Folder shortcuts |
+| `o` | `o <query>` | Omni search |
 | `sys` | `sys shutdown` | System actions |
 | `ps` | `ps` | Process list |
 | `info` | `info cpu` | System information |
@@ -310,6 +311,7 @@ The bookmarks plugin uses the `bm` prefix. Use `bm add <url>` to save a link,
 `bm rm` to list and remove bookmarks (optionally filtering with a pattern) or
 `bm list` to show all bookmarks. Searching with `bm <term>` matches both URLs
 and aliases.
+The omni search plugin uses the `o` prefix to search folders, bookmarks and saved apps at once.
 The envvar plugin uses the `env` prefix and shows matching environment variables
 and their values.
 The system information plugin uses the `info` prefix. Type `info` to show CPU,

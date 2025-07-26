@@ -28,3 +28,4 @@ pub mod asciiart;
 pub mod task_manager;
 pub mod windows;
 pub mod screenshot;
+pub mod omni_search;

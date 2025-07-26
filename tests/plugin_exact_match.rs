@@ -20,6 +20,7 @@ fn new_app(ctx: &egui::Context, settings: Settings) -> LauncherApp {
         Settings::default().net_unit,
         false,
         &std::collections::HashMap::new(),
+        &[],
     );
     LauncherApp::new(
         ctx,
