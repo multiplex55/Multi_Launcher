@@ -76,7 +76,7 @@ pub fn run_macro(name: &str) -> anyhow::Result<()> {
         for (i, step) in entry.steps.iter().enumerate() {
             let command = step.path.as_deref().unwrap_or(step.action.trim());
             let act = Action {
-                label: command.to_string(),
+                label: step.action.clone(),
                 desc: String::new(),
                 action: command.to_string(),
                 args: step.args.clone(),
