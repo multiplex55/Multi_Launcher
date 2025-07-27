@@ -90,6 +90,7 @@ value as shown below:
     "weather",
     "system",
     "timer",
+    "macros",
     "history",
     "help"
   ],
@@ -256,6 +257,14 @@ sequenceDiagram
     L->>P: capture screen
     P-->>L: image path
     L->>U: save/copy
+```
+
+### Macros Plugin
+The macros plugin runs a saved sequence of launcher commands. Macros are stored in `macros.json` and can be edited by typing `macro` to open the editor.
+
+```text
+macro list
+macro example
 ```
 
 When the search box is empty the launcher shows these shortcuts along with `app <alias>` entries for saved actions.
