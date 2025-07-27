@@ -1,10 +1,10 @@
 use crate::actions::Action;
 use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::launcher::launch_action;
-use once_cell::sync::Lazy;
 use crate::plugin::Plugin;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -78,7 +78,7 @@ pub fn run_macro(name: &str) -> anyhow::Result<()> {
             let act = Action {
                 label: step.label.clone(),
                 desc: String::new(),
-                action: step.command.clone(),
+                action: step.command.trim().to_string(),
                 args: step.args.clone(),
             };
             if let Err(e) = launch_action(&act) {

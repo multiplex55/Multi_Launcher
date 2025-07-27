@@ -89,7 +89,12 @@ impl MacroDialog {
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut self.auto_delay, "Automatic delay");
                         if self.auto_delay {
-                            ui.add(egui::DragValue::new(&mut self.auto_delay_secs).speed(0.1).clamp_range(0.0..=60.0).suffix("s"));
+                            ui.add(
+                                egui::DragValue::new(&mut self.auto_delay_secs)
+                                    .speed(0.1)
+                                    .clamp_range(0.0..=60.0)
+                                    .suffix("s"),
+                            );
                         }
                     });
                     ui.label("Steps");
@@ -105,7 +110,12 @@ impl MacroDialog {
                             ui.text_edit_singleline(args);
                             if !self.auto_delay {
                                 let mut secs = self.steps[i].delay_ms as f32 / 1000.0;
-                                ui.add(egui::DragValue::new(&mut secs).speed(0.1).clamp_range(0.0..=60.0).suffix("s"));
+                                ui.add(
+                                    egui::DragValue::new(&mut secs)
+                                        .speed(0.1)
+                                        .clamp_range(0.0..=60.0)
+                                        .suffix("s"),
+                                );
                                 self.steps[i].delay_ms = (secs * 1000.0) as u64;
                             }
                             if ui.button("Up").clicked() {
@@ -180,15 +190,34 @@ impl MacroDialog {
                                     {
                                         continue;
                                     }
-                                    if ui.button(format!("{} - {}", act.label, act.desc)).clicked() {
+                                    if ui.button(format!("{} - {}", act.label, act.desc)).clicked()
+                                    {
+                                        let mut command = act.action.clone();
+                                        let mut args = if self.add_args.trim().is_empty() {
+                                            None
+                                        } else {
+                                            Some(self.add_args.clone())
+                                        };
+
+                                        if let Some(q) = command.strip_prefix("query:") {
+                                            let mut q = q.to_string();
+                                            if let Some(ref a) = args {
+                                                q.push_str(a);
+                                            }
+                                            if let Some(res) = plugin.search(&q).into_iter().next()
+                                            {
+                                                command = res.action;
+                                                args = res.args;
+                                            } else {
+                                                command = q;
+                                                args = None;
+                                            }
+                                        }
+
                                         self.steps.push(MacroStep {
                                             label: act.label.clone(),
-                                            command: act.action.clone(),
-                                            args: if self.add_args.trim().is_empty() {
-                                                None
-                                            } else {
-                                                Some(self.add_args.clone())
-                                            },
+                                            command,
+                                            args,
                                             delay_ms: 0,
                                         });
                                         self.add_args.clear();
