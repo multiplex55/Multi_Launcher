@@ -218,6 +218,7 @@ Built-in commands:
 | `tmp` | `tmp new [name]` | Temporary files |
 | `ascii` | `ascii text` | ASCII art |
 | `emoji` | `emoji smile` | Emoji search |
+| `case` | `case hello world` | Case conversions |
 | `app` | `app <filter>` | Saved apps |
 | `vol` | `vol 50` | Volume control |
 | `media` | `media play` | Media controls |
@@ -259,6 +260,15 @@ sequenceDiagram
     P-->>L: image path
     L->>U: save/copy
 ```
+
+### Text Case Plugin
+Convert text to different cases. Example:
+
+```text
+case Hello World
+```
+
+The plugin shows uppercase, lowercase, title case and snake_case variants. Select one to copy it.
 
 ### Macros Plugin
 The macros plugin runs a saved sequence of launcher commands. Macros are stored in `macros.json` and can be edited by typing `macro` to open the editor.
