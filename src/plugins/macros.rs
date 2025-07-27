@@ -80,31 +80,8 @@ impl MacrosPlugin {
             watcher,
         }
     }
-}
 
-impl Default for MacrosPlugin {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Plugin for MacrosPlugin {
-    fn search(&self, query: &str) -> Vec<Action> {
-        let trimmed = query.trim();
-        if trimmed.eq_ignore_ascii_case("macro") {
-            return vec![Action {
-                label: "macro: edit macros".into(),
-                desc: "Macro".into(),
-                action: "macro:dialog".into(),
-                args: None,
-            }];
-        }
-        const PREFIX: &str = "macro ";
-        let rest = match crate::common::strip_prefix_ci(trimmed, PREFIX) {
-            Some(r) => r,
-            None => return Vec::new(),
-        };
-        let filter = rest.trim();
+    fn list(&self, filter: &str) -> Vec<Action> {
         let guard = match self.data.lock() {
             Ok(g) => g,
             Err(_) => return Vec::new(),
@@ -124,6 +101,38 @@ impl Plugin for MacrosPlugin {
             })
             .collect()
     }
+}
+
+impl Default for MacrosPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Plugin for MacrosPlugin {
+    fn search(&self, query: &str) -> Vec<Action> {
+        let trimmed = query.trim();
+        if trimmed.eq_ignore_ascii_case("macro") {
+            return vec![Action {
+                label: "macro: edit macros".into(),
+                desc: "Macro".into(),
+                action: "macro:dialog".into(),
+                args: None,
+            }];
+        }
+
+        const LIST_PREFIX: &str = "macro list";
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
+            return self.list(rest.trim());
+        }
+
+        const PREFIX: &str = "macro ";
+        let rest = match crate::common::strip_prefix_ci(trimmed, PREFIX) {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        self.list(rest.trim())
+    }
 
     fn name(&self) -> &str {
         "macros"
@@ -138,11 +147,19 @@ impl Plugin for MacrosPlugin {
     }
 
     fn commands(&self) -> Vec<Action> {
-        vec![Action {
-            label: "macro".into(),
-            desc: "Macro".into(),
-            action: "query:macro ".into(),
-            args: None,
-        }]
+        vec![
+            Action {
+                label: "macro".into(),
+                desc: "Macro".into(),
+                action: "query:macro ".into(),
+                args: None,
+            },
+            Action {
+                label: "macro list".into(),
+                desc: "Macro".into(),
+                action: "query:macro list".into(),
+                args: None,
+            },
+        ]
     }
 }

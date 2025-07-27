@@ -9,7 +9,9 @@ pub struct MacroDialog {
     edit_idx: Option<usize>,
     label: String,
     desc: String,
-    steps: String,
+    steps: Vec<String>,
+    add_plugin: String,
+    add_filter: String,
 }
 
 impl MacroDialog {
@@ -20,6 +22,8 @@ impl MacroDialog {
         self.label.clear();
         self.desc.clear();
         self.steps.clear();
+        self.add_plugin.clear();
+        self.add_filter.clear();
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
@@ -49,40 +53,94 @@ impl MacroDialog {
                         ui.label("Description");
                         ui.text_edit_singleline(&mut self.desc);
                     });
-                    ui.label("Steps (one per line)");
-                    ui.text_edit_multiline(&mut self.steps);
+                    ui.label("Steps");
+                    let mut remove_step: Option<usize> = None;
+                    for i in 0..self.steps.len() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{}.", i + 1));
+                            ui.text_edit_singleline(&mut self.steps[i]);
+                            if ui.button("Remove").clicked() {
+                                remove_step = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(i) = remove_step {
+                        self.steps.remove(i);
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Category");
+                        egui::ComboBox::from_id_source("macro_cat")
+                            .selected_text(if self.add_plugin.is_empty() {
+                                "Select".to_string()
+                            } else {
+                                self.add_plugin.clone()
+                            })
+                            .show_ui(ui, |ui| {
+                                for p in app.plugins.iter() {
+                                    let name = p.name();
+                                    ui.selectable_value(
+                                        &mut self.add_plugin,
+                                        name.to_string(),
+                                        name,
+                                    );
+                                }
+                            });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Filter");
+                        ui.text_edit_singleline(&mut self.add_filter);
+                    });
+                    if let Some(plugin) = app.plugins.iter().find(|p| p.name() == self.add_plugin) {
+                        let filter = self.add_filter.to_lowercase();
+                        let actions = plugin.commands();
+                        egui::ScrollArea::vertical()
+                            .max_height(100.0)
+                            .show(ui, |ui| {
+                                for act in actions {
+                                    if !filter.is_empty()
+                                        && !act.label.to_lowercase().contains(&filter)
+                                        && !act.desc.to_lowercase().contains(&filter)
+                                        && !act.action.to_lowercase().contains(&filter)
+                                    {
+                                        continue;
+                                    }
+                                    if ui.button(format!("{} - {}", act.label, act.desc)).clicked()
+                                    {
+                                        self.steps.push(act.action.clone());
+                                    }
+                                }
+                            });
+                    }
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.label.trim().is_empty() {
                                 app.set_error("Label required".into());
                             } else {
-                                let steps: Vec<String> = self
-                                    .steps
-                                    .lines()
-                                    .map(|l| l.trim())
-                                    .filter(|l| !l.is_empty())
-                                    .map(|l| l.to_string())
-                                    .collect();
                                 if idx == self.entries.len() {
                                     self.entries.push(MacroEntry {
                                         label: self.label.clone(),
                                         desc: self.desc.clone(),
-                                        steps,
+                                        steps: self.steps.clone(),
                                     });
                                 } else if let Some(e) = self.entries.get_mut(idx) {
                                     e.label = self.label.clone();
                                     e.desc = self.desc.clone();
-                                    e.steps = steps;
+                                    e.steps = self.steps.clone();
                                 }
                                 self.edit_idx = None;
                                 self.label.clear();
                                 self.desc.clear();
                                 self.steps.clear();
+                                self.add_plugin.clear();
+                                self.add_filter.clear();
                                 save_now = true;
                             }
                         }
                         if ui.button("Cancel").clicked() {
                             self.edit_idx = None;
+                            self.add_plugin.clear();
+                            self.add_filter.clear();
                         }
                     });
                 } else {
@@ -98,7 +156,9 @@ impl MacroDialog {
                                         self.edit_idx = Some(idx);
                                         self.label = entry.label.clone();
                                         self.desc = entry.desc.clone();
-                                        self.steps = entry.steps.join("\n");
+                                        self.steps = entry.steps.clone();
+                                        self.add_plugin.clear();
+                                        self.add_filter.clear();
                                     }
                                     if ui.button("Remove").clicked() {
                                         remove = Some(idx);
@@ -115,6 +175,8 @@ impl MacroDialog {
                         self.label.clear();
                         self.desc.clear();
                         self.steps.clear();
+                        self.add_plugin.clear();
+                        self.add_filter.clear();
                     }
                     if ui.button("Close").clicked() {
                         close = true;
