@@ -2,7 +2,6 @@ use crate::gui::LauncherApp;
 use crate::plugins::macros::{load_macros, save_macros, MacroEntry, MacroStep, MACROS_FILE};
 use eframe::egui;
 
-#[derive(Default)]
 pub struct MacroDialog {
     pub open: bool,
     entries: Vec<MacroEntry>,
@@ -10,9 +9,29 @@ pub struct MacroDialog {
     label: String,
     desc: String,
     steps: Vec<MacroStep>,
+    auto_delay: bool,
+    auto_delay_secs: f32,
     add_plugin: String,
     add_filter: String,
     add_args: String,
+}
+
+impl Default for MacroDialog {
+    fn default() -> Self {
+        Self {
+            open: false,
+            entries: Vec::new(),
+            edit_idx: None,
+            label: String::new(),
+            desc: String::new(),
+            steps: Vec::new(),
+            auto_delay: false,
+            auto_delay_secs: 1.0,
+            add_plugin: String::new(),
+            add_filter: String::new(),
+            add_args: String::new(),
+        }
+    }
 }
 
 impl MacroDialog {
@@ -23,6 +42,8 @@ impl MacroDialog {
         self.label.clear();
         self.desc.clear();
         self.steps.clear();
+        self.auto_delay = false;
+        self.auto_delay_secs = 1.0;
         self.add_plugin.clear();
         self.add_filter.clear();
         self.add_args.clear();
@@ -55,8 +76,16 @@ impl MacroDialog {
                         ui.label("Description");
                         ui.text_edit_singleline(&mut self.desc);
                     });
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.auto_delay, "Automatic delay");
+                        if self.auto_delay {
+                            ui.add(egui::DragValue::new(&mut self.auto_delay_secs).speed(0.1).clamp_range(0.0..=60.0).suffix("s"));
+                        }
+                    });
                     ui.label("Steps");
                     let mut remove_step: Option<usize> = None;
+                    let mut move_up: Option<usize> = None;
+                    let mut move_down: Option<usize> = None;
                     for i in 0..self.steps.len() {
                         ui.horizontal(|ui| {
                             ui.label(format!("{}.", i + 1));
@@ -64,10 +93,31 @@ impl MacroDialog {
                             ui.label("Args");
                             let args = self.steps[i].args.get_or_insert_with(String::new);
                             ui.text_edit_singleline(args);
+                            if !self.auto_delay {
+                                let mut secs = self.steps[i].delay_ms as f32 / 1000.0;
+                                ui.add(egui::DragValue::new(&mut secs).speed(0.1).clamp_range(0.0..=60.0).suffix("s"));
+                                self.steps[i].delay_ms = (secs * 1000.0) as u64;
+                            }
+                            if ui.button("Up").clicked() {
+                                move_up = Some(i);
+                            }
+                            if ui.button("Down").clicked() {
+                                move_down = Some(i);
+                            }
                             if ui.button("Remove").clicked() {
                                 remove_step = Some(i);
                             }
                         });
+                    }
+                    if let Some(i) = move_up {
+                        if i > 0 {
+                            self.steps.swap(i, i - 1);
+                        }
+                    }
+                    if let Some(i) = move_down {
+                        if i + 1 < self.steps.len() {
+                            self.steps.swap(i, i + 1);
+                        }
                     }
                     if let Some(i) = remove_step {
                         self.steps.remove(i);
@@ -129,6 +179,7 @@ impl MacroDialog {
                                             } else {
                                                 Some(self.add_args.clone())
                                             },
+                                            delay_ms: 0,
                                         });
                                         self.add_args.clear();
                                     }
@@ -144,17 +195,29 @@ impl MacroDialog {
                                     self.entries.push(MacroEntry {
                                         label: self.label.clone(),
                                         desc: self.desc.clone(),
+                                        auto_delay_ms: if self.auto_delay {
+                                            Some((self.auto_delay_secs * 1000.0) as u64)
+                                        } else {
+                                            None
+                                        },
                                         steps: self.steps.clone(),
                                     });
                                 } else if let Some(e) = self.entries.get_mut(idx) {
                                     e.label = self.label.clone();
                                     e.desc = self.desc.clone();
+                                    e.auto_delay_ms = if self.auto_delay {
+                                        Some((self.auto_delay_secs * 1000.0) as u64)
+                                    } else {
+                                        None
+                                    };
                                     e.steps = self.steps.clone();
                                 }
                                 self.edit_idx = None;
                                 self.label.clear();
                                 self.desc.clear();
                                 self.steps.clear();
+                                self.auto_delay = false;
+                                self.auto_delay_secs = 1.0;
                                 self.add_plugin.clear();
                                 self.add_filter.clear();
                                 self.add_args.clear();
@@ -163,6 +226,8 @@ impl MacroDialog {
                         }
                         if ui.button("Cancel").clicked() {
                             self.edit_idx = None;
+                            self.auto_delay = false;
+                            self.auto_delay_secs = 1.0;
                             self.add_plugin.clear();
                             self.add_filter.clear();
                             self.add_args.clear();
@@ -182,6 +247,13 @@ impl MacroDialog {
                                         self.label = entry.label.clone();
                                         self.desc = entry.desc.clone();
                                         self.steps = entry.steps.clone();
+                                        if let Some(ms) = entry.auto_delay_ms {
+                                            self.auto_delay = true;
+                                            self.auto_delay_secs = ms as f32 / 1000.0;
+                                        } else {
+                                            self.auto_delay = false;
+                                            self.auto_delay_secs = 1.0;
+                                        }
                                         self.add_plugin.clear();
                                         self.add_filter.clear();
                                     }
@@ -200,6 +272,8 @@ impl MacroDialog {
                         self.label.clear();
                         self.desc.clear();
                         self.steps.clear();
+                        self.auto_delay = false;
+                        self.auto_delay_secs = 1.0;
                         self.add_plugin.clear();
                         self.add_filter.clear();
                         self.add_args.clear();

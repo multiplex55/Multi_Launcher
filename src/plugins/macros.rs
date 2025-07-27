@@ -14,12 +14,18 @@ pub struct MacroStep {
     pub action: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<String>,
+    /// Delay in milliseconds after this step when using manual delays.
+    #[serde(default)]
+    pub delay_ms: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct MacroEntry {
     pub label: String,
     pub desc: String,
+    /// When set, a fixed delay in milliseconds applied after every step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_delay_ms: Option<u64>,
     #[serde(default)]
     pub steps: Vec<MacroStep>,
 }
@@ -42,7 +48,7 @@ pub fn save_macros(path: &str, macros: &[MacroEntry]) -> anyhow::Result<()> {
 pub fn run_macro(name: &str) -> anyhow::Result<()> {
     let list = load_macros(MACROS_FILE).unwrap_or_default();
     if let Some(entry) = list.iter().find(|m| m.label.eq_ignore_ascii_case(name)) {
-        for step in &entry.steps {
+        for (i, step) in entry.steps.iter().enumerate() {
             let act = Action {
                 label: step.action.clone(),
                 desc: String::new(),
@@ -51,6 +57,13 @@ pub fn run_macro(name: &str) -> anyhow::Result<()> {
             };
             if let Err(e) = launch_action(&act) {
                 tracing::error!(?e, "failed to run macro step");
+            }
+            let delay = match entry.auto_delay_ms {
+                Some(ms) => ms,
+                None => step.delay_ms,
+            };
+            if delay > 0 && i + 1 < entry.steps.len() {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
             }
         }
     }
