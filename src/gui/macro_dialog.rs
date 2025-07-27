@@ -14,6 +14,7 @@ pub struct MacroDialog {
     add_plugin: String,
     add_filter: String,
     add_args: String,
+    debug: Vec<String>,
 }
 
 impl Default for MacroDialog {
@@ -30,6 +31,7 @@ impl Default for MacroDialog {
             add_plugin: String::new(),
             add_filter: String::new(),
             add_args: String::new(),
+            debug: Vec::new(),
         }
     }
 }
@@ -47,6 +49,14 @@ impl MacroDialog {
         self.add_plugin.clear();
         self.add_filter.clear();
         self.add_args.clear();
+        self.debug.clear();
+    }
+
+    pub fn push_debug(&mut self, msg: String) {
+        self.debug.push(msg);
+        if self.debug.len() > 20 {
+            self.debug.drain(0..self.debug.len() - 20);
+        }
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
@@ -90,6 +100,9 @@ impl MacroDialog {
                         ui.horizontal(|ui| {
                             ui.label(format!("{}.", i + 1));
                             ui.label(&self.steps[i].action);
+                            ui.label("Path");
+                            let path = self.steps[i].path.get_or_insert_with(String::new);
+                            ui.text_edit_singleline(path);
                             ui.label("Args");
                             let args = self.steps[i].args.get_or_insert_with(String::new);
                             ui.text_edit_singleline(args);
@@ -173,7 +186,8 @@ impl MacroDialog {
                                     if ui.button(format!("{} - {}", act.label, act.desc)).clicked()
                                     {
                                         self.steps.push(MacroStep {
-                                            action: act.action.clone(),
+                                            action: act.label.clone(),
+                                            path: Some(act.action.clone()),
                                             args: if self.add_args.trim().is_empty() {
                                                 None
                                             } else {
@@ -281,6 +295,18 @@ impl MacroDialog {
                     if ui.button("Close").clicked() {
                         close = true;
                     }
+                }
+
+                if !self.debug.is_empty() {
+                    ui.separator();
+                    ui.label("Debug");
+                    egui::ScrollArea::vertical()
+                        .max_height(80.0)
+                        .show(ui, |ui| {
+                            for line in &self.debug {
+                                ui.label(line);
+                            }
+                        });
                 }
             });
         if save_now {

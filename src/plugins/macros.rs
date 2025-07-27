@@ -10,10 +10,13 @@ use std::sync::{Arc, Mutex};
 
 pub const MACROS_FILE: &str = "macros.json";
 pub static STEP_MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+pub static ERROR_MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct MacroStep {
     pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<String>,
     /// Delay in milliseconds after this step when using manual delays.
@@ -57,19 +60,32 @@ pub fn take_step_messages() -> Vec<String> {
     }
 }
 
+pub fn take_error_messages() -> Vec<String> {
+    if let Some(mut list) = ERROR_MESSAGES.lock().ok() {
+        let out = list.clone();
+        list.clear();
+        out
+    } else {
+        Vec::new()
+    }
+}
+
 pub fn run_macro(name: &str) -> anyhow::Result<()> {
     let list = load_macros(MACROS_FILE).unwrap_or_default();
     if let Some(entry) = list.iter().find(|m| m.label.eq_ignore_ascii_case(name)) {
         for (i, step) in entry.steps.iter().enumerate() {
-            let action = step.action.trim();
+            let command = step.path.as_deref().unwrap_or(step.action.trim());
             let act = Action {
-                label: action.to_string(),
+                label: command.to_string(),
                 desc: String::new(),
-                action: action.to_string(),
+                action: command.to_string(),
                 args: step.args.clone(),
             };
             if let Err(e) = launch_action(&act) {
                 tracing::error!(?e, "failed to run macro step");
+                if let Some(mut errs) = ERROR_MESSAGES.lock().ok() {
+                    errs.push(format!("Step {} error: {e}", i + 1));
+                }
             }
             if let Some(mut msgs) = STEP_MESSAGES.lock().ok() {
                 msgs.push(format!("Step {}: {}", i + 1, step.action));
