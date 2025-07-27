@@ -223,7 +223,7 @@ Built-in commands:
 | `ts` | `ts 0` | Timestamp conversion |
 | `tsm` | `tsm 3600000` | Midnight timestamp |
 | `app` | `app <filter>` | Saved apps |
-| `vol` | `vol 50` | Volume control |
+| `vol` | `vol 50` | Volume control (`vol pid <pid> <level>`; dialog lists processes on Windows) |
 | `media` | `media play` | Media controls |
 | `bright` | `bright 50` | Adjust brightness |
 | `tm` | `tm` | Task Manager |
@@ -247,6 +247,16 @@ sequenceDiagram
     T->>L: timer finished
     L->>U: show notification
 ```
+
+### Volume Plugin
+Control system volume or specific processes:
+```text
+vol 75
+vol pid 1234 50
+vol name notepad.exe 20
+```
+On Windows, opening the volume dialog (`vol`) also lists running applications
+with sliders to adjust each process just like the system volume mixer.
 
 ### Screenshot Plugin
 Use `ss` to capture the active window, a custom region or the whole desktop. Add `clip` to copy the result to the clipboard.
