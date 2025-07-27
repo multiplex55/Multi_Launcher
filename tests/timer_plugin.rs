@@ -310,6 +310,13 @@ fn parse_hhmm_with_absolute_date() {
 }
 
 #[test]
+fn parse_hhmm_large_day_offset() {
+    use multi_launcher::plugins::timer::parse_hhmm;
+    assert!(parse_hhmm("1000000000d 12:00").is_none());
+    assert!(parse_hhmm("-1000000000d 12:00").is_none());
+}
+
+#[test]
 fn start_alarm_multi_day() {
     use multi_launcher::plugins::timer::{
         cancel_timer, start_alarm_named, ACTIVE_TIMERS,

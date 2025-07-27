@@ -402,7 +402,17 @@ pub fn parse_hhmm(input: &str) -> Option<(u32, u32, Option<chrono::NaiveDate>)> 
         if let Some((h, m)) = parse_time(rest.trim()) {
             if let Some(days_str) = first.strip_suffix(['d', 'D']) {
                 if let Ok(offset) = days_str.parse::<i64>() {
-                    let date = Local::now().date_naive() + ChronoDuration::days(offset);
+                    let today = Local::now().date_naive();
+                    let max_off = chrono::NaiveDate::MAX
+                        .signed_duration_since(today)
+                        .num_days();
+                    let min_off = chrono::NaiveDate::MIN
+                        .signed_duration_since(today)
+                        .num_days();
+                    if offset > max_off || offset < min_off {
+                        return None;
+                    }
+                    let date = today + ChronoDuration::days(offset);
                     return Some((h, m, Some(date)));
                 }
             }
