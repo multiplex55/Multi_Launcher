@@ -1,7 +1,8 @@
-use crate::actions::Action;
+use crate::actions::{load_actions, Action};
 use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::launcher::launch_action;
-use crate::plugin::Plugin;
+use crate::plugin::{Plugin, PluginManager};
+use crate::settings::Settings;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use once_cell::sync::Lazy;
@@ -71,23 +72,59 @@ pub fn take_error_messages() -> Vec<String> {
     }
 }
 
+fn search_first_action(query: &str) -> Option<Action> {
+    let settings = Settings::load("settings.json").unwrap_or_default();
+    let actions = load_actions("actions.json").unwrap_or_default();
+    let mut pm = PluginManager::new();
+    let dirs = settings.plugin_dirs.unwrap_or_default();
+    pm.reload_from_dirs(
+        &dirs,
+        settings.clipboard_limit,
+        settings.net_unit,
+        false,
+        &settings.plugin_settings,
+        &actions,
+    );
+    pm.search_filtered(
+        query,
+        settings.enabled_plugins.as_ref(),
+        settings.enabled_capabilities.as_ref(),
+    )
+    .into_iter()
+    .next()
+}
+
 pub fn run_macro(name: &str) -> anyhow::Result<()> {
     let list = load_macros(MACROS_FILE).unwrap_or_default();
     if let Some(entry) = list.iter().find(|m| m.label.eq_ignore_ascii_case(name)) {
         for (i, step) in entry.steps.iter().enumerate() {
-            let command = step.command.trim().to_string();
+            let mut command = step.command.trim().to_string();
+            let mut args = step.args.clone();
+            if let Some(q) = command.strip_prefix("query:") {
+                let mut query = q.to_string();
+                if let Some(ref a) = args {
+                    query.push_str(a);
+                }
+                if let Some(res) = search_first_action(&query) {
+                    command = res.action;
+                    args = res.args;
+                } else {
+                    command = query;
+                    args = None;
+                }
+            }
             tracing::info!(
                 step = i + 1,
                 label = %step.label,
                 command = %command,
-                args = ?step.args,
+                args = ?args,
                 "running macro step"
             );
             let act = Action {
                 label: step.label.clone(),
                 desc: String::new(),
                 action: command,
-                args: step.args.clone(),
+                args,
             };
             if let Err(e) = launch_action(&act) {
                 tracing::error!(?e, "failed to run macro step");
