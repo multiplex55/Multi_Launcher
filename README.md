@@ -220,6 +220,8 @@ Built-in commands:
 | `ascii` | `ascii text` | ASCII art |
 | `emoji` | `emoji smile` | Emoji search |
 | `case` | `case hello world` | Case conversions |
+| `ts` | `ts 0` | Timestamp conversion |
+| `tsm` | `tsm 3600000` | Midnight timestamp |
 | `app` | `app <filter>` | Saved apps |
 | `vol` | `vol 50` | Volume control |
 | `media` | `media play` | Media controls |
