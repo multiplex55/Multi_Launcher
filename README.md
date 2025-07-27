@@ -17,6 +17,9 @@ quickly open applications or files.
   <kbd>Enter</kbd> to open the creation dialog.
 - Keep track of quick todo items or notes.
 - Insert saved text snippets, add new ones with `cs add <alias> <text>` or edit them with `cs edit`.
+- Monitor network traffic with the `net` command.
+- Control media playback using the `media` prefix.
+- Trigger sequences of commands through the `macro` plugin.
 
 
 ## Building
@@ -201,6 +204,7 @@ Built-in commands:
 | `sys` | `sys shutdown` | System actions |
 | `ps` | `ps` | Process list |
 | `info` | `info cpu` | System information |
+| `net` | `net` | Network usage |
 | `sh` | `sh echo hi` | Shell commands |
 | `hi` | `hi` | Search history |
 | `note` | `note add <text>` | Quick notes |
@@ -208,11 +212,13 @@ Built-in commands:
 | `todo edit` | `todo edit` | Edit todos |
 | `todo export` | `todo export` | Export todos |
 | `cs` | `cs add <alias> <text>` | Text snippets |
+| `macro` | `macro list` | Command macros |
 | `rec` | `rec` | Recycle Bin cleanup |
 | `tmp` | `tmp new [name]` | Temporary files |
 | `ascii` | `ascii text` | ASCII art |
 | `app` | `app <filter>` | Saved apps |
 | `vol` | `vol 50` | Volume control |
+| `media` | `media play` | Media controls |
 | `bright` | `bright 50` | Adjust brightness |
 | `tm` | `tm` | Task Manager |
 | `win` | `win <title>` | Window management |
@@ -274,10 +280,8 @@ The **Plugin Settings** dialog enables or disables plugins and toggles
 capabilities like `show_full_path`.
 
 Changes take effect immediately once the dialog is closed. Use this window to
-enable additional plugins, such as a dynamic `envvar` plugin that exposes
-environment variables through the `env` prefix. After placing the compiled
-plugin in one of the configured directories simply check its box in the dialog
-and close it to reload the plugin list.
+enable additional plugins as they become available. A plugin to expose
+environment variables is planned for a future release.
 
 
 Example:
@@ -294,9 +298,11 @@ Example:
     "runescape_search",
     "system",
     "processes",
+    "network",
     "weather",
     "timer",
-    "envvar",
+    "media",
+    "macros",
     "history",
     "help"
   ]
@@ -312,8 +318,6 @@ The bookmarks plugin uses the `bm` prefix. Use `bm add <url>` to save a link,
 `bm list` to show all bookmarks. Searching with `bm <term>` matches both URLs
 and aliases.
 The omni search plugin uses the `o` prefix to search folders, bookmarks and saved apps at once. Use `o list` to show all entries or `o list <query>` to filter them.
-The envvar plugin uses the `env` prefix and shows matching environment variables
-and their values.
 The system information plugin uses the `info` prefix. Type `info` to show CPU,
 memory and disk usage or `info cpu` for a single metric.
 ### Security Considerations
