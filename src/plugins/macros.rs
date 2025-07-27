@@ -75,10 +75,18 @@ pub fn run_macro(name: &str) -> anyhow::Result<()> {
     let list = load_macros(MACROS_FILE).unwrap_or_default();
     if let Some(entry) = list.iter().find(|m| m.label.eq_ignore_ascii_case(name)) {
         for (i, step) in entry.steps.iter().enumerate() {
+            let command = step.command.trim().to_string();
+            tracing::info!(
+                step = i + 1,
+                label = %step.label,
+                command = %command,
+                args = ?step.args,
+                "running macro step"
+            );
             let act = Action {
                 label: step.label.clone(),
                 desc: String::new(),
-                action: step.command.trim().to_string(),
+                action: command,
                 args: step.args.clone(),
             };
             if let Err(e) = launch_action(&act) {
