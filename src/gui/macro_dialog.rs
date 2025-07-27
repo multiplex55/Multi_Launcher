@@ -99,10 +99,7 @@ impl MacroDialog {
                     for i in 0..self.steps.len() {
                         ui.horizontal(|ui| {
                             ui.label(format!("{}.", i + 1));
-                            ui.label(&self.steps[i].action);
-                            ui.label("Path");
-                            let path = self.steps[i].path.get_or_insert_with(String::new);
-                            ui.text_edit_singleline(path);
+                            ui.label(&self.steps[i].label);
                             ui.label("Args");
                             let args = self.steps[i].args.get_or_insert_with(String::new);
                             ui.text_edit_singleline(args);
@@ -183,11 +180,10 @@ impl MacroDialog {
                                     {
                                         continue;
                                     }
-                                    if ui.button(format!("{} - {}", act.label, act.desc)).clicked()
-                                    {
+                                    if ui.button(format!("{} - {}", act.label, act.desc)).clicked() {
                                         self.steps.push(MacroStep {
-                                            action: act.label.clone(),
-                                            path: Some(act.action.clone()),
+                                            label: act.label.clone(),
+                                            command: act.action.clone(),
                                             args: if self.add_args.trim().is_empty() {
                                                 None
                                             } else {

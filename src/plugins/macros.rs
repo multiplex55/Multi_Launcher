@@ -14,9 +14,10 @@ pub static ERROR_MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Ve
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct MacroStep {
-    pub action: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
+    /// Display label for this step.
+    pub label: String,
+    /// Command string to execute.
+    pub command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<String>,
     /// Delay in milliseconds after this step when using manual delays.
@@ -74,11 +75,10 @@ pub fn run_macro(name: &str) -> anyhow::Result<()> {
     let list = load_macros(MACROS_FILE).unwrap_or_default();
     if let Some(entry) = list.iter().find(|m| m.label.eq_ignore_ascii_case(name)) {
         for (i, step) in entry.steps.iter().enumerate() {
-            let command = step.path.as_deref().unwrap_or(step.action.trim());
             let act = Action {
-                label: step.action.clone(),
+                label: step.label.clone(),
                 desc: String::new(),
-                action: command.to_string(),
+                action: step.command.clone(),
                 args: step.args.clone(),
             };
             if let Err(e) = launch_action(&act) {
@@ -88,7 +88,7 @@ pub fn run_macro(name: &str) -> anyhow::Result<()> {
                 }
             }
             if let Some(mut msgs) = STEP_MESSAGES.lock().ok() {
-                msgs.push(format!("Step {}: {}", i + 1, step.action));
+                msgs.push(format!("Step {}: {}", i + 1, step.label));
             }
             let delay = match entry.auto_delay_ms {
                 Some(ms) => ms,
