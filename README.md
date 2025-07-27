@@ -223,7 +223,7 @@ Built-in commands:
 | `ts` | `ts 0` | Timestamp conversion |
 | `tsm` | `tsm 3600000` | Midnight timestamp |
 | `app` | `app <filter>` | Saved apps |
-| `vol` | `vol 50` | Volume control |
+| `vol` | `vol 50` | Volume control (`vol pid <pid> <level>` for a process) |
 | `media` | `media play` | Media controls |
 | `bright` | `bright 50` | Adjust brightness |
 | `tm` | `tm` | Task Manager |
@@ -246,6 +246,14 @@ sequenceDiagram
     T-->>L: confirm
     T->>L: timer finished
     L->>U: show notification
+```
+
+### Volume Plugin
+Control system volume or specific processes:
+```text
+vol 75
+vol pid 1234 50
+vol name notepad.exe 20
 ```
 
 ### Screenshot Plugin

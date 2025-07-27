@@ -61,6 +61,12 @@ pub fn mute_active_window() {
     super::super::launcher::mute_active_window();
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+pub fn set_process_volume(pid: u32, level: u32) {
+    #[cfg(target_os = "windows")]
+    super::super::launcher::set_process_volume(pid, level);
+}
+
 pub fn recycle_clean() {
     #[cfg(target_os = "windows")]
     super::super::launcher::clean_recycle_bin();

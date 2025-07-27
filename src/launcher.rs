@@ -73,6 +73,52 @@ pub(crate) fn mute_active_window() {
 }
 
 #[cfg(target_os = "windows")]
+pub(crate) fn set_process_volume(pid: u32, level: u32) {
+    use windows::core::Interface;
+    use windows::Win32::Media::Audio::{
+        eMultimedia, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator,
+        ISimpleAudioVolume, MMDeviceEnumerator,
+    };
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+    };
+
+    let level = level.min(100);
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        if let Ok(enm) =
+            CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+        {
+            if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
+                if let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
+                    if let Ok(list) = manager.GetSessionEnumerator() {
+                        let count = list.GetCount().unwrap_or(0);
+                        for i in 0..count {
+                            if let Ok(ctrl) = list.GetSession(i) {
+                                if let Ok(c2) = ctrl.cast::<IAudioSessionControl2>() {
+                                    if let Ok(session_pid) = c2.GetProcessId() {
+                                        if session_pid == pid {
+                                            if let Ok(vol) = ctrl.cast::<ISimpleAudioVolume>() {
+                                                let _ = vol.SetMasterVolume(
+                                                    level as f32 / 100.0,
+                                                    std::ptr::null(),
+                                                );
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        CoUninitialize();
+    }
+}
+
+#[cfg(target_os = "windows")]
 pub(crate) fn set_display_brightness(percent: u32) {
     use windows::Win32::Devices::Display::{
         DestroyPhysicalMonitors, GetNumberOfPhysicalMonitorsFromHMONITOR,
@@ -163,7 +209,10 @@ pub(crate) fn system_command(action: &str) -> Option<std::process::Command> {
 #[derive(Debug, Clone, PartialEq)]
 enum ActionKind<'a> {
     Shell(&'a str),
-    ShellAdd { name: &'a str, args: &'a str },
+    ShellAdd {
+        name: &'a str,
+        args: &'a str,
+    },
     ShellRemove(&'a str),
     ClipboardClear,
     ClipboardCopy(usize),
@@ -181,24 +230,50 @@ enum ActionKind<'a> {
     TimerCancel(u64),
     TimerPause(u64),
     TimerResume(u64),
-    TimerStart { dur: &'a str, name: &'a str },
-    AlarmSet { time: &'a str, name: &'a str },
+    TimerStart {
+        dur: &'a str,
+        name: &'a str,
+    },
+    AlarmSet {
+        time: &'a str,
+        name: &'a str,
+    },
     NoteAdd(&'a str),
     NoteRemove(usize),
     NoteCopy(usize),
-    TodoAdd { text: &'a str, priority: u8, tags: Vec<String> },
-    TodoSetPriority { idx: usize, priority: u8 },
-    TodoSetTags { idx: usize, tags: Vec<String> },
+    TodoAdd {
+        text: &'a str,
+        priority: u8,
+        tags: Vec<String>,
+    },
+    TodoSetPriority {
+        idx: usize,
+        priority: u8,
+    },
+    TodoSetTags {
+        idx: usize,
+        tags: Vec<String>,
+    },
     TodoRemove(usize),
     TodoDone(usize),
     TodoClear,
     TodoExport,
     SnippetRemove(&'a str),
-    SnippetAdd { alias: &'a str, text: &'a str },
+    SnippetAdd {
+        alias: &'a str,
+        text: &'a str,
+    },
     BrightnessSet(u32),
     VolumeSet(u32),
+    VolumeSetProcess {
+        pid: u32,
+        level: u32,
+    },
     VolumeMuteActive,
-    Screenshot { mode: crate::actions::screenshot::Mode, clip: bool },
+    Screenshot {
+        mode: crate::actions::screenshot::Mode,
+        clip: bool,
+    },
     MediaPlay,
     MediaPause,
     MediaNext,
@@ -210,8 +285,14 @@ enum ActionKind<'a> {
     TempfileOpen,
     TempfileClear,
     TempfileRemove(&'a str),
-    TempfileAlias { path: &'a str, alias: &'a str },
-    ExecPath { path: &'a str, args: Option<&'a str> },
+    TempfileAlias {
+        path: &'a str,
+        alias: &'a str,
+    },
+    ExecPath {
+        path: &'a str,
+        args: Option<&'a str>,
+    },
     Macro(&'a str),
 }
 
@@ -324,10 +405,7 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if let Some(rest) = s.strip_prefix("todo:add:") {
         let mut parts = rest.splitn(3, '|');
         let text = parts.next().unwrap_or("");
-        let priority = parts
-            .next()
-            .and_then(|p| p.parse::<u8>().ok())
-            .unwrap_or(0);
+        let priority = parts.next().and_then(|p| p.parse::<u8>().ok()).unwrap_or(0);
         let tags: Vec<String> = parts
             .next()
             .map(|t| {
@@ -338,12 +416,19 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
                 }
             })
             .unwrap_or_default();
-        return ActionKind::TodoAdd { text, priority, tags };
+        return ActionKind::TodoAdd {
+            text,
+            priority,
+            tags,
+        };
     }
     if let Some(rest) = s.strip_prefix("todo:pset:") {
         if let Some((idx, p)) = rest.split_once('|') {
             if let (Ok(i), Ok(pr)) = (idx.parse::<usize>(), p.parse::<u8>()) {
-                return ActionKind::TodoSetPriority { idx: i, priority: pr };
+                return ActionKind::TodoSetPriority {
+                    idx: i,
+                    priority: pr,
+                };
             }
         }
     }
@@ -393,19 +478,47 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
             return ActionKind::VolumeSet(v);
         }
     }
+    if let Some(rest) = s.strip_prefix("volume:pid:") {
+        if let Some((pid_str, level_str)) = rest.split_once(':') {
+            if let (Ok(pid), Ok(level)) = (pid_str.parse::<u32>(), level_str.parse::<u32>()) {
+                return ActionKind::VolumeSetProcess { pid, level };
+            }
+        }
+    }
     if s == "volume:mute_active" {
         return ActionKind::VolumeMuteActive;
     }
     if let Some(mode) = s.strip_prefix("screenshot:") {
         use crate::actions::screenshot::Mode as ScreenshotMode;
         return match mode {
-            "window" => ActionKind::Screenshot { mode: ScreenshotMode::Window, clip: false },
-            "region" => ActionKind::Screenshot { mode: ScreenshotMode::Region, clip: false },
-            "desktop" => ActionKind::Screenshot { mode: ScreenshotMode::Desktop, clip: false },
-            "window_clip" => ActionKind::Screenshot { mode: ScreenshotMode::Window, clip: true },
-            "region_clip" => ActionKind::Screenshot { mode: ScreenshotMode::Region, clip: true },
-            "desktop_clip" => ActionKind::Screenshot { mode: ScreenshotMode::Desktop, clip: true },
-            _ => ActionKind::ExecPath { path: s, args: action.args.as_deref() },
+            "window" => ActionKind::Screenshot {
+                mode: ScreenshotMode::Window,
+                clip: false,
+            },
+            "region" => ActionKind::Screenshot {
+                mode: ScreenshotMode::Region,
+                clip: false,
+            },
+            "desktop" => ActionKind::Screenshot {
+                mode: ScreenshotMode::Desktop,
+                clip: false,
+            },
+            "window_clip" => ActionKind::Screenshot {
+                mode: ScreenshotMode::Window,
+                clip: true,
+            },
+            "region_clip" => ActionKind::Screenshot {
+                mode: ScreenshotMode::Region,
+                clip: true,
+            },
+            "desktop_clip" => ActionKind::Screenshot {
+                mode: ScreenshotMode::Desktop,
+                clip: true,
+            },
+            _ => ActionKind::ExecPath {
+                path: s,
+                args: action.args.as_deref(),
+            },
         };
     }
     if s == "media:play" {
@@ -516,7 +629,11 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         ActionKind::NoteAdd(text) => notes::add(text),
         ActionKind::NoteRemove(i) => notes::remove(i),
         ActionKind::NoteCopy(i) => notes::copy(i),
-        ActionKind::TodoAdd { text, priority, tags } => todo::add(text, priority, &tags),
+        ActionKind::TodoAdd {
+            text,
+            priority,
+            tags,
+        } => todo::add(text, priority, &tags),
         ActionKind::TodoSetPriority { idx, priority } => todo::set_priority(idx, priority),
         ActionKind::TodoSetTags { idx, tags } => todo::set_tags(idx, &tags),
         ActionKind::TodoRemove(i) => todo::remove(i),
@@ -534,6 +651,10 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         }
         ActionKind::VolumeSet(v) => {
             system::set_volume(v);
+            Ok(())
+        }
+        ActionKind::VolumeSetProcess { pid, level } => {
+            system::set_process_volume(pid, level);
             Ok(())
         }
         ActionKind::VolumeMuteActive => {
