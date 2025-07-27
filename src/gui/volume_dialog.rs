@@ -60,16 +60,6 @@ impl VolumeDialog {
                         close = true;
                         app.focus_input();
                     }
-                    if ui.button("Mute").clicked() {
-                        let _ = launch_action(&Action {
-                            label: String::new(),
-                            desc: "Volume".into(),
-                            action: "volume:mute_active".into(),
-                            args: None,
-                        });
-                        close = true;
-                        app.focus_input();
-                    }
                     if ui.button("Cancel").clicked() {
                         close = true;
                     }
