@@ -290,6 +290,8 @@ pub struct LauncherApp {
     pub screenshot_save_file: bool,
     last_timer_update: Instant,
     last_net_update: Instant,
+    last_search_query: String,
+    last_results_valid: bool,
 }
 
 impl LauncherApp {
@@ -598,6 +600,8 @@ impl LauncherApp {
             screenshot_save_file: settings.screenshot_save_file,
             last_timer_update: Instant::now(),
             last_net_update: Instant::now(),
+            last_search_query: String::new(),
+            last_results_valid: false,
             action_cache: Vec::new(),
         };
 
@@ -634,6 +638,11 @@ impl LauncherApp {
     }
 
     pub fn search(&mut self) {
+        if self.last_results_valid && self.query == self.last_search_query {
+            self.selected = None;
+            return;
+        }
+
         let trimmed = self.query.trim();
         let trimmed_lc = trimmed.to_lowercase();
 
@@ -690,6 +699,8 @@ impl LauncherApp {
 
         self.results = res.into_iter().map(|(a, _)| a).collect();
         self.selected = None;
+        self.last_search_query = self.query.clone();
+        self.last_results_valid = true;
     }
 
     fn search_actions(&self, query: &str, query_lc: &str) -> Vec<(Action, f32)> {
