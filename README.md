@@ -206,6 +206,7 @@ Built-in commands:
 | `ps` | `ps` | Process list |
 | `info` | `info cpu` | System information |
 | `net` | `net` | Network usage |
+| `ip` | `ip` | Show IP addresses |
 | `sh` | `sh echo hi` | Shell commands |
 | `hi` | `hi` | Search history |
 | `note` | `note add <text>` | Quick notes |
@@ -277,6 +278,9 @@ The macros plugin runs a saved sequence of launcher commands. Macros are stored 
 macro list
 macro example
 ```
+
+### IP Plugin
+Display local network interface addresses with the `ip` prefix. Append `public` to also retrieve the public IP via `api.ipify.org`.
 
 When the search box is empty the launcher shows these shortcuts along with `app <alias>` entries for saved actions.
 

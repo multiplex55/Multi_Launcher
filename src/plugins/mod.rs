@@ -29,6 +29,7 @@ pub mod emoji;
 pub mod task_manager;
 pub mod windows;
 pub mod screenshot;
+pub mod ip;
 pub mod omni_search;
 pub mod macros;
 pub mod text_case;
