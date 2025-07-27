@@ -212,6 +212,7 @@ enum ActionKind<'a> {
     TempfileRemove(&'a str),
     TempfileAlias { path: &'a str, alias: &'a str },
     ExecPath { path: &'a str, args: Option<&'a str> },
+    Macro(&'a str),
 }
 
 fn parse_action_kind(action: &Action) -> ActionKind<'_> {
@@ -442,6 +443,9 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
             return ActionKind::TempfileAlias { path, alias };
         }
     }
+    if let Some(name) = s.strip_prefix("macro:") {
+        return ActionKind::Macro(name);
+    }
     ActionKind::ExecPath {
         path: s,
         args: action.args.as_deref(),
@@ -565,6 +569,10 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         ActionKind::TempfileClear => tempfiles::clear(),
         ActionKind::TempfileRemove(path) => tempfiles::remove(path),
         ActionKind::TempfileAlias { path, alias } => tempfiles::set_alias(path, alias),
+        ActionKind::Macro(name) => {
+            crate::plugins::macros::run_macro(name)?;
+            Ok(())
+        }
         ActionKind::ExecPath { path, args } => exec::launch(path, args),
     }
 }
