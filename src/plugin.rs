@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::plugins::asciiart::AsciiArtPlugin;
+use crate::plugins::emoji::EmojiPlugin;
 use crate::plugins::screenshot::ScreenshotPlugin;
 use crate::plugins::bookmarks::BookmarksPlugin;
 #[cfg(target_os = "windows")]
@@ -128,6 +129,7 @@ impl PluginManager {
         self.register_with_settings(TempfilePlugin, plugin_settings);
         self.register_with_settings(MediaPlugin, plugin_settings);
         self.register_with_settings(AsciiArtPlugin::default(), plugin_settings);
+        self.register_with_settings(EmojiPlugin::default(), plugin_settings);
         self.register_with_settings(ScreenshotPlugin, plugin_settings);
         #[cfg(target_os = "windows")]
         {
