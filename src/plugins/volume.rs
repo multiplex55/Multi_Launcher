@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
+#[cfg(target_os = "windows")]
 use sysinfo::System;
 
 pub struct VolumePlugin;
