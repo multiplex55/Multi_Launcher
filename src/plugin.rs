@@ -38,6 +38,7 @@ use crate::plugins::wikipedia::WikipediaPlugin;
 use crate::plugins::windows::WindowsPlugin;
 use crate::plugins::youtube::YoutubePlugin;
 use crate::plugins::ip::IpPlugin;
+use crate::plugins::timestamp::TimestampPlugin;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::NetUnit;
 use std::collections::HashSet;
@@ -134,6 +135,7 @@ impl PluginManager {
         self.register_with_settings(EmojiPlugin::default(), plugin_settings);
         self.register_with_settings(TextCasePlugin, plugin_settings);
         self.register_with_settings(ScreenshotPlugin, plugin_settings);
+        self.register_with_settings(TimestampPlugin, plugin_settings);
         self.register_with_settings(IpPlugin, plugin_settings);
         #[cfg(target_os = "windows")]
         {
