@@ -100,18 +100,25 @@ pub fn run_macro(name: &str) -> anyhow::Result<()> {
         for (i, step) in entry.steps.iter().enumerate() {
             let mut command = step.command.trim().to_string();
             let mut args = step.args.clone();
-            if let Some(q) = command.strip_prefix("query:") {
-                let mut query = q.to_string();
-                if let Some(ref a) = args {
-                    query.push_str(a);
+
+            let mut query = if let Some(q) = command.strip_prefix("query:") {
+                q.to_string()
+            } else {
+                command.clone()
+            };
+            if let Some(ref a) = args {
+                if !query.ends_with(' ') {
+                    query.push(' ');
                 }
-                if let Some(res) = search_first_action(&query) {
-                    command = res.action;
-                    args = res.args;
-                } else {
-                    command = query;
-                    args = None;
-                }
+                query.push_str(a);
+            }
+
+            if let Some(res) = search_first_action(&query) {
+                command = res.action;
+                args = res.args;
+            } else if command.starts_with("query:") {
+                command = query;
+                args = None;
             }
             tracing::info!(
                 step = i + 1,
