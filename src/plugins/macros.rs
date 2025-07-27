@@ -1,6 +1,7 @@
 use crate::actions::Action;
 use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::launcher::launch_action;
+use once_cell::sync::Lazy;
 use crate::plugin::Plugin;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 pub const MACROS_FILE: &str = "macros.json";
+pub static STEP_MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct MacroStep {
@@ -45,6 +47,16 @@ pub fn save_macros(path: &str, macros: &[MacroEntry]) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn take_step_messages() -> Vec<String> {
+    if let Some(mut list) = STEP_MESSAGES.lock().ok() {
+        let out = list.clone();
+        list.clear();
+        out
+    } else {
+        Vec::new()
+    }
+}
+
 pub fn run_macro(name: &str) -> anyhow::Result<()> {
     let list = load_macros(MACROS_FILE).unwrap_or_default();
     if let Some(entry) = list.iter().find(|m| m.label.eq_ignore_ascii_case(name)) {
@@ -57,6 +69,9 @@ pub fn run_macro(name: &str) -> anyhow::Result<()> {
             };
             if let Err(e) = launch_action(&act) {
                 tracing::error!(?e, "failed to run macro step");
+            }
+            if let Some(mut msgs) = STEP_MESSAGES.lock().ok() {
+                msgs.push(format!("Step {}: {}", i + 1, step.action));
             }
             let delay = match entry.auto_delay_ms {
                 Some(ms) => ms,

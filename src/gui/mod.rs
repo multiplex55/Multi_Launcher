@@ -1060,6 +1060,19 @@ impl eframe::App for LauncherApp {
                 self.completion_dialog.open_message(msg);
             }
         }
+        for msg in crate::plugins::macros::take_step_messages() {
+            if self.enable_toasts {
+                push_toast(
+                    &mut self.toasts,
+                    Toast {
+                        text: msg.into(),
+                        kind: ToastKind::Info,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(self.toast_duration as f64),
+                    },
+                );
+            }
+        }
         if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
             self.window_size = (rect.width() as i32, rect.height() as i32);
         }
