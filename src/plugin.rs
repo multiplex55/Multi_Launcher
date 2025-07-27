@@ -99,6 +99,9 @@ impl PluginManager {
         actions: &[Action],
     ) {
         self.clear_plugins();
+        // Drop previously loaded dynamic libraries to avoid accumulating
+        // duplicate handles when reloading plugins.
+        self.libs.clear();
         self.register_with_settings(WebSearchPlugin, plugin_settings);
         self.register_with_settings(CalculatorPlugin, plugin_settings);
         self.register_with_settings(UnitConvertPlugin, plugin_settings);
