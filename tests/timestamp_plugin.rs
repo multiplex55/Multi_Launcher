@@ -48,3 +48,12 @@ fn time_to_ms() {
     assert_eq!(results[0].label, "3600000");
     assert_eq!(results[0].action, "clipboard:3600000");
 }
+
+#[test]
+fn time_with_ms_to_ms() {
+    let plugin = TimestampPlugin;
+    let results = plugin.search("tsm 01:00:00.500");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].label, "3600500");
+    assert_eq!(results[0].action, "clipboard:3600500");
+}

@@ -146,6 +146,7 @@ fn example_queries(name: &str) -> Option<&'static [&'static str]> {
         "dropcalc" => Some(&["drop 1/128 25"]),
         "recycle" => Some(&["rec"]),
         "tempfile" => Some(&["tmp new"]),
+        "timestamp" => Some(&["ts 0", "tsm 3600000"]),
         "snippets" => Some(&["cs hello"]),
         "todo" => Some(&["todo add buy milk", "todo list"]),
         "wikipedia" => Some(&["wiki rust"]),

@@ -25,12 +25,15 @@ impl TimestampPlugin {
     }
 
     fn string_to_ms(s: &str) -> Option<i64> {
-        for fmt in ["%H:%M:%S", "%H:%M"] {
+        for fmt in ["%H:%M:%S%.f", "%H:%M:%S", "%H:%M"] {
             if let Ok(t) = NaiveTime::parse_from_str(s, fmt) {
-                return Some((t.num_seconds_from_midnight() as i64) * 1000);
+                return Some(
+                    (t.num_seconds_from_midnight() as i64) * 1000
+                        + (t.nanosecond() / 1_000_000) as i64,
+                );
             }
         }
-        for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"] {
+        for fmt in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"] {
             if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
                 let midnight = dt.date().and_hms_opt(0, 0, 0)?;
                 return Some((dt - midnight).num_milliseconds());
