@@ -26,6 +26,11 @@ impl Drop for JsonWatcher {
             if let Some(entry) = map.get_mut(&self.path) {
                 let mut cbs = entry.callbacks.lock().unwrap();
                 cbs.remove(&self.id);
+                let empty = cbs.is_empty();
+                drop(cbs);
+                if empty {
+                    map.remove(&self.path);
+                }
             }
         }
     }
@@ -83,4 +88,28 @@ where
     );
 
     Ok(JsonWatcher { path: path_buf, id })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn entry_removed_when_all_handles_dropped() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file.json");
+        std::fs::write(&path, "{}").unwrap();
+
+        // create two watchers for same file
+        let w1 = watch_json(&path, || {}).unwrap();
+        let w2 = watch_json(&path, || {}).unwrap();
+        assert!(WATCHERS.lock().unwrap().contains_key(&path));
+
+        drop(w1);
+        assert!(WATCHERS.lock().unwrap().contains_key(&path));
+        drop(w2);
+
+        assert!(!WATCHERS.lock().unwrap().contains_key(&path));
+    }
 }
