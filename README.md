@@ -217,6 +217,7 @@ Built-in commands:
 | `rec` | `rec` | Recycle Bin cleanup |
 | `tmp` | `tmp new [name]` | Temporary files |
 | `ascii` | `ascii text` | ASCII art |
+| `emoji` | `emoji smile` | Emoji search |
 | `app` | `app <filter>` | Saved apps |
 | `vol` | `vol 50` | Volume control |
 | `media` | `media play` | Media controls |
