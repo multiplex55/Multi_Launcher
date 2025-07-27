@@ -10,11 +10,18 @@ use std::sync::{Arc, Mutex};
 pub const MACROS_FILE: &str = "macros.json";
 
 #[derive(Serialize, Deserialize, Clone)]
+pub struct MacroStep {
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct MacroEntry {
     pub label: String,
     pub desc: String,
     #[serde(default)]
-    pub steps: Vec<String>,
+    pub steps: Vec<MacroStep>,
 }
 
 pub fn load_macros(path: &str) -> anyhow::Result<Vec<MacroEntry>> {
@@ -37,10 +44,10 @@ pub fn run_macro(name: &str) -> anyhow::Result<()> {
     if let Some(entry) = list.iter().find(|m| m.label.eq_ignore_ascii_case(name)) {
         for step in &entry.steps {
             let act = Action {
-                label: step.clone(),
+                label: step.action.clone(),
                 desc: String::new(),
-                action: step.clone(),
-                args: None,
+                action: step.action.clone(),
+                args: step.args.clone(),
             };
             if let Err(e) = launch_action(&act) {
                 tracing::error!(?e, "failed to run macro step");

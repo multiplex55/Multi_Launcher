@@ -1,5 +1,5 @@
 use crate::gui::LauncherApp;
-use crate::plugins::macros::{load_macros, save_macros, MacroEntry, MACROS_FILE};
+use crate::plugins::macros::{load_macros, save_macros, MacroEntry, MacroStep, MACROS_FILE};
 use eframe::egui;
 
 #[derive(Default)]
@@ -9,9 +9,10 @@ pub struct MacroDialog {
     edit_idx: Option<usize>,
     label: String,
     desc: String,
-    steps: Vec<String>,
+    steps: Vec<MacroStep>,
     add_plugin: String,
     add_filter: String,
+    add_args: String,
 }
 
 impl MacroDialog {
@@ -24,6 +25,7 @@ impl MacroDialog {
         self.steps.clear();
         self.add_plugin.clear();
         self.add_filter.clear();
+        self.add_args.clear();
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
@@ -58,7 +60,10 @@ impl MacroDialog {
                     for i in 0..self.steps.len() {
                         ui.horizontal(|ui| {
                             ui.label(format!("{}.", i + 1));
-                            ui.text_edit_singleline(&mut self.steps[i]);
+                            ui.label(&self.steps[i].action);
+                            ui.label("Args");
+                            let args = self.steps[i].args.get_or_insert_with(String::new);
+                            ui.text_edit_singleline(args);
                             if ui.button("Remove").clicked() {
                                 remove_step = Some(i);
                             }
@@ -91,13 +96,23 @@ impl MacroDialog {
                         ui.label("Filter");
                         ui.text_edit_singleline(&mut self.add_filter);
                     });
+                    ui.horizontal(|ui| {
+                        ui.label("Args");
+                        ui.text_edit_singleline(&mut self.add_args);
+                    });
                     if let Some(plugin) = app.plugins.iter().find(|p| p.name() == self.add_plugin) {
-                        let filter = self.add_filter.to_lowercase();
-                        let actions = plugin.commands();
+                        let filter = self.add_filter.trim().to_lowercase();
+                        let mut actions = if plugin.name() == "folders" {
+                            plugin.search(&format!("f {}", self.add_filter))
+                        } else if plugin.name() == "bookmarks" {
+                            plugin.search(&format!("bm {}", self.add_filter))
+                        } else {
+                            plugin.commands()
+                        };
                         egui::ScrollArea::vertical()
                             .max_height(100.0)
                             .show(ui, |ui| {
-                                for act in actions {
+                                for act in actions.drain(..) {
                                     if !filter.is_empty()
                                         && !act.label.to_lowercase().contains(&filter)
                                         && !act.desc.to_lowercase().contains(&filter)
@@ -107,7 +122,15 @@ impl MacroDialog {
                                     }
                                     if ui.button(format!("{} - {}", act.label, act.desc)).clicked()
                                     {
-                                        self.steps.push(act.action.clone());
+                                        self.steps.push(MacroStep {
+                                            action: act.action.clone(),
+                                            args: if self.add_args.trim().is_empty() {
+                                                None
+                                            } else {
+                                                Some(self.add_args.clone())
+                                            },
+                                        });
+                                        self.add_args.clear();
                                     }
                                 }
                             });
@@ -134,6 +157,7 @@ impl MacroDialog {
                                 self.steps.clear();
                                 self.add_plugin.clear();
                                 self.add_filter.clear();
+                                self.add_args.clear();
                                 save_now = true;
                             }
                         }
@@ -141,6 +165,7 @@ impl MacroDialog {
                             self.edit_idx = None;
                             self.add_plugin.clear();
                             self.add_filter.clear();
+                            self.add_args.clear();
                         }
                     });
                 } else {
@@ -177,6 +202,7 @@ impl MacroDialog {
                         self.steps.clear();
                         self.add_plugin.clear();
                         self.add_filter.clear();
+                        self.add_args.clear();
                     }
                     if ui.button("Close").clicked() {
                         close = true;
