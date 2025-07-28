@@ -30,6 +30,7 @@ use crate::plugins::tempfile::TempfilePlugin;
 use crate::plugins::timer::TimerPlugin;
 use crate::plugins::todo::TodoPlugin;
 use crate::plugins::unit_convert::UnitConvertPlugin;
+use crate::plugins::base_convert::BaseConvertPlugin;
 #[cfg(target_os = "windows")]
 use crate::plugins::volume::VolumePlugin;
 use crate::plugins::weather::WeatherPlugin;
@@ -109,6 +110,7 @@ impl PluginManager {
         self.register_with_settings(WebSearchPlugin, plugin_settings);
         self.register_with_settings(CalculatorPlugin, plugin_settings);
         self.register_with_settings(UnitConvertPlugin, plugin_settings);
+        self.register_with_settings(BaseConvertPlugin, plugin_settings);
         self.register_with_settings(DropCalcPlugin, plugin_settings);
         self.register_with_settings(RunescapeSearchPlugin, plugin_settings);
         self.register_with_settings(YoutubePlugin, plugin_settings);

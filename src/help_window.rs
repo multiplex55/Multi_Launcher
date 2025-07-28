@@ -119,6 +119,13 @@ fn example_queries(name: &str) -> Option<&'static [&'static str]> {
             "conv 30 mpg to kpl",
             "conv 180 deg to rad",
         ]),
+        "base_convert" => Some(&[
+            "conv 1010 bin to hex",
+            "conv ff hex to bin",
+            "conv \"hello\" text to hex",
+            "conv 48656c6c6f hex to text",
+            "conv 42 dec to bin",
+        ]),
         "clipboard" => Some(&["cb"]),
         "bookmarks" => Some(&["bm add https://example.com", "bm rm", "bm list"]),
         "folders" => Some(&["f add C:/path", "f rm docs"]),
