@@ -55,3 +55,30 @@ fn hex_to_bin() {
     assert_eq!(results[0].action, "clipboard:11111111");
 }
 
+#[test]
+fn dec_to_bin() {
+    let plugin = BaseConvertPlugin;
+    let results = plugin.search("conv 10 dec to bin");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].label, "10 dec = 1010 bin");
+    assert_eq!(results[0].action, "clipboard:1010");
+}
+
+#[test]
+fn dec_to_hex() {
+    let plugin = BaseConvertPlugin;
+    let results = plugin.search("conv 15 dec to hex");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].label, "15 dec = f hex");
+    assert_eq!(results[0].action, "clipboard:f");
+}
+
+#[test]
+fn dec_to_oct() {
+    let plugin = BaseConvertPlugin;
+    let results = plugin.search("conv 8 dec to oct");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].label, "8 dec = 10 oct");
+    assert_eq!(results[0].action, "clipboard:10");
+}
+

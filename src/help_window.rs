@@ -124,6 +124,7 @@ fn example_queries(name: &str) -> Option<&'static [&'static str]> {
             "conv ff hex to bin",
             "conv \"hello\" text to hex",
             "conv 48656c6c6f hex to text",
+            "conv 42 dec to bin",
         ]),
         "clipboard" => Some(&["cb"]),
         "bookmarks" => Some(&["bm add https://example.com", "bm rm", "bm list"]),

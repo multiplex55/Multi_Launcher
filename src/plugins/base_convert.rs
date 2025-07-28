@@ -9,6 +9,7 @@ fn normalize(base: &str) -> Option<&'static str> {
         "bin" | "binary" => Some("bin"),
         "hex" | "hexadecimal" => Some("hex"),
         "oct" | "octal" => Some("oct"),
+        "dec" | "decimal" => Some("dec"),
         "text" | "string" => Some("text"),
         _ => None,
     }
@@ -42,6 +43,18 @@ fn bin_to_oct(s: &str) -> Option<String> {
 
 fn oct_to_bin(s: &str) -> Option<String> {
     u128::from_str_radix(s, 8).ok().map(|n| format!("{:b}", n))
+}
+
+fn dec_to_bin(s: &str) -> Option<String> {
+    u128::from_str_radix(s, 10).ok().map(|n| format!("{:b}", n))
+}
+
+fn dec_to_hex(s: &str) -> Option<String> {
+    u128::from_str_radix(s, 10).ok().map(|n| format!("{:x}", n))
+}
+
+fn dec_to_oct(s: &str) -> Option<String> {
+    u128::from_str_radix(s, 10).ok().map(|n| format!("{:o}", n))
 }
 
 fn text_to_hex(s: &str) -> Option<String> {
@@ -82,6 +95,9 @@ fn convert(value: &str, from: &str, to: &str) -> Option<String> {
         ("hex", "bin") => hex_to_bin(value),
         ("bin", "oct") => bin_to_oct(value),
         ("oct", "bin") => oct_to_bin(value),
+        ("dec", "bin") => dec_to_bin(value),
+        ("dec", "hex") => dec_to_hex(value),
+        ("dec", "oct") => dec_to_oct(value),
         ("hex", "text") => hex_to_text(value),
         ("text", "hex") => text_to_hex(value),
         ("text", "bin") => text_to_bin(value),
