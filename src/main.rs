@@ -129,6 +129,9 @@ fn spawn_gui(
 }
 
 fn main() -> anyhow::Result<()> {
+    if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        let _ = std::env::set_current_dir(exe_dir);
+    }
     let mut settings = Settings::load("settings.json").unwrap_or_default();
     logging::init(settings.debug_logging, settings.log_file_path());
     tracing::debug!(?settings, "settings loaded");
