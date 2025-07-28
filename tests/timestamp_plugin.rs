@@ -57,3 +57,18 @@ fn time_with_ms_to_ms() {
     assert_eq!(results[0].label, "3600500");
     assert_eq!(results[0].action, "clipboard:3600500");
 }
+
+#[test]
+fn unix_ms_to_date() {
+    let plugin = TimestampPlugin;
+    let dt = Local
+        .with_ymd_and_hms(2024, 5, 1, 12, 0, 0)
+        .unwrap();
+    let ts_ms = dt.timestamp_millis();
+    let query = format!("ts {ts_ms}");
+    let results = plugin.search(&query);
+    let expected = dt.format("%Y-%m-%d %H:%M:%S").to_string();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].label, expected);
+    assert_eq!(results[0].action, format!("clipboard:{expected}"));
+}

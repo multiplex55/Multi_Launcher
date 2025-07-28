@@ -77,7 +77,8 @@ impl Plugin for TimestampPlugin {
                 return Vec::new();
             }
             if let Ok(num) = arg.parse::<i64>() {
-                let dt = Local.timestamp_opt(num, 0).single().or_else(|| Local.timestamp_opt(0, 0).single());
+                let ts_sec = if num.abs() > 1_000_000_000_000 { num / 1000 } else { num };
+                let dt = Local.timestamp_opt(ts_sec, 0).single().or_else(|| Local.timestamp_opt(0, 0).single());
                 if let Some(dt) = dt {
                     let out = dt.format("%Y-%m-%d %H:%M:%S").to_string();
                     return vec![Action {
