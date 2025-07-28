@@ -33,3 +33,16 @@ fn converts_text_cases() {
     assert_eq!(results[22].label, "rust 👏 test"); // Clap case
     assert_eq!(results[24].label, "R-u-s-t T-e-s-t"); // Custom delimiter
 }
+
+#[test]
+fn converts_specific_cases() {
+    let plugin = TextCasePlugin;
+    let hex = plugin.search("case hex Rust");
+    assert_eq!(hex.len(), 1);
+    assert_eq!(hex[0].label, "52757374");
+
+    let bin = plugin.search("case binary A");
+    assert_eq!(bin.len(), 1);
+    assert_eq!(bin[0].label, "01000001");
+}
+
