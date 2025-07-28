@@ -207,6 +207,7 @@ Built-in commands:
 | `info` | `info cpu` | System information |
 | `net` | `net` | Network usage |
 | `ip` | `ip` | Show IP addresses |
+| `speed` | `speed` | Internet speed test |
 | `sh` | `sh echo hi` | Shell commands |
 | `hi` | `hi` | Search history |
 | `note` | `note add <text>` | Quick notes |
