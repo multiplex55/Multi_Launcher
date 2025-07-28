@@ -45,10 +45,15 @@ impl SpeedTestPlugin {
         let result = self.result.clone();
         let running = self.running.clone();
         thread::spawn(move || {
-            let output = Command::new(cmd).args(args).output();
-            let out = match output {
+            let out = match Command::new(&cmd).args(&args).output() {
                 Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
-                Err(_) => String::new(),
+                Err(e) => {
+                    if let Ok(mut lock) = result.lock() {
+                        *lock = Some(format!("Speed test command failed: {e}"));
+                    }
+                    running.store(false, Ordering::SeqCst);
+                    return;
+                }
             };
             let mut dl = None;
             let mut ul = None;
