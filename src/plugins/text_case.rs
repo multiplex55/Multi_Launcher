@@ -10,9 +10,29 @@ impl Plugin for TextCasePlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         const PREFIX: &str = "case ";
         if let Some(rest) = crate::common::strip_prefix_ci(query.trim_start(), PREFIX) {
-            let text = rest.trim();
+            let mut text = rest.trim().to_string();
             if !text.is_empty() {
-                let words: Vec<&str> = text.split_whitespace().collect();
+                let mut words: Vec<&str> = text.split_whitespace().collect();
+
+                // Allow specifying the desired case as the first word, e.g. "case hex foo".
+                // If the first token matches a known case name and there is additional text,
+                // treat the remainder as the text to convert and only output that case.
+                let mut specific_case: Option<String> = None;
+                if words.len() > 1 {
+                    let first = words[0].to_lowercase();
+                    let known = [
+                        "upper", "lower", "capitalized", "camel", "pascal", "snake",
+                        "screaming", "kebab", "train", "dot", "alternating", "mocking",
+                        "inverse", "backwards", "acronym", "initials", "title",
+                        "sentence", "base64", "hex", "binary", "rot13", "clap",
+                        "emoji", "custom", "morse",
+                    ];
+                    if known.contains(&first.as_str()) {
+                        specific_case = Some(first.clone());
+                        text = text[first.len()..].trim_start().to_string();
+                        words = text.split_whitespace().collect();
+                    }
+                }
 
                 fn cap(w: &str) -> String {
                     let mut c = w.chars();
@@ -144,8 +164,8 @@ impl Plugin for TextCasePlugin {
                     }
                 };
 
-                let b64 = general_purpose::STANDARD.encode(text);
-                let hex_enc = hex::encode(text);
+                let b64 = general_purpose::STANDARD.encode(text.as_bytes());
+                let hex_enc = hex::encode(text.as_bytes());
                 let binary = text
                     .as_bytes()
                     .iter()
@@ -244,34 +264,42 @@ impl Plugin for TextCasePlugin {
                     .collect::<Vec<_>>()
                     .join(" ");
 
-                return vec![
-                    Action { label: upper.clone(), desc: "Text Case-Uppercase".into(), action: format!("clipboard:{}", upper), args: None },
-                    Action { label: lower.clone(), desc: "Text Case-Lowercase".into(), action: format!("clipboard:{}", lower), args: None },
-                    Action { label: capitalized.clone(), desc: "Text Case-Capitalized".into(), action: format!("clipboard:{}", capitalized), args: None },
-                    Action { label: camel.clone(), desc: "Text Case-Camel".into(), action: format!("clipboard:{}", camel), args: None },
-                    Action { label: pascal.clone(), desc: "Text Case-Pascal".into(), action: format!("clipboard:{}", pascal), args: None },
-                    Action { label: snake.clone(), desc: "Text Case-Snake".into(), action: format!("clipboard:{}", snake), args: None },
-                    Action { label: screaming.clone(), desc: "Text Case-Screaming".into(), action: format!("clipboard:{}", screaming), args: None },
-                    Action { label: kebab.clone(), desc: "Text Case-Kebab".into(), action: format!("clipboard:{}", kebab), args: None },
-                    Action { label: train.clone(), desc: "Text Case-Train".into(), action: format!("clipboard:{}", train), args: None },
-                    Action { label: dot.clone(), desc: "Text Case-Dot".into(), action: format!("clipboard:{}", dot), args: None },
-                    Action { label: alt_case.clone(), desc: "Text Case-Alternating".into(), action: format!("clipboard:{}", alt_case), args: None },
-                    Action { label: mocking.clone(), desc: "Text Case-Mocking".into(), action: format!("clipboard:{}", mocking), args: None },
-                    Action { label: inverse.clone(), desc: "Text Case-Inverse".into(), action: format!("clipboard:{}", inverse), args: None },
-                    Action { label: backwards.clone(), desc: "Text Case-Backwards".into(), action: format!("clipboard:{}", backwards), args: None },
-                    Action { label: acronym.clone(), desc: "Text Case-Acronym".into(), action: format!("clipboard:{}", acronym), args: None },
-                    Action { label: initial_caps.clone(), desc: "Text Case-Initials".into(), action: format!("clipboard:{}", initial_caps), args: None },
-                    Action { label: title_case.clone(), desc: "Text Case-Title".into(), action: format!("clipboard:{}", title_case), args: None },
-                    Action { label: sentence.clone(), desc: "Text Case-Sentence".into(), action: format!("clipboard:{}", sentence), args: None },
-                    Action { label: b64.clone(), desc: "Text Case-Base64".into(), action: format!("clipboard:{}", b64), args: None },
-                    Action { label: hex_enc.clone(), desc: "Text Case-Hex".into(), action: format!("clipboard:{}", hex_enc), args: None },
-                    Action { label: binary.clone(), desc: "Text Case-Binary".into(), action: format!("clipboard:{}", binary), args: None },
-                    Action { label: rot13.clone(), desc: "Text Case-ROT13".into(), action: format!("clipboard:{}", rot13), args: None },
-                    Action { label: clap.clone(), desc: "Text Case-Clap".into(), action: format!("clipboard:{}", clap), args: None },
-                    Action { label: emoji_case.clone(), desc: "Text Case-Emoji".into(), action: format!("clipboard:{}", emoji_case), args: None },
-                    Action { label: custom.clone(), desc: "Text Case-Custom".into(), action: format!("clipboard:{}", custom), args: None },
-                    Action { label: morse.clone(), desc: "Text Case-Morse".into(), action: format!("clipboard:{}", morse), args: None },
+                let actions = vec![
+                    ("upper", Action { label: upper.clone(), desc: "Text Case-Uppercase".into(), action: format!("clipboard:{}", upper), args: None }),
+                    ("lower", Action { label: lower.clone(), desc: "Text Case-Lowercase".into(), action: format!("clipboard:{}", lower), args: None }),
+                    ("capitalized", Action { label: capitalized.clone(), desc: "Text Case-Capitalized".into(), action: format!("clipboard:{}", capitalized), args: None }),
+                    ("camel", Action { label: camel.clone(), desc: "Text Case-Camel".into(), action: format!("clipboard:{}", camel), args: None }),
+                    ("pascal", Action { label: pascal.clone(), desc: "Text Case-Pascal".into(), action: format!("clipboard:{}", pascal), args: None }),
+                    ("snake", Action { label: snake.clone(), desc: "Text Case-Snake".into(), action: format!("clipboard:{}", snake), args: None }),
+                    ("screaming", Action { label: screaming.clone(), desc: "Text Case-Screaming".into(), action: format!("clipboard:{}", screaming), args: None }),
+                    ("kebab", Action { label: kebab.clone(), desc: "Text Case-Kebab".into(), action: format!("clipboard:{}", kebab), args: None }),
+                    ("train", Action { label: train.clone(), desc: "Text Case-Train".into(), action: format!("clipboard:{}", train), args: None }),
+                    ("dot", Action { label: dot.clone(), desc: "Text Case-Dot".into(), action: format!("clipboard:{}", dot), args: None }),
+                    ("alternating", Action { label: alt_case.clone(), desc: "Text Case-Alternating".into(), action: format!("clipboard:{}", alt_case), args: None }),
+                    ("mocking", Action { label: mocking.clone(), desc: "Text Case-Mocking".into(), action: format!("clipboard:{}", mocking), args: None }),
+                    ("inverse", Action { label: inverse.clone(), desc: "Text Case-Inverse".into(), action: format!("clipboard:{}", inverse), args: None }),
+                    ("backwards", Action { label: backwards.clone(), desc: "Text Case-Backwards".into(), action: format!("clipboard:{}", backwards), args: None }),
+                    ("acronym", Action { label: acronym.clone(), desc: "Text Case-Acronym".into(), action: format!("clipboard:{}", acronym), args: None }),
+                    ("initials", Action { label: initial_caps.clone(), desc: "Text Case-Initials".into(), action: format!("clipboard:{}", initial_caps), args: None }),
+                    ("title", Action { label: title_case.clone(), desc: "Text Case-Title".into(), action: format!("clipboard:{}", title_case), args: None }),
+                    ("sentence", Action { label: sentence.clone(), desc: "Text Case-Sentence".into(), action: format!("clipboard:{}", sentence), args: None }),
+                    ("base64", Action { label: b64.clone(), desc: "Text Case-Base64".into(), action: format!("clipboard:{}", b64), args: None }),
+                    ("hex", Action { label: hex_enc.clone(), desc: "Text Case-Hex".into(), action: format!("clipboard:{}", hex_enc), args: None }),
+                    ("binary", Action { label: binary.clone(), desc: "Text Case-Binary".into(), action: format!("clipboard:{}", binary), args: None }),
+                    ("rot13", Action { label: rot13.clone(), desc: "Text Case-ROT13".into(), action: format!("clipboard:{}", rot13), args: None }),
+                    ("clap", Action { label: clap.clone(), desc: "Text Case-Clap".into(), action: format!("clipboard:{}", clap), args: None }),
+                    ("emoji", Action { label: emoji_case.clone(), desc: "Text Case-Emoji".into(), action: format!("clipboard:{}", emoji_case), args: None }),
+                    ("custom", Action { label: custom.clone(), desc: "Text Case-Custom".into(), action: format!("clipboard:{}", custom), args: None }),
+                    ("morse", Action { label: morse.clone(), desc: "Text Case-Morse".into(), action: format!("clipboard:{}", morse), args: None }),
                 ];
+
+                if let Some(case) = specific_case {
+                    if let Some((_, act)) = actions.iter().find(|(name, _)| *name == case) {
+                        return vec![act.clone()];
+                    }
+                }
+
+                return actions.into_iter().map(|(_, a)| a).collect();
             }
         }
         Vec::new()
