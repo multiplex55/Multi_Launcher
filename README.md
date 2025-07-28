@@ -192,7 +192,7 @@ Built-in commands:
 |-------|---------|-------------|
 | `g` | `g rust` | Google web search |
 | `=` | `= 2+2` | Calculator |
-| `conv` | `conv 10 km to mi` | Unit conversions |
+| `conv` | `conv 10 km to mi` | Unit and base conversions |
 | `drop` | `drop 1/128 128` | Drop rate calculator |
 | `rs`/`osrs` | `rs item` | RuneScape Wiki search |
 | `yt` | `yt rust` | YouTube search |
@@ -247,6 +247,31 @@ sequenceDiagram
     T->>L: timer finished
     L->>U: show notification
 ```
+
+### Conversion Plugins
+The `conv`/`convert` prefix now covers two plugins:
+
+- **Unit Convert** handles common units like length, mass, temperature, volume,
+  area, speed, pressure, energy, power, data, time, fuel economy and angles.
+  Examples:
+
+  ```text
+  conv 1 kwh to j
+  conv 8 bit to byte
+  conv 30 mpg to kpl
+  conv 180 deg to rad
+  ```
+
+- **Base Convert** translates between binary, hexadecimal, octal, decimal and
+  plain text:
+
+  ```text
+  conv 1010 bin to hex
+  conv ff hex to bin
+  conv "hello" text to hex
+  conv 48656c6c6f hex to text
+  conv 42 dec to bin
+  ```
 
 ### Volume Plugin
 Control system volume or specific processes:
