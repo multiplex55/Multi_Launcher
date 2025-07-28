@@ -95,9 +95,11 @@ fn search_first_action(query: &str) -> Option<Action> {
 }
 
 pub fn run_macro(name: &str) -> anyhow::Result<()> {
-    let list = load_macros(MACROS_FILE).unwrap_or_default();
-    if let Some(entry) = list.iter().find(|m| m.label.eq_ignore_ascii_case(name)) {
-        for (i, step) in entry.steps.iter().enumerate() {
+    let list = load_macros(MACROS_FILE)?;
+    let Some(entry) = list.iter().find(|m| m.label.eq_ignore_ascii_case(name)) else {
+        anyhow::bail!("macro '{name}' not found");
+    };
+    for (i, step) in entry.steps.iter().enumerate() {
             let mut command = step.command.trim().to_string();
             let mut args = step.args.clone();
 
@@ -150,7 +152,6 @@ pub fn run_macro(name: &str) -> anyhow::Result<()> {
                 std::thread::sleep(std::time::Duration::from_millis(delay));
             }
         }
-    }
     Ok(())
 }
 
@@ -163,17 +164,26 @@ pub struct MacrosPlugin {
 
 impl MacrosPlugin {
     pub fn new() -> Self {
-        let data = Arc::new(Mutex::new(load_macros(MACROS_FILE).unwrap_or_default()));
+        let data = Arc::new(Mutex::new(match load_macros(MACROS_FILE) {
+            Ok(list) => list,
+            Err(e) => {
+                tracing::error!(?e, "failed to load macros");
+                Vec::new()
+            }
+        }));
         let data_clone = data.clone();
         let path = MACROS_FILE.to_string();
         let watch_path = path.clone();
         let watcher = watch_json(&watch_path, {
             let watch_path = watch_path.clone();
             move || {
-                if let Ok(list) = load_macros(&watch_path) {
-                    if let Ok(mut lock) = data_clone.lock() {
-                        *lock = list;
+                match load_macros(&watch_path) {
+                    Ok(list) => {
+                        if let Ok(mut lock) = data_clone.lock() {
+                            *lock = list;
+                        }
                     }
+                    Err(e) => tracing::error!(?e, "failed to reload macros"),
                 }
             }
         })

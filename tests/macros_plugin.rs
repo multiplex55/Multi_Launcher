@@ -81,3 +81,14 @@ fn macros_file_change_reload() {
     assert_eq!(results[0].label, "two");
 }
 
+#[test]
+fn run_macro_missing_returns_err() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    save_macros(MACROS_FILE, &[]).unwrap();
+    let err = run_macro("none").unwrap_err();
+    assert!(format!("{err}").contains("not found"));
+}
+
