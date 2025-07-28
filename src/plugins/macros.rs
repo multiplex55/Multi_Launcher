@@ -7,11 +7,12 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 
 pub const MACROS_FILE: &str = "macros.json";
 pub static STEP_MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 pub static ERROR_MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+pub static DIALOG_REQUEST: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct MacroStep {
@@ -70,6 +71,14 @@ pub fn take_error_messages() -> Vec<String> {
     } else {
         Vec::new()
     }
+}
+
+pub fn request_dialog() {
+    DIALOG_REQUEST.store(true, Ordering::SeqCst);
+}
+
+pub fn take_dialog_request() -> bool {
+    DIALOG_REQUEST.swap(false, Ordering::SeqCst)
 }
 
 fn search_first_action(query: &str) -> Option<Action> {

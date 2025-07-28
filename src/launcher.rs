@@ -691,8 +691,13 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         ActionKind::TempfileRemove(path) => tempfiles::remove(path),
         ActionKind::TempfileAlias { path, alias } => tempfiles::set_alias(path, alias),
         ActionKind::Macro(name) => {
-            crate::plugins::macros::run_macro(name)?;
-            Ok(())
+            if name.eq_ignore_ascii_case("dialog") {
+                crate::plugins::macros::request_dialog();
+                Ok(())
+            } else {
+                crate::plugins::macros::run_macro(name)?;
+                Ok(())
+            }
         }
         ActionKind::ExecPath { path, args } => exec::launch(path, args),
     }

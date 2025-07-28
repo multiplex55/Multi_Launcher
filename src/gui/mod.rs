@@ -1087,6 +1087,9 @@ impl eframe::App for LauncherApp {
         for err in crate::plugins::macros::take_error_messages() {
             self.macro_dialog.push_debug(err);
         }
+        if crate::plugins::macros::take_dialog_request() {
+            self.macro_dialog.open();
+        }
         if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
             self.window_size = (rect.width() as i32, rect.height() as i32);
         }
