@@ -230,6 +230,13 @@ impl MacroDialog {
                             if self.label.trim().is_empty() {
                                 app.set_error("Label required".into());
                             } else {
+                                for step in &mut self.steps {
+                                    if let Some(a) = &step.args {
+                                        if a.trim().is_empty() {
+                                            step.args = None;
+                                        }
+                                    }
+                                }
                                 if idx == self.entries.len() {
                                     self.entries.push(MacroEntry {
                                         label: self.label.clone(),

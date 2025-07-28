@@ -100,6 +100,11 @@ pub fn run_macro(name: &str) -> anyhow::Result<()> {
         for (i, step) in entry.steps.iter().enumerate() {
             let mut command = step.command.trim().to_string();
             let mut args = step.args.clone();
+            if let Some(ref s) = args {
+                if s.trim().is_empty() {
+                    args = None;
+                }
+            }
 
             let mut query = if let Some(q) = command.strip_prefix("query:") {
                 q.to_string()
