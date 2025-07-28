@@ -219,7 +219,7 @@ Built-in commands:
 | `tmp` | `tmp new [name]` | Temporary files |
 | `ascii` | `ascii text` | ASCII art |
 | `emoji` | `emoji smile` | Emoji search |
-| `case` | `case hello world` | Case conversions |
+| `case` | `case hello world` | Text and encoding conversions |
 | `ts` | `ts 0` | Timestamp conversion |
 | `tsm` | `tsm 3600000` | Midnight timestamp |
 | `app` | `app <filter>` | Saved apps |
@@ -281,7 +281,12 @@ Convert text to different cases. Example:
 case Hello World
 ```
 
-The plugin shows uppercase, lowercase, title case and snake_case variants. Select one to copy it.
+The plugin shows many variations including uppercase, lowercase, capitalized,
+camelCase, PascalCase, snake_case, SCREAMING_SNAKE_CASE, kebab-case,
+Train-Case, dot.case and space case. It also offers alternating, mocking,
+inverse and backwards cases, acronym and initial forms, sentence and title
+case, Base64/hex/binary encodings, ROT13, clap and emoji text, custom
+delimiters and Morse code. Select any variant to copy it to the clipboard.
 
 ### Macros Plugin
 The macros plugin runs a saved sequence of launcher commands. Macros are stored in `macros.json` and can be edited by typing `macro` to open the editor.
