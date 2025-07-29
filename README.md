@@ -222,6 +222,7 @@ Built-in commands:
 | `case` | `case hello world` | Text and encoding conversions |
 | `ts` | `ts 0` | Timestamp conversion |
 | `tsm` | `tsm 3600000` | Midnight timestamp |
+| `rand` | `rand number 10` | Random numbers, dice and passwords |
 | `app` | `app <filter>` | Saved apps |
 | `vol` | `vol 50` | Volume control (`vol pid <pid> <level>`; dialog lists processes on Windows) |
 | `media` | `media play` | Media controls |
@@ -319,6 +320,15 @@ The macros plugin runs a saved sequence of launcher commands. Macros are stored 
 ```text
 macro list
 macro example
+```
+
+### Random Plugin
+Generate random numbers, dice rolls or passwords with the `rand` prefix. Examples:
+
+```text
+rand number 10
+rand dice
+rand pw 8
 ```
 
 ### IP Plugin
