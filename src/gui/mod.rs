@@ -292,6 +292,7 @@ pub struct LauncherApp {
     last_net_update: Instant,
     last_search_query: String,
     last_results_valid: bool,
+    last_timer_query: bool,
 }
 
 impl LauncherApp {
@@ -602,6 +603,7 @@ impl LauncherApp {
             last_net_update: Instant::now(),
             last_search_query: String::new(),
             last_results_valid: false,
+            last_timer_query: false,
             action_cache: Vec::new(),
         };
 
@@ -645,6 +647,7 @@ impl LauncherApp {
 
         let trimmed = self.query.trim();
         let trimmed_lc = trimmed.to_lowercase();
+        self.last_timer_query = trimmed.starts_with("timer list") || trimmed.starts_with("alarm list");
 
         let mut res: Vec<(Action, f32)> = Vec::new();
 
@@ -875,6 +878,22 @@ impl LauncherApp {
         }
     }
 
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn maybe_refresh_timer_list(&mut self) {
+        let trimmed = self.query.trim();
+        if (
+            trimmed.starts_with("timer list")
+                || trimmed.starts_with("alarm list")
+                || self.last_timer_query
+        ) && !self.disable_timer_updates
+            && self.last_timer_update.elapsed().as_secs_f32() >= self.timer_refresh
+        {
+            self.last_results_valid = false;
+            self.search();
+            self.last_timer_update = Instant::now();
+        }
+    }
+
     /// Handle a keyboard navigation key. Returns the index of a selected
     /// action when `Enter` is pressed and a selection is available.
     pub fn handle_key(&mut self, key: egui::Key) -> Option<usize> {
@@ -916,6 +935,27 @@ impl LauncherApp {
 
     pub fn focus_input(&mut self) {
         self.focus_query = true;
+    }
+
+    pub fn set_last_search_query(&mut self, s: String) {
+        self.last_search_query = s;
+    }
+
+    pub fn set_last_timer_update(&mut self, t: Instant) {
+        self.last_timer_update = t;
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn last_timer_update(&self) -> Instant {
+        self.last_timer_update
+    }
+
+    pub fn get_last_search_query(&self) -> &str {
+        &self.last_search_query
+    }
+
+    pub fn last_timer_query_flag(&self) -> bool {
+        self.last_timer_query
     }
 
     fn any_panel_open(&self) -> bool {
@@ -1214,13 +1254,7 @@ impl eframe::App for LauncherApp {
         }
 
         let trimmed = self.query.trim().to_string();
-        if (trimmed.starts_with("timer list") || trimmed.starts_with("alarm list"))
-            && !self.disable_timer_updates
-            && self.last_timer_update.elapsed().as_secs_f32() >= self.timer_refresh
-        {
-            self.search();
-            self.last_timer_update = Instant::now();
-        }
+        self.maybe_refresh_timer_list();
         if trimmed.eq_ignore_ascii_case("net")
             && self.last_net_update.elapsed().as_secs_f32() >= self.net_refresh
         {
@@ -1312,6 +1346,8 @@ impl eframe::App for LauncherApp {
                         if let Some(new_q) = a.action.strip_prefix("query:") {
                             tracing::debug!("query action via Enter: {new_q}");
                             self.query = new_q.to_string();
+                            self.last_timer_query = new_q.starts_with("timer list")
+                                || new_q.starts_with("alarm list");
                             self.search();
                             set_focus = true;
                             tracing::debug!("move_cursor_end set via Enter key");
