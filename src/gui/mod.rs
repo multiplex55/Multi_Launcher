@@ -918,6 +918,24 @@ impl LauncherApp {
         self.focus_query = true;
     }
 
+    pub fn handle_auto_refresh(&mut self) {
+        let trimmed = self.query.trim().to_string();
+        let tlc = trimmed.to_ascii_lowercase();
+        if (tlc.starts_with("timer list") || tlc.starts_with("alarm list"))
+            && !self.disable_timer_updates
+            && self.last_timer_update.elapsed().as_secs_f32() >= self.timer_refresh
+        {
+            self.search();
+            self.last_timer_update = Instant::now();
+        }
+        if trimmed.eq_ignore_ascii_case("net")
+            && self.last_net_update.elapsed().as_secs_f32() >= self.net_refresh
+        {
+            self.search();
+            self.last_net_update = Instant::now();
+        }
+    }
+
     fn any_panel_open(&self) -> bool {
         self.alias_dialog.open
             || self.bookmark_alias_dialog.open
@@ -1213,20 +1231,7 @@ impl eframe::App for LauncherApp {
             }
         }
 
-        let trimmed = self.query.trim().to_string();
-        if (trimmed.starts_with("timer list") || trimmed.starts_with("alarm list"))
-            && !self.disable_timer_updates
-            && self.last_timer_update.elapsed().as_secs_f32() >= self.timer_refresh
-        {
-            self.search();
-            self.last_timer_update = Instant::now();
-        }
-        if trimmed.eq_ignore_ascii_case("net")
-            && self.last_net_update.elapsed().as_secs_f32() >= self.net_refresh
-        {
-            self.search();
-            self.last_net_update = Instant::now();
-        }
+        self.handle_auto_refresh();
 
         CentralPanel::default().show(ctx, |ui| {
             ui.heading("🚀 LNCHR");
