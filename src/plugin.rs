@@ -40,6 +40,7 @@ use crate::plugins::windows::WindowsPlugin;
 use crate::plugins::youtube::YoutubePlugin;
 use crate::plugins::ip::IpPlugin;
 use crate::plugins::timestamp::TimestampPlugin;
+use crate::plugins::random::RandomPlugin;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::NetUnit;
 use std::collections::HashSet;
@@ -139,6 +140,7 @@ impl PluginManager {
         self.register_with_settings(ScreenshotPlugin, plugin_settings);
         self.register_with_settings(TimestampPlugin, plugin_settings);
         self.register_with_settings(IpPlugin, plugin_settings);
+        self.register_with_settings(RandomPlugin::default(), plugin_settings);
         #[cfg(target_os = "windows")]
         {
             self.register_with_settings(VolumePlugin, plugin_settings);
