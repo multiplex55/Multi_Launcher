@@ -90,3 +90,39 @@ fn deg_to_rad() {
     assert_eq!(results[0].label, "180 deg = 3.1416 rad");
     assert_eq!(results[0].action, "clipboard:3.1416");
 }
+
+#[test]
+fn kg_to_lb() {
+    let plugin = UnitConvertPlugin;
+    let results = plugin.search("conv 1 kg to lb");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].label, "1 kg = 2.2046 lb");
+    assert_eq!(results[0].action, "clipboard:2.2046");
+}
+
+#[test]
+fn sq_m_to_sq_ft() {
+    let plugin = UnitConvertPlugin;
+    let results = plugin.search("conv 1 sq_m to sq_ft");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].label, "1 sq_m = 10.7639 sq_ft");
+    assert_eq!(results[0].action, "clipboard:10.7639");
+}
+
+#[test]
+fn kph_to_mph() {
+    let plugin = UnitConvertPlugin;
+    let results = plugin.search("conv 100 kph to mph");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].label, "100 kph = 62.1373 mph");
+    assert_eq!(results[0].action, "clipboard:62.1373");
+}
+
+#[test]
+fn bar_to_psi() {
+    let plugin = UnitConvertPlugin;
+    let results = plugin.search("conv 1 bar to psi");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].label, "1 bar = 14.5038 psi");
+    assert_eq!(results[0].action, "clipboard:14.5038");
+}
