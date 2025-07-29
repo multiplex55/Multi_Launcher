@@ -888,6 +888,7 @@ impl LauncherApp {
         ) && !self.disable_timer_updates
             && self.last_timer_update.elapsed().as_secs_f32() >= self.timer_refresh
         {
+            self.last_results_valid = false;
             self.search();
             self.last_timer_update = Instant::now();
         }
@@ -942,6 +943,11 @@ impl LauncherApp {
 
     pub fn set_last_timer_update(&mut self, t: Instant) {
         self.last_timer_update = t;
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn last_timer_update(&self) -> Instant {
+        self.last_timer_update
     }
 
     pub fn get_last_search_query(&self) -> &str {
