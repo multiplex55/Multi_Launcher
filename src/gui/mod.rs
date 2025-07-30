@@ -972,6 +972,7 @@ impl LauncherApp {
             || self.shell_cmd_dialog.open
             || self.snippet_dialog.open
             || self.macro_dialog.open
+            || self.fav_dialog.open
             || self.notes_dialog.open
             || self.todo_dialog.open
             || self.todo_view_dialog.open
