@@ -29,6 +29,16 @@ impl ActionsEditor {
         self.dialog.open_edit(idx, act);
     }
 
+    /// Returns whether the add dialog is currently open.
+    pub fn is_dialog_open(&self) -> bool {
+        self.dialog.open
+    }
+
+    /// Open the add dialog with `path` pre-filled.
+    pub fn open_add_with_path(&mut self, path: &str) {
+        self.dialog.open_add_with_path(path);
+    }
+
     /// Render the app editor window.
     ///
     /// * `ctx` - Egui context used for drawing the editor UI.
