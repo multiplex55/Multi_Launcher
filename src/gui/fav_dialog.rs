@@ -186,6 +186,19 @@ impl FavDialog {
                         }
                     });
                 } else {
+                    ui.horizontal(|ui| {
+                        if ui.button("Add Fav").clicked() {
+                            self.edit_idx = Some(self.entries.len());
+                            self.label.clear();
+                            self.command.clear();
+                            self.args.clear();
+                            self.add_plugin.clear();
+                            self.add_filter.clear();
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
                     let mut remove: Option<usize> = None;
                     egui::ScrollArea::vertical()
                         .max_height(200.0)
@@ -193,13 +206,13 @@ impl FavDialog {
                             for idx in 0..self.entries.len() {
                                 let entry = self.entries[idx].clone();
                                 ui.horizontal(|ui| {
-                                    ui.label(format!("{} - {}", entry.label, entry.action));
                                     if ui.button("Edit").clicked() {
                                         self.edit_idx = Some(idx);
                                         self.label = entry.label.clone();
                                         self.command = entry.action.clone();
                                         self.args = entry.args.clone().unwrap_or_default();
                                     }
+                                    ui.label(format!("{} - {}", entry.label, entry.action));
                                     if ui.button("Remove").clicked() {
                                         remove = Some(idx);
                                     }
@@ -209,17 +222,6 @@ impl FavDialog {
                     if let Some(idx) = remove {
                         self.entries.remove(idx);
                         save_now = true;
-                    }
-                    if ui.button("Add Fav").clicked() {
-                        self.edit_idx = Some(self.entries.len());
-                        self.label.clear();
-                        self.command.clear();
-                        self.args.clear();
-                        self.add_plugin.clear();
-                        self.add_filter.clear();
-                    }
-                    if ui.button("Close").clicked() {
-                        close = true;
                     }
                 }
             });

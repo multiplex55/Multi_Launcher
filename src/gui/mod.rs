@@ -1503,7 +1503,11 @@ impl eframe::App for LauncherApp {
                         } else if a.action == "macro:dialog" {
                             self.macro_dialog.open();
                         } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
-                            self.fav_dialog.open_edit(label);
+                            if label.is_empty() {
+                                self.fav_dialog.open();
+                            } else {
+                                self.fav_dialog.open_edit(label);
+                            }
                         } else if let Some(alias) = a.action.strip_prefix("snippet:edit:") {
                             self.snippet_dialog.open_edit(alias);
                         } else if a.action == "todo:dialog" {
@@ -1527,6 +1531,9 @@ impl eframe::App for LauncherApp {
                                 self.cpu_list_dialog.open(count);
                             }
                         } else if let Err(e) = launch_action(&a) {
+                            if a.desc == "Fav" && !a.action.starts_with("fav:") {
+                                tracing::error!(?e, fav=%a.label, "failed to run favorite");
+                            }
                             self.set_error(format!("Failed: {e}"));
                             if self.enable_toasts {
                                 push_toast(&mut self.toasts, Toast {
@@ -1536,6 +1543,9 @@ impl eframe::App for LauncherApp {
                                 });
                             }
                         } else {
+                            if a.desc == "Fav" && !a.action.starts_with("fav:") {
+                                tracing::info!(fav=%a.label, command=%a.action, "ran favorite");
+                            }
                             if self.enable_toasts {
                                 let msg = if a.action == "recycle:clean" {
                                     "Emptied Recycle Bin".to_string()
@@ -2073,7 +2083,11 @@ impl eframe::App for LauncherApp {
                         } else if a.action == "macro:dialog" {
                             self.macro_dialog.open();
                         } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
-                            self.fav_dialog.open_edit(label);
+                            if label.is_empty() {
+                                self.fav_dialog.open();
+                            } else {
+                                self.fav_dialog.open_edit(label);
+                            }
                         } else if a.action == "todo:dialog" {
                             self.todo_dialog.open();
                         } else if a.action == "todo:view" {
@@ -2095,6 +2109,9 @@ impl eframe::App for LauncherApp {
                                         self.cpu_list_dialog.open(count);
                                     }
                                 } else if let Err(e) = launch_action(&a) {
+                                    if a.desc == "Fav" && !a.action.starts_with("fav:") {
+                                        tracing::error!(?e, fav=%a.label, "failed to run favorite");
+                                    }
                                     self.error = Some(format!("Failed: {e}"));
                                     self.error_time = Some(Instant::now());
                                     if self.enable_toasts {
@@ -2106,6 +2123,9 @@ impl eframe::App for LauncherApp {
                                         });
                                     }
                                 } else {
+                                    if a.desc == "Fav" && !a.action.starts_with("fav:") {
+                                        tracing::info!(fav=%a.label, command=%a.action, "ran favorite");
+                                    }
                                     if self.enable_toasts {
                                         let msg = if a.action == "recycle:clean" {
                                             "Emptied Recycle Bin".to_string()
