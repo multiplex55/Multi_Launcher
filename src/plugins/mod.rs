@@ -33,6 +33,7 @@ pub mod screenshot;
 pub mod ip;
 pub mod omni_search;
 pub mod macros;
+pub mod fav;
 pub mod text_case;
 pub mod timestamp;
 pub mod random;

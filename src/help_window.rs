@@ -30,25 +30,25 @@ impl HelpWindow {
                         ui.label(format!("Help overlay: {hk}"));
                     }
                     ui.separator();
-                ui.label(egui::RichText::new("Commands").strong());
-                ui.text_edit_singleline(&mut self.filter);
-                let mut infos = app.plugins.plugin_infos();
-                infos.sort_by(|a, b| a.0.cmp(&b.0));
-                let area_height = ui.available_height();
-                egui::ScrollArea::vertical()
-                    .max_height(area_height)
-                    .show(ui, |ui| {
-                        let filt = self.filter.to_lowercase();
-                        for (name, desc, _) in &infos {
-                            if !filt.is_empty()
-                                && !name.to_lowercase().contains(&filt)
-                                && !desc.to_lowercase().contains(&filt)
-                            {
-                                continue;
+                    ui.label(egui::RichText::new("Commands").strong());
+                    ui.text_edit_singleline(&mut self.filter);
+                    let mut infos = app.plugins.plugin_infos();
+                    infos.sort_by(|a, b| a.0.cmp(&b.0));
+                    let area_height = ui.available_height();
+                    egui::ScrollArea::vertical()
+                        .max_height(area_height)
+                        .show(ui, |ui| {
+                            let filt = self.filter.to_lowercase();
+                            for (name, desc, _) in &infos {
+                                if !filt.is_empty()
+                                    && !name.to_lowercase().contains(&filt)
+                                    && !desc.to_lowercase().contains(&filt)
+                                {
+                                    continue;
+                                }
+                                ui.label(format!("{name}: {desc}"));
                             }
-                            ui.label(format!("{name}: {desc}"));
-                        }
-                    });
+                        });
                 });
             self.overlay_open = open;
         }
@@ -63,7 +63,10 @@ impl HelpWindow {
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| ui.heading("Available commands"));
                 ui.separator();
-                if ui.checkbox(&mut self.show_examples, "Show examples").changed() {
+                if ui
+                    .checkbox(&mut self.show_examples, "Show examples")
+                    .changed()
+                {
                     if let Ok(mut s) = crate::settings::Settings::load(&app.settings_path) {
                         s.show_examples = self.show_examples;
                         let _ = s.save(&app.settings_path);
@@ -166,6 +169,7 @@ fn example_queries(name: &str) -> Option<&'static [&'static str]> {
             "tsm 01:00:00.500",
         ]),
         "snippets" => Some(&["cs hello"]),
+        "fav" => Some(&["fav add demo", "fav list"]),
         "todo" => Some(&["todo add buy milk", "todo list"]),
         "wikipedia" => Some(&["wiki rust"]),
         "help" => Some(&["help"]),
