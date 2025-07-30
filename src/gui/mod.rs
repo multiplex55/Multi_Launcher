@@ -299,6 +299,7 @@ pub struct LauncherApp {
     last_search_query: String,
     last_results_valid: bool,
     last_timer_query: bool,
+    pending_query: Option<String>,
 }
 
 impl LauncherApp {
@@ -607,8 +608,9 @@ impl LauncherApp {
             last_net_update: Instant::now(),
             last_search_query: String::new(),
             last_results_valid: false,
-            last_timer_query: false,
-            action_cache: Vec::new(),
+        last_timer_query: false,
+        pending_query: None,
+        action_cache: Vec::new(),
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -1224,6 +1226,11 @@ impl eframe::App for LauncherApp {
         // tracing::debug!("LauncherApp::update called");
         if self.enable_toasts {
             self.toasts.show(ctx);
+        }
+        if let Some(pending) = self.pending_query.take() {
+            self.query = pending;
+            self.search();
+            self.focus_input();
         }
         if let (Some(t), Some(_)) = (self.error_time, self.error.as_ref()) {
             if t.elapsed().as_secs_f32() >= 3.0 {
@@ -2308,18 +2315,7 @@ impl eframe::App for LauncherApp {
                             }
                         }
                         if let Some(new_q) = clicked_query {
-                            self.query = new_q;
-                            self.search();
-                            let input_id = egui::Id::new("query_input");
-                            ui.ctx().memory_mut(|m| m.request_focus(input_id));
-                            let len = self.query.chars().count();
-                            ui.ctx().data_mut(|data| {
-                                let state = data
-                                    .get_persisted_mut_or_default::<egui::widgets::text_edit::TextEditState>(input_id);
-                                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
-                                    egui::text::CCursor::new(len),
-                                )));
-                            });
+                            self.pending_query = Some(new_q);
                         }
                         if refresh {
                             self.search();
