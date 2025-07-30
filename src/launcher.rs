@@ -238,6 +238,11 @@ enum ActionKind<'a> {
         time: &'a str,
         name: &'a str,
     },
+    StopwatchPause(u64),
+    StopwatchResume(u64),
+    StopwatchStop(u64),
+    StopwatchStart { name: &'a str },
+    StopwatchShow(u64),
     NoteAdd(&'a str),
     NoteRemove(usize),
     NoteCopy(usize),
@@ -394,6 +399,29 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if let Some(arg) = s.strip_prefix("alarm:set:") {
         let (time, name) = arg.split_once('|').unwrap_or((arg, ""));
         return ActionKind::AlarmSet { time, name };
+    }
+    if let Some(id) = s.strip_prefix("stopwatch:pause:") {
+        if let Ok(i) = id.parse::<u64>() {
+            return ActionKind::StopwatchPause(i);
+        }
+    }
+    if let Some(id) = s.strip_prefix("stopwatch:resume:") {
+        if let Ok(i) = id.parse::<u64>() {
+            return ActionKind::StopwatchResume(i);
+        }
+    }
+    if let Some(id) = s.strip_prefix("stopwatch:stop:") {
+        if let Ok(i) = id.parse::<u64>() {
+            return ActionKind::StopwatchStop(i);
+        }
+    }
+    if let Some(name) = s.strip_prefix("stopwatch:start:") {
+        return ActionKind::StopwatchStart { name };
+    }
+    if let Some(id) = s.strip_prefix("stopwatch:show:") {
+        if let Ok(i) = id.parse::<u64>() {
+            return ActionKind::StopwatchShow(i);
+        }
     }
     if let Some(text) = s.strip_prefix("note:add:") {
         return ActionKind::NoteAdd(text);
@@ -642,6 +670,23 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
             timer::set_alarm(time, name);
             Ok(())
         }
+        ActionKind::StopwatchPause(id) => {
+            stopwatch::pause(id);
+            Ok(())
+        }
+        ActionKind::StopwatchResume(id) => {
+            stopwatch::resume(id);
+            Ok(())
+        }
+        ActionKind::StopwatchStop(id) => {
+            stopwatch::stop(id);
+            Ok(())
+        }
+        ActionKind::StopwatchStart { name } => {
+            stopwatch::start(name);
+            Ok(())
+        }
+        ActionKind::StopwatchShow(_id) => Ok(()),
         ActionKind::NoteAdd(text) => notes::add(text),
         ActionKind::NoteRemove(i) => notes::remove(i),
         ActionKind::NoteCopy(i) => notes::copy(i),

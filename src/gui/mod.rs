@@ -1911,6 +1911,31 @@ impl eframe::App for LauncherApp {
                                         }
                                     });
                                 }
+                            } else if a.desc == "Stopwatch" && a.action.starts_with("stopwatch:show:") {
+                                if let Ok(id) = a.action[16..].parse::<u64>() {
+                                    menu_resp.clone().context_menu(|ui| {
+                                        if ui.button("Copy Time").clicked() {
+                                            if let Some(time) =
+                                                crate::plugins::stopwatch::format_elapsed(id)
+                                            {
+                                                if let Err(e) =
+                                                    crate::actions::clipboard::set_text(&time)
+                                                {
+                                                    self.error =
+                                                        Some(format!("Failed to copy time: {e}"));
+                                                } else if self.enable_toasts {
+                                                    push_toast(&mut self.toasts, Toast {
+                                                        text: format!("Copied {time}").into(),
+                                                        kind: ToastKind::Success,
+                                                        options: ToastOptions::default()
+                                                            .duration_in_seconds(self.toast_duration as f64),
+                                                    });
+                                                }
+                                            }
+                                            ui.close_menu();
+                                        }
+                                    });
+                                }
                             } else if a.desc == "Snippet" {
                                 menu_resp.clone().context_menu(|ui| {
                                     if ui.button("Edit Snippet").clicked() {
