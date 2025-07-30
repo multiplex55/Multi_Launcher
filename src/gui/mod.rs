@@ -10,6 +10,7 @@ mod notes_dialog;
 mod shell_cmd_dialog;
 mod snippet_dialog;
 mod macro_dialog;
+mod fav_dialog;
 mod tempfile_alias_dialog;
 mod tempfile_dialog;
 mod timer_dialog;
@@ -29,6 +30,7 @@ pub use notes_dialog::NotesDialog;
 pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;
 pub use macro_dialog::MacroDialog;
+pub use fav_dialog::FavDialog;
 pub use tempfile_alias_dialog::TempfileAliasDialog;
 pub use tempfile_dialog::TempfileDialog;
 pub use timer_dialog::{TimerCompletionDialog, TimerDialog};
@@ -162,6 +164,7 @@ enum Panel {
     ShellCmdDialog,
     SnippetDialog,
     MacroDialog,
+    FavDialog,
     NotesDialog,
     TodoDialog,
     TodoViewDialog,
@@ -189,6 +192,7 @@ struct PanelStates {
     shell_cmd_dialog: bool,
     snippet_dialog: bool,
     macro_dialog: bool,
+    fav_dialog: bool,
     notes_dialog: bool,
     todo_dialog: bool,
     todo_view_dialog: bool,
@@ -255,6 +259,7 @@ pub struct LauncherApp {
     shell_cmd_dialog: ShellCmdDialog,
     snippet_dialog: SnippetDialog,
     macro_dialog: MacroDialog,
+    fav_dialog: FavDialog,
     notes_dialog: NotesDialog,
     todo_dialog: TodoDialog,
     todo_view_dialog: TodoViewDialog,
@@ -567,6 +572,7 @@ impl LauncherApp {
             shell_cmd_dialog: ShellCmdDialog::default(),
             snippet_dialog: SnippetDialog::default(),
             macro_dialog: MacroDialog::default(),
+            fav_dialog: FavDialog::default(),
             notes_dialog: NotesDialog::default(),
             todo_dialog: TodoDialog::default(),
             todo_view_dialog: TodoViewDialog::default(),
@@ -1032,6 +1038,7 @@ impl LauncherApp {
             Panel::ShellCmdDialog => { self.shell_cmd_dialog.open = false; self.panel_states.shell_cmd_dialog = false; }
             Panel::SnippetDialog => { self.snippet_dialog.open = false; self.panel_states.snippet_dialog = false; }
             Panel::MacroDialog => { self.macro_dialog.open = false; self.panel_states.macro_dialog = false; }
+            Panel::FavDialog => { self.fav_dialog.open = false; self.panel_states.fav_dialog = false; }
             Panel::NotesDialog => { self.notes_dialog.open = false; self.panel_states.notes_dialog = false; }
             Panel::TodoDialog => { self.todo_dialog.open = false; self.panel_states.todo_dialog = false; }
             Panel::TodoViewDialog => { self.todo_view_dialog.open = false; self.panel_states.todo_view_dialog = false; }
@@ -1073,6 +1080,7 @@ impl LauncherApp {
         check!(self.shell_cmd_dialog.open, shell_cmd_dialog, Panel::ShellCmdDialog);
         check!(self.snippet_dialog.open, snippet_dialog, Panel::SnippetDialog);
         check!(self.macro_dialog.open, macro_dialog, Panel::MacroDialog);
+        check!(self.fav_dialog.open, fav_dialog, Panel::FavDialog);
         check!(self.notes_dialog.open, notes_dialog, Panel::NotesDialog);
         check!(self.todo_dialog.open, todo_dialog, Panel::TodoDialog);
         check!(self.todo_view_dialog.open, todo_view_dialog, Panel::TodoViewDialog);
@@ -1372,6 +1380,8 @@ impl eframe::App for LauncherApp {
                             self.snippet_dialog.open();
                         } else if a.action == "macro:dialog" {
                             self.macro_dialog.open();
+                        } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
+                            self.fav_dialog.open_edit(label);
                         } else if let Some(alias) = a.action.strip_prefix("snippet:edit:") {
                             self.snippet_dialog.open_edit(alias);
                         } else if a.action == "todo:dialog" {
@@ -1932,6 +1942,8 @@ impl eframe::App for LauncherApp {
                             self.snippet_dialog.open();
                         } else if a.action == "macro:dialog" {
                             self.macro_dialog.open();
+                        } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
+                            self.fav_dialog.open_edit(label);
                         } else if a.action == "todo:dialog" {
                             self.todo_dialog.open();
                         } else if a.action == "todo:view" {
@@ -2214,6 +2226,9 @@ impl eframe::App for LauncherApp {
         let mut macro_dlg = std::mem::take(&mut self.macro_dialog);
         macro_dlg.ui(ctx, self);
         self.macro_dialog = macro_dlg;
+        let mut fav_dlg = std::mem::take(&mut self.fav_dialog);
+        fav_dlg.ui(ctx, self);
+        self.fav_dialog = fav_dlg;
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
         notes_dlg.ui(ctx, self);
         self.notes_dialog = notes_dlg;
