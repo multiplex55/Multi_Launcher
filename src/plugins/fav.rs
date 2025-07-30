@@ -129,7 +129,12 @@ impl Plugin for FavPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
         if trimmed.eq_ignore_ascii_case("fav") {
-            return self.list("");
+            return vec![Action {
+                label: "fav: edit favorites".into(),
+                desc: "Fav".into(),
+                action: "fav:dialog".into(),
+                args: None,
+            }];
         }
 
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "fav add") {

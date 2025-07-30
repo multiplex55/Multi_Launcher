@@ -1380,6 +1380,8 @@ impl eframe::App for LauncherApp {
                             self.snippet_dialog.open();
                         } else if a.action == "macro:dialog" {
                             self.macro_dialog.open();
+                        } else if a.action == "fav:dialog" {
+                            self.fav_dialog.open();
                         } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
                             self.fav_dialog.open_edit(label);
                         } else if let Some(alias) = a.action.strip_prefix("snippet:edit:") {
@@ -1942,6 +1944,8 @@ impl eframe::App for LauncherApp {
                             self.snippet_dialog.open();
                         } else if a.action == "macro:dialog" {
                             self.macro_dialog.open();
+                        } else if a.action == "fav:dialog" {
+                            self.fav_dialog.open();
                         } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
                             self.fav_dialog.open_edit(label);
                         } else if a.action == "todo:dialog" {

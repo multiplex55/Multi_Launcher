@@ -47,3 +47,15 @@ fn launch_runs_command() {
     let list = load_bookmarks(BOOKMARKS_FILE).unwrap();
     assert_eq!(list.len(), 1);
 }
+
+#[test]
+fn query_fav_opens_dialog() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let plugin = FavPlugin::default();
+    let results = plugin.search("fav");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "fav:dialog");
+}

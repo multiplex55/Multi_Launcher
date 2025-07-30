@@ -166,7 +166,7 @@ fn example_queries(name: &str) -> Option<&'static [&'static str]> {
             "tsm 01:00:00.500",
         ]),
         "snippets" => Some(&["cs hello"]),
-        "favorites" => Some(&["fav add mycmd", "fav list"]),
+        "favorites" => Some(&["fav", "fav add mycmd", "fav list"]),
         "todo" => Some(&["todo add buy milk", "todo list"]),
         "wikipedia" => Some(&["wiki rust"]),
         "help" => Some(&["help"]),
