@@ -21,17 +21,18 @@ pub fn save_actions(path: &str, actions: &[Action]) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub mod clipboard;
-pub mod timer;
-pub mod shell;
 pub mod bookmarks;
+pub mod clipboard;
+pub mod exec;
+pub mod fav;
 pub mod folders;
 pub mod history;
-pub mod notes;
-pub mod todo;
-pub mod snippets;
-pub mod tempfiles;
 pub mod media;
-pub mod system;
-pub mod exec;
+pub mod notes;
 pub mod screenshot;
+pub mod shell;
+pub mod snippets;
+pub mod system;
+pub mod tempfiles;
+pub mod timer;
+pub mod todo;

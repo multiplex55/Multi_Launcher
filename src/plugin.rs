@@ -1,36 +1,41 @@
 use crate::actions::Action;
 use crate::plugins::asciiart::AsciiArtPlugin;
-use crate::plugins::emoji::EmojiPlugin;
-use crate::plugins::screenshot::ScreenshotPlugin;
-use crate::plugins::text_case::TextCasePlugin;
+use crate::plugins::base_convert::BaseConvertPlugin;
 use crate::plugins::bookmarks::BookmarksPlugin;
 #[cfg(target_os = "windows")]
 use crate::plugins::brightness::BrightnessPlugin;
 use crate::plugins::clipboard::ClipboardPlugin;
 use crate::plugins::dropcalc::DropCalcPlugin;
+use crate::plugins::emoji::EmojiPlugin;
+use crate::plugins::fav::FavPlugin;
 use crate::plugins::folders::FoldersPlugin;
 use crate::plugins::help::HelpPlugin;
 use crate::plugins::history::HistoryPlugin;
+use crate::plugins::ip::IpPlugin;
+use crate::plugins::lorem::LoremPlugin;
+use crate::plugins::macros::MacrosPlugin;
 use crate::plugins::media::MediaPlugin;
 use crate::plugins::network::NetworkPlugin;
 use crate::plugins::notes::NotesPlugin;
+use crate::plugins::omni_search::OmniSearchPlugin;
 use crate::plugins::processes::ProcessesPlugin;
+use crate::plugins::random::RandomPlugin;
 use crate::plugins::recycle::RecyclePlugin;
 use crate::plugins::reddit::RedditPlugin;
 use crate::plugins::runescape::RunescapeSearchPlugin;
+use crate::plugins::screenshot::ScreenshotPlugin;
 use crate::plugins::shell::ShellPlugin;
 use crate::plugins::snippets::SnippetsPlugin;
-use crate::plugins::macros::MacrosPlugin;
-use crate::plugins::omni_search::OmniSearchPlugin;
 use crate::plugins::sysinfo::SysInfoPlugin;
 use crate::plugins::system::SystemPlugin;
 #[cfg(target_os = "windows")]
 use crate::plugins::task_manager::TaskManagerPlugin;
 use crate::plugins::tempfile::TempfilePlugin;
+use crate::plugins::text_case::TextCasePlugin;
 use crate::plugins::timer::TimerPlugin;
+use crate::plugins::timestamp::TimestampPlugin;
 use crate::plugins::todo::TodoPlugin;
 use crate::plugins::unit_convert::UnitConvertPlugin;
-use crate::plugins::base_convert::BaseConvertPlugin;
 #[cfg(target_os = "windows")]
 use crate::plugins::volume::VolumePlugin;
 use crate::plugins::weather::WeatherPlugin;
@@ -38,16 +43,12 @@ use crate::plugins::wikipedia::WikipediaPlugin;
 #[cfg(target_os = "windows")]
 use crate::plugins::windows::WindowsPlugin;
 use crate::plugins::youtube::YoutubePlugin;
-use crate::plugins::ip::IpPlugin;
-use crate::plugins::timestamp::TimestampPlugin;
-use crate::plugins::random::RandomPlugin;
-use crate::plugins::lorem::LoremPlugin;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::NetUnit;
-use std::collections::HashSet;
+use eframe::egui;
 use libloading::Library;
 use serde_json::Value;
-use eframe::egui;
+use std::collections::HashSet;
 
 pub trait Plugin: Send + Sync {
     /// Return actions based on the query string
@@ -132,6 +133,7 @@ impl PluginManager {
         self.register_with_settings(TodoPlugin::default(), plugin_settings);
         self.register_with_settings(SnippetsPlugin::default(), plugin_settings);
         self.register_with_settings(MacrosPlugin::default(), plugin_settings);
+        self.register_with_settings(FavPlugin::default(), plugin_settings);
         self.register_with_settings(RecyclePlugin, plugin_settings);
         self.register_with_settings(TempfilePlugin, plugin_settings);
         self.register_with_settings(MediaPlugin, plugin_settings);

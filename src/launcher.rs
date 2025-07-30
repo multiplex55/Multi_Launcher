@@ -263,6 +263,7 @@ enum ActionKind<'a> {
         alias: &'a str,
         text: &'a str,
     },
+    FavRemove(&'a str),
     BrightnessSet(u32),
     VolumeSet(u32),
     VolumeSetProcess {
@@ -468,6 +469,9 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
             return ActionKind::SnippetAdd { alias, text };
         }
     }
+    if let Some(label) = s.strip_prefix("fav:remove:") {
+        return ActionKind::FavRemove(label);
+    }
     if let Some(val) = s.strip_prefix("brightness:set:") {
         if let Ok(v) = val.parse::<u32>() {
             return ActionKind::BrightnessSet(v);
@@ -645,6 +649,7 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         }
         ActionKind::SnippetRemove(alias) => snippets::remove(alias),
         ActionKind::SnippetAdd { alias, text } => snippets::add(alias, text),
+        ActionKind::FavRemove(label) => crate::actions::fav::remove(label),
         ActionKind::BrightnessSet(v) => {
             system::set_brightness(v);
             Ok(())
