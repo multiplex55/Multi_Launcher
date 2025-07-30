@@ -5,14 +5,15 @@ mod bookmark_alias_dialog;
 mod brightness_dialog;
 mod clipboard_dialog;
 mod cpu_list_dialog;
-mod toast_log_dialog;
+mod fav_dialog;
+mod macro_dialog;
 mod notes_dialog;
 mod shell_cmd_dialog;
 mod snippet_dialog;
-mod macro_dialog;
 mod tempfile_alias_dialog;
 mod tempfile_dialog;
 mod timer_dialog;
+mod toast_log_dialog;
 mod todo_dialog;
 mod todo_view_dialog;
 mod volume_dialog;
@@ -24,22 +25,23 @@ pub use bookmark_alias_dialog::BookmarkAliasDialog;
 pub use brightness_dialog::BrightnessDialog;
 pub use clipboard_dialog::ClipboardDialog;
 pub use cpu_list_dialog::CpuListDialog;
-pub use toast_log_dialog::ToastLogDialog;
+pub use fav_dialog::FavDialog;
+pub use macro_dialog::MacroDialog;
 pub use notes_dialog::NotesDialog;
 pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;
-pub use macro_dialog::MacroDialog;
 pub use tempfile_alias_dialog::TempfileAliasDialog;
 pub use tempfile_dialog::TempfileDialog;
 pub use timer_dialog::{TimerCompletionDialog, TimerDialog};
+pub use toast_log_dialog::ToastLogDialog;
 pub use todo_dialog::TodoDialog;
 pub use todo_view_dialog::TodoViewDialog;
 pub use volume_dialog::VolumeDialog;
 
+use crate::actions::folders;
 use crate::actions::{load_actions, Action};
 use crate::actions_editor::ActionsEditor;
 use crate::help_window::HelpWindow;
-use crate::actions::folders;
 use crate::history::{self, HistoryEntry};
 use crate::indexer;
 use crate::launcher::launch_action;
@@ -48,6 +50,7 @@ use crate::plugin_editor::PluginEditor;
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
 use crate::settings::Settings;
 use crate::settings_editor::SettingsEditor;
+use crate::toast_log::{append_toast_log, TOAST_LOG_FILE};
 use crate::usage::{self, USAGE_FILE};
 use crate::visibility::apply_visibility;
 use eframe::egui;
@@ -65,7 +68,6 @@ use std::sync::{
     Arc,
 };
 use std::time::Instant;
-use crate::toast_log::{append_toast_log, TOAST_LOG_FILE};
 
 const SUBCOMMANDS: &[&str] = &[
     "add", "rm", "list", "clear", "open", "new", "alias", "set", "pause", "resume", "cancel",
@@ -162,6 +164,7 @@ enum Panel {
     ShellCmdDialog,
     SnippetDialog,
     MacroDialog,
+    FavDialog,
     NotesDialog,
     TodoDialog,
     TodoViewDialog,
@@ -189,6 +192,7 @@ struct PanelStates {
     shell_cmd_dialog: bool,
     snippet_dialog: bool,
     macro_dialog: bool,
+    fav_dialog: bool,
     notes_dialog: bool,
     todo_dialog: bool,
     todo_view_dialog: bool,
@@ -255,6 +259,7 @@ pub struct LauncherApp {
     shell_cmd_dialog: ShellCmdDialog,
     snippet_dialog: SnippetDialog,
     macro_dialog: MacroDialog,
+    fav_dialog: FavDialog,
     notes_dialog: NotesDialog,
     todo_dialog: TodoDialog,
     todo_view_dialog: TodoViewDialog,
@@ -294,6 +299,7 @@ pub struct LauncherApp {
     last_search_query: String,
     last_results_valid: bool,
     last_timer_query: bool,
+    pending_query: Option<String>,
 }
 
 impl LauncherApp {
@@ -451,8 +457,7 @@ impl LauncherApp {
                     Toast {
                         text: format!("Failed to watch {}", actions_path).into(),
                         kind: ToastKind::Error,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(toast_duration as f64),
+                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
                     },
                 );
             }
@@ -471,8 +476,7 @@ impl LauncherApp {
                     Toast {
                         text: "Failed to watch folders.json".into(),
                         kind: ToastKind::Error,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(toast_duration as f64),
+                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
                     },
                 );
             }
@@ -491,8 +495,7 @@ impl LauncherApp {
                     Toast {
                         text: "Failed to watch bookmarks.json".into(),
                         kind: ToastKind::Error,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(toast_duration as f64),
+                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
                     },
                 );
             }
@@ -567,6 +570,7 @@ impl LauncherApp {
             shell_cmd_dialog: ShellCmdDialog::default(),
             snippet_dialog: SnippetDialog::default(),
             macro_dialog: MacroDialog::default(),
+            fav_dialog: FavDialog::default(),
             notes_dialog: NotesDialog::default(),
             todo_dialog: TodoDialog::default(),
             todo_view_dialog: TodoViewDialog::default(),
@@ -604,8 +608,9 @@ impl LauncherApp {
             last_net_update: Instant::now(),
             last_search_query: String::new(),
             last_results_valid: false,
-            last_timer_query: false,
-            action_cache: Vec::new(),
+        last_timer_query: false,
+        pending_query: None,
+        action_cache: Vec::new(),
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -648,7 +653,8 @@ impl LauncherApp {
 
         let trimmed = self.query.trim();
         let trimmed_lc = trimmed.to_lowercase();
-        self.last_timer_query = trimmed.starts_with("timer list") || trimmed.starts_with("alarm list");
+        self.last_timer_query =
+            trimmed.starts_with("timer list") || trimmed.starts_with("alarm list");
 
         let mut res: Vec<(Action, f32)> = Vec::new();
 
@@ -882,11 +888,10 @@ impl LauncherApp {
     #[cfg_attr(test, allow(dead_code))]
     pub fn maybe_refresh_timer_list(&mut self) {
         let trimmed = self.query.trim();
-        if (
-            trimmed.starts_with("timer list")
-                || trimmed.starts_with("alarm list")
-                || self.last_timer_query
-        ) && !self.disable_timer_updates
+        if (trimmed.starts_with("timer list")
+            || trimmed.starts_with("alarm list")
+            || self.last_timer_query)
+            && !self.disable_timer_updates
             && self.last_timer_update.elapsed().as_secs_f32() >= self.timer_refresh
         {
             self.last_results_valid = false;
@@ -969,6 +974,7 @@ impl LauncherApp {
             || self.shell_cmd_dialog.open
             || self.snippet_dialog.open
             || self.macro_dialog.open
+            || self.fav_dialog.open
             || self.notes_dialog.open
             || self.todo_dialog.open
             || self.todo_view_dialog.open
@@ -1020,29 +1026,102 @@ impl LauncherApp {
             None => return false,
         };
         match panel {
-            Panel::AliasDialog => { self.alias_dialog.open = false; self.panel_states.alias_dialog = false; }
-            Panel::BookmarkAliasDialog => { self.bookmark_alias_dialog.open = false; self.panel_states.bookmark_alias_dialog = false; }
-            Panel::TempfileAliasDialog => { self.tempfile_alias_dialog.open = false; self.panel_states.tempfile_alias_dialog = false; }
-            Panel::TempfileDialog => { self.tempfile_dialog.open = false; self.panel_states.tempfile_dialog = false; }
-            Panel::AddBookmarkDialog => { self.add_bookmark_dialog.open = false; self.panel_states.add_bookmark_dialog = false; }
-            Panel::HelpOverlay => { self.help_window.overlay_open = false; self.panel_states.help_overlay = false; }
-            Panel::HelpWindow => { self.help_window.open = false; self.panel_states.help_window = false; }
-            Panel::TimerDialog => { self.timer_dialog.open = false; self.panel_states.timer_dialog = false; }
-            Panel::CompletionDialog => { self.completion_dialog.open = false; self.panel_states.completion_dialog = false; }
-            Panel::ShellCmdDialog => { self.shell_cmd_dialog.open = false; self.panel_states.shell_cmd_dialog = false; }
-            Panel::SnippetDialog => { self.snippet_dialog.open = false; self.panel_states.snippet_dialog = false; }
-            Panel::MacroDialog => { self.macro_dialog.open = false; self.panel_states.macro_dialog = false; }
-            Panel::NotesDialog => { self.notes_dialog.open = false; self.panel_states.notes_dialog = false; }
-            Panel::TodoDialog => { self.todo_dialog.open = false; self.panel_states.todo_dialog = false; }
-            Panel::TodoViewDialog => { self.todo_view_dialog.open = false; self.panel_states.todo_view_dialog = false; }
-            Panel::ClipboardDialog => { self.clipboard_dialog.open = false; self.panel_states.clipboard_dialog = false; }
-            Panel::VolumeDialog => { self.volume_dialog.open = false; self.panel_states.volume_dialog = false; }
-            Panel::BrightnessDialog => { self.brightness_dialog.open = false; self.panel_states.brightness_dialog = false; }
-            Panel::CpuListDialog => { self.cpu_list_dialog.open = false; self.panel_states.cpu_list_dialog = false; }
-            Panel::ToastLogDialog => { self.toast_log_dialog.open = false; self.panel_states.toast_log_dialog = false; }
-            Panel::Editor => { self.show_editor = false; self.panel_states.editor = false; }
-            Panel::Settings => { self.show_settings = false; self.panel_states.settings = false; }
-            Panel::Plugins => { self.show_plugins = false; self.panel_states.plugins = false; }
+            Panel::AliasDialog => {
+                self.alias_dialog.open = false;
+                self.panel_states.alias_dialog = false;
+            }
+            Panel::BookmarkAliasDialog => {
+                self.bookmark_alias_dialog.open = false;
+                self.panel_states.bookmark_alias_dialog = false;
+            }
+            Panel::TempfileAliasDialog => {
+                self.tempfile_alias_dialog.open = false;
+                self.panel_states.tempfile_alias_dialog = false;
+            }
+            Panel::TempfileDialog => {
+                self.tempfile_dialog.open = false;
+                self.panel_states.tempfile_dialog = false;
+            }
+            Panel::AddBookmarkDialog => {
+                self.add_bookmark_dialog.open = false;
+                self.panel_states.add_bookmark_dialog = false;
+            }
+            Panel::HelpOverlay => {
+                self.help_window.overlay_open = false;
+                self.panel_states.help_overlay = false;
+            }
+            Panel::HelpWindow => {
+                self.help_window.open = false;
+                self.panel_states.help_window = false;
+            }
+            Panel::TimerDialog => {
+                self.timer_dialog.open = false;
+                self.panel_states.timer_dialog = false;
+            }
+            Panel::CompletionDialog => {
+                self.completion_dialog.open = false;
+                self.panel_states.completion_dialog = false;
+            }
+            Panel::ShellCmdDialog => {
+                self.shell_cmd_dialog.open = false;
+                self.panel_states.shell_cmd_dialog = false;
+            }
+            Panel::SnippetDialog => {
+                self.snippet_dialog.open = false;
+                self.panel_states.snippet_dialog = false;
+            }
+            Panel::MacroDialog => {
+                self.macro_dialog.open = false;
+                self.panel_states.macro_dialog = false;
+            }
+            Panel::FavDialog => {
+                self.fav_dialog.open = false;
+                self.panel_states.fav_dialog = false;
+            }
+            Panel::NotesDialog => {
+                self.notes_dialog.open = false;
+                self.panel_states.notes_dialog = false;
+            }
+            Panel::TodoDialog => {
+                self.todo_dialog.open = false;
+                self.panel_states.todo_dialog = false;
+            }
+            Panel::TodoViewDialog => {
+                self.todo_view_dialog.open = false;
+                self.panel_states.todo_view_dialog = false;
+            }
+            Panel::ClipboardDialog => {
+                self.clipboard_dialog.open = false;
+                self.panel_states.clipboard_dialog = false;
+            }
+            Panel::VolumeDialog => {
+                self.volume_dialog.open = false;
+                self.panel_states.volume_dialog = false;
+            }
+            Panel::BrightnessDialog => {
+                self.brightness_dialog.open = false;
+                self.panel_states.brightness_dialog = false;
+            }
+            Panel::CpuListDialog => {
+                self.cpu_list_dialog.open = false;
+                self.panel_states.cpu_list_dialog = false;
+            }
+            Panel::ToastLogDialog => {
+                self.toast_log_dialog.open = false;
+                self.panel_states.toast_log_dialog = false;
+            }
+            Panel::Editor => {
+                self.show_editor = false;
+                self.panel_states.editor = false;
+            }
+            Panel::Settings => {
+                self.show_settings = false;
+                self.panel_states.settings = false;
+            }
+            Panel::Plugins => {
+                self.show_plugins = false;
+                self.panel_states.plugins = false;
+            }
         }
         true
     }
@@ -1062,25 +1141,78 @@ impl LauncherApp {
         }
 
         check!(self.alias_dialog.open, alias_dialog, Panel::AliasDialog);
-        check!(self.bookmark_alias_dialog.open, bookmark_alias_dialog, Panel::BookmarkAliasDialog);
-        check!(self.tempfile_alias_dialog.open, tempfile_alias_dialog, Panel::TempfileAliasDialog);
-        check!(self.tempfile_dialog.open, tempfile_dialog, Panel::TempfileDialog);
-        check!(self.add_bookmark_dialog.open, add_bookmark_dialog, Panel::AddBookmarkDialog);
-        check!(self.help_window.overlay_open, help_overlay, Panel::HelpOverlay);
+        check!(
+            self.bookmark_alias_dialog.open,
+            bookmark_alias_dialog,
+            Panel::BookmarkAliasDialog
+        );
+        check!(
+            self.tempfile_alias_dialog.open,
+            tempfile_alias_dialog,
+            Panel::TempfileAliasDialog
+        );
+        check!(
+            self.tempfile_dialog.open,
+            tempfile_dialog,
+            Panel::TempfileDialog
+        );
+        check!(
+            self.add_bookmark_dialog.open,
+            add_bookmark_dialog,
+            Panel::AddBookmarkDialog
+        );
+        check!(
+            self.help_window.overlay_open,
+            help_overlay,
+            Panel::HelpOverlay
+        );
         check!(self.help_window.open, help_window, Panel::HelpWindow);
         check!(self.timer_dialog.open, timer_dialog, Panel::TimerDialog);
-        check!(self.completion_dialog.open, completion_dialog, Panel::CompletionDialog);
-        check!(self.shell_cmd_dialog.open, shell_cmd_dialog, Panel::ShellCmdDialog);
-        check!(self.snippet_dialog.open, snippet_dialog, Panel::SnippetDialog);
+        check!(
+            self.completion_dialog.open,
+            completion_dialog,
+            Panel::CompletionDialog
+        );
+        check!(
+            self.shell_cmd_dialog.open,
+            shell_cmd_dialog,
+            Panel::ShellCmdDialog
+        );
+        check!(
+            self.snippet_dialog.open,
+            snippet_dialog,
+            Panel::SnippetDialog
+        );
         check!(self.macro_dialog.open, macro_dialog, Panel::MacroDialog);
+        check!(self.fav_dialog.open, fav_dialog, Panel::FavDialog);
         check!(self.notes_dialog.open, notes_dialog, Panel::NotesDialog);
         check!(self.todo_dialog.open, todo_dialog, Panel::TodoDialog);
-        check!(self.todo_view_dialog.open, todo_view_dialog, Panel::TodoViewDialog);
-        check!(self.clipboard_dialog.open, clipboard_dialog, Panel::ClipboardDialog);
+        check!(
+            self.todo_view_dialog.open,
+            todo_view_dialog,
+            Panel::TodoViewDialog
+        );
+        check!(
+            self.clipboard_dialog.open,
+            clipboard_dialog,
+            Panel::ClipboardDialog
+        );
         check!(self.volume_dialog.open, volume_dialog, Panel::VolumeDialog);
-        check!(self.brightness_dialog.open, brightness_dialog, Panel::BrightnessDialog);
-        check!(self.cpu_list_dialog.open, cpu_list_dialog, Panel::CpuListDialog);
-        check!(self.toast_log_dialog.open, toast_log_dialog, Panel::ToastLogDialog);
+        check!(
+            self.brightness_dialog.open,
+            brightness_dialog,
+            Panel::BrightnessDialog
+        );
+        check!(
+            self.cpu_list_dialog.open,
+            cpu_list_dialog,
+            Panel::CpuListDialog
+        );
+        check!(
+            self.toast_log_dialog.open,
+            toast_log_dialog,
+            Panel::ToastLogDialog
+        );
         check!(self.show_editor, editor, Panel::Editor);
         check!(self.show_settings, settings, Panel::Settings);
         check!(self.show_plugins, plugins, Panel::Plugins);
@@ -1094,6 +1226,11 @@ impl eframe::App for LauncherApp {
         // tracing::debug!("LauncherApp::update called");
         if self.enable_toasts {
             self.toasts.show(ctx);
+        }
+        if let Some(pending) = self.pending_query.take() {
+            self.query = pending;
+            self.search();
+            self.focus_input();
         }
         if let (Some(t), Some(_)) = (self.error_time, self.error.as_ref()) {
             if t.elapsed().as_secs_f32() >= 3.0 {
@@ -1372,6 +1509,12 @@ impl eframe::App for LauncherApp {
                             self.snippet_dialog.open();
                         } else if a.action == "macro:dialog" {
                             self.macro_dialog.open();
+                        } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
+                            if label.is_empty() {
+                                self.fav_dialog.open();
+                            } else {
+                                self.fav_dialog.open_edit(label);
+                            }
                         } else if let Some(alias) = a.action.strip_prefix("snippet:edit:") {
                             self.snippet_dialog.open_edit(alias);
                         } else if a.action == "todo:dialog" {
@@ -1395,6 +1538,9 @@ impl eframe::App for LauncherApp {
                                 self.cpu_list_dialog.open(count);
                             }
                         } else if let Err(e) = launch_action(&a) {
+                            if a.desc == "Fav" && !a.action.starts_with("fav:") {
+                                tracing::error!(?e, fav=%a.label, "failed to run favorite");
+                            }
                             self.set_error(format!("Failed: {e}"));
                             if self.enable_toasts {
                                 push_toast(&mut self.toasts, Toast {
@@ -1404,6 +1550,9 @@ impl eframe::App for LauncherApp {
                                 });
                             }
                         } else {
+                            if a.desc == "Fav" && !a.action.starts_with("fav:") {
+                                tracing::info!(fav=%a.label, command=%a.action, "ran favorite");
+                            }
                             if self.enable_toasts {
                                 let msg = if a.action == "recycle:clean" {
                                     "Emptied Recycle Bin".to_string()
@@ -1450,6 +1599,12 @@ impl eframe::App for LauncherApp {
                                 refresh = true;
                                 set_focus = true;
                             } else if a.action.starts_with("folder:remove:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("fav:add:") {
+                                refresh = true;
+                                set_focus = true;
+                            } else if a.action.starts_with("fav:remove:") {
                                 refresh = true;
                                 set_focus = true;
                             } else if a.action.starts_with("todo:add:") {
@@ -1585,6 +1740,8 @@ impl eframe::App for LauncherApp {
                                 && !a.action.starts_with("folder:add:")
                                 && !a.action.starts_with("folder:remove:")
                                 && !a.action.starts_with("snippet:remove:")
+                                && !a.action.starts_with("fav:add:")
+                                && !a.action.starts_with("fav:remove:")
                                 && !a.action.starts_with("calc:")
                                 && !a.action.starts_with("todo:done:")
                             {
@@ -1932,6 +2089,12 @@ impl eframe::App for LauncherApp {
                             self.snippet_dialog.open();
                         } else if a.action == "macro:dialog" {
                             self.macro_dialog.open();
+                        } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
+                            if label.is_empty() {
+                                self.fav_dialog.open();
+                            } else {
+                                self.fav_dialog.open_edit(label);
+                            }
                         } else if a.action == "todo:dialog" {
                             self.todo_dialog.open();
                         } else if a.action == "todo:view" {
@@ -1953,6 +2116,9 @@ impl eframe::App for LauncherApp {
                                         self.cpu_list_dialog.open(count);
                                     }
                                 } else if let Err(e) = launch_action(&a) {
+                                    if a.desc == "Fav" && !a.action.starts_with("fav:") {
+                                        tracing::error!(?e, fav=%a.label, "failed to run favorite");
+                                    }
                                     self.error = Some(format!("Failed: {e}"));
                                     self.error_time = Some(Instant::now());
                                     if self.enable_toasts {
@@ -1964,6 +2130,9 @@ impl eframe::App for LauncherApp {
                                         });
                                     }
                                 } else {
+                                    if a.desc == "Fav" && !a.action.starts_with("fav:") {
+                                        tracing::info!(fav=%a.label, command=%a.action, "ran favorite");
+                                    }
                                     if self.enable_toasts {
                                         let msg = if a.action == "recycle:clean" {
                                             "Emptied Recycle Bin".to_string()
@@ -2011,6 +2180,12 @@ impl eframe::App for LauncherApp {
                                         refresh = true;
                                         set_focus = true;
                                     } else if a.action.starts_with("folder:remove:") {
+                                        refresh = true;
+                                        set_focus = true;
+                                    } else if a.action.starts_with("fav:add:") {
+                                        refresh = true;
+                                        set_focus = true;
+                                    } else if a.action.starts_with("fav:remove:") {
                                         refresh = true;
                                         set_focus = true;
                                     } else if a.action.starts_with("todo:add:") {
@@ -2128,6 +2303,8 @@ impl eframe::App for LauncherApp {
                                         && !a.action.starts_with("folder:add:")
                                         && !a.action.starts_with("folder:remove:")
                                         && !a.action.starts_with("snippet:remove:")
+                                        && !a.action.starts_with("fav:add:")
+                                        && !a.action.starts_with("fav:remove:")
                                         && !a.action.starts_with("calc:")
                                         && !a.action.starts_with("todo:done:")
                                     {
@@ -2138,18 +2315,7 @@ impl eframe::App for LauncherApp {
                             }
                         }
                         if let Some(new_q) = clicked_query {
-                            self.query = new_q;
-                            self.search();
-                            let input_id = egui::Id::new("query_input");
-                            ui.ctx().memory_mut(|m| m.request_focus(input_id));
-                            let len = self.query.chars().count();
-                            ui.ctx().data_mut(|data| {
-                                let state = data
-                                    .get_persisted_mut_or_default::<egui::widgets::text_edit::TextEditState>(input_id);
-                                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
-                                    egui::text::CCursor::new(len),
-                                )));
-                            });
+                            self.pending_query = Some(new_q);
                         }
                         if refresh {
                             self.search();
@@ -2214,6 +2380,9 @@ impl eframe::App for LauncherApp {
         let mut macro_dlg = std::mem::take(&mut self.macro_dialog);
         macro_dlg.ui(ctx, self);
         self.macro_dialog = macro_dlg;
+        let mut fav_dlg = std::mem::take(&mut self.fav_dialog);
+        fav_dlg.ui(ctx, self);
+        self.fav_dialog = fav_dlg;
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
         notes_dlg.ui(ctx, self);
         self.notes_dialog = notes_dlg;
