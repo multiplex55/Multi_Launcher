@@ -54,10 +54,16 @@ impl Default for AddActionDialog {
 impl AddActionDialog {
     /// Start the dialog for creating a new command.
     pub fn open_add(&mut self) {
+        self.open_add_with_path("");
+    }
+
+    /// Start the dialog for creating a new command using `path` as the
+    /// pre-filled executable.
+    pub fn open_add_with_path(&mut self, path: &str) {
         self.open = true;
         self.label.clear();
         self.desc.clear();
-        self.path.clear();
+        self.path = path.into();
         self.args.clear();
         self.show_args = false;
         self.mode = DialogMode::Add;

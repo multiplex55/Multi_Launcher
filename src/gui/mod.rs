@@ -39,6 +39,7 @@ pub use volume_dialog::VolumeDialog;
 use crate::actions::{load_actions, Action};
 use crate::actions_editor::ActionsEditor;
 use crate::help_window::HelpWindow;
+use crate::actions::folders;
 use crate::history::{self, HistoryEntry};
 use crate::indexer;
 use crate::launcher::launch_action;
@@ -1127,6 +1128,9 @@ impl eframe::App for LauncherApp {
         for err in crate::plugins::macros::take_error_messages() {
             self.macro_dialog.push_debug(err);
         }
+
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        self.handle_dropped_files(dropped);
         if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
             self.window_size = (rect.width() as i32, rect.height() as i32);
         }
@@ -2254,6 +2258,25 @@ impl eframe::App for LauncherApp {
 impl LauncherApp {
     pub fn watch_receiver(&self) -> &Receiver<WatchEvent> {
         &self.rx
+    }
+
+    /// Process dropped files or directories.
+    pub fn handle_dropped_files(&mut self, files: Vec<egui::DroppedFile>) {
+        for file in files {
+            if let Some(path) = file.path {
+                if path.is_dir() {
+                    if let Err(e) = folders::add(path.to_str().unwrap_or_default()) {
+                        self.set_error(format!("Failed to add folder: {e}"));
+                    }
+                    if let Some(p) = path.to_str() {
+                        self.alias_dialog.open(p);
+                    }
+                } else if let Some(p) = path.to_str() {
+                    self.show_editor = true;
+                    self.editor.open_add_with_path(p);
+                }
+            }
+        }
     }
 }
 
