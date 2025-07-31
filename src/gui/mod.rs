@@ -287,6 +287,7 @@ pub struct LauncherApp {
     pub static_pos: Option<(i32, i32)>,
     pub static_size: Option<(i32, i32)>,
     pub hide_after_run: bool,
+    pub always_on_top: bool,
     pub timer_refresh: f32,
     pub disable_timer_updates: bool,
     pub preserve_command: bool,
@@ -356,6 +357,7 @@ impl LauncherApp {
         net_unit: Option<crate::settings::NetUnit>,
         screenshot_dir: Option<String>,
         screenshot_save_file: Option<bool>,
+        always_on_top: Option<bool>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -411,6 +413,9 @@ impl LauncherApp {
         }
         if let Some(v) = screenshot_save_file {
             self.screenshot_save_file = v;
+        }
+        if let Some(v) = always_on_top {
+            self.always_on_top = v;
         }
     }
 
@@ -599,6 +604,7 @@ impl LauncherApp {
             static_pos,
             static_size,
             hide_after_run: settings.hide_after_run,
+            always_on_top: settings.always_on_top,
             timer_refresh: settings.timer_refresh,
             disable_timer_updates: settings.disable_timer_updates,
             preserve_command: settings.preserve_command,

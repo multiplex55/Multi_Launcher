@@ -39,6 +39,7 @@ pub struct SettingsEditor {
     static_w: i32,
     static_h: i32,
     hide_after_run: bool,
+    pub always_on_top: bool,
     timer_refresh: f32,
     disable_timer_updates: bool,
     preserve_command: bool,
@@ -117,6 +118,7 @@ impl SettingsEditor {
             static_w: settings.static_size.unwrap_or((400, 220)).0,
             static_h: settings.static_size.unwrap_or((400, 220)).1,
             hide_after_run: settings.hide_after_run,
+            always_on_top: settings.always_on_top,
             timer_refresh: settings.timer_refresh,
             disable_timer_updates: settings.disable_timer_updates,
             preserve_command: settings.preserve_command,
@@ -162,7 +164,7 @@ impl SettingsEditor {
         }
     }
 
-    fn to_settings(&self, current: &Settings) -> Settings {
+    pub fn to_settings(&self, current: &Settings) -> Settings {
         Settings {
             hotkey: if self.hotkey.trim().is_empty() {
                 None
@@ -200,6 +202,7 @@ impl SettingsEditor {
             static_pos: Some((self.static_x, self.static_y)),
             static_size: Some((self.static_w, self.static_h)),
             hide_after_run: self.hide_after_run,
+            always_on_top: self.always_on_top,
             timer_refresh: self.timer_refresh,
             disable_timer_updates: self.disable_timer_updates,
             preserve_command: self.preserve_command,
@@ -305,6 +308,7 @@ impl SettingsEditor {
                             });
                         }
                         ui.checkbox(&mut self.hide_after_run, "Hide window after running action");
+                        ui.checkbox(&mut self.always_on_top, "Always on top");
                         ui.checkbox(&mut self.preserve_command, "Preserve command after run");
                         ui.checkbox(
                             &mut self.disable_timer_updates,
@@ -515,7 +519,15 @@ impl SettingsEditor {
                                                 Some(new_settings.net_unit),
                                                 new_settings.screenshot_dir.clone(),
                                                 Some(new_settings.screenshot_save_file),
+                                                Some(new_settings.always_on_top),
                                             );
+                                            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                                                if new_settings.always_on_top {
+                                                    egui::WindowLevel::AlwaysOnTop
+                                                } else {
+                                                    egui::WindowLevel::Normal
+                                                },
+                                            ));
                                             app.hotkey_str = new_settings.hotkey.clone();
                                             app.quit_hotkey_str = new_settings.quit_hotkey.clone();
                                             app.help_hotkey_str = new_settings.help_hotkey.clone();

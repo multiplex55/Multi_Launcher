@@ -122,6 +122,8 @@ impl PluginEditor {
                         Some(s.net_unit),
                         s.screenshot_dir.clone(),
                         Some(s.screenshot_save_file),
+        
+                        None,
                     );
                     let dirs = s.plugin_dirs.clone().unwrap_or_default();
                     app.plugins.reload_from_dirs(

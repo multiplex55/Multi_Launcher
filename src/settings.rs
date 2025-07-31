@@ -110,6 +110,9 @@ pub struct Settings {
     /// Hide the main window automatically after successfully launching an action.
     #[serde(default)]
     pub hide_after_run: bool,
+    /// Keep the window always on top of other windows.
+    #[serde(default = "default_always_on_top")]
+    pub always_on_top: bool,
     /// Interval in seconds to refresh the timer list.
     #[serde(default = "default_timer_refresh")]
     pub timer_refresh: f32,
@@ -165,6 +168,10 @@ fn default_follow_mouse() -> bool {
     true
 }
 
+fn default_always_on_top() -> bool {
+    true
+}
+
 fn default_timer_refresh() -> f32 {
     1.0
 }
@@ -215,6 +222,7 @@ impl Default for Settings {
             static_pos: None,
             static_size: None,
             hide_after_run: false,
+            always_on_top: default_always_on_top(),
             timer_refresh: default_timer_refresh(),
             net_refresh: default_net_refresh(),
             net_unit: NetUnit::Auto,
