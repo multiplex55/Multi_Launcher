@@ -231,11 +231,14 @@ Built-in commands:
 | `win` | `win <title>` | Window management |
 | `ss` | `ss clip` | Screenshot capture |
 | `help` | `help` | Command overview |
+| `sw` | `sw start` | Stopwatch |
 | `timer` | `timer add 5m tea` | Timers |
 | `alarm` | `alarm 07:30` | Alarms |
 | `weather` | `weather Berlin` | Weather lookup |
 
 Timers and alarms are stored in `alarms.json` and reload automatically when the launcher starts. The timer plugin exposes a `completion_dialog` capability that toggles pop-up notifications when a timer completes.
+
+Stopwatches use the `sw` prefix. Start one with `sw start`, stop it with `sw stop` or reset it via `sw reset`. Right click a stopwatch entry to copy the elapsed time. A precision option in the **Settings** window controls how many decimals are displayed.
 
 ```mermaid
 sequenceDiagram
