@@ -296,9 +296,11 @@ pub struct LauncherApp {
     pub screenshot_save_file: bool,
     last_timer_update: Instant,
     last_net_update: Instant,
+    last_stopwatch_update: Instant,
     last_search_query: String,
     last_results_valid: bool,
     last_timer_query: bool,
+    last_stopwatch_query: bool,
     pending_query: Option<String>,
 }
 
@@ -606,11 +608,13 @@ impl LauncherApp {
             screenshot_save_file: settings.screenshot_save_file,
             last_timer_update: Instant::now(),
             last_net_update: Instant::now(),
+            last_stopwatch_update: Instant::now(),
             last_search_query: String::new(),
             last_results_valid: false,
-        last_timer_query: false,
-        pending_query: None,
-        action_cache: Vec::new(),
+            last_timer_query: false,
+            last_stopwatch_query: false,
+            pending_query: None,
+            action_cache: Vec::new(),
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -655,6 +659,7 @@ impl LauncherApp {
         let trimmed_lc = trimmed.to_lowercase();
         self.last_timer_query =
             trimmed.starts_with("timer list") || trimmed.starts_with("alarm list");
+        self.last_stopwatch_query = trimmed.starts_with("sw list");
 
         let mut res: Vec<(Action, f32)> = Vec::new();
 
@@ -900,6 +905,23 @@ impl LauncherApp {
         }
     }
 
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn maybe_refresh_stopwatch_list(&mut self) {
+        let trimmed = self.query.trim();
+        if (trimmed.starts_with("sw list") || self.last_stopwatch_query)
+            && !crate::plugins::stopwatch::running_stopwatches().is_empty()
+            && self
+                .last_stopwatch_update
+                .elapsed()
+                .as_secs_f32()
+                >= crate::plugins::stopwatch::refresh_rate()
+        {
+            self.last_results_valid = false;
+            self.search();
+            self.last_stopwatch_update = Instant::now();
+        }
+    }
+
     /// Handle a keyboard navigation key. Returns the index of a selected
     /// action when `Enter` is pressed and a selection is available.
     pub fn handle_key(&mut self, key: egui::Key) -> Option<usize> {
@@ -951,9 +973,18 @@ impl LauncherApp {
         self.last_timer_update = t;
     }
 
+    pub fn set_last_stopwatch_update(&mut self, t: Instant) {
+        self.last_stopwatch_update = t;
+    }
+
     #[cfg_attr(test, allow(dead_code))]
     pub fn last_timer_update(&self) -> Instant {
         self.last_timer_update
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn last_stopwatch_update(&self) -> Instant {
+        self.last_stopwatch_update
     }
 
     pub fn get_last_search_query(&self) -> &str {
@@ -962,6 +993,10 @@ impl LauncherApp {
 
     pub fn last_timer_query_flag(&self) -> bool {
         self.last_timer_query
+    }
+
+    pub fn last_stopwatch_query_flag(&self) -> bool {
+        self.last_stopwatch_query
     }
 
     fn any_panel_open(&self) -> bool {
@@ -1396,6 +1431,7 @@ impl eframe::App for LauncherApp {
 
         let trimmed = self.query.trim().to_string();
         self.maybe_refresh_timer_list();
+        self.maybe_refresh_stopwatch_list();
         if trimmed.eq_ignore_ascii_case("net")
             && self.last_net_update.elapsed().as_secs_f32() >= self.net_refresh
         {

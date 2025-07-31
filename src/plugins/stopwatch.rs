@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static PRECISION: AtomicU32 = AtomicU32::new(2);
+static REFRESH_RATE_MS: AtomicU32 = AtomicU32::new(1_000);
 
 #[derive(Clone)]
 pub struct StopwatchEntry {
@@ -32,6 +33,19 @@ fn precision() -> u32 {
 
 pub fn set_precision(p: u32) {
     PRECISION.store(p, Ordering::Relaxed);
+}
+
+fn refresh_rate_ms() -> u32 {
+    REFRESH_RATE_MS.load(Ordering::Relaxed)
+}
+
+pub fn refresh_rate() -> f32 {
+    refresh_rate_ms() as f32 / 1000.0
+}
+
+pub fn set_refresh_rate(secs: f32) {
+    let ms = (secs * 1000.0).clamp(0.0, 5_000.0) as u32;
+    REFRESH_RATE_MS.store(ms, Ordering::Relaxed);
 }
 
 pub fn start_stopwatch_named(name: Option<String>) -> u64 {
@@ -161,23 +175,32 @@ pub fn format_elapsed(id: u64) -> Option<String> {
 #[derive(Serialize, Deserialize)]
 pub struct StopwatchPluginSettings {
     pub precision: u32,
+    pub refresh_rate: f32,
 }
 
 impl Default for StopwatchPluginSettings {
     fn default() -> Self {
-        Self { precision: 2 }
+        Self {
+            precision: 2,
+            refresh_rate: 1.0,
+        }
     }
 }
 
 pub struct StopwatchPlugin {
     precision: u32,
+    refresh_rate: f32,
 }
 
 impl Default for StopwatchPlugin {
     fn default() -> Self {
-        let p = StopwatchPluginSettings::default().precision;
-        set_precision(p);
-        Self { precision: p }
+        let cfg = StopwatchPluginSettings::default();
+        set_precision(cfg.precision);
+        set_refresh_rate(cfg.refresh_rate);
+        Self {
+            precision: cfg.precision,
+            refresh_rate: cfg.refresh_rate,
+        }
     }
 }
 
@@ -369,6 +392,7 @@ impl Plugin for StopwatchPlugin {
     fn default_settings(&self) -> Option<serde_json::Value> {
         serde_json::to_value(StopwatchPluginSettings {
             precision: self.precision,
+            refresh_rate: self.refresh_rate,
         })
         .ok()
     }
@@ -376,7 +400,9 @@ impl Plugin for StopwatchPlugin {
     fn apply_settings(&mut self, value: &serde_json::Value) {
         if let Ok(cfg) = serde_json::from_value::<StopwatchPluginSettings>(value.clone()) {
             self.precision = cfg.precision;
+            self.refresh_rate = cfg.refresh_rate;
             set_precision(cfg.precision);
+            set_refresh_rate(cfg.refresh_rate);
         }
     }
 
@@ -386,6 +412,14 @@ impl Plugin for StopwatchPlugin {
         ui.horizontal(|ui| {
             ui.label("Precision");
             ui.add(egui::Slider::new(&mut cfg.precision, 0..=9));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Refresh (s)");
+            ui.add(
+                egui::DragValue::new(&mut cfg.refresh_rate)
+                    .clamp_range(0.0..=5.0)
+                    .speed(0.1),
+            );
         });
         match serde_json::to_value(&cfg) {
             Ok(v) => *value = v,
