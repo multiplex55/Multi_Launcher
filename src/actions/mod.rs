@@ -23,6 +23,7 @@ pub fn save_actions(path: &str, actions: &[Action]) -> anyhow::Result<()> {
 
 pub mod clipboard;
 pub mod timer;
+pub mod stopwatch;
 pub mod shell;
 pub mod bookmarks;
 pub mod folders;

@@ -16,6 +16,7 @@ pub mod weather;
 pub mod notes;
 pub mod todo;
 pub mod timer;
+pub mod stopwatch;
 pub mod snippets;
 pub mod media;
 pub mod volume;
