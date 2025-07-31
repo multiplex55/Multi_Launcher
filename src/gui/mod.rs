@@ -910,10 +910,7 @@ impl LauncherApp {
         let trimmed = self.query.trim();
         if (trimmed.starts_with("sw list") || self.last_stopwatch_query)
             && !crate::plugins::stopwatch::running_stopwatches().is_empty()
-            && self
-                .last_stopwatch_update
-                .elapsed()
-                .as_secs_f32()
+            && self.last_stopwatch_update.elapsed().as_secs_f32()
                 >= crate::plugins::stopwatch::refresh_rate()
         {
             self.last_results_valid = false;
@@ -1948,8 +1945,57 @@ impl eframe::App for LauncherApp {
                                     });
                                 }
                             } else if a.desc == "Stopwatch" && a.action.starts_with("stopwatch:show:") {
-                                if let Ok(id) = a.action[16..].parse::<u64>() {
+                                if let Ok(id) = a.action["stopwatch:show:".len()..].parse::<u64>() {
+                                    let query = self.query.trim().to_string();
                                     menu_resp.clone().context_menu(|ui| {
+                                        if ui.button("Pause Stopwatch").clicked() {
+                                            crate::plugins::stopwatch::pause_stopwatch(id);
+                                            if query.starts_with("sw list") {
+                                                refresh = true;
+                                                set_focus = true;
+                                                if self.enable_toasts {
+                                                    push_toast(&mut self.toasts, Toast {
+                                                        text: format!("Paused stopwatch {}", a.label).into(),
+                                                        kind: ToastKind::Success,
+                                                        options: ToastOptions::default()
+                                                            .duration_in_seconds(self.toast_duration as f64),
+                                                    });
+                                                }
+                                            }
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Resume Stopwatch").clicked() {
+                                            crate::plugins::stopwatch::resume_stopwatch(id);
+                                            if query.starts_with("sw list") {
+                                                refresh = true;
+                                                set_focus = true;
+                                                if self.enable_toasts {
+                                                    push_toast(&mut self.toasts, Toast {
+                                                        text: format!("Resumed stopwatch {}", a.label).into(),
+                                                        kind: ToastKind::Success,
+                                                        options: ToastOptions::default()
+                                                            .duration_in_seconds(self.toast_duration as f64),
+                                                    });
+                                                }
+                                            }
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Stop Stopwatch").clicked() {
+                                            crate::plugins::stopwatch::stop_stopwatch(id);
+                                            if query.starts_with("sw list") {
+                                                refresh = true;
+                                                set_focus = true;
+                                                if self.enable_toasts {
+                                                    push_toast(&mut self.toasts, Toast {
+                                                        text: format!("Stopped stopwatch {}", a.label).into(),
+                                                        kind: ToastKind::Success,
+                                                        options: ToastOptions::default()
+                                                            .duration_in_seconds(self.toast_duration as f64),
+                                                    });
+                                                }
+                                            }
+                                            ui.close_menu();
+                                        }
                                         if ui.button("Copy Time").clicked() {
                                             if let Some(time) =
                                                 crate::plugins::stopwatch::format_elapsed(id)
