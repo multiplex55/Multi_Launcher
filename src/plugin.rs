@@ -29,6 +29,7 @@ use crate::plugins::system::SystemPlugin;
 use crate::plugins::task_manager::TaskManagerPlugin;
 use crate::plugins::tempfile::TempfilePlugin;
 use crate::plugins::timer::TimerPlugin;
+// Stopwatch plugin provides time tracking
 use crate::plugins::stopwatch::StopwatchPlugin;
 use crate::plugins::todo::TodoPlugin;
 use crate::plugins::unit_convert::UnitConvertPlugin;
@@ -155,6 +156,7 @@ impl PluginManager {
         }
         self.register_with_settings(HelpPlugin, plugin_settings);
         self.register_with_settings(TimerPlugin, plugin_settings);
+        // Register stopwatch plugin
         self.register_with_settings(StopwatchPlugin::default(), plugin_settings);
         if reset_alarm {
             crate::plugins::timer::reset_alarms_loaded();
