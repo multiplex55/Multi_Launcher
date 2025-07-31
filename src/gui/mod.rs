@@ -1562,6 +1562,8 @@ impl eframe::App for LauncherApp {
                             self.clipboard_dialog.open();
                         } else if a.action == "tempfile:dialog" {
                             self.tempfile_dialog.open();
+                        } else if a.action == "settings:dialog" {
+                            self.show_settings = true;
                         } else if a.action == "volume:dialog" {
                             self.volume_dialog.open();
                         } else if a.action == "brightness:dialog" {
@@ -2214,15 +2216,17 @@ impl eframe::App for LauncherApp {
                             self.clipboard_dialog.open();
                         } else if a.action == "tempfile:dialog" {
                             self.tempfile_dialog.open();
-                                } else if a.action == "volume:dialog" {
-                                    self.volume_dialog.open();
-                                } else if a.action == "brightness:dialog" {
-                                    self.brightness_dialog.open();
-                                } else if let Some(n) = a.action.strip_prefix("sysinfo:cpu_list:") {
-                                    if let Ok(count) = n.parse::<usize>() {
-                                        self.cpu_list_dialog.open(count);
-                                    }
-                                } else if let Err(e) = launch_action(&a) {
+                        } else if a.action == "settings:dialog" {
+                            self.show_settings = true;
+                        } else if a.action == "volume:dialog" {
+                            self.volume_dialog.open();
+                        } else if a.action == "brightness:dialog" {
+                            self.brightness_dialog.open();
+                        } else if let Some(n) = a.action.strip_prefix("sysinfo:cpu_list:") {
+                            if let Ok(count) = n.parse::<usize>() {
+                                self.cpu_list_dialog.open(count);
+                            }
+                        } else if let Err(e) = launch_action(&a) {
                                     if a.desc == "Fav" && !a.action.starts_with("fav:") {
                                         tracing::error!(?e, fav=%a.label, "failed to run favorite");
                                     }
