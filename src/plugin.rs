@@ -25,6 +25,7 @@ use crate::plugins::macros::MacrosPlugin;
 use crate::plugins::omni_search::OmniSearchPlugin;
 use crate::plugins::sysinfo::SysInfoPlugin;
 use crate::plugins::system::SystemPlugin;
+use crate::plugins::settings::SettingsPlugin;
 #[cfg(target_os = "windows")]
 use crate::plugins::task_manager::TaskManagerPlugin;
 use crate::plugins::tempfile::TempfilePlugin;
@@ -153,6 +154,7 @@ impl PluginManager {
             self.register_with_settings(TaskManagerPlugin, plugin_settings);
             self.register_with_settings(WindowsPlugin, plugin_settings);
         }
+        self.register_with_settings(SettingsPlugin, plugin_settings);
         self.register_with_settings(HelpPlugin, plugin_settings);
         self.register_with_settings(TimerPlugin, plugin_settings);
         self.register_with_settings(StopwatchPlugin::default(), plugin_settings);

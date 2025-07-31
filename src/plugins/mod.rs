@@ -5,6 +5,7 @@ pub mod runescape;
 pub mod history;
 pub mod folders;
 pub mod system;
+pub mod settings;
 pub mod help;
 pub mod youtube;
 pub mod reddit;
