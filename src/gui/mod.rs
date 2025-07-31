@@ -1945,7 +1945,7 @@ impl eframe::App for LauncherApp {
                                     });
                                 }
                             } else if a.desc == "Stopwatch" && a.action.starts_with("stopwatch:show:") {
-                                if let Ok(id) = a.action[16..].parse::<u64>() {
+                                if let Ok(id) = a.action["stopwatch:show:".len()..].parse::<u64>() {
                                     let query = self.query.trim().to_string();
                                     menu_resp.clone().context_menu(|ui| {
                                         if ui.button("Pause Stopwatch").clicked() {
