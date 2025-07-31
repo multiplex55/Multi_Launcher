@@ -99,7 +99,7 @@ fn spawn_gui(
         };
 
         let _ = eframe::run_native(
-            "Multi_LNCHR",
+            "Multi Lnchr",
             native_options,
             Box::new(move |cc| {
                 if let Ok(mut guard) = ctx_clone.lock() {

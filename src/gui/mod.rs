@@ -1450,7 +1450,7 @@ impl eframe::App for LauncherApp {
         }
 
         CentralPanel::default().show(ctx, |ui| {
-            ui.heading("🚀 LNCHR");
+            ui.heading("🚀 Multi Lnchr");
             if let Some(err) = &self.error {
                 ui.colored_label(Color32::RED, err);
             }
