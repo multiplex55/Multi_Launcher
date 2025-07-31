@@ -1379,7 +1379,14 @@ impl eframe::App for LauncherApp {
                         self.help_window.open = true;
                     }
                     if ui.button("Open Toast Log").clicked() {
-                        if let Err(e) = open::that(TOAST_LOG_FILE) {
+                        if std::fs::OpenOptions::new()
+                            .create(true)
+                            .write(true)
+                            .open(TOAST_LOG_FILE)
+                            .is_err()
+                        {
+                            self.set_error("Failed to create log".into());
+                        } else if let Err(e) = open::that(TOAST_LOG_FILE) {
                             self.set_error(format!("Failed to open log: {e}"));
                         }
                     }

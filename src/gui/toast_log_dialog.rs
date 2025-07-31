@@ -14,15 +14,12 @@ impl ToastLogDialog {
     }
 
     fn read_last_lines(path: &str, count: usize) -> Vec<String> {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            let mut lines: Vec<String> = content.lines().map(|s| s.to_owned()).collect();
-            if lines.len() > count {
-                lines.drain(0..lines.len() - count);
-            }
-            lines
-        } else {
-            Vec::new()
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        let mut lines: Vec<String> = content.lines().map(|s| s.to_owned()).collect();
+        if lines.len() > count {
+            lines.drain(0..lines.len() - count);
         }
+        lines
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, _app: &mut crate::gui::LauncherApp) {
