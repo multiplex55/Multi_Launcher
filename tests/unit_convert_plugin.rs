@@ -126,3 +126,17 @@ fn bar_to_psi() {
     assert_eq!(results[0].label, "1 bar = 14.5038 psi");
     assert_eq!(results[0].action, "clipboard:14.5038");
 }
+
+#[test]
+fn handles_empty_query() {
+    let plugin = UnitConvertPlugin;
+    let results = plugin.search("conv");
+    assert!(results.is_empty());
+}
+
+#[test]
+fn handles_invalid_input() {
+    let plugin = UnitConvertPlugin;
+    let results = plugin.search("conv foo");
+    assert!(results.is_empty());
+}

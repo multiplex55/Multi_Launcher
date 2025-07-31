@@ -20,12 +20,13 @@ fn parse_query(query: &str) -> Option<(String, String, String)> {
     if tokens.len() < 4 {
         return None;
     }
-    if !tokens[tokens.len() - 2].eq_ignore_ascii_case("to") {
+    let to_idx = tokens.len() - 2;
+    if !tokens.get(to_idx)?.eq_ignore_ascii_case("to") {
         return None;
     }
-    let value = tokens[0].to_string();
-    let from = normalize(&tokens[1])?.to_string();
-    let to = normalize(&tokens[3])?.to_string();
+    let value = tokens.get(0)?.to_string();
+    let from = normalize(tokens.get(1)?)?.to_string();
+    let to = normalize(tokens.last()?)?.to_string();
     Some((value, from, to))
 }
 
@@ -83,7 +84,11 @@ fn bin_to_text(s: &str) -> Option<String> {
     }
     let bytes: Option<Vec<u8>> = (0..clean.len())
         .step_by(8)
-        .map(|i| u8::from_str_radix(&clean[i..i + 8], 2).ok())
+        .map(|i| {
+            clean
+                .get(i..i + 8)
+                .and_then(|chunk| u8::from_str_radix(chunk, 2).ok())
+        })
         .collect();
     let bytes = bytes?;
     String::from_utf8(bytes).ok()
@@ -110,7 +115,8 @@ impl Plugin for BaseConvertPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         const CONV_PREFIX: &str = "conv ";
         const CONVERT_PREFIX: &str = "convert ";
-        let rest = if let Some(r) = crate::common::strip_prefix_ci(query.trim_start(), CONV_PREFIX) {
+        let rest = if let Some(r) = crate::common::strip_prefix_ci(query.trim_start(), CONV_PREFIX)
+        {
             r
         } else if let Some(r) = crate::common::strip_prefix_ci(query.trim_start(), CONVERT_PREFIX) {
             r
@@ -145,9 +151,18 @@ impl Plugin for BaseConvertPlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![
-            Action { label: "conv".into(), desc: "Base Convert".into(), action: "query:conv ".into(), args: None },
-            Action { label: "convert".into(), desc: "Base Convert".into(), action: "query:convert ".into(), args: None },
+            Action {
+                label: "conv".into(),
+                desc: "Base Convert".into(),
+                action: "query:conv ".into(),
+                args: None,
+            },
+            Action {
+                label: "convert".into(),
+                desc: "Base Convert".into(),
+                action: "query:convert ".into(),
+                args: None,
+            },
         ]
     }
 }
-
