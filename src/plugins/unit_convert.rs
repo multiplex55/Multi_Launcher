@@ -338,12 +338,12 @@ fn parse_query(query: &str) -> Option<(f64, String, String)> {
     if parts.len() < 4 {
         return None;
     }
-    if !parts[2].eq_ignore_ascii_case("to") {
+    if !parts.get(2)?.eq_ignore_ascii_case("to") {
         return None;
     }
-    let val: f64 = parts[0].parse().ok()?;
-    let from = normalize_unit(parts[1])?.to_string();
-    let to = normalize_unit(parts[3])?.to_string();
+    let val: f64 = parts.get(0)?.parse().ok()?;
+    let from = normalize_unit(parts.get(1)?)?.to_string();
+    let to = normalize_unit(parts.get(3)?)?.to_string();
     Some((val, from, to))
 }
 
@@ -389,8 +389,18 @@ impl Plugin for UnitConvertPlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![
-            Action { label: "conv".into(), desc: "Unit convert".into(), action: "query:conv ".into(), args: None },
-            Action { label: "convert".into(), desc: "Unit convert".into(), action: "query:convert ".into(), args: None },
+            Action {
+                label: "conv".into(),
+                desc: "Unit convert".into(),
+                action: "query:conv ".into(),
+                args: None,
+            },
+            Action {
+                label: "convert".into(),
+                desc: "Unit convert".into(),
+                action: "query:convert ".into(),
+                args: None,
+            },
         ]
     }
 }

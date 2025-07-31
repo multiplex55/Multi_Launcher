@@ -82,3 +82,16 @@ fn dec_to_oct() {
     assert_eq!(results[0].action, "clipboard:10");
 }
 
+#[test]
+fn handles_empty_query() {
+    let plugin = BaseConvertPlugin;
+    let results = plugin.search("conv");
+    assert!(results.is_empty());
+}
+
+#[test]
+fn handles_invalid_tokens() {
+    let plugin = BaseConvertPlugin;
+    let results = plugin.search("conv 123 bin hex");
+    assert!(results.is_empty());
+}
