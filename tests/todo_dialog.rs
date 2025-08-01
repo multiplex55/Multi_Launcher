@@ -31,3 +31,31 @@ fn empty_filter_returns_all() {
     assert_eq!(idx, vec![0, 1]);
 }
 
+#[test]
+fn add_todo_parses_multiple_tags() {
+    let mut dlg = TodoDialog::default();
+    dlg.test_set_text("task");
+    dlg.test_set_tags("alpha, beta, gamma");
+    assert!(dlg.test_add_todo());
+    assert_eq!(
+        dlg.test_entries()[0].tags,
+        vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+            "gamma".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn add_todo_ignores_trailing_comma() {
+    let mut dlg = TodoDialog::default();
+    dlg.test_set_text("task");
+    dlg.test_set_tags("alpha, beta,");
+    assert!(dlg.test_add_todo());
+    assert_eq!(
+        dlg.test_entries()[0].tags,
+        vec!["alpha".to_string(), "beta".to_string()]
+    );
+}
+
