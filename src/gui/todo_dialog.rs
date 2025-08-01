@@ -61,9 +61,14 @@ impl TodoDialog {
         let tag_list: Vec<String> = self
             .tags
             .split(',')
-            .map(|t| t.trim())
-            .filter(|t| !t.is_empty())
-            .map(|t| t.to_string())
+            .filter_map(|t| {
+                let t = t.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t.to_owned())
+                }
+            })
             .collect();
         tracing::debug!("Adding todo: '{}' tags={:?}", self.text, tag_list);
         self.entries.push(TodoEntry {
@@ -78,6 +83,22 @@ impl TodoDialog {
             self.tags.clear();
         }
         true
+    }
+
+    pub fn test_set_text(&mut self, text: &str) {
+        self.text = text.to_owned();
+    }
+
+    pub fn test_set_tags(&mut self, tags: &str) {
+        self.tags = tags.to_owned();
+    }
+
+    pub fn test_entries(&self) -> &Vec<TodoEntry> {
+        &self.entries
+    }
+
+    pub fn test_add_todo(&mut self) -> bool {
+        self.add_todo()
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
