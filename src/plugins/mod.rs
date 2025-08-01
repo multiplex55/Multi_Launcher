@@ -24,6 +24,7 @@ pub mod volume;
 pub mod brightness;
 pub mod unit_convert;
 pub mod base_convert;
+pub mod convert_panel;
 pub mod dropcalc;
 pub mod recycle;
 pub mod tempfile;
