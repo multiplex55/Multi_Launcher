@@ -40,3 +40,4 @@ pub mod text_case;
 pub mod timestamp;
 pub mod random;
 pub mod lorem;
+pub mod convert_panel;
