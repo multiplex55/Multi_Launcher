@@ -17,6 +17,7 @@ mod toast_log_dialog;
 mod todo_dialog;
 mod todo_view_dialog;
 mod volume_dialog;
+mod convert_panel;
 
 pub use add_action_dialog::AddActionDialog;
 pub use add_bookmark_dialog::AddBookmarkDialog;
@@ -37,6 +38,7 @@ pub use toast_log_dialog::ToastLogDialog;
 pub use todo_dialog::TodoDialog;
 pub use todo_view_dialog::TodoViewDialog;
 pub use volume_dialog::VolumeDialog;
+pub use convert_panel::ConvertPanel;
 
 use crate::actions::folders;
 use crate::actions::{load_actions, Action};
@@ -172,6 +174,7 @@ enum Panel {
     VolumeDialog,
     BrightnessDialog,
     CpuListDialog,
+    ConvertPanel,
     ToastLogDialog,
     Editor,
     Settings,
@@ -200,6 +203,7 @@ struct PanelStates {
     volume_dialog: bool,
     brightness_dialog: bool,
     cpu_list_dialog: bool,
+    convert_panel: bool,
     toast_log_dialog: bool,
     editor: bool,
     settings: bool,
@@ -267,6 +271,7 @@ pub struct LauncherApp {
     volume_dialog: VolumeDialog,
     brightness_dialog: BrightnessDialog,
     cpu_list_dialog: CpuListDialog,
+    pub convert_panel: ConvertPanel,
     toast_log_dialog: ToastLogDialog,
     panel_stack: Vec<Panel>,
     panel_states: PanelStates,
@@ -585,6 +590,7 @@ impl LauncherApp {
             volume_dialog: VolumeDialog::default(),
             brightness_dialog: BrightnessDialog::default(),
             cpu_list_dialog: CpuListDialog::default(),
+            convert_panel: ConvertPanel::default(),
             toast_log_dialog: ToastLogDialog::default(),
             panel_stack: Vec::new(),
             panel_states: PanelStates::default(),
@@ -1144,6 +1150,10 @@ impl LauncherApp {
                 self.cpu_list_dialog.open = false;
                 self.panel_states.cpu_list_dialog = false;
             }
+            Panel::ConvertPanel => {
+                self.convert_panel.open = false;
+                self.panel_states.convert_panel = false;
+            }
             Panel::ToastLogDialog => {
                 self.toast_log_dialog.open = false;
                 self.panel_states.toast_log_dialog = false;
@@ -1245,6 +1255,11 @@ impl LauncherApp {
             self.cpu_list_dialog.open,
             cpu_list_dialog,
             Panel::CpuListDialog
+        );
+        check!(
+            self.convert_panel.open,
+            convert_panel,
+            Panel::ConvertPanel
         );
         check!(
             self.toast_log_dialog.open,
@@ -1575,6 +1590,8 @@ impl eframe::App for LauncherApp {
                             self.clipboard_dialog.open();
                         } else if a.action == "tempfile:dialog" {
                             self.tempfile_dialog.open();
+                        } else if a.action == "convert:panel" {
+                            self.convert_panel.open();
                         } else if a.action == "settings:dialog" {
                             self.show_settings = true;
                         } else if a.action == "volume:dialog" {
@@ -2229,6 +2246,8 @@ impl eframe::App for LauncherApp {
                             self.clipboard_dialog.open();
                         } else if a.action == "tempfile:dialog" {
                             self.tempfile_dialog.open();
+                        } else if a.action == "convert:panel" {
+                            self.convert_panel.open();
                         } else if a.action == "settings:dialog" {
                             self.show_settings = true;
                         } else if a.action == "volume:dialog" {
@@ -2528,6 +2547,9 @@ impl eframe::App for LauncherApp {
         let mut cpu_dlg = std::mem::take(&mut self.cpu_list_dialog);
         cpu_dlg.ui(ctx, self);
         self.cpu_list_dialog = cpu_dlg;
+        let mut convert_panel = std::mem::take(&mut self.convert_panel);
+        convert_panel.ui(ctx, self);
+        self.convert_panel = convert_panel;
         let mut toast_dlg = std::mem::take(&mut self.toast_log_dialog);
         toast_dlg.ui(ctx, self);
         self.toast_log_dialog = toast_dlg;

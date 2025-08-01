@@ -34,6 +34,7 @@ use crate::plugins::stopwatch::StopwatchPlugin;
 use crate::plugins::todo::TodoPlugin;
 use crate::plugins::unit_convert::UnitConvertPlugin;
 use crate::plugins::base_convert::BaseConvertPlugin;
+use crate::plugins::convert_panel::ConvertPanelPlugin;
 #[cfg(target_os = "windows")]
 use crate::plugins::volume::VolumePlugin;
 use crate::plugins::weather::WeatherPlugin;
@@ -142,6 +143,7 @@ impl PluginManager {
         self.register_with_settings(AsciiArtPlugin::default(), plugin_settings);
         self.register_with_settings(EmojiPlugin::default(), plugin_settings);
         self.register_with_settings(TextCasePlugin, plugin_settings);
+        self.register_with_settings(ConvertPanelPlugin, plugin_settings);
         self.register_with_settings(ScreenshotPlugin, plugin_settings);
         self.register_with_settings(TimestampPlugin, plugin_settings);
         self.register_with_settings(IpPlugin, plugin_settings);
