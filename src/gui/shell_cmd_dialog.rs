@@ -31,6 +31,12 @@ impl ShellCmdDialog {
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         if !self.open { return; }
+        if self.edit_idx.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape) && i.modifiers.shift) {
+            self.args.push('\n');
+            ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers { shift: true, ..Default::default() }, egui::Key::Escape);
+            });
+        }
         let mut close = false;
         let mut save_now = false;
         egui::Window::new("Shell Commands")
@@ -43,7 +49,7 @@ impl ShellCmdDialog {
                     });
                     ui.horizontal(|ui| {
                         ui.label("Command");
-                        ui.text_edit_singleline(&mut self.args);
+                        ui.text_edit_multiline(&mut self.args);
                     });
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
@@ -102,5 +108,62 @@ impl ShellCmdDialog {
             self.save(app);
         }
         if close { self.open = false; }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugin::PluginManager;
+    use crate::settings::Settings;
+    use eframe::egui;
+    use std::sync::{Arc, atomic::AtomicBool};
+    use tempfile::tempdir;
+
+    fn new_app(ctx: &egui::Context) -> LauncherApp {
+        LauncherApp::new(
+            ctx,
+            Vec::new(),
+            0,
+            PluginManager::new(),
+            "actions.json".into(),
+            "settings.json".into(),
+            Settings::default(),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    #[test]
+    fn shift_escape_inserts_newline() {
+        let dir = tempdir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut dlg = ShellCmdDialog::default();
+        dlg.open();
+        dlg.edit_idx = Some(0);
+        dlg.args = "echo hi".into();
+
+        ctx.begin_frame(egui::RawInput {
+            modifiers: egui::Modifiers { shift: true, ..Default::default() },
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers { shift: true, ..Default::default() },
+            }],
+            ..Default::default()
+        });
+        dlg.ui(&ctx, &mut app);
+        let _ = ctx.end_frame();
+
+        assert_eq!(dlg.args, "echo hi\n");
     }
 }
