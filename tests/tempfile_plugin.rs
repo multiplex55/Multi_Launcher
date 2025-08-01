@@ -104,6 +104,22 @@ fn launch_action_remove_deletes_file() {
 }
 
 #[test]
+fn rm_refreshes_results() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let file = create_file().unwrap();
+    let plugin = TempfilePlugin;
+    let results = plugin.search("tmp rm");
+    assert_eq!(results.len(), 1);
+    launch_action(&results[0]).unwrap();
+    let results = plugin.search("tmp rm");
+    assert!(results.is_empty());
+    assert!(!file.exists());
+}
+
+#[test]
 fn set_alias_renames_file() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
