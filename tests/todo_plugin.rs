@@ -1,7 +1,6 @@
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::todo::{
-    append_todo, load_todos, remove_todo, mark_done, set_priority, set_tags,
-    TodoPlugin, TODO_FILE,
+    append_todo, load_todos, mark_done, remove_todo, set_priority, set_tags, TodoPlugin, TODO_FILE,
 };
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
@@ -201,6 +200,21 @@ fn list_tag_filter_sorts_by_priority() {
     assert!(results[0].label.contains("high"));
     assert!(results[1].label.contains("mid"));
     assert!(results[2].label.contains("low"));
+}
+
+#[test]
+fn tag_command_filters_by_tag() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    append_todo(TODO_FILE, "urgent task", 1, &["urgent".into()]).unwrap();
+    append_todo(TODO_FILE, "other task", 1, &["other".into()]).unwrap();
+
+    let plugin = TodoPlugin::default();
+    let results = plugin.search("todo tag urgent");
+    assert_eq!(results.len(), 1);
+    assert!(results[0].label.contains("urgent task"));
 }
 #[test]
 fn search_view_opens_dialog() {

@@ -1,8 +1,8 @@
 use crate::actions::Action;
+use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::plugin::Plugin;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use crate::common::json_watch::{watch_json, JsonWatcher};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -280,8 +280,8 @@ impl Plugin for TodoPlugin {
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, TAG_PREFIX) {
             let rest = rest.trim();
             let mut parts = rest.split_whitespace();
-            if let Some(idx_str) = parts.next() {
-                if let Ok(idx) = idx_str.parse::<usize>() {
+            if let Some(first) = parts.next() {
+                if let Ok(idx) = first.parse::<usize>() {
                     let mut tags: Vec<String> = Vec::new();
                     for t in parts {
                         if let Some(tag) = t.strip_prefix('#') {
@@ -297,6 +297,29 @@ impl Plugin for TodoPlugin {
                         action: format!("todo:tag:{idx}|{tag_str}"),
                         args: None,
                     }];
+                } else {
+                    let filter = rest;
+                    let guard = match self.data.lock() {
+                        Ok(g) => g,
+                        Err(_) => return Vec::new(),
+                    };
+                    let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
+                    entries
+                        .retain(|(_, t)| t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(filter)));
+                    entries.sort_by(|a, b| b.1.priority.cmp(&a.1.priority));
+                    return entries
+                        .into_iter()
+                        .map(|(idx, t)| Action {
+                            label: format!(
+                                "{} {}",
+                                if t.done { "[x]" } else { "[ ]" },
+                                t.text.clone()
+                            ),
+                            desc: "Todo".into(),
+                            action: format!("query:todo tag {idx} "),
+                            args: None,
+                        })
+                        .collect();
                 }
             }
         }
