@@ -16,6 +16,7 @@ mod timer_dialog;
 mod toast_log_dialog;
 mod todo_dialog;
 mod todo_view_dialog;
+mod convert_panel;
 mod volume_dialog;
 
 pub use add_action_dialog::AddActionDialog;
@@ -36,6 +37,7 @@ pub use timer_dialog::{TimerCompletionDialog, TimerDialog};
 pub use toast_log_dialog::ToastLogDialog;
 pub use todo_dialog::TodoDialog;
 pub use todo_view_dialog::TodoViewDialog;
+pub use convert_panel::ConvertPanel;
 pub use volume_dialog::VolumeDialog;
 
 use crate::actions::folders;
@@ -169,6 +171,7 @@ enum Panel {
     TodoDialog,
     TodoViewDialog,
     ClipboardDialog,
+    ConvertPanel,
     VolumeDialog,
     BrightnessDialog,
     CpuListDialog,
@@ -197,6 +200,7 @@ struct PanelStates {
     todo_dialog: bool,
     todo_view_dialog: bool,
     clipboard_dialog: bool,
+    convert_panel: bool,
     volume_dialog: bool,
     brightness_dialog: bool,
     cpu_list_dialog: bool,
@@ -264,6 +268,7 @@ pub struct LauncherApp {
     todo_dialog: TodoDialog,
     todo_view_dialog: TodoViewDialog,
     clipboard_dialog: ClipboardDialog,
+    convert_panel: ConvertPanel,
     volume_dialog: VolumeDialog,
     brightness_dialog: BrightnessDialog,
     cpu_list_dialog: CpuListDialog,
@@ -582,6 +587,7 @@ impl LauncherApp {
             todo_dialog: TodoDialog::default(),
             todo_view_dialog: TodoViewDialog::default(),
             clipboard_dialog: ClipboardDialog::default(),
+            convert_panel: ConvertPanel::default(),
             volume_dialog: VolumeDialog::default(),
             brightness_dialog: BrightnessDialog::default(),
             cpu_list_dialog: CpuListDialog::default(),
@@ -1132,6 +1138,10 @@ impl LauncherApp {
                 self.clipboard_dialog.open = false;
                 self.panel_states.clipboard_dialog = false;
             }
+            Panel::ConvertPanel => {
+                self.convert_panel.open = false;
+                self.panel_states.convert_panel = false;
+            }
             Panel::VolumeDialog => {
                 self.volume_dialog.open = false;
                 self.panel_states.volume_dialog = false;
@@ -1235,6 +1245,7 @@ impl LauncherApp {
             clipboard_dialog,
             Panel::ClipboardDialog
         );
+        check!(self.convert_panel.open, convert_panel, Panel::ConvertPanel);
         check!(self.volume_dialog.open, volume_dialog, Panel::VolumeDialog);
         check!(
             self.brightness_dialog.open,
@@ -1573,6 +1584,8 @@ impl eframe::App for LauncherApp {
                             }
                         } else if a.action == "clipboard:dialog" {
                             self.clipboard_dialog.open();
+                        } else if a.action == "convert:panel" {
+                            self.convert_panel.open();
                         } else if a.action == "tempfile:dialog" {
                             self.tempfile_dialog.open();
                         } else if a.action == "settings:dialog" {
@@ -2227,6 +2240,8 @@ impl eframe::App for LauncherApp {
                             }
                         } else if a.action == "clipboard:dialog" {
                             self.clipboard_dialog.open();
+                        } else if a.action == "convert:panel" {
+                            self.convert_panel.open();
                         } else if a.action == "tempfile:dialog" {
                             self.tempfile_dialog.open();
                         } else if a.action == "settings:dialog" {
@@ -2519,6 +2534,9 @@ impl eframe::App for LauncherApp {
         let mut cb_dlg = std::mem::take(&mut self.clipboard_dialog);
         cb_dlg.ui(ctx, self);
         self.clipboard_dialog = cb_dlg;
+        let mut conv_panel = std::mem::take(&mut self.convert_panel);
+        conv_panel.ui(ctx, self);
+        self.convert_panel = conv_panel;
         let mut vol_dlg = std::mem::take(&mut self.volume_dialog);
         vol_dlg.ui(ctx, self);
         self.volume_dialog = vol_dlg;
