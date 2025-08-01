@@ -7,6 +7,7 @@ use crate::plugins::bookmarks::BookmarksPlugin;
 #[cfg(target_os = "windows")]
 use crate::plugins::brightness::BrightnessPlugin;
 use crate::plugins::clipboard::ClipboardPlugin;
+use crate::plugins::convert_panel::ConvertPanelPlugin;
 use crate::plugins::dropcalc::DropCalcPlugin;
 use crate::plugins::folders::FoldersPlugin;
 use crate::plugins::help::HelpPlugin;
@@ -117,6 +118,7 @@ impl PluginManager {
         self.register_with_settings(UnitConvertPlugin, plugin_settings);
         self.register_with_settings(BaseConvertPlugin, plugin_settings);
         self.register_with_settings(DropCalcPlugin, plugin_settings);
+        self.register_with_settings(ConvertPanelPlugin, plugin_settings);
         self.register_with_settings(RunescapeSearchPlugin, plugin_settings);
         self.register_with_settings(YoutubePlugin, plugin_settings);
         self.register_with_settings(RedditPlugin, plugin_settings);
