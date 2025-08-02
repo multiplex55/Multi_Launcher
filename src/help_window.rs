@@ -158,7 +158,7 @@ fn example_queries(name: &str) -> Option<&'static [&'static str]> {
         "processes" => Some(&["ps", "ps firefox"]),
         "dropcalc" => Some(&["drop 1/128 25"]),
         "recycle" => Some(&["rec"]),
-        "tempfile" => Some(&["tmp new"]),
+        "tempfile" => Some(&["tmp new", "tmp create"]),
         "timestamp" => Some(&[
             "ts 0",
             "ts 2024-05-01 12:00",

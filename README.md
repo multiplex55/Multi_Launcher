@@ -216,7 +216,7 @@ Built-in commands:
 | `cs` | `cs add <alias> <text>` | Text snippets |
 | `macro` | `macro list` | Command macros |
 | `rec` | `rec` | Recycle Bin cleanup |
-| `tmp` | `tmp new [name]` | Temporary files |
+| `tmp` | `tmp new [name]` or `tmp create [name]` | Temporary files |
 | `ascii` | `ascii text` | ASCII art |
 | `emoji` | `emoji smile` | Emoji search |
 | `case` | `case hello world` | Text and encoding conversions |
