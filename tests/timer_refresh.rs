@@ -9,13 +9,14 @@ fn new_app(ctx: &eframe::egui::Context) -> LauncherApp {
     let actions: Vec<Action> = Vec::new();
     let custom_len = actions.len();
     let mut plugins = PluginManager::new();
+    let actions_arc = Arc::new(actions.clone());
     plugins.reload_from_dirs(
         &[],
         Settings::default().clipboard_limit,
         Settings::default().net_unit,
         false,
         &std::collections::HashMap::new(),
-        &actions,
+        actions_arc,
     );
     LauncherApp::new(
         ctx,

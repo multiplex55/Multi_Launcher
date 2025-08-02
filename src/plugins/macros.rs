@@ -77,13 +77,14 @@ fn search_first_action(query: &str) -> Option<Action> {
     let actions = load_actions("actions.json").unwrap_or_default();
     let mut pm = PluginManager::new();
     let dirs = settings.plugin_dirs.unwrap_or_default();
+    let actions_arc = Arc::new(actions);
     pm.reload_from_dirs(
         &dirs,
         settings.clipboard_limit,
         settings.net_unit,
         false,
         &settings.plugin_settings,
-        &actions,
+        actions_arc,
     );
     pm.search_filtered(
         query,

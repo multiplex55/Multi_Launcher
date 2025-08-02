@@ -3,6 +3,7 @@ use crate::plugin::PluginManager;
 use crate::settings::Settings;
 use eframe::egui;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Default)]
 
@@ -50,7 +51,7 @@ impl PluginEditor {
             Settings::default().net_unit,
             false,
             &std::collections::HashMap::new(),
-            &[],
+            Arc::new(Vec::new()),
         );
         let mut infos = pm.plugin_infos();
         infos.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
@@ -126,13 +127,14 @@ impl PluginEditor {
                         None,
                     );
                     let dirs = s.plugin_dirs.clone().unwrap_or_default();
+                    let actions_arc = Arc::new(app.actions.clone());
                     app.plugins.reload_from_dirs(
                         &dirs,
                         app.clipboard_limit,
                         app.net_unit,
                         false,
                         &s.plugin_settings,
-                        &app.actions,
+                        actions_arc,
                     );
                     tracing::debug!(available=?app.plugins.plugin_names(), "plugins reloaded");
                     self.available = Self::gather_available(&dirs);

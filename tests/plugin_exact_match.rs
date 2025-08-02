@@ -1,4 +1,5 @@
 use eframe::egui;
+use multi_launcher::actions::Action;
 use multi_launcher::gui::LauncherApp;
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::plugins::bookmarks::{save_bookmarks, BookmarkEntry, BOOKMARKS_FILE};
@@ -14,13 +15,14 @@ fn new_app(ctx: &egui::Context, settings: Settings) -> LauncherApp {
     let custom_len = 0;
     let mut plugins = PluginManager::new();
     let dirs: Vec<String> = Vec::new();
+    let actions_arc: Arc<Vec<Action>> = Arc::new(Vec::new());
     plugins.reload_from_dirs(
         &dirs,
         Settings::default().clipboard_limit,
         Settings::default().net_unit,
         false,
         &std::collections::HashMap::new(),
-        &[],
+        actions_arc,
     );
     LauncherApp::new(
         ctx,

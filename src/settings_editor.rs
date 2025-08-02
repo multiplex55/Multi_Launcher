@@ -1,6 +1,7 @@
 use crate::gui::LauncherApp;
 use crate::hotkey::parse_hotkey;
 use crate::settings::Settings;
+use std::sync::Arc;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 #[cfg(target_os = "windows")]
@@ -549,13 +550,14 @@ impl SettingsEditor {
                                                 .plugin_dirs
                                                 .clone()
                                                 .unwrap_or_default();
+                                            let actions_arc = Arc::new(app.actions.clone());
                                             app.plugins.reload_from_dirs(
                                                 &dirs,
                                                 app.clipboard_limit,
                                                 app.net_unit,
                                                 false,
                                                 &new_settings.plugin_settings,
-                                                &app.actions,
+                                                actions_arc,
                                             );
                                             crate::request_hotkey_restart(new_settings);
                                             if app.enable_toasts {

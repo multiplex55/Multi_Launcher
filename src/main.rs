@@ -50,13 +50,14 @@ fn spawn_gui(
     let mut plugins = PluginManager::new();
     let empty_dirs = Vec::new();
     let dirs = settings.plugin_dirs.as_ref().unwrap_or(&empty_dirs);
+    let actions_arc = Arc::new(actions_for_window.clone());
     plugins.reload_from_dirs(
         dirs,
         settings.clipboard_limit,
         settings.net_unit,
         true,
         &settings.plugin_settings,
-        &actions_for_window,
+        actions_arc,
     );
 
     let actions_path = "actions.json".to_string();

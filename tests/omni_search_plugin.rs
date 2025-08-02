@@ -1,5 +1,6 @@
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::omni_search::OmniSearchPlugin;
+use std::sync::Arc;
 use multi_launcher::plugins::bookmarks::{save_bookmarks, BookmarkEntry, BOOKMARKS_FILE};
 use multi_launcher::plugins::folders::{save_folders, FolderEntry, FOLDERS_FILE};
 use multi_launcher::actions::Action;
@@ -18,7 +19,7 @@ fn o_list_combines_all_sources() {
     save_bookmarks(BOOKMARKS_FILE, &[BookmarkEntry { url: "https://example.com".into(), alias: None }]).unwrap();
     save_folders(FOLDERS_FILE, &[FolderEntry { label: "Foo".into(), path: "/foo".into(), alias: None }]).unwrap();
 
-    let actions = vec![Action { label: "myapp".into(), desc: "app".into(), action: "myapp".into(), args: None }];
+    let actions = Arc::new(vec![Action { label: "myapp".into(), desc: "app".into(), action: "myapp".into(), args: None }]);
     let plugin = OmniSearchPlugin::new(actions);
 
     let results = plugin.search("o list");
@@ -37,7 +38,7 @@ fn o_list_filters_results() {
     save_bookmarks(BOOKMARKS_FILE, &[BookmarkEntry { url: "https://example.com".into(), alias: None }]).unwrap();
     save_folders(FOLDERS_FILE, &[FolderEntry { label: "Foo".into(), path: "/foo".into(), alias: None }]).unwrap();
 
-    let actions = vec![Action { label: "barapp".into(), desc: "app".into(), action: "bar".into(), args: None }];
+    let actions = Arc::new(vec![Action { label: "barapp".into(), desc: "app".into(), action: "bar".into(), args: None }]);
     let plugin = OmniSearchPlugin::new(actions);
 
     let results = plugin.search("o list bar");
