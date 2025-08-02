@@ -37,19 +37,21 @@ impl ShellCmdDialog {
             .open(&mut self.open)
             .show(ctx, |ui| {
                 if let Some(idx) = self.edit_idx {
-                    if ui.input(|i| i.key_pressed(egui::Key::Escape) && i.modifiers.shift) {
-                        self.args.push('\n');
-                        ui.input_mut(|i| {
-                            i.consume_key(egui::Modifiers { shift: true, ..Default::default() }, egui::Key::Escape);
-                        });
-                    }
                     ui.horizontal(|ui| {
                         ui.label("Name");
                         ui.text_edit_singleline(&mut self.name);
                     });
                     ui.horizontal(|ui| {
                         ui.label("Command");
-                        ui.text_edit_multiline(&mut self.args);
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.args)
+                                .id_source("shell_cmd_args"),
+                        );
+                        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            self.args.push('\n');
+                            let modifiers = ui.input(|i| i.modifiers);
+                            ui.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+                        }
                     });
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
@@ -139,8 +141,7 @@ mod tests {
         )
     }
 
-    #[test]
-    fn shift_escape_inserts_newline() {
+    fn run_enter_test(modifiers: egui::Modifiers) -> String {
         let dir = tempdir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
         let ctx = egui::Context::default();
@@ -150,20 +151,37 @@ mod tests {
         dlg.edit_idx = Some(0);
         dlg.args = "echo hi".into();
 
+        ctx.begin_frame(Default::default());
+        dlg.ui(&ctx, &mut app);
+        let _ = ctx.end_frame();
+        ctx.memory_mut(|m| m.request_focus(egui::Id::new("shell_cmd_args")));
+
         ctx.begin_frame(egui::RawInput {
-            modifiers: egui::Modifiers { shift: true, ..Default::default() },
+            modifiers,
             events: vec![egui::Event::Key {
-                key: egui::Key::Escape,
+                key: egui::Key::Enter,
                 physical_key: None,
                 pressed: true,
                 repeat: false,
-                modifiers: egui::Modifiers { shift: true, ..Default::default() },
+                modifiers,
             }],
             ..Default::default()
         });
         dlg.ui(&ctx, &mut app);
         let _ = ctx.end_frame();
 
-        assert_eq!(dlg.args, "echo hi\n");
+        dlg.args
+    }
+
+    #[test]
+    fn enter_inserts_newline() {
+        let args = run_enter_test(egui::Modifiers::default());
+        assert_eq!(args, "echo hi\n");
+    }
+
+    #[test]
+    fn shift_enter_inserts_newline() {
+        let args = run_enter_test(egui::Modifiers { shift: true, ..Default::default() });
+        assert_eq!(args, "echo hi\n");
     }
 }
