@@ -104,6 +104,24 @@ fn mark_done_toggles_status() {
 }
 
 #[test]
+fn search_reflects_done_state_immediately() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    append_todo(TODO_FILE, "task", 0, &[]).unwrap();
+    let plugin = TodoPlugin::default();
+
+    mark_done(TODO_FILE, 0).unwrap();
+    let results = plugin.search("todo list");
+    assert!(results[0].label.starts_with("[x]"));
+
+    mark_done(TODO_FILE, 0).unwrap();
+    let results = plugin.search("todo list");
+    assert!(results[0].label.starts_with("[ ]"));
+}
+
+#[test]
 fn set_priority_and_tags_update_entry() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();

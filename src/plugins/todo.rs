@@ -4,6 +4,7 @@ use crate::plugin::Plugin;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use serde::{Deserialize, Serialize};
+use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex};
 
 pub const TODO_FILE: &str = "todo.json";
@@ -17,6 +18,9 @@ pub struct TodoEntry {
     #[serde(default)]
     pub tags: Vec<String>,
 }
+
+pub static TODO_DATA: Lazy<Arc<Mutex<Vec<TodoEntry>>>> =
+    Lazy::new(|| Arc::new(Mutex::new(load_todos(TODO_FILE).unwrap_or_default())));
 
 /// Sort todo entries by priority descending (highest priority first).
 pub fn sort_by_priority_desc(entries: &mut Vec<TodoEntry>) {
@@ -40,6 +44,12 @@ pub fn save_todos(path: &str, todos: &[TodoEntry]) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn update_cache(list: Vec<TodoEntry>) {
+    if let Ok(mut lock) = TODO_DATA.lock() {
+        *lock = list;
+    }
+}
+
 /// Append a new todo entry with `text`, `priority` and `tags`.
 pub fn append_todo(path: &str, text: &str, priority: u8, tags: &[String]) -> anyhow::Result<()> {
     let mut list = load_todos(path).unwrap_or_default();
@@ -49,7 +59,9 @@ pub fn append_todo(path: &str, text: &str, priority: u8, tags: &[String]) -> any
         priority,
         tags: tags.to_vec(),
     });
-    save_todos(path, &list)
+    save_todos(path, &list)?;
+    update_cache(list);
+    Ok(())
 }
 
 /// Remove the todo at `index` from the list stored at `path`.
@@ -58,6 +70,7 @@ pub fn remove_todo(path: &str, index: usize) -> anyhow::Result<()> {
     if index < list.len() {
         list.remove(index);
         save_todos(path, &list)?;
+        update_cache(list);
     }
     Ok(())
 }
@@ -68,6 +81,7 @@ pub fn mark_done(path: &str, index: usize) -> anyhow::Result<()> {
     if let Some(entry) = list.get_mut(index) {
         entry.done = !entry.done;
         save_todos(path, &list)?;
+        update_cache(list);
     }
     Ok(())
 }
@@ -78,6 +92,7 @@ pub fn set_priority(path: &str, index: usize, priority: u8) -> anyhow::Result<()
     if let Some(entry) = list.get_mut(index) {
         entry.priority = priority;
         save_todos(path, &list)?;
+        update_cache(list);
     }
     Ok(())
 }
@@ -88,6 +103,7 @@ pub fn set_tags(path: &str, index: usize, tags: &[String]) -> anyhow::Result<()>
     if let Some(entry) = list.get_mut(index) {
         entry.tags = tags.to_vec();
         save_todos(path, &list)?;
+        update_cache(list);
     }
     Ok(())
 }
@@ -99,6 +115,7 @@ pub fn clear_done(path: &str) -> anyhow::Result<()> {
     list.retain(|e| !e.done);
     if list.len() != orig_len {
         save_todos(path, &list)?;
+        update_cache(list);
     }
     Ok(())
 }
@@ -113,12 +130,11 @@ pub struct TodoPlugin {
 impl TodoPlugin {
     /// Create a new todo plugin with a fuzzy matcher.
     pub fn new() -> Self {
-        let data = Arc::new(Mutex::new(load_todos(TODO_FILE).unwrap_or_default()));
-        let data_clone = data.clone();
-        let path = TODO_FILE.to_string();
-        let watch_path = path.clone();
+        let data = TODO_DATA.clone();
+        let watch_path = TODO_FILE.to_string();
         let watcher = watch_json(&watch_path, {
             let watch_path = watch_path.clone();
+            let data_clone = data.clone();
             move || {
                 if let Ok(list) = load_todos(&watch_path) {
                     if let Ok(mut lock) = data_clone.lock() {
