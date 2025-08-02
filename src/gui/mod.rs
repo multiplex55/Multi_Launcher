@@ -1529,6 +1529,7 @@ impl eframe::App for LauncherApp {
                     && !self.bookmark_alias_dialog.open
                     && !self.tempfile_alias_dialog.open
                     && !self.tempfile_dialog.open
+                    && !self.shell_cmd_dialog.open
                     && !self.notes_dialog.open
                     && !self.todo_dialog.open
                     && !self.todo_view_dialog.open
