@@ -1706,6 +1706,9 @@ impl eframe::App for LauncherApp {
                             } else if a.action.starts_with("todo:done:") {
                                 refresh = true;
                                 set_focus = true;
+                                // Re-run the current query so the todo list reflects the
+                                // updated completion state immediately.
+                                self.pending_query = Some(current.clone());
                                 if self.enable_toasts {
                                     let label = a
                                         .label
@@ -2294,7 +2297,7 @@ impl eframe::App for LauncherApp {
                                     if a.action != "help:show" {
                                         let _ = history::append_history(
                                             HistoryEntry {
-                                                query: current,
+                                                query: current.clone(),
                                                 query_lc: String::new(),
                                                 action: a.clone(),
                                             },
@@ -2370,6 +2373,9 @@ impl eframe::App for LauncherApp {
                                     } else if a.action.starts_with("todo:done:") {
                                         refresh = true;
                                         set_focus = true;
+                                        // Re-run the current query so the visible list refreshes
+                                        // with the toggled completion state.
+                                        clicked_query = Some(current.clone());
                                         if self.enable_toasts {
                                             let label = a
                                                 .label
