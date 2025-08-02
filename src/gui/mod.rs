@@ -4,6 +4,7 @@ mod alias_dialog;
 mod bookmark_alias_dialog;
 mod brightness_dialog;
 mod clipboard_dialog;
+mod convert_panel;
 mod cpu_list_dialog;
 mod fav_dialog;
 mod macro_dialog;
@@ -16,7 +17,6 @@ mod timer_dialog;
 mod toast_log_dialog;
 mod todo_dialog;
 mod todo_view_dialog;
-mod convert_panel;
 mod volume_dialog;
 
 pub use add_action_dialog::AddActionDialog;
@@ -25,6 +25,7 @@ pub use alias_dialog::AliasDialog;
 pub use bookmark_alias_dialog::BookmarkAliasDialog;
 pub use brightness_dialog::BrightnessDialog;
 pub use clipboard_dialog::ClipboardDialog;
+pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
 pub use macro_dialog::MacroDialog;
@@ -37,7 +38,6 @@ pub use timer_dialog::{TimerCompletionDialog, TimerDialog};
 pub use toast_log_dialog::ToastLogDialog;
 pub use todo_dialog::TodoDialog;
 pub use todo_view_dialog::TodoViewDialog;
-pub use convert_panel::ConvertPanel;
 pub use volume_dialog::VolumeDialog;
 
 use crate::actions::folders;
@@ -1811,6 +1811,8 @@ impl eframe::App for LauncherApp {
                             }
                         }
                         if refresh {
+                            // Ensure file removals update the visible results list
+                            self.last_results_valid = false;
                             self.search();
                         }
                         if set_focus {
@@ -2458,6 +2460,8 @@ impl eframe::App for LauncherApp {
                             self.pending_query = Some(new_q);
                         }
                         if refresh {
+                            // Ensure file removals update the visible results list
+                            self.last_results_valid = false;
                             self.search();
                         }
                         if set_focus {
