@@ -1,5 +1,5 @@
 use crate::actions::Action;
-use crate::history::get_history;
+use crate::history::with_history;
 use crate::plugin::Plugin;
 use eframe::egui;
 
@@ -36,18 +36,20 @@ impl Plugin for HistoryPlugin {
             }
         }
         let filter = rest.trim().to_lowercase();
-        get_history()
-            .into_iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.query_lc.contains(&filter))
-            .take(MAX_HISTORY_RESULTS)
-            .map(|(idx, entry)| Action {
-                label: entry.query,
-                desc: "History".into(),
-                action: format!("history:{idx}"),
-                args: None,
-            })
-            .collect()
+        with_history(|h| {
+            h.iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.query_lc.contains(&filter))
+                .take(MAX_HISTORY_RESULTS)
+                .map(|(idx, entry)| Action {
+                    label: entry.query.clone(),
+                    desc: "History".into(),
+                    action: format!("history:{idx}"),
+                    args: None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     fn name(&self) -> &str {
