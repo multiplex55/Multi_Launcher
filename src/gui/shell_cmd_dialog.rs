@@ -31,18 +31,18 @@ impl ShellCmdDialog {
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         if !self.open { return; }
-        if self.edit_idx.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape) && i.modifiers.shift) {
-            self.args.push('\n');
-            ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers { shift: true, ..Default::default() }, egui::Key::Escape);
-            });
-        }
         let mut close = false;
         let mut save_now = false;
         egui::Window::new("Shell Commands")
             .open(&mut self.open)
             .show(ctx, |ui| {
                 if let Some(idx) = self.edit_idx {
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape) && i.modifiers.shift) {
+                        self.args.push('\n');
+                        ui.input_mut(|i| {
+                            i.consume_key(egui::Modifiers { shift: true, ..Default::default() }, egui::Key::Escape);
+                        });
+                    }
                     ui.horizontal(|ui| {
                         ui.label("Name");
                         ui.text_edit_singleline(&mut self.name);
