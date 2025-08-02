@@ -69,9 +69,19 @@ pub fn append_history(mut entry: HistoryEntry, limit: usize) -> anyhow::Result<(
     save_history()
 }
 
+/// Run a closure while holding a lock on the history list.
+///
+/// The closure receives a reference to the current list which should only be
+/// used within the scope of the closure. This avoids cloning the entire
+/// history for read-only operations.
+pub fn with_history<R>(f: impl FnOnce(&VecDeque<HistoryEntry>) -> R) -> Option<R> {
+    let h = HISTORY.lock().ok()?;
+    Some(f(&h))
+}
+
 /// Return a clone of the current history list.
 pub fn get_history() -> VecDeque<HistoryEntry> {
-    HISTORY.lock().ok().map(|h| h.clone()).unwrap_or_default()
+    with_history(|h| h.iter().cloned().collect()).unwrap_or_default()
 }
 
 /// Clear all history entries and persist the empty list to `history.json`.
