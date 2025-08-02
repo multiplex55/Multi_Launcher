@@ -1,3 +1,10 @@
+//! Todo plugin and helpers.
+//!
+//! `TODO_DATA` is a process-wide cache of todos loaded from `todo.json`.
+//! Any operation that writes to disk updates this cache, and a `JsonWatcher`
+//! refreshes it when the file changes externally. This keeps plugin state and
+//! tests synchronized with the latest on-disk data.
+
 use crate::actions::Action;
 use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::plugin::Plugin;
@@ -19,6 +26,9 @@ pub struct TodoEntry {
     pub tags: Vec<String>,
 }
 
+/// Shared in-memory todo cache kept in sync with `todo.json`.
+/// Disk writes and the [`JsonWatcher`] ensure updates are visible immediately
+/// to all plugin instances and tests.
 pub static TODO_DATA: Lazy<Arc<Mutex<Vec<TodoEntry>>>> =
     Lazy::new(|| Arc::new(Mutex::new(load_todos(TODO_FILE).unwrap_or_default())));
 
