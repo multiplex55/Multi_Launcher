@@ -130,7 +130,10 @@ impl Plugin for TempfilePlugin {
             }
         }
         const NEW_PREFIX: &str = "tmp new ";
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, NEW_PREFIX) {
+        const CREATE_PREFIX: &str = "tmp create ";
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, NEW_PREFIX)
+            .or_else(|| crate::common::strip_prefix_ci(trimmed, CREATE_PREFIX))
+        {
             let alias = rest.trim();
             if !alias.is_empty() && validate_alias(alias).is_ok() {
                 return vec![Action {
@@ -140,7 +143,9 @@ impl Plugin for TempfilePlugin {
                     args: None,
                 }];
             }
-        } else if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp new") {
+        } else if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp new")
+            .or_else(|| crate::common::strip_prefix_ci(trimmed, "tmp create"))
+        {
             if rest.is_empty() {
                 return vec![Action {
                     label: "Create temp file".into(),
@@ -276,6 +281,12 @@ impl Plugin for TempfilePlugin {
                 label: "tmp new".into(),
                 desc: "Tempfile".into(),
                 action: "query:tmp new ".into(),
+                args: None,
+            },
+            Action {
+                label: "tmp create".into(),
+                desc: "Tempfile".into(),
+                action: "query:tmp create ".into(),
                 args: None,
             },
             Action {

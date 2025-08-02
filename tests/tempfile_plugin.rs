@@ -28,10 +28,28 @@ fn search_new_returns_action() {
 }
 
 #[test]
+fn search_create_returns_action() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let plugin = TempfilePlugin;
+    let results = plugin.search("tmp create");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "tempfile:new");
+}
+
+#[test]
 fn search_new_with_name_returns_action() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let plugin = TempfilePlugin;
     let results = plugin.search("tmp new testfile");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "tempfile:new:testfile");
+}
+
+#[test]
+fn search_create_with_name_returns_action() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let plugin = TempfilePlugin;
+    let results = plugin.search("tmp create testfile");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "tempfile:new:testfile");
 }
