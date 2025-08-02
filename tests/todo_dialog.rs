@@ -35,7 +35,7 @@ fn empty_filter_returns_all() {
 fn add_todo_parses_multiple_tags() {
     let mut dlg = TodoDialog::default();
     dlg.test_set_text("task");
-    dlg.test_set_tags("alpha, beta, gamma");
+    dlg.test_set_tags("alpha, beta, gamma, delta");
     assert!(dlg.test_add_todo());
     assert_eq!(
         dlg.test_entries()[0].tags,
@@ -43,6 +43,7 @@ fn add_todo_parses_multiple_tags() {
             "alpha".to_string(),
             "beta".to_string(),
             "gamma".to_string(),
+            "delta".to_string(),
         ]
     );
 }
@@ -51,11 +52,16 @@ fn add_todo_parses_multiple_tags() {
 fn add_todo_ignores_trailing_comma() {
     let mut dlg = TodoDialog::default();
     dlg.test_set_text("task");
-    dlg.test_set_tags("alpha, beta,");
+    dlg.test_set_tags("alpha, beta, gamma, delta,");
     assert!(dlg.test_add_todo());
     assert_eq!(
         dlg.test_entries()[0].tags,
-        vec!["alpha".to_string(), "beta".to_string()]
+        vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+            "gamma".to_string(),
+            "delta".to_string(),
+        ]
     );
 }
 

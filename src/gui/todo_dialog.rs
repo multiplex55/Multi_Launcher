@@ -60,15 +60,12 @@ impl TodoDialog {
         }
         let tag_list: Vec<String> = self
             .tags
+            .trim()
+            .trim_end_matches(',')
             .split(',')
-            .filter_map(|t| {
-                let t = t.trim();
-                if t.is_empty() {
-                    None
-                } else {
-                    Some(t.to_owned())
-                }
-            })
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_owned())
             .collect();
         tracing::debug!("Adding todo: '{}' tags={:?}", self.text, tag_list);
         self.entries.push(TodoEntry {
