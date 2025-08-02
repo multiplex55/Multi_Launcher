@@ -49,6 +49,7 @@ use crate::plugins::convert_panel::ConvertPanelPlugin;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::NetUnit;
 use std::collections::HashSet;
+use std::sync::Arc;
 use libloading::Library;
 use serde_json::Value;
 use eframe::egui;
@@ -107,7 +108,7 @@ impl PluginManager {
         net_unit: NetUnit,
         reset_alarm: bool,
         plugin_settings: &std::collections::HashMap<String, Value>,
-        actions: &[Action],
+        actions: Arc<Vec<Action>>,
     ) {
         self.clear_plugins();
         // Drop previously loaded dynamic libraries to avoid accumulating
@@ -125,7 +126,7 @@ impl PluginManager {
         self.register_with_settings(ClipboardPlugin::new(clipboard_limit), plugin_settings);
         self.register_with_settings(BookmarksPlugin::default(), plugin_settings);
         self.register_with_settings(FoldersPlugin::default(), plugin_settings);
-        self.register_with_settings(OmniSearchPlugin::new(actions.to_vec()), plugin_settings);
+        self.register_with_settings(OmniSearchPlugin::new(actions.clone()), plugin_settings);
         self.register_with_settings(SystemPlugin, plugin_settings);
         self.register_with_settings(ProcessesPlugin, plugin_settings);
         self.register_with_settings(SysInfoPlugin, plugin_settings);

@@ -9,13 +9,14 @@ fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
     let custom_len = actions.len();
     let mut plugins = PluginManager::new();
     let dirs: Vec<String> = Vec::new();
+    let actions_arc = Arc::new(actions.clone());
     plugins.reload_from_dirs(
         &dirs,
         Settings::default().clipboard_limit,
         Settings::default().net_unit,
         false,
         &std::collections::HashMap::new(),
-        &actions,
+        actions_arc,
     );
     LauncherApp::new(
         ctx,
@@ -44,13 +45,14 @@ fn new_app_with_settings(
     let mut plugins = PluginManager::new();
     let dirs: Vec<String> = Vec::new();
     let plugin_settings = settings.plugin_settings.clone();
+    let actions_arc = Arc::new(actions.clone());
     plugins.reload_from_dirs(
         &dirs,
         settings.clipboard_limit,
         settings.net_unit,
         false,
         &plugin_settings,
-        &actions,
+        actions_arc,
     );
     let enabled_plugins = settings.enabled_plugins.clone();
     LauncherApp::new(

@@ -4,16 +4,17 @@ use crate::plugins::bookmarks::BookmarksPlugin;
 use crate::plugins::folders::FoldersPlugin;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use std::sync::Arc;
 
 pub struct OmniSearchPlugin {
     folders: FoldersPlugin,
     bookmarks: BookmarksPlugin,
-    actions: Vec<Action>,
+    actions: Arc<Vec<Action>>,
     matcher: SkimMatcherV2,
 }
 
 impl OmniSearchPlugin {
-    pub fn new(actions: Vec<Action>) -> Self {
+    pub fn new(actions: Arc<Vec<Action>>) -> Self {
         Self {
             folders: FoldersPlugin::default(),
             bookmarks: BookmarksPlugin::default(),
@@ -81,7 +82,7 @@ impl OmniSearchPlugin {
         if q.is_empty() {
             out.extend(self.actions.iter().cloned());
         } else {
-            for a in &self.actions {
+            for a in self.actions.iter() {
                 if self.matcher.fuzzy_match(&a.label, q).is_some()
                     || self.matcher.fuzzy_match(&a.desc, q).is_some()
                 {
