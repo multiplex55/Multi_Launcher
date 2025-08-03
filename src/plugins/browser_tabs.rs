@@ -126,16 +126,16 @@ mod imp {
                         SafeArrayDestroy, SafeArrayLock, SafeArrayUnlock,
                     };
                     if !sa_ptr.is_null() {
-                        let psa = *sa_ptr;
-                        if SafeArrayLock(psa).is_ok() {
-                            let len = (*psa).rgsabound[0].cElements as usize;
-                            let data = (*psa).pvData as *const i32;
+                        if SafeArrayLock(sa_ptr).is_ok() {
+                            let len = (*sa_ptr).rgsabound[0].cElements as usize;
+                            let data = (*sa_ptr).pvData as *const i32;
                             if !data.is_null() {
-                                runtime_id = std::slice::from_raw_parts(data, len).to_vec();
+                                runtime_id =
+                                    std::slice::from_raw_parts(data, len).to_vec();
                             }
-                            let _ = SafeArrayUnlock(psa);
+                            let _ = SafeArrayUnlock(sa_ptr);
                         }
-                        let _ = SafeArrayDestroy(psa);
+                        let _ = SafeArrayDestroy(sa_ptr);
                     }
                 }
                 if runtime_id.is_empty() {
