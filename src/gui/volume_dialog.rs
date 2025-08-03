@@ -3,7 +3,7 @@ use crate::gui::LauncherApp;
 use crate::launcher::launch_action;
 use eframe::egui;
 #[cfg(target_os = "windows")]
-use sysinfo::{Pid, System};
+use sysinfo::System;
 
 pub struct VolumeDialog {
     pub open: bool,
