@@ -93,7 +93,7 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
                 CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
             {
                 // Build SAFEARRAY from runtime ID pieces
-                let psa = SafeArrayCreateVector(VT_I4.0 as u16, 0, runtime_id.len() as u32);
+                let psa = SafeArrayCreateVector(VT_I4, 0, runtime_id.len() as u32);
                 if !psa.is_null() {
                     for (i, v) in runtime_id.iter().enumerate() {
                         let mut idx = i as i32;
