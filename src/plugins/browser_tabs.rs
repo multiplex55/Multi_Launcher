@@ -44,8 +44,7 @@ mod imp {
 
         let mut out = Vec::new();
         unsafe {
-            let init = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-            if let Err(e) = init {
+            if let Err(e) = CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok() {
                 log_enum_error("CoInitializeEx failed", e);
                 return out;
             }
