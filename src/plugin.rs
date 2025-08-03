@@ -158,7 +158,7 @@ impl PluginManager {
             self.register_with_settings(BrightnessPlugin, plugin_settings);
             self.register_with_settings(TaskManagerPlugin, plugin_settings);
             self.register_with_settings(WindowsPlugin, plugin_settings);
-            self.register_with_settings(BrowserTabsPlugin, plugin_settings);
+            self.register_with_settings(BrowserTabsPlugin::default(), plugin_settings);
         }
         self.register_with_settings(SettingsPlugin, plugin_settings);
         self.register_with_settings(HelpPlugin, plugin_settings);

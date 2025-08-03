@@ -1312,6 +1312,19 @@ impl eframe::App for LauncherApp {
                 );
             }
         }
+        for msg in crate::plugins::browser_tabs::take_cache_messages() {
+            if self.enable_toasts {
+                push_toast(
+                    &mut self.toasts,
+                    Toast {
+                        text: msg.into(),
+                        kind: ToastKind::Info,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(self.toast_duration as f64),
+                    },
+                );
+            }
+        }
         for err in crate::plugins::macros::take_error_messages() {
             self.macro_dialog.push_debug(err);
         }

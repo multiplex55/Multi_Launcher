@@ -1,7 +1,17 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
+use eframe::egui;
+use serde::{Deserialize, Serialize};
 
-pub struct BrowserTabsPlugin;
+pub struct BrowserTabsPlugin {
+    recalc_each_query: bool,
+}
+
+impl Default for BrowserTabsPlugin {
+    fn default() -> Self {
+        Self { recalc_each_query: false }
+    }
+}
 
 #[cfg(target_os = "windows")]
 mod imp {
@@ -25,6 +35,23 @@ mod imp {
     static REFRESHING: AtomicBool = AtomicBool::new(false);
     static LAST_ENUM_ERR: Lazy<Mutex<Instant>> =
         Lazy::new(|| Mutex::new(Instant::now() - Duration::from_secs(60)));
+    static MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+    pub(super) fn take_messages() -> Vec<String> {
+        if let Ok(mut list) = MESSAGES.lock() {
+            let out = list.clone();
+            list.clear();
+            out
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn push_message(msg: String) {
+        if let Ok(mut list) = MESSAGES.lock() {
+            list.push(msg);
+        }
+    }
 
     fn log_enum_error(msg: &str, err: windows::core::Error) {
         let mut last = LAST_ENUM_ERR.lock().unwrap();
@@ -165,6 +192,7 @@ mod imp {
             warn!("BrowserTabsPlugin: failed to lock last refresh time");
         }
         REFRESHING.store(false, Ordering::Release);
+        push_message("Tab cache refreshed".into());
     }
 
     fn trigger_refresh() {
@@ -184,8 +212,32 @@ mod imp {
         }
     }
 
-    pub(super) fn cached_actions(filter: &str) -> Vec<Action> {
-        trigger_refresh();
+    pub(super) fn force_refresh() {
+        if REFRESHING
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            std::thread::spawn(refresh_cache);
+        }
+    }
+
+    pub(super) fn clear_cache() {
+        if let Ok(mut cache) = CACHE.write() {
+            cache.clear();
+        }
+        if let Ok(mut last) = LAST_REFRESH.lock() {
+            *last = Instant::now() - Duration::from_secs(60);
+        }
+        REFRESHING.store(false, Ordering::Release);
+        push_message("Tab cache cleared".into());
+    }
+
+    pub(super) fn cached_actions(filter: &str, force: bool) -> Vec<Action> {
+        if force {
+            force_refresh();
+        } else {
+            trigger_refresh();
+        }
 
         let mut out = Vec::new();
         if let Ok(cache) = CACHE.read() {
@@ -243,7 +295,7 @@ mod imp {
                 *last = Instant::now();
             }
 
-            let plugin = BrowserTabsPlugin;
+            let plugin = BrowserTabsPlugin::default();
             let first = plugin.search("tab ");
             assert_eq!(first.len(), 1);
             assert!(first[0].label.contains("Dummy"));
@@ -270,9 +322,27 @@ impl Plugin for BrowserTabsPlugin {
             Some(r) => r.trim(),
             None => return Vec::new(),
         };
+
+        if rest.eq_ignore_ascii_case("clear") {
+            return vec![Action {
+                label: "Clear tab cache".into(),
+                desc: "Remove cached browser tabs".into(),
+                action: "tab:clear".into(),
+                args: None,
+            }];
+        }
+        if rest.eq_ignore_ascii_case("cache") {
+            return vec![Action {
+                label: "Rebuild tab cache".into(),
+                desc: "Enumerate browser tabs".into(),
+                action: "tab:cache".into(),
+                args: None,
+            }];
+        }
+
         let filter = rest.to_lowercase();
 
-        imp::cached_actions(&filter)
+        imp::cached_actions(&filter, self.recalc_each_query)
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -293,12 +363,51 @@ impl Plugin for BrowserTabsPlugin {
     }
 
     fn commands(&self) -> Vec<Action> {
-        vec![Action {
-            label: "tab".into(),
-            desc: "Browser tabs".into(),
-            action: "query:tab ".into(),
-            args: None,
-        }]
+        vec![
+            Action {
+                label: "tab".into(),
+                desc: "Browser tabs".into(),
+                action: "query:tab ".into(),
+                args: None,
+            },
+            Action {
+                label: "tab cache".into(),
+                desc: "Rebuild browser tab cache".into(),
+                action: "tab:cache".into(),
+                args: None,
+            },
+            Action {
+                label: "tab clear".into(),
+                desc: "Clear browser tab cache".into(),
+                action: "tab:clear".into(),
+                args: None,
+            },
+        ]
+    }
+
+    fn default_settings(&self) -> Option<serde_json::Value> {
+        serde_json::to_value(BrowserTabsPluginSettings {
+            recalc_each_query: self.recalc_each_query,
+        })
+        .ok()
+    }
+
+    fn apply_settings(&mut self, value: &serde_json::Value) {
+        if let Ok(cfg) = serde_json::from_value::<BrowserTabsPluginSettings>(value.clone()) {
+            self.recalc_each_query = cfg.recalc_each_query;
+        }
+    }
+
+    fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
+        let mut cfg: BrowserTabsPluginSettings =
+            serde_json::from_value(value.clone()).unwrap_or_default();
+        ui.checkbox(&mut cfg.recalc_each_query, "Recalculate cache on each query");
+        self.recalc_each_query = cfg.recalc_each_query;
+        if let Ok(v) = serde_json::to_value(&cfg) {
+            *value = v;
+        } else {
+            tracing::error!("failed to serialize browser tabs settings");
+        }
     }
 }
 
@@ -308,7 +417,42 @@ mod tests {
 
     #[test]
     fn search_is_empty_on_non_windows() {
-        let plugin = BrowserTabsPlugin;
+        let plugin = BrowserTabsPlugin::default();
         assert!(plugin.search("tab ").is_empty());
     }
 }
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct BrowserTabsPluginSettings {
+    #[serde(default)]
+    pub recalc_each_query: bool,
+}
+
+impl Default for BrowserTabsPluginSettings {
+    fn default() -> Self {
+        Self {
+            recalc_each_query: false,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub use imp::take_messages as take_cache_messages;
+#[cfg(not(target_os = "windows"))]
+pub fn take_cache_messages() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(target_os = "windows")]
+pub fn rebuild_cache() {
+    imp::force_refresh();
+}
+#[cfg(not(target_os = "windows"))]
+pub fn rebuild_cache() {}
+
+#[cfg(target_os = "windows")]
+pub fn clear_cache() {
+    imp::clear_cache();
+}
+#[cfg(not(target_os = "windows"))]
+pub fn clear_cache() {}

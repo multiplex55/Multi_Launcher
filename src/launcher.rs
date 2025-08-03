@@ -293,6 +293,8 @@ enum ActionKind<'a> {
     WindowSwitch(isize),
     WindowClose(isize),
     BrowserTabSwitch(Vec<i32>),
+    BrowserTabCache,
+    BrowserTabClear,
     TempfileNew(Option<&'a str>),
     TempfileOpen,
     TempfileClear,
@@ -386,6 +388,12 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
         if !parts.is_empty() {
             return ActionKind::BrowserTabSwitch(parts);
         }
+    }
+    if s == "tab:cache" {
+        return ActionKind::BrowserTabCache;
+    }
+    if s == "tab:clear" {
+        return ActionKind::BrowserTabClear;
     }
     if let Some(id) = s.strip_prefix("timer:cancel:") {
         if let Ok(i) = id.parse::<u64>() {
@@ -662,6 +670,14 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         }
         ActionKind::BrowserTabSwitch(ids) => {
             system::browser_tab_switch(&ids);
+            Ok(())
+        }
+        ActionKind::BrowserTabCache => {
+            crate::plugins::browser_tabs::rebuild_cache();
+            Ok(())
+        }
+        ActionKind::BrowserTabClear => {
+            crate::plugins::browser_tabs::clear_cache();
             Ok(())
         }
         ActionKind::TimerCancel(id) => {

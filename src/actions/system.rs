@@ -122,7 +122,6 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
                                                         psa as *const _,
                                                     ) {
                                                         if same.as_bool() {
-                                                            let _ = elem.SetFocus();
                                                             if let Ok(sel) = elem
                                                                 .GetCurrentPatternAs::<
                                                                     IUIAutomationSelectionItemPattern,
@@ -142,6 +141,7 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
                                                             {
                                                                 let _ = acc.DoDefaultAction();
                                                             }
+                                                            let _ = elem.SetFocus();
                                                             let _ = SafeArrayDestroy(
                                                                 elem_id as *const _,
                                                             );
