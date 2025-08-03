@@ -292,7 +292,7 @@ enum ActionKind<'a> {
     RecycleClean,
     WindowSwitch(isize),
     WindowClose(isize),
-    BrowserTabSwitch(String),
+    BrowserTabSwitch(Vec<i32>),
     TempfileNew(Option<&'a str>),
     TempfileOpen,
     TempfileClear,
@@ -378,9 +378,13 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
             return ActionKind::WindowClose(h);
         }
     }
-    if let Some(name) = s.strip_prefix("tab:switch:") {
-        if let Ok(decoded) = urlencoding::decode(name) {
-            return ActionKind::BrowserTabSwitch(decoded.into_owned());
+    if let Some(ids) = s.strip_prefix("tab:switch:") {
+        let parts: Vec<i32> = ids
+            .split('_')
+            .filter_map(|p| p.parse::<i32>().ok())
+            .collect();
+        if !parts.is_empty() {
+            return ActionKind::BrowserTabSwitch(parts);
         }
     }
     if let Some(id) = s.strip_prefix("timer:cancel:") {
@@ -656,8 +660,8 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
             system::window_close(hwnd);
             Ok(())
         }
-        ActionKind::BrowserTabSwitch(title) => {
-            system::browser_tab_switch(&title);
+        ActionKind::BrowserTabSwitch(ids) => {
+            system::browser_tab_switch(&ids);
             Ok(())
         }
         ActionKind::TimerCancel(id) => {

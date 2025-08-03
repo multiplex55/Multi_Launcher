@@ -16,6 +16,7 @@ mod imp {
     pub(super) struct TabInfo {
         title: String,
         url: String,
+        runtime_id: Vec<i32>,
     }
 
     static CACHE: Lazy<RwLock<Vec<TabInfo>>> = Lazy::new(|| RwLock::new(Vec::new()));
@@ -119,7 +120,28 @@ mod imp {
                     }
                     Err(e) => warn!(?e, "BrowserTabsPlugin: GetCurrentPropertyValue failed"),
                 }
-                out.push(TabInfo { title, url });
+                let mut runtime_id = Vec::new();
+                if let Ok(sa_ptr) = elem.GetRuntimeId() {
+                    use windows::Win32::System::Ole::{
+                        SafeArrayDestroy, SafeArrayLock, SafeArrayUnlock,
+                    };
+                    if !sa_ptr.is_null() {
+                        let psa = *sa_ptr;
+                        if SafeArrayLock(psa).is_ok() {
+                            let len = (*psa).rgsabound[0].cElements as usize;
+                            let data = (*psa).pvData as *const i32;
+                            if !data.is_null() {
+                                runtime_id = std::slice::from_raw_parts(data, len).to_vec();
+                            }
+                            let _ = SafeArrayUnlock(psa);
+                        }
+                        let _ = SafeArrayDestroy(psa);
+                    }
+                }
+                if runtime_id.is_empty() {
+                    continue;
+                }
+                out.push(TabInfo { title, url, runtime_id });
             }
 
             CoUninitialize();
@@ -169,7 +191,15 @@ mod imp {
                     || tab.title.to_lowercase().contains(filter)
                     || tab.url.to_lowercase().contains(filter)
                 {
-                    let encoded = urlencoding::encode(&tab.title);
+                    if tab.runtime_id.is_empty() {
+                        continue;
+                    }
+                    let id_str = tab
+                        .runtime_id
+                        .iter()
+                        .map(|i| i.to_string())
+                        .collect::<Vec<_>>()
+                        .join("_");
                     out.push(Action {
                         label: format!("Switch to {}", tab.title),
                         desc: if tab.url.is_empty() {
@@ -177,7 +207,7 @@ mod imp {
                         } else {
                             tab.url.clone()
                         },
-                        action: format!("tab:switch:{encoded}"),
+                        action: format!("tab:switch:{id_str}"),
                         args: None,
                     });
                 }
@@ -201,6 +231,7 @@ mod imp {
                 cache.push(TabInfo {
                     title: "Dummy".into(),
                     url: "about:blank".into(),
+                    runtime_id: vec![1],
                 });
             }
 

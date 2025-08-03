@@ -73,12 +73,15 @@ pub fn recycle_clean() {
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
-pub fn browser_tab_switch(title: &str) {
+pub fn browser_tab_switch(runtime_id: &[i32]) {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::System::Com::{
             CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
             COINIT_APARTMENTTHREADED,
+        };
+        use windows::Win32::System::Ole::{
+            SafeArrayCreateVector, SafeArrayDestroy, SafeArrayPutElement, VT_I4,
         };
         use windows::Win32::UI::Accessibility::*;
 
@@ -87,40 +90,40 @@ pub fn browser_tab_switch(title: &str) {
             if let Ok(automation) =
                 CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
             {
-                if let Ok(root) = automation.GetRootElement() {
-                    use windows::core::VARIANT;
-                    if let Ok(cond) = automation.CreatePropertyCondition(
-                        UIA_ControlTypePropertyId,
-                        &VARIANT::from(UIA_TabItemControlTypeId.0),
-                    ) {
-                        if let Ok(tabs) = root.FindAll(TreeScope_Subtree, &cond) {
-                            if let Ok(count) = tabs.Length() {
-                                for i in 0..count {
-                                    if let Ok(elem) = tabs.GetElement(i) {
-                                        if let Ok(name) = elem.CurrentName() {
-                                            if name.to_string() == title {
-                                                let _ = elem.SetFocus();
-                                                if let Ok(sel) = elem
-                                                    .GetCurrentPatternAs::<
-                                                        IUIAutomationSelectionItemPattern,
-                                                    >(UIA_SelectionItemPatternId)
-                                                {
-                                                    let _ = sel.Select();
-                                                } else if let Ok(inv) = elem
-                                                    .GetCurrentPatternAs::<
-                                                        IUIAutomationInvokePattern,
-                                                    >(UIA_InvokePatternId)
-                                                {
-                                                    let _ = inv.Invoke();
-                                                }
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                let psa = SafeArrayCreateVector(VT_I4, 0, runtime_id.len() as u32);
+                if !psa.is_null() {
+                    for (i, v) in runtime_id.iter().enumerate() {
+                        let mut idx = i as i32;
+                        let val = *v;
+                        let _ = SafeArrayPutElement(
+                            psa,
+                            &mut idx,
+                            &val as *const _ as *const core::ffi::c_void,
+                        );
+                    }
+                    if let Ok(elem) = automation.ElementFromRuntimeId(psa) {
+                        let _ = elem.SetFocus();
+                        if let Ok(sel) = elem
+                            .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                                UIA_SelectionItemPatternId,
+                            )
+                        {
+                            let _ = sel.Select();
+                        } else if let Ok(inv) = elem
+                            .GetCurrentPatternAs::<IUIAutomationInvokePattern>(
+                                UIA_InvokePatternId,
+                            )
+                        {
+                            let _ = inv.Invoke();
+                        } else if let Ok(acc) = elem
+                            .GetCurrentPatternAs::<IUIAutomationLegacyIAccessiblePattern>(
+                                UIA_LegacyIAccessiblePatternId,
+                            )
+                        {
+                            let _ = acc.DoDefaultAction();
                         }
                     }
+                    let _ = SafeArrayDestroy(psa);
                 }
             }
             CoUninitialize();
