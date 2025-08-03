@@ -37,7 +37,7 @@ mod imp {
         Lazy::new(|| Mutex::new(Instant::now() - Duration::from_secs(60)));
     static MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
-    pub(super) fn take_messages() -> Vec<String> {
+    pub(crate) fn take_messages() -> Vec<String> {
         if let Ok(mut list) = MESSAGES.lock() {
             let out = list.clone();
             list.clear();
@@ -437,7 +437,7 @@ impl Default for BrowserTabsPluginSettings {
 }
 
 #[cfg(target_os = "windows")]
-pub use imp::take_messages as take_cache_messages;
+pub(crate) use imp::take_messages as take_cache_messages;
 #[cfg(not(target_os = "windows"))]
 pub fn take_cache_messages() -> Vec<String> {
     Vec::new()
