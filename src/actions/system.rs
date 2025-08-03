@@ -76,11 +76,11 @@ pub fn recycle_clean() {
 pub fn browser_tab_switch(runtime_id: &[i32]) {
     #[cfg(target_os = "windows")]
     {
+        use windows::core::VARIANT;
         use windows::Win32::System::Com::{
             CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
             COINIT_APARTMENTTHREADED,
         };
-        use windows::core::VARIANT;
         use windows::Win32::System::Ole::{
             SafeArrayCreateVector, SafeArrayDestroy, SafeArrayPutElement,
         };
@@ -117,9 +117,10 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
                                         if let Ok(elem) = tabs.GetElement(i) {
                                             if let Ok(elem_id) = elem.GetRuntimeId() {
                                                 if !elem_id.is_null() {
-                                                    if let Ok(same) =
-                                                        automation.CompareRuntimeIds(elem_id, psa)
-                                                    {
+                                                    if let Ok(same) = automation.CompareRuntimeIds(
+                                                        elem_id as *const _,
+                                                        psa as *const _,
+                                                    ) {
                                                         if same.as_bool() {
                                                             let _ = elem.SetFocus();
                                                             if let Ok(sel) = elem
@@ -141,11 +142,13 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
                                                             {
                                                                 let _ = acc.DoDefaultAction();
                                                             }
-                                                            let _ = SafeArrayDestroy(elem_id);
+                                                            let _ = SafeArrayDestroy(
+                                                                elem_id as *const _,
+                                                            );
                                                             break 'outer;
                                                         }
                                                     }
-                                                    let _ = SafeArrayDestroy(elem_id);
+                                                    let _ = SafeArrayDestroy(elem_id as *const _);
                                                 }
                                             }
                                         }
@@ -154,7 +157,7 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
                             }
                         }
                     }
-                    let _ = SafeArrayDestroy(psa);
+                    let _ = SafeArrayDestroy(psa as *const _);
                 }
             }
             CoUninitialize();

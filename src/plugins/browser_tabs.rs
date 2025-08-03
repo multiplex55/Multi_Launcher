@@ -23,9 +23,8 @@ mod imp {
     static LAST_REFRESH: Lazy<Mutex<Instant>> =
         Lazy::new(|| Mutex::new(Instant::now() - Duration::from_secs(60)));
     static REFRESHING: AtomicBool = AtomicBool::new(false);
-    static LAST_ENUM_ERR: Lazy<Mutex<Instant>> = Lazy::new(|| {
-        Mutex::new(Instant::now() - Duration::from_secs(60))
-    });
+    static LAST_ENUM_ERR: Lazy<Mutex<Instant>> =
+        Lazy::new(|| Mutex::new(Instant::now() - Duration::from_secs(60)));
 
     fn log_enum_error(msg: &str, err: windows::core::Error) {
         let mut last = LAST_ENUM_ERR.lock().unwrap();
@@ -126,22 +125,26 @@ mod imp {
                         SafeArrayDestroy, SafeArrayLock, SafeArrayUnlock,
                     };
                     if !sa_ptr.is_null() {
-                        if SafeArrayLock(sa_ptr).is_ok() {
-                            let len = (*sa_ptr).rgsabound[0].cElements as usize;
-                            let data = (*sa_ptr).pvData as *const i32;
+                        let psa = sa_ptr as *const _;
+                        if SafeArrayLock(psa).is_ok() {
+                            let len = (*psa).rgsabound[0].cElements as usize;
+                            let data = (*psa).pvData as *const i32;
                             if !data.is_null() {
-                                runtime_id =
-                                    std::slice::from_raw_parts(data, len).to_vec();
+                                runtime_id = std::slice::from_raw_parts(data, len).to_vec();
                             }
-                            let _ = SafeArrayUnlock(sa_ptr);
+                            let _ = SafeArrayUnlock(psa);
                         }
-                        let _ = SafeArrayDestroy(sa_ptr);
+                        let _ = SafeArrayDestroy(psa);
                     }
                 }
                 if runtime_id.is_empty() {
                     continue;
                 }
-                out.push(TabInfo { title, url, runtime_id });
+                out.push(TabInfo {
+                    title,
+                    url,
+                    runtime_id,
+                });
             }
 
             CoUninitialize();
@@ -218,10 +221,10 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
+        use super::super::BrowserTabsPlugin;
         use super::*;
         use std::thread::sleep;
         use std::time::{Duration, Instant};
-        use super::super::BrowserTabsPlugin;
 
         #[test]
         fn search_refreshes_cache() {
@@ -309,4 +312,3 @@ mod tests {
         assert!(plugin.search("tab ").is_empty());
     }
 }
-
