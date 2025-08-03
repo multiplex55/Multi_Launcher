@@ -91,7 +91,7 @@ pub fn browser_tab_switch(title: &str) {
                     use windows::core::VARIANT;
                     if let Ok(cond) = automation.CreatePropertyCondition(
                         UIA_ControlTypePropertyId,
-                        VARIANT::from(UIA_TabItemControlTypeId.0),
+                        &VARIANT::from(UIA_TabItemControlTypeId.0),
                     ) {
                         if let Ok(tabs) = root.FindAll(TreeScope_Subtree, &cond) {
                             if let Ok(count) = tabs.Length() {

@@ -14,12 +14,11 @@ impl Plugin for BrowserTabsPlugin {
         };
         let filter = rest.to_lowercase();
 
-        use windows::core::VARIANT;
+        use windows::core::{BSTR, VARIANT};
         use windows::Win32::System::Com::{
             CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
             COINIT_APARTMENTTHREADED,
         };
-        use windows::Win32::System::Variant::VT_BSTR;
         use windows::Win32::UI::Accessibility::*;
 
         let mut out = Vec::new();
@@ -31,7 +30,7 @@ impl Plugin for BrowserTabsPlugin {
                 if let Ok(root) = automation.GetRootElement() {
                     if let Ok(cond) = automation.CreatePropertyCondition(
                         UIA_ControlTypePropertyId,
-                        VARIANT::from(UIA_TabItemControlTypeId.0),
+                        &VARIANT::from(UIA_TabItemControlTypeId.0),
                     ) {
                         if let Ok(tabs) = root.FindAll(TreeScope_Subtree, &cond) {
                             if let Ok(count) = tabs.Length() {
@@ -39,21 +38,13 @@ impl Plugin for BrowserTabsPlugin {
                                     if let Ok(elem) = tabs.GetElement(i) {
                                         let title = elem.CurrentName().unwrap_or_default().to_string();
                                         let mut url = String::new();
-                                        if let Ok(var) = elem.GetCurrentPropertyValue(
-                                            UIA_LegacyIAccessibleValuePropertyId,
-                                        ) {
-                                            if unsafe { var.0.Anonymous.Anonymous.vt } as u32
-                                                == VT_BSTR.0
-                                            {
-                                                unsafe {
-                                                    url = var
-                                                        .0
-                                                        .Anonymous
-                                                        .Anonymous
-                                                        .Anonymous
-                                                        .bstrVal
-                                                        .to_string();
-                                                }
+                                        if let Ok(var) = elem
+                                            .GetCurrentPropertyValue(
+                                                UIA_LegacyIAccessibleValuePropertyId,
+                                            )
+                                        {
+                                            if let Ok(bstr) = BSTR::try_from(&var) {
+                                                url = bstr.to_string();
                                             }
                                         }
                                         if filter.is_empty()
