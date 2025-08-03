@@ -100,6 +100,19 @@ pub fn browser_tab_switch(title: &str) {
                                         if let Ok(name) = elem.CurrentName() {
                                             if name.to_string() == title {
                                                 let _ = elem.SetFocus();
+                                                if let Ok(sel) = elem
+                                                    .GetCurrentPatternAs::<
+                                                        IUIAutomationSelectionItemPattern,
+                                                    >(UIA_SelectionItemPatternId)
+                                                {
+                                                    let _ = sel.Select();
+                                                } else if let Ok(inv) = elem
+                                                    .GetCurrentPatternAs::<
+                                                        IUIAutomationInvokePattern,
+                                                    >(UIA_InvokePatternId)
+                                                {
+                                                    let _ = inv.Invoke();
+                                                }
                                                 break;
                                             }
                                         }
