@@ -71,3 +71,46 @@ pub fn recycle_clean() {
     #[cfg(target_os = "windows")]
     super::super::launcher::clean_recycle_bin();
 }
+
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+pub fn browser_tab_switch(title: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+            COINIT_APARTMENTTHREADED,
+        };
+        use windows::Win32::UI::Accessibility::*;
+
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if let Ok(automation) =
+                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+            {
+                if let Ok(root) = automation.GetRootElement() {
+                    use windows::core::VARIANT;
+                    if let Ok(cond) = automation.CreatePropertyCondition(
+                        UIA_ControlTypePropertyId,
+                        VARIANT::from(UIA_TabItemControlTypeId.0),
+                    ) {
+                        if let Ok(tabs) = root.FindAll(TreeScope_Subtree, &cond) {
+                            if let Ok(count) = tabs.Length() {
+                                for i in 0..count {
+                                    if let Ok(elem) = tabs.GetElement(i) {
+                                        if let Ok(name) = elem.CurrentName() {
+                                            if name.to_string() == title {
+                                                let _ = elem.SetFocus();
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            CoUninitialize();
+        }
+    }
+}
