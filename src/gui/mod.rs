@@ -1326,7 +1326,7 @@ impl eframe::App for LauncherApp {
             }
         }
         for err in crate::plugins::macros::take_error_messages() {
-            self.macro_dialog.push_debug(err);
+            tracing::debug!("{err}");
         }
 
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
