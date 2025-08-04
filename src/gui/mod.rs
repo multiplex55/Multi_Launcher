@@ -18,7 +18,6 @@ mod toast_log_dialog;
 mod todo_dialog;
 mod todo_view_dialog;
 mod volume_dialog;
-mod muscle_mapping_panel;
 
 pub use add_action_dialog::AddActionDialog;
 pub use add_bookmark_dialog::AddBookmarkDialog;
@@ -40,7 +39,6 @@ pub use toast_log_dialog::ToastLogDialog;
 pub use todo_dialog::TodoDialog;
 pub use todo_view_dialog::TodoViewDialog;
 pub use volume_dialog::VolumeDialog;
-pub use muscle_mapping_panel::refresh_muscle_mappings;
 
 use crate::actions::folders;
 use crate::actions::{load_actions, Action};
