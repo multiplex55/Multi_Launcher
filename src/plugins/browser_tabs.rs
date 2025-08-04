@@ -1,3 +1,18 @@
+//! Browser tab search and switching on Windows using UI Automation.
+//!
+//! The plugin enumerates `TabItem` elements exposed by browsers via the
+//! Windows UI Automation (UIA) tree. This currently works reliably with
+//! Chromium-based browsers such as Microsoft Edge and Google Chrome; other
+//! browsers may not expose their tabs as `TabItem` controls and will therefore
+//! not appear in search results.
+//!
+//! Only top-level windows on the active desktop session are scanned. Tabs in
+//! minimized or non‑UIA compliant windows might be missed, and changes in a
+//! browser's accessibility implementation could break enumeration. When UIA
+//! patterns fail to activate a tab, the plugin falls back to simulating a mouse
+//! click on the tab's bounding rectangle.
+//!
+//! The plugin is Windows-only; on other platforms it returns no results.
 use crate::actions::Action;
 use crate::plugin::Plugin;
 use eframe::egui;
