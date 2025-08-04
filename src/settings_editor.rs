@@ -1,11 +1,11 @@
 use crate::gui::LauncherApp;
 use crate::hotkey::parse_hotkey;
 use crate::settings::Settings;
-use std::sync::Arc;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 #[cfg(target_os = "windows")]
 use rfd::FileDialog;
+use std::sync::Arc;
 
 #[derive(Default)]
 pub struct SettingsEditor {
@@ -33,6 +33,7 @@ pub struct SettingsEditor {
     clipboard_limit: usize,
     fuzzy_weight: f32,
     usage_weight: f32,
+    page_jump: usize,
     follow_mouse: bool,
     static_enabled: bool,
     static_x: i32,
@@ -112,6 +113,7 @@ impl SettingsEditor {
             clipboard_limit: settings.clipboard_limit,
             fuzzy_weight: settings.fuzzy_weight,
             usage_weight: settings.usage_weight,
+            page_jump: settings.page_jump,
             follow_mouse: settings.follow_mouse,
             static_enabled: settings.static_location_enabled,
             static_x: settings.static_pos.unwrap_or((0, 0)).0,
@@ -198,6 +200,7 @@ impl SettingsEditor {
             clipboard_limit: self.clipboard_limit,
             fuzzy_weight: self.fuzzy_weight,
             usage_weight: self.usage_weight,
+            page_jump: self.page_jump,
             follow_mouse: self.follow_mouse,
             static_location_enabled: self.static_enabled,
             static_pos: Some((self.static_x, self.static_y)),
@@ -344,6 +347,15 @@ impl SettingsEditor {
                         });
 
                         ui.horizontal(|ui| {
+                            ui.label("Page jump");
+                            ui.add(
+                                egui::DragValue::new(&mut self.page_jump)
+                                    .clamp_range(1..=100)
+                                    .speed(1),
+                            );
+                        });
+
+                        ui.horizontal(|ui| {
                             ui.label("Off-screen X");
                             ui.add(egui::DragValue::new(&mut self.offscreen_x));
                             ui.label("Y");
@@ -412,9 +424,8 @@ impl SettingsEditor {
                                 continue;
                             }
 
-                            let has_settings =
-                                plugin.default_settings().is_some()
-                                    || self.plugin_settings.contains_key(&name);
+                            let has_settings = plugin.default_settings().is_some()
+                                || self.plugin_settings.contains_key(&name);
                             if !has_settings {
                                 continue;
                             }
@@ -521,14 +532,17 @@ impl SettingsEditor {
                                                 new_settings.screenshot_dir.clone(),
                                                 Some(new_settings.screenshot_save_file),
                                                 Some(new_settings.always_on_top),
+                                                Some(new_settings.page_jump),
                                             );
-                                            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
-                                                if new_settings.always_on_top {
-                                                    egui::WindowLevel::AlwaysOnTop
-                                                } else {
-                                                    egui::WindowLevel::Normal
-                                                },
-                                            ));
+                                            ctx.send_viewport_cmd(
+                                                egui::ViewportCommand::WindowLevel(
+                                                    if new_settings.always_on_top {
+                                                        egui::WindowLevel::AlwaysOnTop
+                                                    } else {
+                                                        egui::WindowLevel::Normal
+                                                    },
+                                                ),
+                                            );
                                             app.hotkey_str = new_settings.hotkey.clone();
                                             app.quit_hotkey_str = new_settings.quit_hotkey.clone();
                                             app.help_hotkey_str = new_settings.help_hotkey.clone();
@@ -538,6 +552,7 @@ impl SettingsEditor {
                                                 new_settings.list_scale.unwrap_or(1.0).min(5.0);
                                             app.history_limit = new_settings.history_limit;
                                             app.clipboard_limit = new_settings.clipboard_limit;
+                                            app.page_jump = new_settings.page_jump;
                                             app.preserve_command = new_settings.preserve_command;
                                             app.net_refresh = new_settings.net_refresh;
                                             app.net_unit = new_settings.net_unit;

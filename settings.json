@@ -8,5 +8,6 @@
     "enable_toasts": true,
     "show_examples": false,
     "preserve_command": false,
-    "history_limit": 100
+    "history_limit": 100,
+    "page_jump": 5
 }

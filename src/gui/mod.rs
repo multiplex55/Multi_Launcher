@@ -288,6 +288,7 @@ pub struct LauncherApp {
     pub clipboard_limit: usize,
     pub fuzzy_weight: f32,
     pub usage_weight: f32,
+    pub page_jump: usize,
     pub follow_mouse: bool,
     pub static_location_enabled: bool,
     pub static_pos: Option<(i32, i32)>,
@@ -370,6 +371,7 @@ impl LauncherApp {
         screenshot_dir: Option<String>,
         screenshot_save_file: Option<bool>,
         always_on_top: Option<bool>,
+        page_jump: Option<usize>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -431,6 +433,9 @@ impl LauncherApp {
         }
         if let Some(v) = always_on_top {
             self.always_on_top = v;
+        }
+        if let Some(v) = page_jump {
+            self.page_jump = v;
         }
     }
 
@@ -615,6 +620,7 @@ impl LauncherApp {
             clipboard_limit: settings.clipboard_limit,
             fuzzy_weight: settings.fuzzy_weight,
             usage_weight: settings.usage_weight,
+            page_jump: settings.page_jump,
             follow_mouse,
             static_location_enabled: static_enabled,
             static_pos,
@@ -964,7 +970,7 @@ impl LauncherApp {
                 if !self.results.is_empty() {
                     let max = self.results.len() - 1;
                     self.selected = match self.selected {
-                        Some(i) => Some((i + 5).min(max)),
+                        Some(i) => Some(i.saturating_add(self.page_jump).min(max)),
                         None => Some(0),
                     };
                 }
@@ -973,7 +979,7 @@ impl LauncherApp {
             egui::Key::PageUp => {
                 if !self.results.is_empty() {
                     self.selected = match self.selected {
-                        Some(i) => Some(i.saturating_sub(5)),
+                        Some(i) => Some(i.saturating_sub(self.page_jump)),
                         None => Some(0),
                     };
                 }
