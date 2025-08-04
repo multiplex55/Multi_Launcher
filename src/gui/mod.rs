@@ -213,6 +213,7 @@ struct PanelStates {
 pub struct LauncherApp {
     pub actions: Vec<Action>,
     action_cache: Vec<(String, String)>,
+    command_cache: Vec<Action>,
     pub query: String,
     pub results: Vec<Action>,
     pub matcher: SkimMatcherV2,
@@ -319,6 +320,12 @@ impl LauncherApp {
             .collect();
     }
 
+    pub fn update_command_cache(&mut self) {
+        let mut cmds = self.plugins.commands_filtered(self.enabled_plugins.as_ref());
+        cmds.sort_by_cached_key(|a| a.label.to_lowercase());
+        self.command_cache = cmds;
+    }
+
     pub fn plugin_enabled(&self, name: &str) -> bool {
         match &self.enabled_plugins {
             Some(set) => set.contains(name),
@@ -367,6 +374,9 @@ impl LauncherApp {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
         self.enabled_plugins = enabled_plugins;
+        if self.enabled_plugins.is_some() {
+            self.update_command_cache();
+        }
         self.enabled_capabilities = enabled_capabilities;
         if let Some((x, y)) = offscreen_pos {
             self.offscreen_pos = (x as f32, y as f32);
@@ -627,6 +637,7 @@ impl LauncherApp {
             last_stopwatch_query: false,
             pending_query: None,
             action_cache: Vec::new(),
+            command_cache: Vec::new(),
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
@@ -657,6 +668,7 @@ impl LauncherApp {
         }
 
         app.update_action_cache();
+        app.update_command_cache();
         app.search();
         app
     }
@@ -672,31 +684,22 @@ impl LauncherApp {
         self.last_timer_query =
             trimmed.starts_with("timer list") || trimmed.starts_with("alarm list");
         self.last_stopwatch_query = trimmed.starts_with("sw list");
-
-        let mut res: Vec<(Action, f32)> = Vec::new();
-
         if trimmed.is_empty() {
-            for cmd in self
-                .plugins
-                .commands_filtered(self.enabled_plugins.as_ref())
-            {
-                res.push((cmd, 0.0));
-            }
+            let mut res = self.command_cache.clone();
             for a in &self.actions {
-                res.push((
-                    Action {
-                        label: format!("app {}", a.label),
-                        desc: a.desc.clone(),
-                        action: a.action.clone(),
-                        args: a.args.clone(),
-                    },
-                    0.0,
-                ));
+                res.push(Action {
+                    label: format!("app {}", a.label),
+                    desc: a.desc.clone(),
+                    action: a.action.clone(),
+                    args: a.args.clone(),
+                });
             }
-            self.results = res.into_iter().map(|(a, _)| a).collect();
+            self.results = res;
             self.selected = None;
             return;
         }
+
+        let mut res: Vec<(Action, f32)> = Vec::new();
 
         let search_actions =
             trimmed_lc == APP_PREFIX || trimmed_lc.starts_with(&format!("{} ", APP_PREFIX));
