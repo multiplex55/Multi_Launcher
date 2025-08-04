@@ -18,6 +18,7 @@ pub mod sound;
 pub mod toast_log;
 pub mod usage;
 pub mod visibility;
+pub mod muscle_mapping;
 
 pub mod global_hotkey;
 pub mod gui;
