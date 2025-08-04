@@ -9,7 +9,9 @@ pub struct BrowserTabsPlugin {
 
 impl Default for BrowserTabsPlugin {
     fn default() -> Self {
-        Self { recalc_each_query: false }
+        Self {
+            recalc_each_query: false,
+        }
     }
 }
 
@@ -37,7 +39,7 @@ mod imp {
         Lazy::new(|| Mutex::new(Instant::now() - Duration::from_secs(60)));
     static MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
-    pub(crate) fn take_messages() -> Vec<String> {
+    pub(super) fn take_messages() -> Vec<String> {
         if let Ok(mut list) = MESSAGES.lock() {
             let out = list.clone();
             list.clear();
@@ -401,7 +403,10 @@ impl Plugin for BrowserTabsPlugin {
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
         let mut cfg: BrowserTabsPluginSettings =
             serde_json::from_value(value.clone()).unwrap_or_default();
-        ui.checkbox(&mut cfg.recalc_each_query, "Recalculate cache on each query");
+        ui.checkbox(
+            &mut cfg.recalc_each_query,
+            "Recalculate cache on each query",
+        );
         self.recalc_each_query = cfg.recalc_each_query;
         if let Ok(v) = serde_json::to_value(&cfg) {
             *value = v;
@@ -437,7 +442,9 @@ impl Default for BrowserTabsPluginSettings {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) use imp::take_messages as take_cache_messages;
+pub fn take_cache_messages() -> Vec<String> {
+    imp::take_messages()
+}
 #[cfg(not(target_os = "windows"))]
 pub fn take_cache_messages() -> Vec<String> {
     Vec::new()
