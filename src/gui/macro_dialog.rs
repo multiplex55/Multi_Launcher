@@ -50,14 +50,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn matching_plugins_returns_all_when_filter_empty() {
+        let dlg = MacroDialog::default();
+        let plugins = ["alpha", "beta", "app"];
+        let matches = MacroDialog::matching_plugins(&dlg.category_filter, plugins.iter().copied());
+        assert_eq!(matches, vec!["alpha", "app", "beta"]);
+    }
+
+    #[test]
+    fn matching_plugins_returns_empty_when_no_match() {
+        let dlg = MacroDialog {
+            category_filter: "zzz".into(),
+            ..Default::default()
+        };
+        let plugins = ["alpha", "beta", "app"];
+        let matches = MacroDialog::matching_plugins(&dlg.category_filter, plugins.iter().copied());
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn matching_plugins_is_case_insensitive() {
+        let dlg = MacroDialog {
+            category_filter: "AP".into(),
+            ..Default::default()
+        };
+        let plugins = ["alpha", "beta", "app"];
+        let matches = MacroDialog::matching_plugins(&dlg.category_filter, plugins.iter().copied());
+        assert_eq!(matches, vec!["alpha", "app"]);
+    }
+
+    #[test]
     fn fuzzy_filter_lists_matching_plugins() {
         let dlg = MacroDialog {
             category_filter: "ap".into(),
             ..Default::default()
         };
         let plugins = ["alpha", "beta", "app"];
-        let matches =
-            MacroDialog::matching_plugins(&dlg.category_filter, plugins.iter().copied());
+        let matches = MacroDialog::matching_plugins(&dlg.category_filter, plugins.iter().copied());
         assert_eq!(matches, vec!["alpha", "app"]);
     }
 
@@ -68,13 +97,8 @@ mod tests {
             ..Default::default()
         };
         let plugins = ["alpha", "app"];
-        let matches =
-            MacroDialog::matching_plugins(&dlg.category_filter, plugins.iter().copied());
-        MacroDialog::select_plugin(
-            &mut dlg.add_plugin,
-            &mut dlg.category_filter,
-            matches[0],
-        );
+        let matches = MacroDialog::matching_plugins(&dlg.category_filter, plugins.iter().copied());
+        MacroDialog::select_plugin(&mut dlg.add_plugin, &mut dlg.category_filter, matches[0]);
         assert_eq!(dlg.add_plugin, "alpha");
         assert!(dlg.category_filter.is_empty());
     }
@@ -86,8 +110,7 @@ mod tests {
             ..Default::default()
         };
         let plugins = ["alpha", "app"];
-        let matches =
-            MacroDialog::matching_plugins(&dlg.category_filter, plugins.iter().copied());
+        let matches = MacroDialog::matching_plugins(&dlg.category_filter, plugins.iter().copied());
         assert!(matches.contains(&"app"));
         MacroDialog::select_plugin(&mut dlg.add_plugin, &mut dlg.category_filter, "app");
         assert_eq!(dlg.add_plugin, "app");
@@ -126,10 +149,13 @@ impl MacroDialog {
         let matcher = SkimMatcherV2::default();
         let mut names: Vec<&'a str> = names.collect();
         let total = names.len();
+        let filter = filter.to_lowercase();
         names.sort_unstable();
         let filtered: Vec<&'a str> = names
             .into_iter()
-            .filter(|name| filter.is_empty() || matcher.fuzzy_match(name, filter).is_some())
+            .filter(|name| {
+                filter.is_empty() || matcher.fuzzy_match(&name.to_lowercase(), &filter).is_some()
+            })
             .collect();
         if !filter.is_empty() {
             debug!(
