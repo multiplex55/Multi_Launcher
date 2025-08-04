@@ -3,6 +3,7 @@ use crate::plugins::macros::{load_macros, save_macros, MacroEntry, MacroStep, MA
 use eframe::egui;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use log::debug;
 
 /// Dialog for creating and editing macros.
 ///
@@ -90,6 +91,7 @@ impl MacroDialog {
     }
 
     pub fn push_debug(&mut self, msg: String) {
+        debug!("{msg}");
         self.debug.push(msg);
         if self.debug.len() > 20 {
             self.debug.drain(0..self.debug.len() - 20);
@@ -109,15 +111,22 @@ impl MacroDialog {
     fn matching_plugins<'a>(filter: &str, names: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
         let matcher = SkimMatcherV2::default();
         let mut names: Vec<&'a str> = names.collect();
+        let total = names.len();
         names.sort_unstable();
-        names
+        let filtered: Vec<&'a str> = names
             .into_iter()
             .filter(|name| filter.is_empty() || matcher.fuzzy_match(name, filter).is_some())
-            .collect()
+            .collect();
+        debug!(
+            "matching_plugins: filter '{filter}' returned {} of {total}",
+            filtered.len()
+        );
+        filtered
     }
 
     /// Record the selected plugin and clear the category filter.
     fn select_plugin(add_plugin: &mut String, category_filter: &mut String, name: &str) {
+        debug!("select_plugin: {name}");
         *add_plugin = name.to_string();
         category_filter.clear();
     }
@@ -131,281 +140,295 @@ impl MacroDialog {
         }
         let mut close = false;
         let mut save_now = false;
-        egui::Window::new("Macros")
-            .open(&mut self.open)
-            .show(ctx, |ui| {
-                if let Some(idx) = self.edit_idx {
+        let mut open = self.open;
+        egui::Window::new("Macros").open(&mut open).show(ctx, |ui| {
+            if let Some(idx) = self.edit_idx {
+                ui.horizontal(|ui| {
+                    ui.label("Label");
+                    ui.text_edit_singleline(&mut self.label);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Description");
+                    ui.text_edit_singleline(&mut self.desc);
+                });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.auto_delay, "Automatic delay");
+                    if self.auto_delay {
+                        ui.add(
+                            egui::DragValue::new(&mut self.auto_delay_secs)
+                                .speed(0.1)
+                                .clamp_range(0.0..=60.0)
+                                .suffix("s"),
+                        );
+                    }
+                });
+                ui.label("Steps");
+                let mut remove_step: Option<usize> = None;
+                let mut move_up: Option<usize> = None;
+                let mut move_down: Option<usize> = None;
+                for i in 0..self.steps.len() {
                     ui.horizontal(|ui| {
-                        ui.label("Label");
-                        ui.text_edit_singleline(&mut self.label);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Description");
-                        ui.text_edit_singleline(&mut self.desc);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.auto_delay, "Automatic delay");
-                        if self.auto_delay {
+                        ui.label(format!("{}.", i + 1));
+                        ui.label(&self.steps[i].label);
+                        ui.label("Args");
+                        let args = self.steps[i].args.get_or_insert_with(String::new);
+                        ui.text_edit_singleline(args);
+                        if !self.auto_delay {
+                            let mut secs = self.steps[i].delay_ms as f32 / 1000.0;
                             ui.add(
-                                egui::DragValue::new(&mut self.auto_delay_secs)
+                                egui::DragValue::new(&mut secs)
                                     .speed(0.1)
                                     .clamp_range(0.0..=60.0)
                                     .suffix("s"),
                             );
+                            self.steps[i].delay_ms = (secs * 1000.0) as u64;
+                        }
+                        if ui.button("Up").clicked() {
+                            move_up = Some(i);
+                        }
+                        if ui.button("Down").clicked() {
+                            move_down = Some(i);
+                        }
+                        if ui.button("Remove").clicked() {
+                            remove_step = Some(i);
                         }
                     });
-                    ui.label("Steps");
-                    let mut remove_step: Option<usize> = None;
-                    let mut move_up: Option<usize> = None;
-                    let mut move_down: Option<usize> = None;
-                    for i in 0..self.steps.len() {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("{}.", i + 1));
-                            ui.label(&self.steps[i].label);
-                            ui.label("Args");
-                            let args = self.steps[i].args.get_or_insert_with(String::new);
-                            ui.text_edit_singleline(args);
-                            if !self.auto_delay {
-                                let mut secs = self.steps[i].delay_ms as f32 / 1000.0;
-                                ui.add(
-                                    egui::DragValue::new(&mut secs)
-                                        .speed(0.1)
-                                        .clamp_range(0.0..=60.0)
-                                        .suffix("s"),
+                }
+                if let Some(i) = move_up {
+                    if i > 0 {
+                        self.steps.swap(i, i - 1);
+                    }
+                }
+                if let Some(i) = move_down {
+                    if i + 1 < self.steps.len() {
+                        self.steps.swap(i, i + 1);
+                    }
+                }
+                if let Some(i) = remove_step {
+                    self.steps.remove(i);
+                }
+                ui.separator();
+                let mut filter_changed = false;
+                ui.horizontal(|ui| {
+                    ui.label("Category");
+                    // Free-form text input used to fuzzily match plugin names.
+                    let resp = ui.text_edit_singleline(&mut self.category_filter);
+                    if resp.changed() {
+                        filter_changed = true;
+                        self.push_debug(format!(
+                            "category_filter set to '{}'",
+                            self.category_filter
+                        ));
+                    }
+                });
+                // Collect plugin names matching the fuzzy category filter.
+                let plugin_names = MacroDialog::matching_plugins(
+                    &self.category_filter,
+                    app.plugins.iter().map(|p| p.name()),
+                );
+                if filter_changed {
+                    self.push_debug(format!("{} plugin(s) match filter", plugin_names.len()));
+                }
+                egui::ScrollArea::vertical()
+                    .id_source("macro_plugin_list")
+                    .max_height(100.0)
+                    .show(ui, |ui| {
+                        for name in plugin_names {
+                            // Choosing a plugin stores it and clears the filter.
+                            if ui.button(name).clicked() {
+                                self.push_debug(format!("selected plugin {name}"));
+                                MacroDialog::select_plugin(
+                                    &mut self.add_plugin,
+                                    &mut self.category_filter,
+                                    name,
                                 );
-                                self.steps[i].delay_ms = (secs * 1000.0) as u64;
                             }
-                            if ui.button("Up").clicked() {
-                                move_up = Some(i);
-                            }
-                            if ui.button("Down").clicked() {
-                                move_down = Some(i);
-                            }
-                            if ui.button("Remove").clicked() {
-                                remove_step = Some(i);
-                            }
-                        });
-                    }
-                    if let Some(i) = move_up {
-                        if i > 0 {
-                            self.steps.swap(i, i - 1);
                         }
-                    }
-                    if let Some(i) = move_down {
-                        if i + 1 < self.steps.len() {
-                            self.steps.swap(i, i + 1);
-                        }
-                    }
-                    if let Some(i) = remove_step {
-                        self.steps.remove(i);
-                    }
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label("Category");
-                        // Free-form text input used to fuzzily match plugin names.
-                        ui.text_edit_singleline(&mut self.category_filter);
                     });
-                    // Collect plugin names matching the fuzzy category filter.
-                    let plugin_names = MacroDialog::matching_plugins(
-                        &self.category_filter,
-                        app.plugins.iter().map(|p| p.name()),
-                    );
+                ui.horizontal(|ui| {
+                    ui.label("Filter");
+                    ui.text_edit_singleline(&mut self.add_filter);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Args");
+                    ui.text_edit_singleline(&mut self.add_args);
+                });
+                if let Some(plugin) = app.plugins.iter().find(|p| p.name() == self.add_plugin) {
+                    let filter = self.add_filter.trim().to_lowercase();
+                    let mut actions = if plugin.name() == "folders" {
+                        plugin.search(&format!("f {}", self.add_filter))
+                    } else if plugin.name() == "bookmarks" {
+                        plugin.search(&format!("bm {}", self.add_filter))
+                    } else {
+                        plugin.commands()
+                    };
                     egui::ScrollArea::vertical()
+                        .id_source("macro_action_list")
                         .max_height(100.0)
                         .show(ui, |ui| {
-                            for name in plugin_names {
-                                // Choosing a plugin stores it and clears the filter.
-                                if ui.button(name).clicked() {
-                                    MacroDialog::select_plugin(
-                                        &mut self.add_plugin,
-                                        &mut self.category_filter,
-                                        name,
-                                    );
+                            for act in actions.drain(..) {
+                                if !filter.is_empty()
+                                    && !act.label.to_lowercase().contains(&filter)
+                                    && !act.desc.to_lowercase().contains(&filter)
+                                    && !act.action.to_lowercase().contains(&filter)
+                                {
+                                    continue;
+                                }
+                                if ui.button(format!("{} - {}", act.label, act.desc)).clicked() {
+                                    let mut command = act.action.clone();
+                                    let mut args = if self.add_args.trim().is_empty() {
+                                        None
+                                    } else {
+                                        Some(self.add_args.clone())
+                                    };
+
+                                    if let Some(q) = command.strip_prefix("query:") {
+                                        let mut q = q.to_string();
+                                        if let Some(ref a) = args {
+                                            q.push_str(a);
+                                        }
+                                        if let Some(res) = plugin.search(&q).into_iter().next() {
+                                            command = res.action;
+                                            args = res.args;
+                                        } else {
+                                            command = q;
+                                            args = None;
+                                        }
+                                    }
+
+                                    self.steps.push(MacroStep {
+                                        label: act.label.clone(),
+                                        command,
+                                        args,
+                                        delay_ms: 0,
+                                    });
+                                    // Reset pending args after adding a step.
+                                    self.add_args.clear();
                                 }
                             }
                         });
-                    ui.horizontal(|ui| {
-                        ui.label("Filter");
-                        ui.text_edit_singleline(&mut self.add_filter);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Args");
-                        ui.text_edit_singleline(&mut self.add_args);
-                    });
-                    if let Some(plugin) = app.plugins.iter().find(|p| p.name() == self.add_plugin) {
-                        let filter = self.add_filter.trim().to_lowercase();
-                        let mut actions = if plugin.name() == "folders" {
-                            plugin.search(&format!("f {}", self.add_filter))
-                        } else if plugin.name() == "bookmarks" {
-                            plugin.search(&format!("bm {}", self.add_filter))
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        if self.label.trim().is_empty() {
+                            app.set_error("Label required".into());
                         } else {
-                            plugin.commands()
-                        };
-                        egui::ScrollArea::vertical()
-                            .max_height(100.0)
-                            .show(ui, |ui| {
-                                for act in actions.drain(..) {
-                                    if !filter.is_empty()
-                                        && !act.label.to_lowercase().contains(&filter)
-                                        && !act.desc.to_lowercase().contains(&filter)
-                                        && !act.action.to_lowercase().contains(&filter)
-                                    {
-                                        continue;
-                                    }
-                                    if ui.button(format!("{} - {}", act.label, act.desc)).clicked()
-                                    {
-                                        let mut command = act.action.clone();
-                                        let mut args = if self.add_args.trim().is_empty() {
-                                            None
-                                        } else {
-                                            Some(self.add_args.clone())
-                                        };
-
-                                        if let Some(q) = command.strip_prefix("query:") {
-                                            let mut q = q.to_string();
-                                            if let Some(ref a) = args {
-                                                q.push_str(a);
-                                            }
-                                            if let Some(res) = plugin.search(&q).into_iter().next()
-                                            {
-                                                command = res.action;
-                                                args = res.args;
-                                            } else {
-                                                command = q;
-                                                args = None;
-                                            }
-                                        }
-
-                                        self.steps.push(MacroStep {
-                                            label: act.label.clone(),
-                                            command,
-                                            args,
-                                            delay_ms: 0,
-                                        });
-                                        // Reset pending args after adding a step.
-                                        self.add_args.clear();
+                            for step in &mut self.steps {
+                                if let Some(a) = &step.args {
+                                    if a.trim().is_empty() {
+                                        step.args = None;
                                     }
                                 }
-                            });
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
-                            if self.label.trim().is_empty() {
-                                app.set_error("Label required".into());
-                            } else {
-                                for step in &mut self.steps {
-                                    if let Some(a) = &step.args {
-                                        if a.trim().is_empty() {
-                                            step.args = None;
-                                        }
-                                    }
-                                }
-                                if idx == self.entries.len() {
-                                    self.entries.push(MacroEntry {
-                                        label: self.label.clone(),
-                                        desc: self.desc.clone(),
-                                        auto_delay_ms: if self.auto_delay {
-                                            Some((self.auto_delay_secs * 1000.0) as u64)
-                                        } else {
-                                            None
-                                        },
-                                        steps: self.steps.clone(),
-                                    });
-                                } else if let Some(e) = self.entries.get_mut(idx) {
-                                    e.label = self.label.clone();
-                                    e.desc = self.desc.clone();
-                                    e.auto_delay_ms = if self.auto_delay {
+                            }
+                            if idx == self.entries.len() {
+                                self.entries.push(MacroEntry {
+                                    label: self.label.clone(),
+                                    desc: self.desc.clone(),
+                                    auto_delay_ms: if self.auto_delay {
                                         Some((self.auto_delay_secs * 1000.0) as u64)
                                     } else {
                                         None
-                                    };
-                                    e.steps = self.steps.clone();
-                                }
-                                self.edit_idx = None;
-                                self.label.clear();
-                                self.desc.clear();
-                                self.steps.clear();
-                                self.auto_delay = false;
-                                self.auto_delay_secs = 1.0;
-                                // Clear temporary plugin selection state after saving.
-                                self.add_plugin.clear();
-                                self.add_filter.clear();
-                                self.add_args.clear();
-                                save_now = true;
+                                    },
+                                    steps: self.steps.clone(),
+                                });
+                            } else if let Some(e) = self.entries.get_mut(idx) {
+                                e.label = self.label.clone();
+                                e.desc = self.desc.clone();
+                                e.auto_delay_ms = if self.auto_delay {
+                                    Some((self.auto_delay_secs * 1000.0) as u64)
+                                } else {
+                                    None
+                                };
+                                e.steps = self.steps.clone();
                             }
-                        }
-                        if ui.button("Cancel").clicked() {
                             self.edit_idx = None;
+                            self.label.clear();
+                            self.desc.clear();
+                            self.steps.clear();
                             self.auto_delay = false;
                             self.auto_delay_secs = 1.0;
-                            // Cancel editing and reset plugin selection state.
+                            // Clear temporary plugin selection state after saving.
                             self.add_plugin.clear();
                             self.add_filter.clear();
                             self.add_args.clear();
+                            save_now = true;
                         }
-                    });
-                } else {
-                    let mut remove: Option<usize> = None;
-                    egui::ScrollArea::vertical()
-                        .max_height(200.0)
-                        .show(ui, |ui| {
-                            for idx in 0..self.entries.len() {
-                                let entry = &self.entries[idx];
-                                ui.horizontal(|ui| {
-                                    ui.label(format!("{}: {}", entry.label, entry.desc));
-                                    if ui.button("Edit").clicked() {
-                                        self.edit_idx = Some(idx);
-                                        self.label = entry.label.clone();
-                                        self.desc = entry.desc.clone();
-                                        self.steps = entry.steps.clone();
-                                        if let Some(ms) = entry.auto_delay_ms {
-                                            self.auto_delay = true;
-                                            self.auto_delay_secs = ms as f32 / 1000.0;
-                                        } else {
-                                            self.auto_delay = false;
-                                            self.auto_delay_secs = 1.0;
-                                        }
-                                        self.add_plugin.clear();
-                                        self.add_filter.clear();
-                                    }
-                                    if ui.button("Remove").clicked() {
-                                        remove = Some(idx);
-                                    }
-                                });
-                            }
-                        });
-                    if let Some(idx) = remove {
-                        self.entries.remove(idx);
-                        save_now = true;
                     }
-                    if ui.button("Add Macro").clicked() {
-                        self.edit_idx = Some(self.entries.len());
-                        self.label.clear();
-                        self.desc.clear();
-                        self.steps.clear();
+                    if ui.button("Cancel").clicked() {
+                        self.edit_idx = None;
                         self.auto_delay = false;
                         self.auto_delay_secs = 1.0;
+                        // Cancel editing and reset plugin selection state.
                         self.add_plugin.clear();
                         self.add_filter.clear();
                         self.add_args.clear();
                     }
-                    if ui.button("Close").clicked() {
-                        close = true;
-                    }
+                });
+            } else {
+                let mut remove: Option<usize> = None;
+                egui::ScrollArea::vertical()
+                    .id_source("macro_entry_list")
+                    .max_height(200.0)
+                    .show(ui, |ui| {
+                        for idx in 0..self.entries.len() {
+                            let entry = &self.entries[idx];
+                            ui.horizontal(|ui| {
+                                ui.label(format!("{}: {}", entry.label, entry.desc));
+                                if ui.button("Edit").clicked() {
+                                    self.edit_idx = Some(idx);
+                                    self.label = entry.label.clone();
+                                    self.desc = entry.desc.clone();
+                                    self.steps = entry.steps.clone();
+                                    if let Some(ms) = entry.auto_delay_ms {
+                                        self.auto_delay = true;
+                                        self.auto_delay_secs = ms as f32 / 1000.0;
+                                    } else {
+                                        self.auto_delay = false;
+                                        self.auto_delay_secs = 1.0;
+                                    }
+                                    self.add_plugin.clear();
+                                    self.add_filter.clear();
+                                }
+                                if ui.button("Remove").clicked() {
+                                    remove = Some(idx);
+                                }
+                            });
+                        }
+                    });
+                if let Some(idx) = remove {
+                    self.entries.remove(idx);
+                    save_now = true;
                 }
+                if ui.button("Add Macro").clicked() {
+                    self.edit_idx = Some(self.entries.len());
+                    self.label.clear();
+                    self.desc.clear();
+                    self.steps.clear();
+                    self.auto_delay = false;
+                    self.auto_delay_secs = 1.0;
+                    self.add_plugin.clear();
+                    self.add_filter.clear();
+                    self.add_args.clear();
+                }
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            }
 
-                if !self.debug.is_empty() {
-                    ui.separator();
-                    ui.label("Debug");
-                    egui::ScrollArea::vertical()
-                        .max_height(80.0)
-                        .show(ui, |ui| {
-                            for line in &self.debug {
-                                ui.label(line);
-                            }
-                        });
-                }
-            });
+            if !self.debug.is_empty() {
+                ui.separator();
+                ui.label("Debug");
+                egui::ScrollArea::vertical()
+                    .id_source("macro_debug_log")
+                    .max_height(80.0)
+                    .show(ui, |ui| {
+                        for line in &self.debug {
+                            ui.label(line);
+                        }
+                    });
+            }
+        });
+        self.open = open;
         if save_now {
             self.save(app);
         }
