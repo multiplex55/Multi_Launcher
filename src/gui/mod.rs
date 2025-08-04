@@ -1312,6 +1312,19 @@ impl eframe::App for LauncherApp {
                 );
             }
         }
+        for msg in crate::plugins::browser_tabs::take_cache_messages() {
+            if self.enable_toasts {
+                push_toast(
+                    &mut self.toasts,
+                    Toast {
+                        text: msg.into(),
+                        kind: ToastKind::Info,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(self.toast_duration as f64),
+                    },
+                );
+            }
+        }
         for err in crate::plugins::macros::take_error_messages() {
             self.macro_dialog.push_debug(err);
         }
@@ -1599,6 +1612,36 @@ impl eframe::App for LauncherApp {
                         } else if let Some(n) = a.action.strip_prefix("sysinfo:cpu_list:") {
                             if let Ok(count) = n.parse::<usize>() {
                                 self.cpu_list_dialog.open(count);
+                            }
+                        } else if a.action.starts_with("tab:switch:") {
+                            if self.enable_toasts {
+                                push_toast(
+                                    &mut self.toasts,
+                                    Toast {
+                                        text: format!("Switching to {}", a.label).into(),
+                                        kind: ToastKind::Info,
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(self.toast_duration as f64),
+                                    },
+                                );
+                            }
+                            let act = a.clone();
+                            std::thread::spawn(move || {
+                                if let Err(e) = launch_action(&act) {
+                                    tracing::error!(?e, "failed to switch tab");
+                                }
+                            });
+                            if a.action != "help:show" {
+                                let _ = history::append_history(
+                                    HistoryEntry {
+                                        query: current.clone(),
+                                        query_lc: String::new(),
+                                        action: a.clone(),
+                                    },
+                                    self.history_limit,
+                                );
+                                let count = self.usage.entry(a.action.clone()).or_insert(0);
+                                *count += 1;
                             }
                         } else if let Err(e) = launch_action(&a) {
                             if a.desc == "Fav" && !a.action.starts_with("fav:") {

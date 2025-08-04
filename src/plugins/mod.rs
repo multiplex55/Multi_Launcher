@@ -31,6 +31,7 @@ pub mod asciiart;
 pub mod emoji;
 pub mod task_manager;
 pub mod windows;
+pub mod browser_tabs;
 pub mod screenshot;
 pub mod ip;
 pub mod omni_search;

@@ -40,6 +40,8 @@ use crate::plugins::weather::WeatherPlugin;
 use crate::plugins::wikipedia::WikipediaPlugin;
 #[cfg(target_os = "windows")]
 use crate::plugins::windows::WindowsPlugin;
+#[cfg(target_os = "windows")]
+use crate::plugins::browser_tabs::BrowserTabsPlugin;
 use crate::plugins::youtube::YoutubePlugin;
 use crate::plugins::ip::IpPlugin;
 use crate::plugins::timestamp::TimestampPlugin;
@@ -156,6 +158,7 @@ impl PluginManager {
             self.register_with_settings(BrightnessPlugin, plugin_settings);
             self.register_with_settings(TaskManagerPlugin, plugin_settings);
             self.register_with_settings(WindowsPlugin, plugin_settings);
+            self.register_with_settings(BrowserTabsPlugin::default(), plugin_settings);
         }
         self.register_with_settings(SettingsPlugin, plugin_settings);
         self.register_with_settings(HelpPlugin, plugin_settings);
