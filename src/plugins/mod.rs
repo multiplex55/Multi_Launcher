@@ -14,7 +14,7 @@ pub mod processes;
 pub mod sysinfo;
 pub mod network;
 pub mod weather;
-pub mod notes;
+pub mod note;
 pub mod todo;
 pub mod timer;
 pub mod stopwatch;

@@ -1,28 +1,27 @@
 use crate::gui::LauncherApp;
-use crate::plugins::notes::{load_notes, save_notes, NoteEntry, QUICK_NOTES_FILE};
-use chrono::Local;
+use crate::plugins::note::{load_notes, save_notes, Note};
 use eframe::egui;
 
 #[derive(Default)]
 pub struct NotesDialog {
     pub open: bool,
-    entries: Vec<NoteEntry>,
+    entries: Vec<Note>,
     edit_idx: Option<usize>,
     text: String,
 }
 
 impl NotesDialog {
     pub fn open(&mut self) {
-        self.entries = load_notes(QUICK_NOTES_FILE).unwrap_or_default();
+        self.entries = load_notes().unwrap_or_default();
         self.open = true;
         self.edit_idx = None;
         self.text.clear();
     }
 
     pub fn open_edit(&mut self, idx: usize) {
-        self.entries = load_notes(QUICK_NOTES_FILE).unwrap_or_default();
+        self.entries = load_notes().unwrap_or_default();
         if idx < self.entries.len() {
-            self.text = self.entries[idx].text.clone();
+            self.text = self.entries[idx].content.clone();
         } else {
             self.text.clear();
         }
@@ -31,7 +30,7 @@ impl NotesDialog {
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
-        if let Err(e) = save_notes(QUICK_NOTES_FILE, &self.entries) {
+        if let Err(e) = save_notes(&self.entries) {
             app.set_error(format!("Failed to save notes: {e}"));
         } else {
             app.search();
@@ -69,12 +68,17 @@ impl NotesDialog {
                                 app.set_error("Text required".into());
                             } else {
                                 if idx == self.entries.len() {
-                                    self.entries.push(NoteEntry {
-                                        ts: Local::now().timestamp() as u64,
-                                        text: self.text.clone(),
+                                    let title = self.text.lines().next().unwrap_or("untitled").to_string();
+                                    self.entries.push(Note {
+                                        title,
+                                        path: std::path::PathBuf::new(),
+                                        content: self.text.clone(),
+                                        tags: Vec::new(),
+                                        links: Vec::new(),
                                     });
                                 } else if let Some(e) = self.entries.get_mut(idx) {
-                                    e.text = self.text.clone();
+                                    e.content = self.text.clone();
+                                    e.title = self.text.lines().next().unwrap_or(&e.title).to_string();
                                 }
                                 self.edit_idx = None;
                                 self.text.clear();
@@ -91,32 +95,32 @@ impl NotesDialog {
                     egui::ScrollArea::both()
                         .max_height(area_height)
                         .show(ui, |ui| {
-                        for idx in 0..self.entries.len() {
-                            let entry = self.entries[idx].clone();
-                            ui.horizontal(|ui| {
-                                let resp = ui.label(entry.text.replace('\n', " "));
-                                let idx_copy = idx;
-                                resp.clone().context_menu(|ui| {
-                                    if ui.button("Edit Note").clicked() {
-                                        self.edit_idx = Some(idx_copy);
-                                        self.text = entry.text.clone();
-                                        ui.close_menu();
+                            for idx in 0..self.entries.len() {
+                                let entry = self.entries[idx].clone();
+                                ui.horizontal(|ui| {
+                                    let resp = ui.label(entry.content.replace('\n', " "));
+                                    let idx_copy = idx;
+                                    resp.clone().context_menu(|ui| {
+                                        if ui.button("Edit Note").clicked() {
+                                            self.edit_idx = Some(idx_copy);
+                                            self.text = entry.content.clone();
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Remove Note").clicked() {
+                                            remove = Some(idx_copy);
+                                            ui.close_menu();
+                                        }
+                                    });
+                                    if ui.button("Edit").clicked() {
+                                        self.edit_idx = Some(idx);
+                                        self.text = entry.content.clone();
                                     }
-                                    if ui.button("Remove Note").clicked() {
-                                        remove = Some(idx_copy);
-                                        ui.close_menu();
+                                    if ui.button("Remove").clicked() {
+                                        remove = Some(idx);
                                     }
                                 });
-                                if ui.button("Edit").clicked() {
-                                    self.edit_idx = Some(idx);
-                                    self.text = entry.text.clone();
-                                }
-                                if ui.button("Remove").clicked() {
-                                    remove = Some(idx);
-                                }
-                            });
-                        }
-                    });
+                            }
+                        });
                     if let Some(idx) = remove {
                         self.entries.remove(idx);
                         save_now = true;
