@@ -183,28 +183,32 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
 
                                                                     let mut hwnd = elem
                                                                         .CurrentNativeWindowHandle()
-                                                                        .unwrap_or(HWND(0));
-                                                                    if hwnd.0 == 0 {
-                                                                        let mut cur = elem.clone();
-                                                                        loop {
-                                                                            if let Ok(h) = cur
-                                                                                .CurrentNativeWindowHandle()
-                                                                            {
-                                                                                if h.0 != 0 {
-                                                                                    hwnd = h;
+                                                                        .unwrap_or(HWND(std::ptr::null_mut()));
+                                                                    if hwnd.0.is_null() {
+                                                                        if let Ok(walker) =
+                                                                            automation.RawViewWalker()
+                                                                        {
+                                                                            let mut cur = elem.clone();
+                                                                            loop {
+                                                                                if let Ok(h) = cur
+                                                                                    .CurrentNativeWindowHandle()
+                                                                                {
+                                                                                    if !h.0.is_null() {
+                                                                                        hwnd = h;
+                                                                                        break;
+                                                                                    }
+                                                                                }
+                                                                                if let Ok(p) = walker
+                                                                                    .GetParentElement(&cur)
+                                                                                {
+                                                                                    cur = p;
+                                                                                } else {
                                                                                     break;
                                                                                 }
                                                                             }
-                                                                            if let Ok(p) =
-                                                                                cur.GetCurrentParent()
-                                                                            {
-                                                                                cur = p;
-                                                                            } else {
-                                                                                break;
-                                                                            }
                                                                         }
                                                                     }
-                                                                    if hwnd.0 != 0 {
+                                                                    if !hwnd.0.is_null() {
                                                                         super::super::window_manager::force_restore_and_foreground(hwnd);
                                                                     }
 
