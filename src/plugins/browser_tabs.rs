@@ -8,9 +8,12 @@
 //!
 //! Only top-level windows on the active desktop session are scanned. Tabs in
 //! minimized or non‑UIA compliant windows might be missed, and changes in a
-//! browser's accessibility implementation could break enumeration. When UIA
-//! patterns fail to activate a tab, the plugin falls back to simulating a mouse
-//! click on the tab's bounding rectangle.
+//! browser's accessibility implementation could break enumeration.
+//!
+//! When activation patterns like `SelectionItem` or `Invoke` are missing or
+//! fail, the plugin falls back to simulating a mouse click on the tab's center.
+//! This requires the window to be visible and may briefly move the cursor before
+//! restoring its position.
 //!
 //! The plugin is Windows-only; on other platforms it returns no results.
 use crate::actions::Action;
@@ -372,7 +375,7 @@ impl Plugin for BrowserTabsPlugin {
     }
 
     fn description(&self) -> &str {
-        "Switch between browser tabs (prefix: `tab`)"
+        "Switch between browser tabs (prefix: `tab`). Uses UI Automation and may simulate a mouse click when activation patterns are unsupported"
     }
 
     fn capabilities(&self) -> &[&str] {
@@ -421,6 +424,9 @@ impl Plugin for BrowserTabsPlugin {
         ui.checkbox(
             &mut cfg.recalc_each_query,
             "Recalculate cache on each query",
+        );
+        ui.label(
+            "If UI Automation can't activate a tab, a mouse click is simulated and the cursor may briefly move",
         );
         self.recalc_each_query = cfg.recalc_each_query;
         if let Ok(v) = serde_json::to_value(&cfg) {
