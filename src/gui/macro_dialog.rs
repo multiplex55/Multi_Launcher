@@ -7,10 +7,10 @@ use log::debug;
 
 /// Dialog for creating and editing macros.
 ///
-/// `category_filter` stores user input for a fuzzy search over plugin names
-/// when choosing a macro step's category. Matching plugin names are shown in a
-/// scrollable list; selecting one writes it to `add_plugin` and clears the
-/// filter.
+/// `category_filter` stores user input for a fuzzy search over plugin names,
+/// including a special `app` category listing all configured applications.
+/// Matching names are shown in a scrollable list; selecting one writes it to
+/// `add_plugin` and clears the filter.
 pub struct MacroDialog {
     pub open: bool,
     entries: Vec<MacroEntry>,
@@ -24,7 +24,6 @@ pub struct MacroDialog {
     category_filter: String,
     add_filter: String,
     add_args: String,
-    debug: Vec<String>,
 }
 
 impl Default for MacroDialog {
@@ -42,7 +41,6 @@ impl Default for MacroDialog {
             category_filter: String::new(),
             add_filter: String::new(),
             add_args: String::new(),
-            debug: Vec::new(),
         }
     }
 }
@@ -87,15 +85,6 @@ impl MacroDialog {
         self.category_filter.clear();
         self.add_filter.clear();
         self.add_args.clear();
-        self.debug.clear();
-    }
-
-    pub fn push_debug(&mut self, msg: String) {
-        debug!("{msg}");
-        self.debug.push(msg);
-        if self.debug.len() > 20 {
-            self.debug.drain(0..self.debug.len() - 20);
-        }
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
@@ -117,10 +106,12 @@ impl MacroDialog {
             .into_iter()
             .filter(|name| filter.is_empty() || matcher.fuzzy_match(name, filter).is_some())
             .collect();
-        debug!(
-            "matching_plugins: filter '{filter}' returned {} of {total}",
-            filtered.len()
-        );
+        if !filter.is_empty() {
+            debug!(
+                "matching_plugins: filter '{filter}' returned {} of {total}",
+                filtered.len()
+            );
+        }
         filtered
     }
 
@@ -208,27 +199,23 @@ impl MacroDialog {
                     self.steps.remove(i);
                 }
                 ui.separator();
-                let mut filter_changed = false;
                 ui.horizontal(|ui| {
                     ui.label("Category");
                     // Free-form text input used to fuzzily match plugin names.
                     let resp = ui.text_edit_singleline(&mut self.category_filter);
                     if resp.changed() {
-                        filter_changed = true;
-                        self.push_debug(format!(
-                            "category_filter set to '{}'",
-                            self.category_filter
-                        ));
+                        debug!("category_filter set to '{}'", self.category_filter);
                     }
                 });
-                // Collect plugin names matching the fuzzy category filter.
+                // Collect plugin names matching the fuzzy category filter,
+                // including the special `app` category.
                 let plugin_names = MacroDialog::matching_plugins(
                     &self.category_filter,
-                    app.plugins.iter().map(|p| p.name()),
+                    app.plugins
+                        .iter()
+                        .map(|p| p.name())
+                        .chain(std::iter::once("app")),
                 );
-                if filter_changed {
-                    self.push_debug(format!("{} plugin(s) match filter", plugin_names.len()));
-                }
                 egui::ScrollArea::vertical()
                     .id_source("macro_plugin_list")
                     .max_height(100.0)
@@ -236,7 +223,7 @@ impl MacroDialog {
                         for name in plugin_names {
                             // Choosing a plugin stores it and clears the filter.
                             if ui.button(name).clicked() {
-                                self.push_debug(format!("selected plugin {name}"));
+                                debug!("selected plugin {name}");
                                 MacroDialog::select_plugin(
                                     &mut self.add_plugin,
                                     &mut self.category_filter,
@@ -253,7 +240,39 @@ impl MacroDialog {
                     ui.label("Args");
                     ui.text_edit_singleline(&mut self.add_args);
                 });
-                if let Some(plugin) = app.plugins.iter().find(|p| p.name() == self.add_plugin) {
+                if self.add_plugin == "app" {
+                    let filter = self.add_filter.trim().to_lowercase();
+                    egui::ScrollArea::vertical()
+                        .id_source("macro_app_list")
+                        .max_height(100.0)
+                        .show(ui, |ui| {
+                            for act in &app.actions {
+                                if !filter.is_empty()
+                                    && !act.label.to_lowercase().contains(&filter)
+                                    && !act.desc.to_lowercase().contains(&filter)
+                                    && !act.action.to_lowercase().contains(&filter)
+                                {
+                                    continue;
+                                }
+                                if ui.button(format!("{} - {}", act.label, act.desc)).clicked() {
+                                    let args = if self.add_args.trim().is_empty() {
+                                        act.args.clone()
+                                    } else {
+                                        Some(self.add_args.clone())
+                                    };
+                                    self.steps.push(MacroStep {
+                                        label: act.label.clone(),
+                                        command: act.action.clone(),
+                                        args,
+                                        delay_ms: 0,
+                                    });
+                                    self.add_args.clear();
+                                }
+                            }
+                        });
+                } else if let Some(plugin) =
+                    app.plugins.iter().find(|p| p.name() == self.add_plugin)
+                {
                     let filter = self.add_filter.trim().to_lowercase();
                     let mut actions = if plugin.name() == "folders" {
                         plugin.search(&format!("f {}", self.add_filter))
@@ -413,19 +432,6 @@ impl MacroDialog {
                 if ui.button("Close").clicked() {
                     close = true;
                 }
-            }
-
-            if !self.debug.is_empty() {
-                ui.separator();
-                ui.label("Debug");
-                egui::ScrollArea::vertical()
-                    .id_source("macro_debug_log")
-                    .max_height(80.0)
-                    .show(ui, |ui| {
-                        for line in &self.debug {
-                            ui.label(line);
-                        }
-                    });
             }
         });
         self.open = open;
