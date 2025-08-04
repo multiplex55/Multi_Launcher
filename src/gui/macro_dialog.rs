@@ -1,7 +1,15 @@
 use crate::gui::LauncherApp;
 use crate::plugins::macros::{load_macros, save_macros, MacroEntry, MacroStep, MACROS_FILE};
 use eframe::egui;
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 
+/// Dialog for creating and editing macros.
+///
+/// `category_filter` stores user input for a fuzzy search over plugin names
+/// when choosing a macro step's category. Matching plugin names are shown in a
+/// scrollable list; selecting one writes it to `add_plugin` and clears the
+/// filter.
 pub struct MacroDialog {
     pub open: bool,
     entries: Vec<MacroEntry>,
@@ -12,6 +20,7 @@ pub struct MacroDialog {
     auto_delay: bool,
     auto_delay_secs: f32,
     add_plugin: String,
+    category_filter: String,
     add_filter: String,
     add_args: String,
     debug: Vec<String>,
@@ -29,6 +38,7 @@ impl Default for MacroDialog {
             auto_delay: false,
             auto_delay_secs: 1.0,
             add_plugin: String::new(),
+            category_filter: String::new(),
             add_filter: String::new(),
             add_args: String::new(),
             debug: Vec::new(),
@@ -36,7 +46,33 @@ impl Default for MacroDialog {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fuzzy_filter_matches_plugin_names() {
+        let dlg = MacroDialog {
+            category_filter: "bt".into(),
+            ..Default::default()
+        };
+        let plugins = ["alpha", "beta", "gamma"];
+        let matches = MacroDialog::matching_plugins(&dlg.category_filter, plugins.iter().copied());
+        assert_eq!(matches, vec!["beta"]);
+    }
+
+    #[test]
+    fn select_plugin_sets_field_and_clears_filter() {
+        let mut dlg = MacroDialog::default();
+        dlg.category_filter = "something".into();
+        MacroDialog::select_plugin(&mut dlg.add_plugin, &mut dlg.category_filter, "test_plugin");
+        assert_eq!(dlg.add_plugin, "test_plugin");
+        assert!(dlg.category_filter.is_empty());
+    }
+}
+
 impl MacroDialog {
+    /// Load macros and reset dialog state, including the category filter.
     pub fn open(&mut self) {
         self.entries = load_macros(MACROS_FILE).unwrap_or_default();
         self.open = true;
@@ -47,6 +83,7 @@ impl MacroDialog {
         self.auto_delay = false;
         self.auto_delay_secs = 1.0;
         self.add_plugin.clear();
+        self.category_filter.clear();
         self.add_filter.clear();
         self.add_args.clear();
         self.debug.clear();
@@ -68,6 +105,26 @@ impl MacroDialog {
         }
     }
 
+    /// Return plugin names sorted alphabetically and filtered by `filter`.
+    fn matching_plugins<'a>(filter: &str, names: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+        let matcher = SkimMatcherV2::default();
+        let mut names: Vec<&'a str> = names.collect();
+        names.sort_unstable();
+        names
+            .into_iter()
+            .filter(|name| filter.is_empty() || matcher.fuzzy_match(name, filter).is_some())
+            .collect()
+    }
+
+    /// Record the selected plugin and clear the category filter.
+    fn select_plugin(add_plugin: &mut String, category_filter: &mut String, name: &str) {
+        *add_plugin = name.to_string();
+        category_filter.clear();
+    }
+
+    /// Render the dialog, including the fuzzy plugin picker used when adding
+    /// macro steps. Plugin names are filtered with `SkimMatcherV2`; choosing a
+    /// name stores it in `add_plugin` and clears `category_filter`.
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         if !self.open {
             return;
@@ -145,23 +202,28 @@ impl MacroDialog {
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.label("Category");
-                        egui::ComboBox::from_id_source("macro_cat")
-                            .selected_text(if self.add_plugin.is_empty() {
-                                "Select".to_string()
-                            } else {
-                                self.add_plugin.clone()
-                            })
-                            .show_ui(ui, |ui| {
-                                for p in app.plugins.iter() {
-                                    let name = p.name();
-                                    ui.selectable_value(
+                        // Free-form text input used to fuzzily match plugin names.
+                        ui.text_edit_singleline(&mut self.category_filter);
+                    });
+                    // Collect plugin names matching the fuzzy category filter.
+                    let plugin_names = MacroDialog::matching_plugins(
+                        &self.category_filter,
+                        app.plugins.iter().map(|p| p.name()),
+                    );
+                    egui::ScrollArea::vertical()
+                        .max_height(100.0)
+                        .show(ui, |ui| {
+                            for name in plugin_names {
+                                // Choosing a plugin stores it and clears the filter.
+                                if ui.button(name).clicked() {
+                                    MacroDialog::select_plugin(
                                         &mut self.add_plugin,
-                                        name.to_string(),
+                                        &mut self.category_filter,
                                         name,
                                     );
                                 }
-                            });
-                    });
+                            }
+                        });
                     ui.horizontal(|ui| {
                         ui.label("Filter");
                         ui.text_edit_singleline(&mut self.add_filter);
@@ -220,6 +282,7 @@ impl MacroDialog {
                                             args,
                                             delay_ms: 0,
                                         });
+                                        // Reset pending args after adding a step.
                                         self.add_args.clear();
                                     }
                                 }
@@ -264,6 +327,7 @@ impl MacroDialog {
                                 self.steps.clear();
                                 self.auto_delay = false;
                                 self.auto_delay_secs = 1.0;
+                                // Clear temporary plugin selection state after saving.
                                 self.add_plugin.clear();
                                 self.add_filter.clear();
                                 self.add_args.clear();
@@ -274,6 +338,7 @@ impl MacroDialog {
                             self.edit_idx = None;
                             self.auto_delay = false;
                             self.auto_delay_secs = 1.0;
+                            // Cancel editing and reset plugin selection state.
                             self.add_plugin.clear();
                             self.add_filter.clear();
                             self.add_args.clear();
