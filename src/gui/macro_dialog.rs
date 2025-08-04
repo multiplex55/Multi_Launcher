@@ -50,22 +50,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fuzzy_filter_matches_plugin_names() {
+    fn fuzzy_filter_lists_matching_plugins() {
         let dlg = MacroDialog {
-            category_filter: "bt".into(),
+            category_filter: "ap".into(),
             ..Default::default()
         };
-        let plugins = ["alpha", "beta", "gamma"];
-        let matches = MacroDialog::matching_plugins(&dlg.category_filter, plugins.iter().copied());
-        assert_eq!(matches, vec!["beta"]);
+        let plugins = ["alpha", "beta", "app"];
+        let matches =
+            MacroDialog::matching_plugins(&dlg.category_filter, plugins.iter().copied());
+        assert_eq!(matches, vec!["alpha", "app"]);
     }
 
     #[test]
-    fn select_plugin_sets_field_and_clears_filter() {
-        let mut dlg = MacroDialog::default();
-        dlg.category_filter = "something".into();
-        MacroDialog::select_plugin(&mut dlg.add_plugin, &mut dlg.category_filter, "test_plugin");
-        assert_eq!(dlg.add_plugin, "test_plugin");
+    fn selecting_plugin_after_filtering_updates_state() {
+        let mut dlg = MacroDialog {
+            category_filter: "ap".into(),
+            ..Default::default()
+        };
+        let plugins = ["alpha", "app"];
+        let matches =
+            MacroDialog::matching_plugins(&dlg.category_filter, plugins.iter().copied());
+        MacroDialog::select_plugin(
+            &mut dlg.add_plugin,
+            &mut dlg.category_filter,
+            matches[0],
+        );
+        assert_eq!(dlg.add_plugin, "alpha");
+        assert!(dlg.category_filter.is_empty());
+    }
+
+    #[test]
+    fn app_category_is_included_and_selectable() {
+        let mut dlg = MacroDialog {
+            category_filter: "ap".into(),
+            ..Default::default()
+        };
+        let plugins = ["alpha", "app"];
+        let matches =
+            MacroDialog::matching_plugins(&dlg.category_filter, plugins.iter().copied());
+        assert!(matches.contains(&"app"));
+        MacroDialog::select_plugin(&mut dlg.add_plugin, &mut dlg.category_filter, "app");
+        assert_eq!(dlg.add_plugin, "app");
         assert!(dlg.category_filter.is_empty());
     }
 }
