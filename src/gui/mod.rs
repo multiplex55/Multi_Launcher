@@ -960,6 +960,25 @@ impl LauncherApp {
                 }
                 None
             }
+            egui::Key::PageDown => {
+                if !self.results.is_empty() {
+                    let max = self.results.len() - 1;
+                    self.selected = match self.selected {
+                        Some(i) => Some((i + 5).min(max)),
+                        None => Some(0),
+                    };
+                }
+                None
+            }
+            egui::Key::PageUp => {
+                if !self.results.is_empty() {
+                    self.selected = match self.selected {
+                        Some(i) => Some(i.saturating_sub(5)),
+                        None => Some(0),
+                    };
+                }
+                None
+            }
             egui::Key::Enter => {
                 if let Some(i) = self.selected {
                     Some(i)
@@ -1538,6 +1557,14 @@ impl eframe::App for LauncherApp {
 
                 if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
                     self.handle_key(egui::Key::ArrowUp);
+                }
+
+                if ctx.input(|i| i.key_pressed(egui::Key::PageDown)) {
+                    self.handle_key(egui::Key::PageDown);
+                }
+
+                if ctx.input(|i| i.key_pressed(egui::Key::PageUp)) {
+                    self.handle_key(egui::Key::PageUp);
                 }
 
                 let mut launch_idx: Option<usize> = None;
