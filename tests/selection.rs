@@ -58,3 +58,32 @@ fn enter_returns_selected_index() {
     let idx = app.handle_key(egui::Key::Enter);
     assert_eq!(idx, Some(0));
 }
+
+#[test]
+fn page_keys_update_selection() {
+    let ctx = egui::Context::default();
+    let acts: Vec<Action> = (0..10)
+        .map(|i| Action {
+            label: format!("act{i}"),
+            desc: "".into(),
+            action: format!("act{i}"),
+            args: None,
+        })
+        .collect();
+    let mut app = new_app(&ctx, acts);
+    app.query = APP_PREFIX.into();
+    app.search();
+    assert_eq!(app.selected, None);
+    app.handle_key(egui::Key::PageDown);
+    assert_eq!(app.selected, Some(0));
+    app.handle_key(egui::Key::PageDown);
+    assert_eq!(app.selected, Some(5));
+    app.handle_key(egui::Key::PageDown);
+    assert_eq!(app.selected, Some(9));
+    app.handle_key(egui::Key::PageUp);
+    assert_eq!(app.selected, Some(4));
+    app.handle_key(egui::Key::PageUp);
+    assert_eq!(app.selected, Some(0));
+    app.handle_key(egui::Key::PageUp);
+    assert_eq!(app.selected, Some(0));
+}
