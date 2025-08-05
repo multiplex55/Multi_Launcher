@@ -1753,7 +1753,7 @@ impl eframe::App for LauncherApp {
                             set_focus = true;
                         } else if let Some(link) = a.action.strip_prefix("note:link:") {
                             self.open_note_link(link);
-                        } else if let Some(slug) = a.action.strip_prefix("note:delete:") {
+                        } else if let Some(slug) = a.action.strip_prefix("note:remove:") {
                             self.delete_note(slug);
                         } else if a.action == "convert:panel" {
                             self.convert_panel.open();
@@ -2434,7 +2434,7 @@ impl eframe::App for LauncherApp {
                             set_focus = true;
                         } else if let Some(link) = a.action.strip_prefix("note:link:") {
                             self.open_note_link(link);
-                        } else if let Some(slug) = a.action.strip_prefix("note:delete:") {
+                        } else if let Some(slug) = a.action.strip_prefix("note:remove:") {
                             self.delete_note(slug);
                         } else if a.action == "convert:panel" {
                             self.convert_panel.open();

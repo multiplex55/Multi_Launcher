@@ -353,9 +353,9 @@ impl Plugin for NotePlugin {
                         args: None,
                     },
                     Action {
-                        label: "note delete".into(),
+                        label: "note rm".into(),
                         desc: "Note".into(),
-                        action: "query:note delete ".into(),
+                        action: "query:note rm ".into(),
                         args: None,
                     },
                 ]);
@@ -525,16 +525,16 @@ impl Plugin for NotePlugin {
                     }
                     return Vec::new();
                 }
-                "delete" => {
+                "rm" => {
                     let filter = args;
                     return guard
                         .notes
                         .iter()
                         .filter(|n| self.matcher.fuzzy_match(&n.title, filter).is_some())
                         .map(|n| Action {
-                            label: format!("Delete {}", n.title),
+                            label: format!("Remove {}", n.title),
                             desc: "Note".into(),
-                            action: format!("note:delete:{}", n.slug),
+                            action: format!("note:remove:{}", n.slug),
                             args: None,
                         })
                         .collect();
@@ -636,9 +636,9 @@ impl Plugin for NotePlugin {
                 args: None,
             },
             Action {
-                label: "note delete".into(),
+                label: "note rm".into(),
                 desc: "Note".into(),
-                action: "query:note delete ".into(),
+                action: "query:note rm ".into(),
                 args: None,
             },
         ]

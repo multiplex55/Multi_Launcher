@@ -209,7 +209,7 @@ Built-in commands:
 | `ip` | `ip` | Show IP addresses |
 | `sh` | `sh echo hi` | Shell commands |
 | `hi` | `hi` | Search history |
-| `note` | `note add <text>` | Quick notes |
+| `note` | `note add <text>` or `note rm <slug>` | Quick notes |
 | `todo` | `todo add <task>` | Todo items |
 | `todo edit` | `todo edit` | Edit todos |
 | `todo export` | `todo export` | Export todos |

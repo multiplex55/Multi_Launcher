@@ -36,20 +36,25 @@ impl NoteDeleteDialog {
                                 let word_count = note.content.split_whitespace().count();
                                 if let Err(e) = remove_note(idx) {
                                     app.set_error(format!("Failed to remove note: {e}"));
-                                } else if app.enable_toasts {
-                                    push_toast(
-                                        &mut app.toasts,
-                                        Toast {
-                                            text: format!(
-                                                "Removed note {} ({} words)",
-                                                note.title, word_count
-                                            )
-                                            .into(),
-                                            kind: ToastKind::Success,
-                                            options: ToastOptions::default()
-                                                .duration_in_seconds(app.toast_duration as f64),
-                                        },
-                                    );
+                                } else {
+                                    if app.enable_toasts {
+                                        push_toast(
+                                            &mut app.toasts,
+                                            Toast {
+                                                text: format!(
+                                                    "Removed note {} ({} words)",
+                                                    note.title, word_count
+                                                )
+                                                .into(),
+                                                kind: ToastKind::Success,
+                                                options: ToastOptions::default()
+                                                    .duration_in_seconds(app.toast_duration as f64),
+                                            },
+                                        );
+                                    }
+                                    if app.notes_dialog.open {
+                                        app.notes_dialog.open();
+                                    }
                                 }
                                 app.search();
                                 app.focus_input();

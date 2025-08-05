@@ -1,13 +1,13 @@
 use chrono::Local;
-use multi_launcher::plugin::Plugin;
-use multi_launcher::plugins::note::{append_note, save_notes, NotePlugin};
-use multi_launcher::gui::{LauncherApp, show_wiki_link, extract_links};
-use multi_launcher::plugin::PluginManager;
-use multi_launcher::settings::Settings;
 use eframe::egui;
-use std::sync::{Arc, atomic::AtomicBool};
+use multi_launcher::gui::{extract_links, show_wiki_link, LauncherApp};
+use multi_launcher::plugin::Plugin;
+use multi_launcher::plugin::PluginManager;
+use multi_launcher::plugins::note::{append_note, save_notes, NotePlugin};
+use multi_launcher::settings::Settings;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
+use std::sync::{atomic::AtomicBool, Arc};
 use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -60,7 +60,7 @@ fn note_root_query_returns_actions_in_order() {
             "query:note open ",
             "query:note today",
             "query:note link ",
-            "query:note delete ",
+            "query:note rm ",
         ]
     );
 }
