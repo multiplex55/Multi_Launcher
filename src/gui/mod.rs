@@ -8,6 +8,7 @@ mod convert_panel;
 mod cpu_list_dialog;
 mod fav_dialog;
 mod macro_dialog;
+mod note_panel;
 mod notes_dialog;
 mod shell_cmd_dialog;
 mod snippet_dialog;
@@ -29,6 +30,7 @@ pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
 pub use macro_dialog::MacroDialog;
+pub use note_panel::NotePanel;
 pub use notes_dialog::NotesDialog;
 pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;
@@ -60,6 +62,7 @@ use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use slug::slugify;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -168,6 +171,7 @@ enum Panel {
     MacroDialog,
     FavDialog,
     NotesDialog,
+    NotePanel,
     TodoDialog,
     TodoViewDialog,
     ClipboardDialog,
@@ -197,6 +201,7 @@ struct PanelStates {
     macro_dialog: bool,
     fav_dialog: bool,
     notes_dialog: bool,
+    note_panel: bool,
     todo_dialog: bool,
     todo_view_dialog: bool,
     clipboard_dialog: bool,
@@ -266,6 +271,7 @@ pub struct LauncherApp {
     macro_dialog: MacroDialog,
     fav_dialog: FavDialog,
     notes_dialog: NotesDialog,
+    note_panels: Vec<NotePanel>,
     todo_dialog: TodoDialog,
     todo_view_dialog: TodoViewDialog,
     clipboard_dialog: ClipboardDialog,
@@ -322,7 +328,9 @@ impl LauncherApp {
     }
 
     pub fn update_command_cache(&mut self) {
-        let mut cmds = self.plugins.commands_filtered(self.enabled_plugins.as_ref());
+        let mut cmds = self
+            .plugins
+            .commands_filtered(self.enabled_plugins.as_ref());
         cmds.sort_by_cached_key(|a| a.label.to_lowercase());
         self.command_cache = cmds;
     }
@@ -599,6 +607,7 @@ impl LauncherApp {
             macro_dialog: MacroDialog::default(),
             fav_dialog: FavDialog::default(),
             notes_dialog: NotesDialog::default(),
+            note_panels: Vec::new(),
             todo_dialog: TodoDialog::default(),
             todo_view_dialog: TodoViewDialog::default(),
             clipboard_dialog: ClipboardDialog::default(),
@@ -1048,6 +1057,7 @@ impl LauncherApp {
             || self.macro_dialog.open
             || self.fav_dialog.open
             || self.notes_dialog.open
+            || !self.note_panels.is_empty()
             || self.todo_dialog.open
             || self.todo_view_dialog.open
             || self.clipboard_dialog.open
@@ -1154,6 +1164,10 @@ impl LauncherApp {
             Panel::NotesDialog => {
                 self.notes_dialog.open = false;
                 self.panel_states.notes_dialog = false;
+            }
+            Panel::NotePanel => {
+                let _ = self.note_panels.pop();
+                self.panel_states.note_panel = false;
             }
             Panel::TodoDialog => {
                 self.todo_dialog.open = false;
@@ -1263,6 +1277,7 @@ impl LauncherApp {
         check!(self.macro_dialog.open, macro_dialog, Panel::MacroDialog);
         check!(self.fav_dialog.open, fav_dialog, Panel::FavDialog);
         check!(self.notes_dialog.open, notes_dialog, Panel::NotesDialog);
+        check!(!self.note_panels.is_empty(), note_panel, Panel::NotePanel);
         check!(self.todo_dialog.open, todo_dialog, Panel::TodoDialog);
         check!(
             self.todo_view_dialog.open,
@@ -1635,6 +1650,12 @@ impl eframe::App for LauncherApp {
                             }
                         } else if a.action == "clipboard:dialog" {
                             self.clipboard_dialog.open();
+                        } else if let Some(slug) = a.action.strip_prefix("note:open:") {
+                            let slug = slug.to_string();
+                            self.open_note_panel(&slug);
+                        } else if let Some(slug) = a.action.strip_prefix("note:new:") {
+                            let slug = slug.to_string();
+                            self.open_note_panel(&slug);
                         } else if a.action == "convert:panel" {
                             self.convert_panel.open();
                         } else if a.action == "tempfile:dialog" {
@@ -1922,7 +1943,8 @@ impl eframe::App for LauncherApp {
                             .and_then(|m| m.get("folders"))
                             .map(|caps| caps.contains(&"show_full_path".to_string()))
                             .unwrap_or(false);
-                        for (idx, a) in self.results.iter().enumerate() {
+                        for idx in 0..self.results.len() {
+                            let a = self.results[idx].clone();
                             let aliased = self
                                 .folder_aliases
                                 .get(&a.action)
@@ -2285,7 +2307,6 @@ impl eframe::App for LauncherApp {
                                 resp.scroll_to_me(Some(egui::Align::Center));
                             }
                             if resp.clicked() {
-                                let a = a.clone();
                                 let current = self.query.clone();
                                 if let Some(new_q) = a.action.strip_prefix("query:") {
                                     tracing::debug!("query action via click: {new_q}");
@@ -2325,6 +2346,12 @@ impl eframe::App for LauncherApp {
                             }
                         } else if a.action == "clipboard:dialog" {
                             self.clipboard_dialog.open();
+                        } else if let Some(slug) = a.action.strip_prefix("note:open:") {
+                            let slug = slug.to_string();
+                            self.open_note_panel(&slug);
+                        } else if let Some(slug) = a.action.strip_prefix("note:new:") {
+                            let slug = slug.to_string();
+                            self.open_note_panel(&slug);
                         } else if a.action == "convert:panel" {
                             self.convert_panel.open();
                         } else if a.action == "tempfile:dialog" {
@@ -2615,6 +2642,15 @@ impl eframe::App for LauncherApp {
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
         notes_dlg.ui(ctx, self);
         self.notes_dialog = notes_dlg;
+        let mut i = 0;
+        while i < self.note_panels.len() {
+            let mut panel = self.note_panels.remove(i);
+            panel.ui(ctx, self);
+            if panel.open {
+                self.note_panels.insert(i, panel);
+                i += 1;
+            }
+        }
         let mut todo_dlg = std::mem::take(&mut self.todo_dialog);
         todo_dlg.ui(ctx, self);
         self.todo_dialog = todo_dlg;
@@ -2659,6 +2695,27 @@ impl eframe::App for LauncherApp {
 impl LauncherApp {
     pub fn watch_receiver(&self) -> &Receiver<WatchEvent> {
         &self.rx
+    }
+
+    /// Open a note panel for the given slug.
+    pub fn open_note_panel(&mut self, slug: &str) {
+        use crate::plugins::note::{load_notes, Note};
+        let note = load_notes()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|n| slugify(&n.title) == slug)
+            .unwrap_or_else(|| {
+                let title = slug.replace('-', " ");
+                let content = format!("# {}\n\n", title);
+                Note {
+                    title,
+                    path: std::path::PathBuf::new(),
+                    content,
+                    tags: Vec::new(),
+                    links: Vec::new(),
+                }
+            });
+        self.note_panels.push(NotePanel::from_note(note));
     }
 
     /// Process dropped files or directories.
