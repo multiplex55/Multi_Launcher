@@ -1,7 +1,8 @@
 use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
-use crate::plugins::note::{save_note, Note};
-use eframe::egui;
+use crate::plugins::note::{load_notes, save_note, Note, NotePlugin};
+use crate::plugin::Plugin;
+use eframe::egui::{self, Color32};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use url::Url;
@@ -10,11 +11,16 @@ use url::Url;
 pub struct NotePanel {
     pub open: bool,
     note: Note,
+    link_search: String,
 }
 
 impl NotePanel {
     pub fn from_note(note: Note) -> Self {
-        Self { open: true, note }
+        Self {
+            open: true,
+            note,
+            link_search: String::new(),
+        }
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
@@ -36,6 +42,34 @@ impl NotePanel {
                         .desired_rows(15)
                         .id_source("note_content"),
                 );
+                resp.context_menu(|ui| {
+                    ui.set_min_width(200.0);
+                    ui.label("Insert link:");
+                    ui.text_edit_singleline(&mut self.link_search);
+                    let plugin = NotePlugin::default();
+                    let results = plugin.search(&format!("note open {}", self.link_search));
+                    for action in results.into_iter().take(10) {
+                        let title = action.label.clone();
+                        if ui.button(&title).clicked() {
+                            let insert = format!("[[{title}]]");
+                            let mut state =
+                                egui::widgets::text_edit::TextEditState::load(ui.ctx(), resp.id)
+                                    .unwrap_or_default();
+                            let idx = state
+                                .cursor
+                                .char_range()
+                                .map(|r| r.primary.index)
+                                .unwrap_or_else(|| self.note.content.chars().count());
+                            self.note.content.insert_str(idx, &insert);
+                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                                egui::text::CCursor::new(idx + insert.chars().count()),
+                            )));
+                            state.store(ui.ctx(), resp.id);
+                            self.link_search.clear();
+                            ui.close_menu();
+                        }
+                    }
+                });
                 if !ctx.memory(|m| m.has_focus(resp.id)) {
                     resp.request_focus();
                 }
@@ -92,12 +126,24 @@ impl NotePanel {
     }
 }
 
-fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui::Response {
+pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui::Response {
     // Display wiki style links with brackets and allow Ctrl+click to
-    // navigate to the referenced note.
-    let resp = ui.link(format!("[[{l}]]"));
+    // navigate to the referenced note. Missing targets are colored red.
+    let slug = slugify(l);
+    let exists = load_notes()
+        .ok()
+        .map(|notes| notes.iter().any(|n| n.slug == slug))
+        .unwrap_or(false);
+    let text = format!("[[{l}]]");
+    let resp = if exists {
+        ui.link(text)
+    } else {
+        ui.add(
+            egui::Label::new(egui::RichText::new(text).color(Color32::RED))
+                .sense(egui::Sense::click()),
+        )
+    };
     if resp.clicked() && ui.ctx().input(|i| i.modifiers.ctrl) {
-        let slug = slugify(l);
         app.open_note_panel(&slug, None);
     }
     resp
@@ -111,8 +157,10 @@ fn extract_tags(content: &str) -> Vec<String> {
         .collect()
 }
 
-fn extract_links(content: &str) -> Vec<String> {
-    static LINK_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(https://\S+|www\.\S+)").unwrap());
+pub fn extract_links(content: &str) -> Vec<String> {
+    static LINK_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"([a-zA-Z][a-zA-Z0-9+.-]*://\S+|www\.\S+)").unwrap()
+    });
     LINK_RE
         .find_iter(content)
         .filter_map(|m| {
