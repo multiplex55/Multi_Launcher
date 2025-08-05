@@ -31,7 +31,7 @@ pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
 pub use macro_dialog::MacroDialog;
-pub use note_panel::NotePanel;
+pub use note_panel::{NotePanel, show_wiki_link, extract_links};
 pub use notes_dialog::NotesDialog;
 pub use note_delete_dialog::NoteDeleteDialog;
 pub use shell_cmd_dialog::ShellCmdDialog;
@@ -188,7 +188,7 @@ fn open_link(_url: &str) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-static OPEN_LINK_COUNT: AtomicUsize = AtomicUsize::new(0);
+pub static OPEN_LINK_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Panel {
@@ -2851,12 +2851,12 @@ impl LauncherApp {
 
     /// Open a link collected from notes in the system browser.
     pub fn open_note_link(&mut self, link: &str) {
-        if link.starts_with("https://") || link.starts_with("www.") {
-            let url = if link.starts_with("www.") {
-                format!("https://{link}")
-            } else {
-                link.to_string()
-            };
+        let url = if link.starts_with("www.") {
+            format!("https://{link}")
+        } else {
+            link.to_string()
+        };
+        if link.starts_with("www.") || link.contains("://") {
             match Url::parse(&url) {
                 Ok(url) if url.scheme() == "https" => match open_link(url.as_str()) {
                     Ok(_) => {
@@ -2887,18 +2887,6 @@ impl LauncherApp {
                         );
                     }
                 }
-            }
-        } else if link.contains("://") {
-            if self.enable_toasts {
-                push_toast(
-                    &mut self.toasts,
-                    Toast {
-                        text: format!("Invalid link: {link}").into(),
-                        kind: ToastKind::Error,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(self.toast_duration as f64),
-                    },
-                );
             }
         } else {
             self.open_note_panel(link, None);

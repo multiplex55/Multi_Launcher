@@ -1,6 +1,11 @@
 use chrono::Local;
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::note::{append_note, save_notes, NotePlugin};
+use multi_launcher::gui::{LauncherApp, show_wiki_link, extract_links};
+use multi_launcher::plugin::PluginManager;
+use multi_launcher::settings::Settings;
+use eframe::egui;
+use std::sync::{Arc, atomic::AtomicBool};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use tempfile::tempdir;
@@ -15,6 +20,25 @@ fn setup() -> tempfile::TempDir {
     std::env::set_var("HOME", dir.path());
     save_notes(&[]).unwrap();
     dir
+}
+
+fn new_app(ctx: &egui::Context) -> LauncherApp {
+    LauncherApp::new(
+        ctx,
+        Vec::new(),
+        0,
+        PluginManager::new(),
+        "actions.json".into(),
+        "settings.json".into(),
+        Settings::default(),
+        None,
+        None,
+        None,
+        None,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    )
 }
 
 #[test]
@@ -127,4 +151,52 @@ fn note_today_opens_daily_note() {
     let results = plugin.search("note today");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, format!("note:open:{}", today));
+}
+
+#[test]
+fn note_open_uses_fuzzy_matching() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _tmp = setup();
+    append_note("fuzzy target", "content").unwrap();
+    let plugin = NotePlugin::default();
+    let results = plugin.search("note open fz targ");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "note:open:fuzzy-target");
+}
+
+#[test]
+fn missing_link_colored_red() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _tmp = setup();
+    let ctx = egui::Context::default();
+    let mut app = new_app(&ctx);
+    let output = ctx.run(Default::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            show_wiki_link(ui, &mut app, "missing");
+        });
+    });
+    let shapes = output.shapes;
+    assert!(shapes.iter().any(|s| match &s.shape {
+        egui::epaint::Shape::Text(t) => {
+            t.galley
+                .job
+                .sections
+                .iter()
+                .any(|sec| sec.format.color == egui::Color32::RED)
+        }
+        _ => false,
+    }));
+}
+
+#[test]
+fn link_validation_rejects_invalid_urls() {
+    let content = "visit http://example.com and http://exa%mple.com also https://rust-lang.org and www.example.com and www.exa%mple.com";
+    let links = extract_links(content);
+    assert_eq!(
+        links,
+        vec![
+            "https://rust-lang.org".to_string(),
+            "www.example.com".to_string(),
+        ]
+    );
 }
