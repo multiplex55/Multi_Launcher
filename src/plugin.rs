@@ -13,7 +13,7 @@ use crate::plugins::help::HelpPlugin;
 use crate::plugins::history::HistoryPlugin;
 use crate::plugins::media::MediaPlugin;
 use crate::plugins::network::NetworkPlugin;
-use crate::plugins::notes::NotesPlugin;
+use crate::plugins::note::NotePlugin;
 use crate::plugins::processes::ProcessesPlugin;
 use crate::plugins::recycle::RecyclePlugin;
 use crate::plugins::reddit::RedditPlugin;
@@ -135,7 +135,7 @@ impl PluginManager {
         self.register_with_settings(NetworkPlugin::new(net_unit), plugin_settings);
         self.register_with_settings(ShellPlugin, plugin_settings);
         self.register_with_settings(HistoryPlugin, plugin_settings);
-        self.register_with_settings(NotesPlugin::default(), plugin_settings);
+        self.register_with_settings(NotePlugin::default(), plugin_settings);
         self.register_with_settings(TodoPlugin::default(), plugin_settings);
         self.register_with_settings(SnippetsPlugin::default(), plugin_settings);
         self.register_with_settings(MacrosPlugin::default(), plugin_settings);

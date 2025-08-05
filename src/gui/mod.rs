@@ -2200,8 +2200,7 @@ impl eframe::App for LauncherApp {
                                             ui.close_menu();
                                         }
                                         if ui.button("Remove Note").clicked() {
-                                            if let Err(e) = crate::plugins::notes::remove_note(
-                                                crate::plugins::notes::QUICK_NOTES_FILE,
+                                            if let Err(e) = crate::plugins::note::remove_note(
                                                 note_idx,
                                             ) {
                                                 self.error =

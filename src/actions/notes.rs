@@ -1,30 +1,19 @@
 use arboard::Clipboard;
 
 pub fn add(text: &str) -> anyhow::Result<()> {
-    crate::plugins::notes::append_note(
-        crate::plugins::notes::QUICK_NOTES_FILE,
-        text,
-    )?;
+    crate::plugins::note::append_note(text, text)?;
     Ok(())
 }
 
 pub fn remove(i: usize) -> anyhow::Result<()> {
-    crate::plugins::notes::remove_note(
-        crate::plugins::notes::QUICK_NOTES_FILE,
-        i,
-    )?;
+    crate::plugins::note::remove_note(i)?;
     Ok(())
 }
 
 pub fn copy(i: usize) -> anyhow::Result<()> {
-    if let Some(entry) = crate::plugins::notes::load_notes(
-        crate::plugins::notes::QUICK_NOTES_FILE,
-    )?
-    .get(i)
-    .cloned()
-    {
+    if let Some(entry) = crate::plugins::note::load_notes()?.get(i).cloned() {
         let mut cb = Clipboard::new()?;
-        cb.set_text(entry.text)?;
+        cb.set_text(entry.content)?;
     }
     Ok(())
 }
