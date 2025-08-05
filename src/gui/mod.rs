@@ -1572,6 +1572,14 @@ impl eframe::App for LauncherApp {
                     }
                 }
 
+                if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::W)) {
+                    if self.any_panel_open() {
+                        if self.close_front_dialog() {
+                            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::W));
+                        }
+                    }
+                }
+
                 if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
                     self.handle_key(egui::Key::ArrowDown);
                 }
@@ -1656,6 +1664,13 @@ impl eframe::App for LauncherApp {
                         } else if let Some(slug) = a.action.strip_prefix("note:new:") {
                             let slug = slug.to_string();
                             self.open_note_panel(&slug);
+                        } else if a.action == "note:tags" {
+                            self.open_note_tags();
+                            set_focus = true;
+                        } else if let Some(link) = a.action.strip_prefix("note:link:") {
+                            self.open_note_link(link);
+                        } else if let Some(slug) = a.action.strip_prefix("note:delete:") {
+                            self.delete_note(slug);
                         } else if a.action == "convert:panel" {
                             self.convert_panel.open();
                         } else if a.action == "tempfile:dialog" {
@@ -2352,6 +2367,13 @@ impl eframe::App for LauncherApp {
                         } else if let Some(slug) = a.action.strip_prefix("note:new:") {
                             let slug = slug.to_string();
                             self.open_note_panel(&slug);
+                        } else if a.action == "note:tags" {
+                            self.open_note_tags();
+                            set_focus = true;
+                        } else if let Some(link) = a.action.strip_prefix("note:link:") {
+                            self.open_note_link(link);
+                        } else if let Some(slug) = a.action.strip_prefix("note:delete:") {
+                            self.delete_note(slug);
                         } else if a.action == "convert:panel" {
                             self.convert_panel.open();
                         } else if a.action == "tempfile:dialog" {
@@ -2715,7 +2737,64 @@ impl LauncherApp {
                     links: Vec::new(),
                 }
             });
+        let word_count = note.content.split_whitespace().count();
+        if self.enable_toasts {
+            push_toast(
+                &mut self.toasts,
+                Toast {
+                    text: format!("Opened note ({} words)", word_count).into(),
+                    kind: ToastKind::Info,
+                    options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
+                },
+            );
+        }
         self.note_panels.push(NotePanel::from_note(note));
+    }
+
+    /// Update query to show available note tags.
+    pub fn open_note_tags(&mut self) {
+        self.query = "note tags".into();
+        self.search();
+        self.focus_input();
+    }
+
+    /// Open a link collected from notes in the system browser.
+    pub fn open_note_link(&mut self, link: &str) {
+        if let Err(e) = open::that(link) {
+            self.set_error(format!("Failed to open link: {e}"));
+        }
+    }
+
+    /// Delete a note by its slug identifier.
+    pub fn delete_note(&mut self, slug: &str) {
+        use crate::plugins::note::{load_notes, remove_note};
+        if let Ok(notes) = load_notes() {
+            if let Some((idx, note)) = notes
+                .into_iter()
+                .enumerate()
+                .find(|(_, n)| slugify(&n.title) == slug)
+            {
+                let word_count = note.content.split_whitespace().count();
+                if let Err(e) = remove_note(idx) {
+                    self.set_error(format!("Failed to remove note: {e}"));
+                } else {
+                    if self.enable_toasts {
+                        push_toast(
+                            &mut self.toasts,
+                            Toast {
+                                text: format!("Removed note {} ({} words)", note.title, word_count)
+                                    .into(),
+                                kind: ToastKind::Success,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(self.toast_duration as f64),
+                            },
+                        );
+                    }
+                    self.search();
+                    self.focus_input();
+                }
+            }
+        }
     }
 
     /// Process dropped files or directories.
