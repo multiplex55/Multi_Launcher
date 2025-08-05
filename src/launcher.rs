@@ -168,7 +168,6 @@ pub(crate) fn clean_recycle_bin() -> windows::core::Result<()> {
             None,
             SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND,
         )
-        .ok()
     }
 }
 
