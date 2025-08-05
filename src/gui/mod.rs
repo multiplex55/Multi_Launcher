@@ -2810,9 +2810,14 @@ impl LauncherApp {
 
     /// Open a link collected from notes in the system browser.
     pub fn open_note_link(&mut self, link: &str) {
-        match Url::parse(link) {
-            Ok(url) if url.scheme() == "http" || url.scheme() == "https" => {
-                match open_link(url.as_str()) {
+        if link.starts_with("https://") || link.starts_with("www.") {
+            let url = if link.starts_with("www.") {
+                format!("https://{link}")
+            } else {
+                link.to_string()
+            };
+            match Url::parse(&url) {
+                Ok(url) if url.scheme() == "https" => match open_link(url.as_str()) {
                     Ok(_) => {
                         if self.enable_toasts {
                             push_toast(
@@ -2827,21 +2832,35 @@ impl LauncherApp {
                         }
                     }
                     Err(e) => self.set_error(format!("Failed to open link: {e}")),
+                },
+                _ => {
+                    if self.enable_toasts {
+                        push_toast(
+                            &mut self.toasts,
+                            Toast {
+                                text: format!("Invalid link: {link}").into(),
+                                kind: ToastKind::Error,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(self.toast_duration as f64),
+                            },
+                        );
+                    }
                 }
             }
-            _ => {
-                if self.enable_toasts {
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: format!("Invalid link: {link}").into(),
-                            kind: ToastKind::Error,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
+        } else if link.contains("://") {
+            if self.enable_toasts {
+                push_toast(
+                    &mut self.toasts,
+                    Toast {
+                        text: format!("Invalid link: {link}").into(),
+                        kind: ToastKind::Error,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(self.toast_duration as f64),
+                    },
+                );
             }
+        } else {
+            self.open_note_panel(link, None);
         }
     }
 
@@ -2908,9 +2927,21 @@ mod tests {
         super::OPEN_LINK_COUNT.store(0, Ordering::SeqCst);
         app.open_note_link("https://example.com");
         assert_eq!(super::OPEN_LINK_COUNT.load(Ordering::SeqCst), 1);
+        super::OPEN_LINK_COUNT.store(0, Ordering::SeqCst);
+        app.open_note_link("www.example.com");
+        assert_eq!(super::OPEN_LINK_COUNT.load(Ordering::SeqCst), 1);
+
+        super::OPEN_LINK_COUNT.store(0, Ordering::SeqCst);
+        app.open_note_link("http://example.com");
+        assert_eq!(super::OPEN_LINK_COUNT.load(Ordering::SeqCst), 0);
 
         super::OPEN_LINK_COUNT.store(0, Ordering::SeqCst);
         app.open_note_link("ftp://example.com");
         assert_eq!(super::OPEN_LINK_COUNT.load(Ordering::SeqCst), 0);
+
+        super::OPEN_LINK_COUNT.store(0, Ordering::SeqCst);
+        app.open_note_link("internal-note");
+        assert_eq!(super::OPEN_LINK_COUNT.load(Ordering::SeqCst), 0);
+        assert_eq!(app.note_panels.len(), 1);
     }
 }
