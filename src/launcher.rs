@@ -158,16 +158,17 @@ pub(crate) fn set_display_brightness(percent: u32) {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn clean_recycle_bin() {
+pub(crate) fn clean_recycle_bin() -> windows::core::Result<()> {
     use windows::Win32::UI::Shell::{
         SHEmptyRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND,
     };
     unsafe {
-        let _ = SHEmptyRecycleBinW(
+        SHEmptyRecycleBinW(
             None,
             None,
             SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND,
-        );
+        )
+        .ok()
     }
 }
 
