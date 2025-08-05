@@ -65,6 +65,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use url::Url;
+use serde::{Serialize, Deserialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -190,8 +191,8 @@ fn open_link(_url: &str) -> std::io::Result<()> {
 #[cfg(test)]
 pub static OPEN_LINK_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Panel {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Panel {
     AliasDialog,
     BookmarkAliasDialog,
     TempfileAliasDialog,
@@ -320,6 +321,7 @@ pub struct LauncherApp {
     toast_log_dialog: ToastLogDialog,
     panel_stack: Vec<Panel>,
     panel_states: PanelStates,
+    pinned_panels: Vec<Panel>,
     pub help_flag: Arc<AtomicBool>,
     pub hotkey_str: Option<String>,
     pub quit_hotkey_str: Option<String>,
@@ -663,6 +665,7 @@ impl LauncherApp {
             toast_log_dialog: ToastLogDialog::default(),
             panel_stack: Vec::new(),
             panel_states: PanelStates::default(),
+            pinned_panels: settings.pinned_panels.clone(),
             help_flag: help_flag.clone(),
             hotkey_str: settings.hotkey.clone(),
             quit_hotkey_str: settings.quit_hotkey.clone(),
@@ -712,6 +715,9 @@ impl LauncherApp {
             static_size.map(|(w, h)| (w as f32, h as f32)),
             (win_size.0 as f32, win_size.1 as f32),
         );
+
+        app.enforce_pinned();
+        app.update_panel_stack();
 
         #[cfg(target_os = "windows")]
         {
@@ -1154,6 +1160,10 @@ impl LauncherApp {
             Some(p) => p,
             None => return false,
         };
+        if self.pinned_panels.contains(&panel) {
+            self.panel_stack.push(panel);
+            return false;
+        }
         match panel {
             Panel::AliasDialog => {
                 self.alias_dialog.open = false;
@@ -1265,6 +1275,188 @@ impl LauncherApp {
             }
         }
         true
+    }
+
+    fn force_close_panel(&mut self, panel: Panel) {
+        match panel {
+            Panel::AliasDialog => {
+                self.alias_dialog.open = false;
+                self.panel_states.alias_dialog = false;
+            }
+            Panel::BookmarkAliasDialog => {
+                self.bookmark_alias_dialog.open = false;
+                self.panel_states.bookmark_alias_dialog = false;
+            }
+            Panel::TempfileAliasDialog => {
+                self.tempfile_alias_dialog.open = false;
+                self.panel_states.tempfile_alias_dialog = false;
+            }
+            Panel::TempfileDialog => {
+                self.tempfile_dialog.open = false;
+                self.panel_states.tempfile_dialog = false;
+            }
+            Panel::AddBookmarkDialog => {
+                self.add_bookmark_dialog.open = false;
+                self.panel_states.add_bookmark_dialog = false;
+            }
+            Panel::HelpOverlay => {
+                self.help_window.overlay_open = false;
+                self.panel_states.help_overlay = false;
+            }
+            Panel::HelpWindow => {
+                self.help_window.open = false;
+                self.panel_states.help_window = false;
+            }
+            Panel::TimerDialog => {
+                self.timer_dialog.open = false;
+                self.panel_states.timer_dialog = false;
+            }
+            Panel::CompletionDialog => {
+                self.completion_dialog.open = false;
+                self.panel_states.completion_dialog = false;
+            }
+            Panel::ShellCmdDialog => {
+                self.shell_cmd_dialog.open = false;
+                self.panel_states.shell_cmd_dialog = false;
+            }
+            Panel::SnippetDialog => {
+                self.snippet_dialog.open = false;
+                self.panel_states.snippet_dialog = false;
+            }
+            Panel::MacroDialog => {
+                self.macro_dialog.open = false;
+                self.panel_states.macro_dialog = false;
+            }
+            Panel::FavDialog => {
+                self.fav_dialog.open = false;
+                self.panel_states.fav_dialog = false;
+            }
+            Panel::NotesDialog => {
+                self.notes_dialog.open = false;
+                self.panel_states.notes_dialog = false;
+            }
+            Panel::NoteDeleteDialog => {
+                self.note_delete_dialog.open = false;
+                self.panel_states.note_delete_dialog = false;
+            }
+            Panel::NotePanel => {
+                let _ = self.note_panels.pop();
+                self.panel_states.note_panel = false;
+            }
+            Panel::TodoDialog => {
+                self.todo_dialog.open = false;
+                self.panel_states.todo_dialog = false;
+            }
+            Panel::TodoViewDialog => {
+                self.todo_view_dialog.open = false;
+                self.panel_states.todo_view_dialog = false;
+            }
+            Panel::ClipboardDialog => {
+                self.clipboard_dialog.open = false;
+                self.panel_states.clipboard_dialog = false;
+            }
+            Panel::ConvertPanel => {
+                self.convert_panel.open = false;
+                self.panel_states.convert_panel = false;
+            }
+            Panel::VolumeDialog => {
+                self.volume_dialog.open = false;
+                self.panel_states.volume_dialog = false;
+            }
+            Panel::BrightnessDialog => {
+                self.brightness_dialog.open = false;
+                self.panel_states.brightness_dialog = false;
+            }
+            Panel::CpuListDialog => {
+                self.cpu_list_dialog.open = false;
+                self.panel_states.cpu_list_dialog = false;
+            }
+            Panel::ToastLogDialog => {
+                self.toast_log_dialog.open = false;
+                self.panel_states.toast_log_dialog = false;
+            }
+            Panel::Editor => {
+                self.show_editor = false;
+                self.panel_states.editor = false;
+            }
+            Panel::Settings => {
+                self.show_settings = false;
+                self.panel_states.settings = false;
+            }
+            Panel::Plugins => {
+                self.show_plugins = false;
+                self.panel_states.plugins = false;
+            }
+        }
+        self.panel_stack.retain(|p| *p != panel);
+    }
+
+    fn ensure_open(&mut self, panel: Panel) {
+        match panel {
+            Panel::AliasDialog => self.alias_dialog.open = true,
+            Panel::BookmarkAliasDialog => self.bookmark_alias_dialog.open = true,
+            Panel::TempfileAliasDialog => self.tempfile_alias_dialog.open = true,
+            Panel::TempfileDialog => self.tempfile_dialog.open = true,
+            Panel::AddBookmarkDialog => self.add_bookmark_dialog.open = true,
+            Panel::HelpOverlay => self.help_window.overlay_open = true,
+            Panel::HelpWindow => self.help_window.open = true,
+            Panel::TimerDialog => self.timer_dialog.open = true,
+            Panel::CompletionDialog => self.completion_dialog.open = true,
+            Panel::ShellCmdDialog => self.shell_cmd_dialog.open = true,
+            Panel::SnippetDialog => self.snippet_dialog.open = true,
+            Panel::MacroDialog => self.macro_dialog.open = true,
+            Panel::FavDialog => self.fav_dialog.open = true,
+            Panel::NotesDialog => self.notes_dialog.open = true,
+            Panel::NoteDeleteDialog => self.note_delete_dialog.open = true,
+            Panel::NotePanel => {},
+            Panel::TodoDialog => self.todo_dialog.open = true,
+            Panel::TodoViewDialog => self.todo_view_dialog.open = true,
+            Panel::ClipboardDialog => self.clipboard_dialog.open = true,
+            Panel::ConvertPanel => self.convert_panel.open = true,
+            Panel::VolumeDialog => self.volume_dialog.open = true,
+            Panel::BrightnessDialog => self.brightness_dialog.open = true,
+            Panel::CpuListDialog => self.cpu_list_dialog.open = true,
+            Panel::ToastLogDialog => self.toast_log_dialog.open = true,
+            Panel::Editor => self.show_editor = true,
+            Panel::Settings => self.show_settings = true,
+            Panel::Plugins => self.show_plugins = true,
+        }
+        if !self.panel_stack.contains(&panel) {
+            self.panel_stack.push(panel);
+        }
+    }
+
+    fn focus_panel(&mut self, panel: Panel) {
+        self.panel_stack.retain(|p| *p != panel);
+        self.panel_stack.push(panel);
+        self.ensure_open(panel);
+    }
+
+    fn enforce_pinned(&mut self) {
+        let pinned = self.pinned_panels.clone();
+        for panel in pinned {
+            self.ensure_open(panel);
+        }
+    }
+
+    fn toggle_pin(&mut self, panel: Panel) {
+        if self.pinned_panels.contains(&panel) {
+            self.pinned_panels.retain(|p| *p != panel);
+            self.force_close_panel(panel);
+        } else {
+            self.pinned_panels.push(panel);
+            self.focus_panel(panel);
+        }
+        self.save_pinned_panels();
+    }
+
+    fn save_pinned_panels(&mut self) {
+        if let Ok(mut s) = Settings::load(&self.settings_path) {
+            s.pinned_panels = self.pinned_panels.clone();
+            if let Err(e) = s.save(&self.settings_path) {
+                self.set_error(format!("Failed to save: {e}"));
+            }
+        }
     }
 
     fn update_panel_stack(&mut self) {
@@ -1523,6 +1715,16 @@ impl eframe::App for LauncherApp {
                         self.toast_log_dialog.open();
                     }
                 });
+                for panel in self.pinned_panels.clone() {
+                    let label = format!("{:?}", panel);
+                    if ui.button(label).clicked() {
+                        if self.panel_stack.last() == Some(&panel) {
+                            self.toggle_pin(panel);
+                        } else {
+                            self.focus_panel(panel);
+                        }
+                    }
+                }
             });
         });
 
@@ -2760,6 +2962,7 @@ impl eframe::App for LauncherApp {
         let mut toast_dlg = std::mem::take(&mut self.toast_log_dialog);
         toast_dlg.ui(ctx, self);
         self.toast_log_dialog = toast_dlg;
+        self.enforce_pinned();
         self.update_panel_stack();
     }
 
@@ -2769,6 +2972,7 @@ impl eframe::App for LauncherApp {
         self.last_visible = false;
         if let Ok(mut settings) = crate::settings::Settings::load(&self.settings_path) {
             settings.window_size = Some(self.window_size);
+            settings.pinned_panels = self.pinned_panels.clone();
             let _ = settings.save(&self.settings_path);
         }
         let _ = usage::save_usage(USAGE_FILE, &self.usage);
@@ -2934,6 +3138,7 @@ mod tests {
     use crate::{plugin::PluginManager, settings::Settings};
     use eframe::egui;
     use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use tempfile::tempdir;
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
@@ -2978,5 +3183,40 @@ mod tests {
         app.open_note_link("internal-note");
         assert_eq!(super::OPEN_LINK_COUNT.load(Ordering::SeqCst), 0);
         assert_eq!(app.note_panels.len(), 1);
+    }
+
+    #[test]
+    fn pinned_panel_prevents_close() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.pinned_panels = vec![Panel::ClipboardDialog];
+        let dir = tempdir().unwrap();
+        let actions_path = dir.path().join("actions.json");
+        let settings_path = dir.path().join("settings.json");
+        let mut app = LauncherApp::new(
+            &ctx,
+            Vec::new(),
+            0,
+            PluginManager::new(),
+            actions_path.to_string_lossy().to_string(),
+            settings_path.to_string_lossy().to_string(),
+            settings,
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(app.clipboard_dialog.open);
+        assert!(!app.close_front_dialog());
+        assert!(app.clipboard_dialog.open);
+        app.toggle_pin(Panel::ClipboardDialog);
+        assert!(!app.pinned_panels.contains(&Panel::ClipboardDialog));
+        app.clipboard_dialog.open = true;
+        app.update_panel_stack();
+        assert!(app.close_front_dialog());
+        assert!(!app.clipboard_dialog.open);
     }
 }
