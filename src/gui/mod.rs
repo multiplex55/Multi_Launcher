@@ -64,6 +64,7 @@ use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use url::Url;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -73,6 +74,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
 const SUBCOMMANDS: &[&str] = &[
@@ -155,6 +158,20 @@ fn push_toast(toasts: &mut Toasts, toast: Toast) {
     append_toast_log(toast.text.text());
     toasts.add(toast);
 }
+
+#[cfg(not(test))]
+fn open_link(url: &str) -> std::io::Result<()> {
+    open::that(url)
+}
+
+#[cfg(test)]
+fn open_link(_url: &str) -> std::io::Result<()> {
+    OPEN_LINK_COUNT.fetch_add(1, Ordering::SeqCst);
+    Ok(())
+}
+
+#[cfg(test)]
+static OPEN_LINK_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Panel {
@@ -2793,21 +2810,38 @@ impl LauncherApp {
 
     /// Open a link collected from notes in the system browser.
     pub fn open_note_link(&mut self, link: &str) {
-        match open::that(link) {
-            Ok(_) => {
+        match Url::parse(link) {
+            Ok(url) if url.scheme() == "http" || url.scheme() == "https" => {
+                match open_link(url.as_str()) {
+                    Ok(_) => {
+                        if self.enable_toasts {
+                            push_toast(
+                                &mut self.toasts,
+                                Toast {
+                                    text: "Opened note link".into(),
+                                    kind: ToastKind::Info,
+                                    options: ToastOptions::default()
+                                        .duration_in_seconds(self.toast_duration as f64),
+                                },
+                            );
+                        }
+                    }
+                    Err(e) => self.set_error(format!("Failed to open link: {e}")),
+                }
+            }
+            _ => {
                 if self.enable_toasts {
                     push_toast(
                         &mut self.toasts,
                         Toast {
-                            text: "Opened note link".into(),
-                            kind: ToastKind::Info,
+                            text: format!("Invalid link: {link}").into(),
+                            kind: ToastKind::Error,
                             options: ToastOptions::default()
                                 .duration_in_seconds(self.toast_duration as f64),
                         },
                     );
                 }
             }
-            Err(e) => self.set_error(format!("Failed to open link: {e}")),
         }
     }
 
@@ -2838,4 +2872,45 @@ impl LauncherApp {
 
 pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
     rx.try_recv().ok().map(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{plugin::PluginManager, settings::Settings};
+    use eframe::egui;
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+
+    fn new_app(ctx: &egui::Context) -> LauncherApp {
+        LauncherApp::new(
+            ctx,
+            Vec::new(),
+            0,
+            PluginManager::new(),
+            "actions.json".into(),
+            "settings.json".into(),
+            Settings::default(),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    #[test]
+    fn open_note_link_valid_and_invalid() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+
+        super::OPEN_LINK_COUNT.store(0, Ordering::SeqCst);
+        app.open_note_link("https://example.com");
+        assert_eq!(super::OPEN_LINK_COUNT.load(Ordering::SeqCst), 1);
+
+        super::OPEN_LINK_COUNT.store(0, Ordering::SeqCst);
+        app.open_note_link("ftp://example.com");
+        assert_eq!(super::OPEN_LINK_COUNT.load(Ordering::SeqCst), 0);
+    }
 }

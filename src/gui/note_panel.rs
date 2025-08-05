@@ -3,6 +3,7 @@ use crate::plugins::note::{save_note, Note};
 use eframe::egui;
 use once_cell::sync::Lazy;
 use regex::Regex;
+use url::Url;
 use crate::common::slug::slugify;
 
 #[derive(Clone)]
@@ -110,7 +111,13 @@ fn extract_links(content: &str) -> Vec<String> {
     static LINK_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://\S+").unwrap());
     LINK_RE
         .find_iter(content)
-        .map(|m| m.as_str().to_string())
+        .filter_map(|m| {
+            let url = m.as_str();
+            Url::parse(url)
+                .ok()
+                .filter(|u| u.scheme() == "http" || u.scheme() == "https")
+                .map(|_| url.to_string())
+        })
         .collect()
 }
 
@@ -221,5 +228,15 @@ mod tests {
         });
 
         assert!(app.note_panels.is_empty());
+    }
+
+    #[test]
+    fn extract_links_filters_invalid() {
+        let content = "visit http://example.com and http://exa%mple.com also https://rust-lang.org";
+        let links = extract_links(content);
+        assert_eq!(links, vec![
+            "http://example.com".to_string(),
+            "https://rust-lang.org".to_string(),
+        ]);
     }
 }
