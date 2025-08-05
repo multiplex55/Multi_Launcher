@@ -297,12 +297,69 @@ impl Plugin for NotePlugin {
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "note") {
             let rest = rest.trim();
             if rest.is_empty() {
-                return vec![Action {
+                let mut actions = vec![Action {
                     label: "note: edit notes".into(),
                     desc: "Note".into(),
                     action: "note:dialog".into(),
                     args: None,
                 }];
+                actions.extend([
+                    Action {
+                        label: "note search".into(),
+                        desc: "Note".into(),
+                        action: "query:note search ".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "note list".into(),
+                        desc: "Note".into(),
+                        action: "query:note list".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "note tags".into(),
+                        desc: "Note".into(),
+                        action: "query:note tags".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "note templates".into(),
+                        desc: "Note".into(),
+                        action: "query:note templates".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "note new".into(),
+                        desc: "Note".into(),
+                        action: "query:note new ".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "note open".into(),
+                        desc: "Note".into(),
+                        action: "query:note open ".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "note today".into(),
+                        desc: "Note".into(),
+                        action: "query:note today".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "note link".into(),
+                        desc: "Note".into(),
+                        action: "query:note link ".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "note delete".into(),
+                        desc: "Note".into(),
+                        action: "query:note delete ".into(),
+                        args: None,
+                    },
+                ]);
+                return actions;
             }
 
             let mut parts = rest.splitn(2, ' ');
@@ -426,19 +483,15 @@ impl Plugin for NotePlugin {
                 }
                 "today" => {
                     let slug = Local::now().format("%Y-%m-%d").to_string();
-                    let tmpl = self
-                        .templates
-                        .lock()
-                        .ok()
-                        .and_then(|t| {
-                            if t.contains_key("today") {
-                                Some("today")
-                            } else if t.contains_key("default") {
-                                Some("default")
-                            } else {
-                                None
-                            }
-                        });
+                    let tmpl = self.templates.lock().ok().and_then(|t| {
+                        if t.contains_key("today") {
+                            Some("today")
+                        } else if t.contains_key("default") {
+                            Some("default")
+                        } else {
+                            None
+                        }
+                    });
                     let action = if let Some(t) = tmpl {
                         format!("note:new:{slug}:{t}")
                     } else {

@@ -18,6 +18,30 @@ fn setup() -> tempfile::TempDir {
 }
 
 #[test]
+fn note_root_query_returns_actions_in_order() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _tmp = setup();
+    let plugin = NotePlugin::default();
+    let results = plugin.search("note");
+    let actions: Vec<&str> = results.iter().map(|a| a.action.as_str()).collect();
+    assert_eq!(
+        actions,
+        vec![
+            "note:dialog",
+            "query:note search ",
+            "query:note list",
+            "query:note tags",
+            "query:note templates",
+            "query:note new ",
+            "query:note open ",
+            "query:note today",
+            "query:note link ",
+            "query:note delete ",
+        ]
+    );
+}
+
+#[test]
 fn note_new_generates_action() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let _tmp = setup();
