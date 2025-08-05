@@ -1,11 +1,11 @@
 use crate::actions::Action;
+use crate::common::slug::{register_slug, reset_slug_lookup, slugify, unique_slug};
 use crate::plugin::Plugin;
 use chrono::Local;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use crate::common::slug::{register_slug, reset_slug_lookup, slugify, unique_slug};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -28,6 +28,8 @@ pub struct NoteCache {
     pub tags: Vec<String>,
     /// Map of note slug -> notes that link to it (backlinks).
     pub links: HashMap<String, Vec<String>>,
+    /// Lowercased contents for simple full-text search.
+    pub index: Vec<String>,
 }
 
 impl NoteCache {
@@ -51,15 +53,19 @@ impl NoteCache {
         let mut tags: Vec<String> = tag_set.into_iter().collect();
         tags.sort();
 
+        let index = notes.iter().map(|n| n.content.to_lowercase()).collect();
+
         Self {
             notes,
             tags,
             links: link_map,
+            index,
         }
     }
 }
 
-static CACHE: Lazy<Arc<Mutex<NoteCache>>> = Lazy::new(|| Arc::new(Mutex::new(NoteCache::default())));
+static CACHE: Lazy<Arc<Mutex<NoteCache>>> =
+    Lazy::new(|| Arc::new(Mutex::new(NoteCache::default())));
 
 static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"#([A-Za-z0-9_]+)").unwrap());
 static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
@@ -308,12 +314,21 @@ impl Plugin for NotePlugin {
                         .collect();
                 }
                 "search" => {
-                    let filter = args;
-                    return guard
-                        .notes
+                    let filter = args.to_lowercase();
+                    let mut matches: Vec<(i64, &Note)> = guard
+                        .index
                         .iter()
-                        .filter(|n| self.matcher.fuzzy_match(&n.content, filter).is_some())
-                        .map(|n| Action {
+                        .zip(guard.notes.iter())
+                        .filter_map(|(text, note)| {
+                            self.matcher
+                                .fuzzy_match(text, &filter)
+                                .map(|score| (score, note))
+                        })
+                        .collect();
+                    matches.sort_by(|a, b| b.0.cmp(&a.0));
+                    return matches
+                        .into_iter()
+                        .map(|(_, n)| Action {
                             label: n.title.clone(),
                             desc: "Note".into(),
                             action: format!("note:open:{}", n.slug),
