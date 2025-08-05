@@ -6,7 +6,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use slug::slugify;
 use std::collections::HashSet;
-use std::path::{PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug)]
@@ -41,10 +41,11 @@ fn extract_links(content: &str) -> Vec<String> {
 }
 
 fn notes_dir() -> PathBuf {
-    let mut dir = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    dir.push(".multi_launcher");
-    dir.push("notes");
-    dir
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("notes")
 }
 
 pub fn load_notes() -> anyhow::Result<Vec<Note>> {
@@ -274,4 +275,3 @@ impl Plugin for NotePlugin {
         ]
     }
 }
-
