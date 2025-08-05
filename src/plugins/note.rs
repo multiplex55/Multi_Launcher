@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
+use chrono::Local;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use once_cell::sync::Lazy;
@@ -165,62 +166,9 @@ impl Default for NotePlugin {
 
 impl Plugin for NotePlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        const ADD_PREFIX: &str = "note add ";
-        if let Some(rest) = crate::common::strip_prefix_ci(query, ADD_PREFIX) {
-            let text = rest.trim();
-            if !text.is_empty() {
-                return vec![Action {
-                    label: format!("Add note {text}"),
-                    desc: "Note".into(),
-                    action: format!("note:add:{text}"),
-                    args: None,
-                }];
-            }
-        }
-
-        const RM_PREFIX: &str = "note rm ";
-        if let Some(rest) = crate::common::strip_prefix_ci(query, RM_PREFIX) {
-            let filter = rest.trim();
-            let guard = match self.data.lock() {
-                Ok(g) => g,
-                Err(_) => return Vec::new(),
-            };
-            return guard
-                .notes
-                .iter()
-                .enumerate()
-                .filter(|(_, n)| self.matcher.fuzzy_match(&n.title, filter).is_some())
-                .map(|(idx, n)| Action {
-                    label: format!("Remove note {}", n.title),
-                    desc: "Note".into(),
-                    action: format!("note:remove:{idx}"),
-                    args: None,
-                })
-                .collect();
-        }
-
-        const LIST_PREFIX: &str = "note list";
-        if let Some(rest) = crate::common::strip_prefix_ci(query, LIST_PREFIX) {
-            let filter = rest.trim();
-            let guard = match self.data.lock() {
-                Ok(g) => g,
-                Err(_) => return Vec::new(),
-            };
-            return guard
-                .notes
-                .iter()
-                .enumerate()
-                .filter(|(_, n)| self.matcher.fuzzy_match(&n.title, filter).is_some())
-                .map(|(idx, n)| Action {
-                    label: n.title.clone(),
-                    desc: "Note".into(),
-                    action: format!("note:copy:{idx}"),
-                    args: None,
-                })
-                .collect();
-        }
-
-        if let Some(rest) = crate::common::strip_prefix_ci(query.trim(), "note") {
+        let trimmed = query.trim();
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "note") {
+            let rest = rest.trim();
             if rest.is_empty() {
                 return vec![Action {
                     label: "note: edit notes".into(),
@@ -228,6 +176,157 @@ impl Plugin for NotePlugin {
                     action: "note:dialog".into(),
                     args: None,
                 }];
+            }
+
+            let mut parts = rest.splitn(2, ' ');
+            let cmd = parts.next().unwrap_or("").to_ascii_lowercase();
+            let args = parts.next().unwrap_or("").trim();
+
+            let guard = match self.data.lock() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+
+            match cmd.as_str() {
+                "new" => {
+                    if !args.is_empty() {
+                        let slug = slugify(args);
+                        return vec![Action {
+                            label: format!("New note {args}"),
+                            desc: "Note".into(),
+                            action: format!("note:new:{slug}"),
+                            args: None,
+                        }];
+                    }
+                }
+                "open" => {
+                    let filter = args;
+                    return guard
+                        .notes
+                        .iter()
+                        .filter(|n| self.matcher.fuzzy_match(&n.title, filter).is_some())
+                        .map(|n| {
+                            let slug = slugify(&n.title);
+                            Action {
+                                label: n.title.clone(),
+                                desc: "Note".into(),
+                                action: format!("note:open:{slug}"),
+                                args: None,
+                            }
+                        })
+                        .collect();
+                }
+                "list" => {
+                    let filter = args;
+                    let tag_filter = filter.starts_with('#');
+                    return guard
+                        .notes
+                        .iter()
+                        .filter(|n| {
+                            if filter.is_empty() {
+                                true
+                            } else if tag_filter {
+                                let tag = filter.trim_start_matches('#');
+                                n.tags.iter().any(|t| t.eq_ignore_ascii_case(tag))
+                            } else {
+                                self.matcher.fuzzy_match(&n.title, filter).is_some()
+                            }
+                        })
+                        .map(|n| {
+                            let slug = slugify(&n.title);
+                            Action {
+                                label: n.title.clone(),
+                                desc: "Note".into(),
+                                action: format!("note:open:{slug}"),
+                                args: None,
+                            }
+                        })
+                        .collect();
+                }
+                "search" => {
+                    let filter = args;
+                    return guard
+                        .notes
+                        .iter()
+                        .filter(|n| self.matcher.fuzzy_match(&n.content, filter).is_some())
+                        .map(|n| {
+                            let slug = slugify(&n.title);
+                            Action {
+                                label: n.title.clone(),
+                                desc: "Note".into(),
+                                action: format!("note:open:{slug}"),
+                                args: None,
+                            }
+                        })
+                        .collect();
+                }
+                "tags" => {
+                    let filter = args;
+                    let mut tags: HashSet<String> = HashSet::new();
+                    for n in &guard.notes {
+                        for t in &n.tags {
+                            tags.insert(t.clone());
+                        }
+                    }
+                    let mut tags: Vec<String> = tags.into_iter().collect();
+                    if !filter.is_empty() {
+                        tags.retain(|t| self.matcher.fuzzy_match(t, filter).is_some());
+                    }
+                    tags.sort();
+                    return tags
+                        .into_iter()
+                        .map(|t| Action {
+                            label: format!("#{t}"),
+                            desc: "Note".into(),
+                            action: format!("query:note list #{t}"),
+                            args: None,
+                        })
+                        .collect();
+                }
+                "today" => {
+                    let slug = Local::now().format("%Y-%m-%d").to_string();
+                    return vec![Action {
+                        label: format!("Open {slug}"),
+                        desc: "Note".into(),
+                        action: format!("note:open:{slug}"),
+                        args: None,
+                    }];
+                }
+                "link" => {
+                    let filter = args;
+                    return guard
+                        .notes
+                        .iter()
+                        .flat_map(|n| n.links.iter().cloned())
+                        .filter(|l| {
+                            filter.is_empty() || self.matcher.fuzzy_match(l, filter).is_some()
+                        })
+                        .map(|l| Action {
+                            label: l.clone(),
+                            desc: "Note".into(),
+                            action: format!("note:link:{l}"),
+                            args: None,
+                        })
+                        .collect();
+                }
+                "delete" => {
+                    let filter = args;
+                    return guard
+                        .notes
+                        .iter()
+                        .filter(|n| self.matcher.fuzzy_match(&n.title, filter).is_some())
+                        .map(|n| {
+                            let slug = slugify(&n.title);
+                            Action {
+                                label: format!("Delete {}", n.title),
+                                desc: "Note".into(),
+                                action: format!("note:delete:{slug}"),
+                                args: None,
+                            }
+                        })
+                        .collect();
+                }
+                _ => {}
             }
         }
 
@@ -255,9 +354,15 @@ impl Plugin for NotePlugin {
                 args: None,
             },
             Action {
-                label: "note add".into(),
+                label: "note new".into(),
                 desc: "Note".into(),
-                action: "query:note add ".into(),
+                action: "query:note new ".into(),
+                args: None,
+            },
+            Action {
+                label: "note open".into(),
+                desc: "Note".into(),
+                action: "query:note open ".into(),
                 args: None,
             },
             Action {
@@ -267,9 +372,33 @@ impl Plugin for NotePlugin {
                 args: None,
             },
             Action {
-                label: "note rm".into(),
+                label: "note search".into(),
                 desc: "Note".into(),
-                action: "query:note rm ".into(),
+                action: "query:note search ".into(),
+                args: None,
+            },
+            Action {
+                label: "note tags".into(),
+                desc: "Note".into(),
+                action: "query:note tags".into(),
+                args: None,
+            },
+            Action {
+                label: "note today".into(),
+                desc: "Note".into(),
+                action: "query:note today".into(),
+                args: None,
+            },
+            Action {
+                label: "note link".into(),
+                desc: "Note".into(),
+                action: "query:note link ".into(),
+                args: None,
+            },
+            Action {
+                label: "note delete".into(),
+                desc: "Note".into(),
+                action: "query:note delete ".into(),
                 args: None,
             },
         ]

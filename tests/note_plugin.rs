@@ -1,5 +1,5 @@
 use multi_launcher::plugin::Plugin;
-use multi_launcher::plugins::note::{append_note, load_notes, remove_note, NotePlugin};
+use multi_launcher::plugins::note::{append_note, NotePlugin};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
@@ -15,13 +15,13 @@ fn setup() {
 }
 
 #[test]
-fn search_add_returns_action() {
+fn search_new_returns_action() {
     let _lock = TEST_MUTEX.lock().unwrap();
     setup();
     let plugin = NotePlugin::default();
-    let results = plugin.search("note add demo");
+    let results = plugin.search("note new demo");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].action, "note:add:demo");
+    assert_eq!(results[0].action, "note:new:demo");
 }
 
 #[test]
@@ -35,11 +35,11 @@ fn list_returns_saved_notes() {
     let plugin = NotePlugin::default();
     let results = plugin.search("note list");
     assert_eq!(results.len(), 2);
-    assert!(results.iter().all(|a| a.action.starts_with("note:copy:")));
+    assert!(results.iter().all(|a| a.action.starts_with("note:open:")));
 }
 
 #[test]
-fn remove_action_returns_indices() {
+fn delete_returns_slug() {
     let _lock = TEST_MUTEX.lock().unwrap();
     setup();
 
@@ -47,18 +47,9 @@ fn remove_action_returns_indices() {
     append_note("second", "second").unwrap();
 
     let plugin = NotePlugin::default();
-    let results = plugin.search("note rm first");
+    let results = plugin.search("note delete first");
     assert_eq!(results.len(), 1);
-    let idx: usize = results[0]
-        .action
-        .strip_prefix("note:remove:")
-        .unwrap()
-        .parse()
-        .unwrap();
-    remove_note(idx).unwrap();
-    let notes = load_notes().unwrap();
-    assert_eq!(notes.len(), 1);
-    assert_eq!(notes[0].title, "second");
+    assert_eq!(results[0].action, "note:delete:first");
 }
 
 #[test]
@@ -70,4 +61,18 @@ fn search_plain_note_opens_dialog() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "note:dialog");
     assert_eq!(results[0].label, "note: edit notes");
+}
+
+#[test]
+fn list_filters_by_tag() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    setup();
+
+    append_note("alpha", "alpha #foo").unwrap();
+    append_note("beta", "beta #bar").unwrap();
+
+    let plugin = NotePlugin::default();
+    let results = plugin.search("note list #foo");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "note:open:alpha");
 }
