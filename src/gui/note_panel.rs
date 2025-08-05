@@ -93,7 +93,7 @@ fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui::Re
     let resp = ui.link(format!("[[{l}]]"));
     if resp.clicked() && ui.ctx().input(|i| i.modifiers.ctrl) {
         let slug = slugify(l);
-        app.open_note_panel(&slug);
+        app.open_note_panel(&slug, None);
     }
     resp
 }
