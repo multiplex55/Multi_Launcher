@@ -133,6 +133,9 @@ pub fn get_template(name: &str) -> Option<String> {
 }
 
 fn notes_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("ML_NOTES_DIR") {
+        return PathBuf::from(dir);
+    }
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
