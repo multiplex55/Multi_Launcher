@@ -28,7 +28,6 @@ pub mod shell;
 pub mod bookmarks;
 pub mod folders;
 pub mod history;
-pub mod notes;
 pub mod todo;
 pub mod snippets;
 pub mod tempfiles;
