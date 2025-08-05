@@ -35,7 +35,12 @@ impl TodoDialog {
     }
 
     pub fn filtered_indices(entries: &[TodoEntry], filter: &str) -> Vec<usize> {
-        let filter = filter.trim().to_lowercase();
+        let mut filter = filter.trim().to_lowercase();
+        let mut negative = false;
+        if let Some(stripped) = filter.strip_prefix('!') {
+            negative = true;
+            filter = stripped.to_string();
+        }
         entries
             .iter()
             .enumerate()
@@ -44,10 +49,20 @@ impl TodoDialog {
                     true
                 } else if filter.starts_with('#') {
                     let tag = filter.trim_start_matches('#');
-                    e.tags.iter().any(|t| t.to_lowercase().contains(tag))
+                    let has_tag = e.tags.iter().any(|t| t.to_lowercase().contains(tag));
+                    if negative {
+                        !has_tag
+                    } else {
+                        has_tag
+                    }
                 } else {
-                    e.text.to_lowercase().contains(&filter)
-                        || e.tags.iter().any(|t| t.to_lowercase().contains(&filter))
+                    let text_match = e.text.to_lowercase().contains(&filter)
+                        || e.tags.iter().any(|t| t.to_lowercase().contains(&filter));
+                    if negative {
+                        !text_match
+                    } else {
+                        text_match
+                    }
                 }
             })
             .map(|(i, _)| i)
@@ -112,113 +127,116 @@ impl TodoDialog {
             .min_height(150.0)
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
-                ui.checkbox(&mut self.persist_tags, "Persist Tags");
-                egui::Grid::new("todo_add_grid")
-                    .num_columns(2)
-                    .spacing([4.0, 2.0])
-                    .striped(false)
-                    .show(ui, |ui| {
-                        ui.label(egui::RichText::new("New Todo").strong());
-                        let text_resp = ui.add(
-                            egui::TextEdit::singleline(&mut self.text).desired_width(f32::INFINITY),
-                        );
-                        ui.end_row();
-
-                        ui.label("Tags");
-                        let tags_resp = ui.add(
-                            egui::TextEdit::singleline(&mut self.tags).desired_width(f32::INFINITY),
-                        );
-                        ui.end_row();
-
-                        ui.label("Priority");
-                        let (prio_resp, add_resp) = ui
-                            .horizontal(|ui| {
-                                (
-                                    ui.add(
-                                        egui::DragValue::new(&mut self.priority)
-                                            .clamp_range(0..=255),
-                                    ),
-                                    ui.button("Add"),
-                                )
-                            })
-                            .inner;
-
-                        if text_resp.changed() {
-                            tracing::debug!("Todo text updated: '{}'", self.text);
-                        }
-                        if tags_resp.changed() {
-                            tracing::debug!("Todo tags updated: '{}'", self.tags);
-                        }
-
-                        add_now |= add_resp.clicked();
-                        if (text_resp.lost_focus()
-                            || tags_resp.lost_focus()
-                            || prio_resp.lost_focus())
-                            && ctx.input(|i| i.key_pressed(egui::Key::Enter))
-                        {
-                            let modifiers = ctx.input(|i| i.modifiers);
-                            ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
-                            tracing::debug!(
-                                "Enter pressed in TodoDialog fields: text='{}', tags='{}'",
-                                self.text,
-                                self.tags
-                            );
-                            add_now = true;
-                        }
-                        ui.end_row();
-                    });
-                ui.horizontal(|ui| {
-                    if ui.button("Clear Completed").clicked() {
-                        self.entries.retain(|e| !e.done);
-                        save_now = true;
-                    }
-                });
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("Filter");
-                    ui.text_edit_singleline(&mut self.filter);
-                });
-                let mut remove: Option<usize> = None;
                 let area_height = ui.available_height();
-                let indices = Self::filtered_indices(&self.entries, &self.filter);
-                egui::ScrollArea::both()
-                    .max_height(area_height)
-                    .show(ui, |ui| {
-                        for idx in indices {
-                            ui.horizontal(|ui| {
-                                let entry = &mut self.entries[idx];
-                                if ui.checkbox(&mut entry.done, "").changed() {
-                                    save_now = true;
-                                }
-                                ui.label(entry.text.replace('\n', " "));
-                                ui.add(
-                                    egui::DragValue::new(&mut entry.priority).clamp_range(0..=255),
+                let mut remove: Option<usize> = None;
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.checkbox(&mut self.persist_tags, "Persist Tags");
+                    egui::Grid::new("todo_add_grid")
+                        .num_columns(2)
+                        .spacing([4.0, 2.0])
+                        .striped(false)
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("New Todo").strong());
+                            let text_resp = ui.add(
+                                egui::TextEdit::singleline(&mut self.text)
+                                    .desired_width(f32::INFINITY),
+                            );
+                            ui.end_row();
+
+                            ui.label("Tags");
+                            let tags_resp = ui.add(
+                                egui::TextEdit::singleline(&mut self.tags)
+                                    .desired_width(f32::INFINITY),
+                            );
+                            ui.end_row();
+
+                            ui.label("Priority");
+                            let (prio_resp, add_resp) = ui
+                                .horizontal(|ui| {
+                                    (
+                                        ui.add(
+                                            egui::DragValue::new(&mut self.priority)
+                                                .clamp_range(0..=255),
+                                        ),
+                                        ui.button("Add"),
+                                    )
+                                })
+                                .inner;
+
+                            if text_resp.changed() {
+                                tracing::debug!("Todo text updated: '{}'", self.text);
+                            }
+                            if tags_resp.changed() {
+                                tracing::debug!("Todo tags updated: '{}'", self.tags);
+                            }
+
+                            add_now |= add_resp.clicked();
+                            if (text_resp.lost_focus()
+                                || tags_resp.lost_focus()
+                                || prio_resp.lost_focus())
+                                && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+                            {
+                                let modifiers = ctx.input(|i| i.modifiers);
+                                ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+                                tracing::debug!(
+                                    "Enter pressed in TodoDialog fields: text='{}', tags='{}'",
+                                    self.text,
+                                    self.tags
                                 );
-                                let mut tag_str = entry.tags.join(", ");
-                                if ui.text_edit_singleline(&mut tag_str).changed() {
-                                    entry.tags = tag_str
-                                        .split(',')
-                                        .map(|t| t.trim())
-                                        .filter(|t| !t.is_empty())
-                                        .map(|t| t.to_string())
-                                        .collect();
-                                    save_now = true;
-                                }
-                                if ui.button("Remove").clicked() {
-                                    remove = Some(idx);
-                                }
-                            });
+                                add_now = true;
+                            }
+                            ui.end_row();
+                        });
+                    ui.horizontal(|ui| {
+                        if ui.button("Clear Completed").clicked() {
+                            self.entries.retain(|e| !e.done);
+                            save_now = true;
                         }
                     });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Filter");
+                        ui.text_edit_singleline(&mut self.filter);
+                    });
+                    let indices = Self::filtered_indices(&self.entries, &self.filter);
+                    egui::ScrollArea::both()
+                        .max_height(area_height)
+                        .show(ui, |ui| {
+                            for idx in indices {
+                                ui.horizontal(|ui| {
+                                    let entry = &mut self.entries[idx];
+                                    if ui.checkbox(&mut entry.done, "").changed() {
+                                        save_now = true;
+                                    }
+                                    ui.label(entry.text.replace('\n', " "));
+                                    ui.add(
+                                        egui::DragValue::new(&mut entry.priority)
+                                            .clamp_range(0..=255),
+                                    );
+                                    let mut tag_str = entry.tags.join(", ");
+                                    if ui.text_edit_singleline(&mut tag_str).changed() {
+                                        entry.tags = tag_str
+                                            .split(',')
+                                            .map(|t| t.trim())
+                                            .filter(|t| !t.is_empty())
+                                            .map(|t| t.to_string())
+                                            .collect();
+                                        save_now = true;
+                                    }
+                                    if ui.button("Remove").clicked() {
+                                        remove = Some(idx);
+                                    }
+                                });
+                            }
+                        });
+                });
                 if let Some(idx) = remove {
                     self.entries.remove(idx);
                     save_now = true;
                 }
             });
 
-        if self.open
-            && ctx.input(|i| i.key_pressed(egui::Key::Enter))
-            && !app.todo_view_dialog.open
+        if self.open && ctx.input(|i| i.key_pressed(egui::Key::Enter)) && !app.todo_view_dialog.open
         {
             let modifiers = ctx.input(|i| i.modifiers);
             ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
@@ -248,7 +266,7 @@ mod tests {
     use super::*;
     use crate::plugin::PluginManager;
     use crate::settings::Settings;
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::{atomic::AtomicBool, Arc};
     use tempfile::tempdir;
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {

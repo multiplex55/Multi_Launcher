@@ -1,12 +1,36 @@
+use eframe::egui;
+use multi_launcher::gui::{LauncherApp, TodoDialog};
 use multi_launcher::plugin::Plugin;
+use multi_launcher::plugin::PluginManager;
 use multi_launcher::plugins::todo::{
-    append_todo, load_todos, mark_done, remove_todo, set_priority, set_tags, TodoPlugin, TODO_FILE,
+    append_todo, load_todos, mark_done, remove_todo, set_priority, set_tags, TodoEntry, TodoPlugin,
+    TODO_FILE,
 };
+use multi_launcher::settings::Settings;
 use once_cell::sync::Lazy;
-use std::sync::Mutex;
+use std::sync::{atomic::AtomicBool, Arc, Mutex};
 use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+fn new_app(ctx: &egui::Context) -> LauncherApp {
+    LauncherApp::new(
+        ctx,
+        Vec::new(),
+        0,
+        PluginManager::new(),
+        "actions.json".into(),
+        "settings.json".into(),
+        Settings::default(),
+        None,
+        None,
+        None,
+        None,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    )
+}
 
 #[test]
 fn search_add_returns_action() {
@@ -250,4 +274,72 @@ fn search_export_returns_action() {
     let results = plugin.search("todo export");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "todo:export");
+}
+
+#[test]
+fn list_negative_filters() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+    append_todo(TODO_FILE, "urgent task", 1, &["urgent".into()]).unwrap();
+    append_todo(TODO_FILE, "other task", 1, &["other".into()]).unwrap();
+    let plugin = TodoPlugin::default();
+    let results = plugin.search("todo list !#urgent");
+    assert_eq!(results.len(), 1);
+    assert!(results[0].label.contains("other task"));
+    let results = plugin.search("todo list !urgent");
+    assert_eq!(results.len(), 1);
+    assert!(results[0].label.contains("other task"));
+}
+
+#[test]
+fn dialog_filtered_indices_negation() {
+    let entries = vec![
+        TodoEntry {
+            text: "alpha".into(),
+            done: false,
+            priority: 0,
+            tags: vec!["work".into()],
+        },
+        TodoEntry {
+            text: "beta".into(),
+            done: false,
+            priority: 0,
+            tags: vec![],
+        },
+    ];
+    let idx = TodoDialog::filtered_indices(&entries, "!#work");
+    assert_eq!(idx, vec![1]);
+    let idx = TodoDialog::filtered_indices(&entries, "!beta");
+    assert_eq!(idx, vec![0]);
+}
+
+#[test]
+fn dialog_scrolls_with_many_entries() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = new_app(&ctx);
+    let mut dlg = TodoDialog::default();
+    dlg.open();
+    for i in 0..100 {
+        dlg.test_set_text(&format!("task{i}"));
+        dlg.test_add_todo();
+    }
+
+    ctx.begin_frame(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1000.0, 2000.0),
+        )),
+        ..Default::default()
+    });
+    dlg.ui(&ctx, &mut app);
+    let _ = ctx.end_frame();
+
+    let rect = ctx
+        .memory(|m| m.area_rect(egui::Id::new("Todos")))
+        .expect("window rect");
+    assert!(rect.height() < 800.0);
 }
