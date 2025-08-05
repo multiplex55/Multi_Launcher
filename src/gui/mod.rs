@@ -2742,13 +2742,20 @@ impl LauncherApp {
             push_toast(
                 &mut self.toasts,
                 Toast {
-                    text: format!("Opened note ({} words)", word_count).into(),
+                    text: format!(
+                        "Opened note ({} words) – press Esc or Cmd+W to close",
+                        word_count
+                    )
+                    .into(),
                     kind: ToastKind::Info,
-                    options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
+                    options: ToastOptions::default()
+                        .duration_in_seconds(self.toast_duration as f64),
                 },
             );
         }
         self.note_panels.push(NotePanel::from_note(note));
+        // Allow keyboard shortcuts like Esc/Cmd+W to immediately close the panel
+        self.update_panel_stack();
     }
 
     /// Update query to show available note tags.
@@ -2756,12 +2763,36 @@ impl LauncherApp {
         self.query = "note tags".into();
         self.search();
         self.focus_input();
+        if self.enable_toasts {
+            push_toast(
+                &mut self.toasts,
+                Toast {
+                    text: "Showing note tags – press Esc to exit".into(),
+                    kind: ToastKind::Info,
+                    options: ToastOptions::default()
+                        .duration_in_seconds(self.toast_duration as f64),
+                },
+            );
+        }
     }
 
     /// Open a link collected from notes in the system browser.
     pub fn open_note_link(&mut self, link: &str) {
-        if let Err(e) = open::that(link) {
-            self.set_error(format!("Failed to open link: {e}"));
+        match open::that(link) {
+            Ok(_) => {
+                if self.enable_toasts {
+                    push_toast(
+                        &mut self.toasts,
+                        Toast {
+                            text: "Opened note link".into(),
+                            kind: ToastKind::Info,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(self.toast_duration as f64),
+                        },
+                    );
+                }
+            }
+            Err(e) => self.set_error(format!("Failed to open link: {e}")),
         }
     }
 
@@ -2782,8 +2813,11 @@ impl LauncherApp {
                         push_toast(
                             &mut self.toasts,
                             Toast {
-                                text: format!("Removed note {} ({} words)", note.title, word_count)
-                                    .into(),
+                                text: format!(
+                                    "Removed note {} ({} words)",
+                                    note.title, word_count
+                                )
+                                .into(),
                                 kind: ToastKind::Success,
                                 options: ToastOptions::default()
                                     .duration_in_seconds(self.toast_duration as f64),
