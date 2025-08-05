@@ -2949,6 +2949,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "url",
  "urlencoding",
  "walkdir",
  "windows 0.58.0",

@@ -1,9 +1,10 @@
+use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::plugins::note::{save_note, Note};
 use eframe::egui;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use crate::common::slug::slugify;
+use url::Url;
 
 #[derive(Clone)]
 pub struct NotePanel {
@@ -107,10 +108,21 @@ fn extract_tags(content: &str) -> Vec<String> {
 }
 
 fn extract_links(content: &str) -> Vec<String> {
-    static LINK_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://\S+").unwrap());
+    static LINK_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(https://\S+|www\.\S+)").unwrap());
     LINK_RE
         .find_iter(content)
-        .map(|m| m.as_str().to_string())
+        .filter_map(|m| {
+            let raw = m.as_str();
+            let url = if raw.starts_with("www.") {
+                format!("https://{raw}")
+            } else {
+                raw.to_string()
+            };
+            Url::parse(&url)
+                .ok()
+                .filter(|u| u.scheme() == "https")
+                .map(|_| raw.to_string())
+        })
         .collect()
 }
 
@@ -127,7 +139,7 @@ mod tests {
     use super::*;
     use crate::{plugin::PluginManager, settings::Settings};
     use eframe::egui;
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::{atomic::AtomicBool, Arc};
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
@@ -221,5 +233,18 @@ mod tests {
         });
 
         assert!(app.note_panels.is_empty());
+    }
+
+    #[test]
+    fn extract_links_filters_invalid() {
+        let content = "visit http://example.com and http://exa%mple.com also https://rust-lang.org and www.example.com and www.exa%mple.com";
+        let links = extract_links(content);
+        assert_eq!(
+            links,
+            vec![
+                "https://rust-lang.org".to_string(),
+                "www.example.com".to_string(),
+            ]
+        );
     }
 }
