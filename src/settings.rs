@@ -67,6 +67,9 @@ pub struct Settings {
     /// Last known window size. If absent, a default size is used.
     #[serde(default)]
     pub window_size: Option<(i32, i32)>,
+    /// Default size for note editor panels.
+    #[serde(default = "default_note_panel_size")]
+    pub note_panel_default_size: (f32, f32),
     /// Enable toast notifications in the UI.
     #[serde(default = "default_toasts")]
     pub enable_toasts: bool,
@@ -187,6 +190,10 @@ fn default_net_refresh() -> f32 {
     1.0
 }
 
+fn default_note_panel_size() -> (f32, f32) {
+    (420.0, 320.0)
+}
+
 fn default_log_path() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -216,6 +223,7 @@ impl Default for Settings {
             log_file: None,
             offscreen_pos: Some((2000, 2000)),
             window_size: Some((400, 220)),
+            note_panel_default_size: default_note_panel_size(),
             enable_toasts: true,
             toast_duration: default_toast_duration(),
             query_scale: Some(1.0),
