@@ -67,7 +67,10 @@ impl NotePanel {
             });
         if save_now {
             self.note.tags = extract_tags(&self.note.content);
-            self.note.links = extract_links(&self.note.content);
+            self.note.links = extract_wiki_links(&self.note.content)
+                .into_iter()
+                .map(|l| slugify(&l))
+                .collect();
             if let Some(first) = self.note.content.lines().next() {
                 if let Some(t) = first.strip_prefix("# ") {
                     self.note.title = t.to_string();

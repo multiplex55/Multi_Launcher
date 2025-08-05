@@ -1,5 +1,5 @@
 use multi_launcher::plugin::Plugin;
-use multi_launcher::plugins::note::{append_note, NotePlugin};
+use multi_launcher::plugins::note::{append_note, remove_note, NotePlugin};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
@@ -75,4 +75,51 @@ fn list_filters_by_tag() {
     let results = plugin.search("note list #foo");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "note:open:alpha");
+}
+
+#[test]
+fn tags_command_lists_unique_tags() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    setup();
+
+    append_note("alpha", "alpha #foo #bar").unwrap();
+    append_note("beta", "beta #foo").unwrap();
+
+    let plugin = NotePlugin::default();
+    let results = plugin.search("note tags");
+    assert_eq!(results.len(), 2);
+    let labels: Vec<String> = results.into_iter().map(|a| a.label).collect();
+    assert!(labels.contains(&"#foo".to_string()));
+    assert!(labels.contains(&"#bar".to_string()));
+}
+
+#[test]
+fn link_shows_backlinks() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    setup();
+
+    append_note("alpha", "alpha [[beta]]").unwrap();
+    append_note("beta", "beta").unwrap();
+
+    let plugin = NotePlugin::default();
+    let results = plugin.search("note link beta");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "note:open:alpha");
+}
+
+#[test]
+fn cache_updates_after_changes() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    setup();
+
+    let plugin = NotePlugin::default();
+    append_note("alpha", "alpha #foo").unwrap();
+
+    // The plugin should see the new note without reinitialization
+    let results = plugin.search("note tags");
+    assert_eq!(results.len(), 1);
+
+    remove_note(0).unwrap();
+    let results = plugin.search("note list");
+    assert_eq!(results.len(), 0);
 }
