@@ -32,16 +32,21 @@ impl NotePanel {
         egui::Window::new(self.note.title.clone())
             .open(&mut open)
             .resizable(true)
-            .default_size((420.0, 320.0))
+            .default_size(app.note_panel_default_size)
             .min_width(200.0)
             .min_height(150.0)
+            .movable(true)
             .show(ctx, |ui| {
-                let resp = ui.add(
-                    egui::TextEdit::multiline(&mut self.note.content)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(15)
-                        .id_source("note_content"),
-                );
+                let resp = egui::ScrollArea::vertical()
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.note.content)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(15)
+                                .id_source("note_content"),
+                        )
+                    })
+                    .inner;
                 resp.context_menu(|ui| {
                     ui.set_min_width(200.0);
                     ui.label("Insert link:");
@@ -70,7 +75,7 @@ impl NotePanel {
                         }
                     }
                 });
-                if !ctx.memory(|m| m.has_focus(resp.id)) {
+                if resp.clicked() {
                     resp.request_focus();
                 }
                 if resp.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -83,7 +88,7 @@ impl NotePanel {
                 ui.separator();
                 let tags = extract_tags(&self.note.content);
                 if !tags.is_empty() {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label("Tags:");
                         for t in tags {
                             ui.monospace(format!("#{t}"));
@@ -324,6 +329,20 @@ mod tests {
         });
 
         let mut input = egui::RawInput::default();
+        let pos = egui::pos2(200.0, 100.0);
+        input.events.push(egui::Event::PointerMoved(pos));
+        input.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        });
+        input.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        });
         input.events.push(egui::Event::Key {
             key: egui::Key::Enter,
             physical_key: None,

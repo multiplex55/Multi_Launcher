@@ -333,6 +333,7 @@ pub struct LauncherApp {
     pub fuzzy_weight: f32,
     pub usage_weight: f32,
     pub page_jump: usize,
+    pub note_panel_default_size: (f32, f32),
     pub follow_mouse: bool,
     pub static_location_enabled: bool,
     pub static_pos: Option<(i32, i32)>,
@@ -418,6 +419,7 @@ impl LauncherApp {
         screenshot_save_file: Option<bool>,
         always_on_top: Option<bool>,
         page_jump: Option<usize>,
+        note_panel_default_size: Option<(f32, f32)>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -482,6 +484,9 @@ impl LauncherApp {
         }
         if let Some(v) = page_jump {
             self.page_jump = v;
+        }
+        if let Some(v) = note_panel_default_size {
+            self.note_panel_default_size = v;
         }
     }
 
@@ -670,6 +675,7 @@ impl LauncherApp {
             fuzzy_weight: settings.fuzzy_weight,
             usage_weight: settings.usage_weight,
             page_jump: settings.page_jump,
+            note_panel_default_size: settings.note_panel_default_size,
             follow_mouse,
             static_location_enabled: static_enabled,
             static_pos,
