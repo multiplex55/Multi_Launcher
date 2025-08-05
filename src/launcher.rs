@@ -243,9 +243,6 @@ enum ActionKind<'a> {
     StopwatchStop(u64),
     StopwatchStart { name: &'a str },
     StopwatchShow(u64),
-    NoteAdd(&'a str),
-    NoteRemove(usize),
-    NoteCopy(usize),
     TodoAdd {
         text: &'a str,
         priority: u8,
@@ -439,19 +436,6 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if let Some(id) = s.strip_prefix("stopwatch:show:") {
         if let Ok(i) = id.parse::<u64>() {
             return ActionKind::StopwatchShow(i);
-        }
-    }
-    if let Some(text) = s.strip_prefix("note:add:") {
-        return ActionKind::NoteAdd(text);
-    }
-    if let Some(idx) = s.strip_prefix("note:remove:") {
-        if let Ok(i) = idx.parse::<usize>() {
-            return ActionKind::NoteRemove(i);
-        }
-    }
-    if let Some(idx) = s.strip_prefix("note:copy:") {
-        if let Ok(i) = idx.parse::<usize>() {
-            return ActionKind::NoteCopy(i);
         }
     }
     if let Some(rest) = s.strip_prefix("todo:add:") {
@@ -717,9 +701,6 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
             Ok(())
         }
         ActionKind::StopwatchShow(_id) => Ok(()),
-        ActionKind::NoteAdd(text) => notes::add(text),
-        ActionKind::NoteRemove(i) => notes::remove(i),
-        ActionKind::NoteCopy(i) => notes::copy(i),
         ActionKind::TodoAdd {
             text,
             priority,

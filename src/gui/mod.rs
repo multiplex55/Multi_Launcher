@@ -2225,43 +2225,21 @@ impl eframe::App for LauncherApp {
                                     }
                                 });
                             } else if a.desc == "Note"
-                                && (a.action.starts_with("note:copy:")
-                                    || a.action.starts_with("note:remove:"))
+                                && a.action.starts_with("note:open:")
                             {
-                                let idx_str = a.action.rsplit(':').next().unwrap_or("");
-                                if let Ok(note_idx) = idx_str.parse::<usize>() {
-                                    let note_label = a.label.clone();
-                                    menu_resp.clone().context_menu(|ui| {
-                                        if ui.button("Edit Note").clicked() {
-                                            self.notes_dialog.open_edit(note_idx);
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Remove Note").clicked() {
-                                            if let Err(e) = crate::plugins::note::remove_note(
-                                                note_idx,
-                                            ) {
-                                                self.error =
-                                                    Some(format!("Failed to remove note: {e}"));
-                                            } else {
-                                                refresh = true;
-                                                set_focus = true;
-                                                if self.enable_toasts {
-                                                    push_toast(&mut self.toasts, Toast {
-                                                        text: format!(
-                                                            "Removed note {}",
-                                                            note_label
-                                                        )
-                                                        .into(),
-                                                        kind: ToastKind::Success,
-                                                        options: ToastOptions::default()
-                                                            .duration_in_seconds(self.toast_duration as f64),
-                                                    });
-                                                }
-                                            }
-                                            ui.close_menu();
-                                        }
-                                    });
-                                }
+                                let slug = a.action.rsplit(':').next().unwrap_or("").to_string();
+                                menu_resp.clone().context_menu(|ui| {
+                                    if ui.button("Edit Note").clicked() {
+                                        self.open_note_panel(&slug);
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Remove Note").clicked() {
+                                        self.delete_note(&slug);
+                                        refresh = true;
+                                        set_focus = true;
+                                        ui.close_menu();
+                                    }
+                                });
                             } else if a.desc == "Clipboard"
                                 && a.action.starts_with("clipboard:copy:")
                             {
