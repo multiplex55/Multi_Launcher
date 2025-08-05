@@ -69,7 +69,13 @@ pub fn set_process_volume(pid: u32, level: u32) {
 
 pub fn recycle_clean() {
     #[cfg(target_os = "windows")]
-    super::super::launcher::clean_recycle_bin();
+    {
+        std::thread::spawn(|| {
+            let res = super::super::launcher::clean_recycle_bin()
+                .map_err(|e| format!("{e:?}"));
+            crate::gui::send_event(crate::gui::WatchEvent::Recycle(res));
+        });
+    }
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]

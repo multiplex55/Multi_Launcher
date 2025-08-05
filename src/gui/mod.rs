@@ -68,8 +68,8 @@ use url::Url;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, Sender};
-#[cfg(target_os = "windows")]
 use std::sync::Mutex;
+use once_cell::sync::Lazy;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -102,11 +102,12 @@ fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egu
     .inner
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum WatchEvent {
     Actions,
     Folders,
     Bookmarks,
+    Recycle(Result<(), String>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +123,7 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::Actions => TestWatchEvent::Actions,
             WatchEvent::Folders => TestWatchEvent::Folders,
             WatchEvent::Bookmarks => TestWatchEvent::Bookmarks,
+            WatchEvent::Recycle(_) => unreachable!(),
         }
     }
 }
@@ -138,7 +140,7 @@ fn watch_file(
                     ev.kind,
                     EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
                 ) {
-                    let _ = tx.send(event);
+                    let _ = tx.send(event.clone());
                 }
             }
             Err(e) => tracing::error!("watch error: {:?}", e),
@@ -157,6 +159,21 @@ fn watch_file(
 fn push_toast(toasts: &mut Toasts, toast: Toast) {
     append_toast_log(toast.text.text());
     toasts.add(toast);
+}
+
+static APP_EVENT_TXS: Lazy<Mutex<Vec<Sender<WatchEvent>>>> =
+    Lazy::new(|| Mutex::new(Vec::new()));
+
+pub fn register_event_sender(tx: Sender<WatchEvent>) {
+    if let Ok(mut guard) = APP_EVENT_TXS.lock() {
+        guard.push(tx);
+    }
+}
+
+pub fn send_event(ev: WatchEvent) {
+    if let Ok(mut guard) = APP_EVENT_TXS.lock() {
+        guard.retain(|tx| tx.send(ev.clone()).is_ok());
+    }
 }
 
 #[cfg(not(test))]
@@ -485,6 +502,7 @@ impl LauncherApp {
         help_flag: Arc<AtomicBool>,
     ) -> Self {
         let (tx, rx) = channel();
+        register_event_sender(tx.clone());
         let mut watchers = Vec::new();
         let mut toasts = Toasts::new().anchor(egui::Align2::RIGHT_TOP, [10.0, 10.0]);
         let enable_toasts = settings.enable_toasts;
@@ -1535,6 +1553,32 @@ impl eframe::App for LauncherApp {
                     .map(|b| (b.url, b.alias))
                     .collect();
                 }
+                WatchEvent::Recycle(res) => {
+                    match res {
+                        Ok(()) => {
+                            if self.enable_toasts {
+                                push_toast(&mut self.toasts, Toast {
+                                    text: "Emptied Recycle Bin".into(),
+                                    kind: ToastKind::Success,
+                                    options: ToastOptions::default()
+                                        .duration_in_seconds(self.toast_duration as f64),
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            let msg = format!("Failed to empty recycle bin: {e}");
+                            self.set_error(msg.clone());
+                            if self.enable_toasts {
+                                push_toast(&mut self.toasts, Toast {
+                                    text: msg.into(),
+                                    kind: ToastKind::Error,
+                                    options: ToastOptions::default()
+                                        .duration_in_seconds(self.toast_duration as f64),
+                                });
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -1765,10 +1809,8 @@ impl eframe::App for LauncherApp {
                             if a.desc == "Fav" && !a.action.starts_with("fav:") {
                                 tracing::info!(fav=%a.label, command=%a.action, "ran favorite");
                             }
-                            if self.enable_toasts {
-                                let msg = if a.action == "recycle:clean" {
-                                    "Emptied Recycle Bin".to_string()
-                                } else if a.action.starts_with("clipboard:") {
+                            if self.enable_toasts && a.action != "recycle:clean" {
+                                let msg = if a.action.starts_with("clipboard:") {
                                     format!("Copied {}", a.label)
                                 } else {
                                     format!("Launched {}", a.label)
@@ -2420,21 +2462,19 @@ impl eframe::App for LauncherApp {
                                     if a.desc == "Fav" && !a.action.starts_with("fav:") {
                                         tracing::info!(fav=%a.label, command=%a.action, "ran favorite");
                                     }
-                                    if self.enable_toasts {
-                                        let msg = if a.action == "recycle:clean" {
-                                            "Emptied Recycle Bin".to_string()
-                                        } else if a.action.starts_with("clipboard:") {
-                                            format!("Copied {}", a.label)
-                                        } else {
-                                            format!("Launched {}", a.label)
-                                        };
-                                        push_toast(&mut self.toasts, Toast {
-                                            text: msg.into(),
-                                            kind: ToastKind::Success,
-                                            options: ToastOptions::default()
-                                                .duration_in_seconds(self.toast_duration as f64),
-                                        });
-                                    }
+                            if self.enable_toasts && a.action != "recycle:clean" {
+                                let msg = if a.action.starts_with("clipboard:") {
+                                    format!("Copied {}", a.label)
+                                } else {
+                                    format!("Launched {}", a.label)
+                                };
+                                push_toast(&mut self.toasts, Toast {
+                                    text: msg.into(),
+                                    kind: ToastKind::Success,
+                                    options: ToastOptions::default()
+                                        .duration_in_seconds(self.toast_duration as f64),
+                                });
+                            }
                                     if a.action != "help:show" {
                                         let _ = history::append_history(
                                             HistoryEntry {
