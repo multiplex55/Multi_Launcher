@@ -3,7 +3,7 @@ use crate::plugins::note::{save_note, Note};
 use eframe::egui;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use slug::slugify;
+use crate::common::slug::slugify;
 
 #[derive(Clone)]
 pub struct NotePanel {
@@ -184,7 +184,7 @@ mod tests {
         });
 
         assert_eq!(app.note_panels.len(), 1);
-        assert_eq!(slug::slugify(&app.note_panels[0].note.title), "second-note");
+        assert_eq!(slugify(&app.note_panels[0].note.title), "second-note");
     }
 
     #[test]

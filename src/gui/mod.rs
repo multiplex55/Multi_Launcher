@@ -10,6 +10,7 @@ mod fav_dialog;
 mod macro_dialog;
 mod note_panel;
 mod notes_dialog;
+mod note_delete_dialog;
 mod shell_cmd_dialog;
 mod snippet_dialog;
 mod tempfile_alias_dialog;
@@ -32,6 +33,7 @@ pub use fav_dialog::FavDialog;
 pub use macro_dialog::MacroDialog;
 pub use note_panel::NotePanel;
 pub use notes_dialog::NotesDialog;
+pub use note_delete_dialog::NoteDeleteDialog;
 pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;
 pub use tempfile_alias_dialog::TempfileAliasDialog;
@@ -62,7 +64,6 @@ use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use slug::slugify;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -171,6 +172,7 @@ enum Panel {
     MacroDialog,
     FavDialog,
     NotesDialog,
+    NoteDeleteDialog,
     NotePanel,
     TodoDialog,
     TodoViewDialog,
@@ -201,6 +203,7 @@ struct PanelStates {
     macro_dialog: bool,
     fav_dialog: bool,
     notes_dialog: bool,
+    note_delete_dialog: bool,
     note_panel: bool,
     todo_dialog: bool,
     todo_view_dialog: bool,
@@ -271,6 +274,7 @@ pub struct LauncherApp {
     macro_dialog: MacroDialog,
     fav_dialog: FavDialog,
     notes_dialog: NotesDialog,
+    note_delete_dialog: NoteDeleteDialog,
     note_panels: Vec<NotePanel>,
     todo_dialog: TodoDialog,
     todo_view_dialog: TodoViewDialog,
@@ -607,6 +611,7 @@ impl LauncherApp {
             macro_dialog: MacroDialog::default(),
             fav_dialog: FavDialog::default(),
             notes_dialog: NotesDialog::default(),
+            note_delete_dialog: NoteDeleteDialog::default(),
             note_panels: Vec::new(),
             todo_dialog: TodoDialog::default(),
             todo_view_dialog: TodoViewDialog::default(),
@@ -1165,6 +1170,10 @@ impl LauncherApp {
                 self.notes_dialog.open = false;
                 self.panel_states.notes_dialog = false;
             }
+            Panel::NoteDeleteDialog => {
+                self.note_delete_dialog.open = false;
+                self.panel_states.note_delete_dialog = false;
+            }
             Panel::NotePanel => {
                 let _ = self.note_panels.pop();
                 self.panel_states.note_panel = false;
@@ -1277,6 +1286,11 @@ impl LauncherApp {
         check!(self.macro_dialog.open, macro_dialog, Panel::MacroDialog);
         check!(self.fav_dialog.open, fav_dialog, Panel::FavDialog);
         check!(self.notes_dialog.open, notes_dialog, Panel::NotesDialog);
+        check!(
+            self.note_delete_dialog.open,
+            note_delete_dialog,
+            Panel::NoteDeleteDialog
+        );
         check!(!self.note_panels.is_empty(), note_panel, Panel::NotePanel);
         check!(self.todo_dialog.open, todo_dialog, Panel::TodoDialog);
         check!(
@@ -2642,6 +2656,9 @@ impl eframe::App for LauncherApp {
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
         notes_dlg.ui(ctx, self);
         self.notes_dialog = notes_dlg;
+        let mut del_dlg = std::mem::take(&mut self.note_delete_dialog);
+        del_dlg.ui(ctx, self);
+        self.note_delete_dialog = del_dlg;
         let mut i = 0;
         while i < self.note_panels.len() {
             let mut panel = self.note_panels.remove(i);
@@ -2703,7 +2720,7 @@ impl LauncherApp {
         let note = load_notes()
             .unwrap_or_default()
             .into_iter()
-            .find(|n| slugify(&n.title) == slug)
+            .find(|n| n.slug == slug)
             .unwrap_or_else(|| {
                 let title = slug.replace('-', " ");
                 let content = format!("# {}\n\n", title);
@@ -2713,6 +2730,7 @@ impl LauncherApp {
                     content,
                     tags: Vec::new(),
                     links: Vec::new(),
+                    slug: String::new(),
                 }
             });
         let word_count = note.content.split_whitespace().count();
@@ -2776,37 +2794,7 @@ impl LauncherApp {
 
     /// Delete a note by its slug identifier.
     pub fn delete_note(&mut self, slug: &str) {
-        use crate::plugins::note::{load_notes, remove_note};
-        if let Ok(notes) = load_notes() {
-            if let Some((idx, note)) = notes
-                .into_iter()
-                .enumerate()
-                .find(|(_, n)| slugify(&n.title) == slug)
-            {
-                let word_count = note.content.split_whitespace().count();
-                if let Err(e) = remove_note(idx) {
-                    self.set_error(format!("Failed to remove note: {e}"));
-                } else {
-                    if self.enable_toasts {
-                        push_toast(
-                            &mut self.toasts,
-                            Toast {
-                                text: format!(
-                                    "Removed note {} ({} words)",
-                                    note.title, word_count
-                                )
-                                .into(),
-                                kind: ToastKind::Success,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(self.toast_duration as f64),
-                            },
-                        );
-                    }
-                    self.search();
-                    self.focus_input();
-                }
-            }
-        }
+        self.note_delete_dialog.open(slug.to_string());
     }
 
     /// Process dropped files or directories.
