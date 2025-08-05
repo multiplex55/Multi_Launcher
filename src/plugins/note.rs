@@ -6,7 +6,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use slug::slugify;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -21,11 +21,47 @@ pub struct Note {
 
 #[derive(Default)]
 pub struct NoteCache {
+    /// All loaded notes.
     pub notes: Vec<Note>,
+    /// Unique list of tags extracted from notes.
+    pub tags: Vec<String>,
+    /// Map of note slug -> notes that link to it (backlinks).
+    pub links: HashMap<String, Vec<String>>,
 }
 
+impl NoteCache {
+    fn from_notes(notes: Vec<Note>) -> Self {
+        let mut tag_set: HashSet<String> = HashSet::new();
+        let mut link_map: HashMap<String, Vec<String>> = HashMap::new();
+
+        for n in &notes {
+            let slug = slugify(&n.title);
+            for t in &n.tags {
+                tag_set.insert(t.clone());
+            }
+            for l in &n.links {
+                let entry = link_map.entry(l.clone()).or_default();
+                if !entry.contains(&slug) {
+                    entry.push(slug.clone());
+                }
+            }
+        }
+
+        let mut tags: Vec<String> = tag_set.into_iter().collect();
+        tags.sort();
+
+        Self {
+            notes,
+            tags,
+            links: link_map,
+        }
+    }
+}
+
+static CACHE: Lazy<Arc<Mutex<NoteCache>>> = Lazy::new(|| Arc::new(Mutex::new(NoteCache::default())));
+
 static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"#([A-Za-z0-9_]+)").unwrap());
-static LINK_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://\S+").unwrap());
+static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
 
 fn extract_tags(content: &str) -> Vec<String> {
     TAG_RE
@@ -35,10 +71,13 @@ fn extract_tags(content: &str) -> Vec<String> {
 }
 
 fn extract_links(content: &str) -> Vec<String> {
-    LINK_RE
-        .find_iter(content)
-        .map(|m| m.as_str().to_string())
-        .collect()
+    let mut links: Vec<String> = WIKI_RE
+        .captures_iter(content)
+        .map(|c| slugify(&c[1]))
+        .collect();
+    links.sort();
+    links.dedup();
+    links
 }
 
 fn notes_dir() -> PathBuf {
@@ -84,6 +123,15 @@ pub fn load_notes() -> anyhow::Result<Vec<Note>> {
     Ok(notes)
 }
 
+fn refresh_cache() -> anyhow::Result<()> {
+    let notes = load_notes()?;
+    let cache = NoteCache::from_notes(notes);
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = cache;
+    }
+    Ok(())
+}
+
 pub fn save_note(note: &Note) -> anyhow::Result<()> {
     let dir = notes_dir();
     std::fs::create_dir_all(&dir)?;
@@ -95,6 +143,7 @@ pub fn save_note(note: &Note) -> anyhow::Result<()> {
         format!("# {}\n\n{}", note.title, note.content)
     };
     std::fs::write(path, content)?;
+    refresh_cache()?;
     Ok(())
 }
 
@@ -119,6 +168,7 @@ pub fn save_notes(notes: &[Note]) -> anyhow::Result<()> {
             let _ = std::fs::remove_file(path);
         }
     }
+    refresh_cache()?;
     Ok(())
 }
 
@@ -138,6 +188,7 @@ pub fn remove_note(index: usize) -> anyhow::Result<()> {
     if let Some(note) = notes.get(index) {
         let _ = std::fs::remove_file(&note.path);
     }
+    refresh_cache()?;
     Ok(())
 }
 
@@ -148,12 +199,10 @@ pub struct NotePlugin {
 
 impl NotePlugin {
     pub fn new() -> Self {
-        let cache = NoteCache {
-            notes: load_notes().unwrap_or_default(),
-        };
+        let _ = refresh_cache();
         Self {
             matcher: SkimMatcherV2::default(),
-            data: Arc::new(Mutex::new(cache)),
+            data: CACHE.clone(),
         }
     }
 }
@@ -262,17 +311,14 @@ impl Plugin for NotePlugin {
                 }
                 "tags" => {
                     let filter = args;
-                    let mut tags: HashSet<String> = HashSet::new();
-                    for n in &guard.notes {
-                        for t in &n.tags {
-                            tags.insert(t.clone());
-                        }
-                    }
-                    let mut tags: Vec<String> = tags.into_iter().collect();
-                    if !filter.is_empty() {
-                        tags.retain(|t| self.matcher.fuzzy_match(t, filter).is_some());
-                    }
-                    tags.sort();
+                    let tags = guard
+                        .tags
+                        .iter()
+                        .filter(|t| {
+                            filter.is_empty() || self.matcher.fuzzy_match(t, filter).is_some()
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
                     return tags
                         .into_iter()
                         .map(|t| Action {
@@ -293,21 +339,25 @@ impl Plugin for NotePlugin {
                     }];
                 }
                 "link" => {
-                    let filter = args;
-                    return guard
-                        .notes
-                        .iter()
-                        .flat_map(|n| n.links.iter().cloned())
-                        .filter(|l| {
-                            filter.is_empty() || self.matcher.fuzzy_match(l, filter).is_some()
-                        })
-                        .map(|l| Action {
-                            label: l.clone(),
-                            desc: "Note".into(),
-                            action: format!("note:link:{l}"),
-                            args: None,
-                        })
-                        .collect();
+                    let target = slugify(args);
+                    if let Some(back) = guard.links.get(&target) {
+                        return back
+                            .iter()
+                            .filter_map(|slug| {
+                                guard
+                                    .notes
+                                    .iter()
+                                    .find(|n| slugify(&n.title) == *slug)
+                                    .map(|n| Action {
+                                        label: n.title.clone(),
+                                        desc: "Note".into(),
+                                        action: format!("note:open:{slug}"),
+                                        args: None,
+                                    })
+                            })
+                            .collect();
+                    }
+                    return Vec::new();
                 }
                 "delete" => {
                     let filter = args;
