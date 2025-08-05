@@ -75,6 +75,7 @@ impl NotesDialog {
                                         content: self.text.clone(),
                                         tags: Vec::new(),
                                         links: Vec::new(),
+                                        slug: String::new(),
                                     });
                                 } else if let Some(e) = self.entries.get_mut(idx) {
                                     e.content = self.text.clone();

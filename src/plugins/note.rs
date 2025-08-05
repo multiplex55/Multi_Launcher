@@ -5,7 +5,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use slug::slugify;
+use crate::common::slug::{register_slug, reset_slug_lookup, slugify, unique_slug};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -17,6 +17,7 @@ pub struct Note {
     pub content: String,
     pub tags: Vec<String>,
     pub links: Vec<String>,
+    pub slug: String,
 }
 
 #[derive(Default)]
@@ -35,7 +36,7 @@ impl NoteCache {
         let mut link_map: HashMap<String, Vec<String>> = HashMap::new();
 
         for n in &notes {
-            let slug = slugify(&n.title);
+            let slug = n.slug.clone();
             for t in &n.tags {
                 tag_set.insert(t.clone());
             }
@@ -91,6 +92,7 @@ fn notes_dir() -> PathBuf {
 pub fn load_notes() -> anyhow::Result<Vec<Note>> {
     let dir = notes_dir();
     std::fs::create_dir_all(&dir)?;
+    reset_slug_lookup();
     let mut notes = Vec::new();
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
@@ -98,18 +100,19 @@ pub fn load_notes() -> anyhow::Result<Vec<Note>> {
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
+        let slug = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        register_slug(&slug);
         let content = std::fs::read_to_string(&path)?;
         let title = content
             .lines()
             .next()
             .and_then(|l| l.strip_prefix("# "))
             .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .replace('-', " ")
-            });
+            .unwrap_or_else(|| slug.replace('-', " "));
         let tags = extract_tags(&content);
         let links = extract_links(&content);
         notes.push(Note {
@@ -118,6 +121,7 @@ pub fn load_notes() -> anyhow::Result<Vec<Note>> {
             content,
             tags,
             links,
+            slug,
         });
     }
     Ok(notes)
@@ -135,7 +139,13 @@ fn refresh_cache() -> anyhow::Result<()> {
 pub fn save_note(note: &Note) -> anyhow::Result<()> {
     let dir = notes_dir();
     std::fs::create_dir_all(&dir)?;
-    let slug = slugify(&note.title);
+    // Ensure slug lookup is aware of existing notes
+    let _ = load_notes();
+    let slug = if note.slug.is_empty() {
+        unique_slug(&note.title)
+    } else {
+        note.slug.clone()
+    };
     let path = dir.join(format!("{slug}.md"));
     let content = if note.content.starts_with("# ") {
         note.content.clone()
@@ -150,9 +160,19 @@ pub fn save_note(note: &Note) -> anyhow::Result<()> {
 pub fn save_notes(notes: &[Note]) -> anyhow::Result<()> {
     let dir = notes_dir();
     std::fs::create_dir_all(&dir)?;
+    reset_slug_lookup();
+    for n in notes {
+        if !n.slug.is_empty() {
+            register_slug(&n.slug);
+        }
+    }
     let mut expected = HashSet::new();
     for note in notes {
-        let slug = slugify(&note.title);
+        let slug = if note.slug.is_empty() {
+            unique_slug(&note.title)
+        } else {
+            note.slug.clone()
+        };
         let path = dir.join(format!("{slug}.md"));
         expected.insert(path.clone());
         let content = if note.content.starts_with("# ") {
@@ -179,6 +199,7 @@ pub fn append_note(title: &str, content: &str) -> anyhow::Result<()> {
         content: content.to_string(),
         tags: extract_tags(content),
         links: extract_links(content),
+        slug: String::new(),
     };
     save_note(&note)
 }
@@ -254,14 +275,11 @@ impl Plugin for NotePlugin {
                         .notes
                         .iter()
                         .filter(|n| self.matcher.fuzzy_match(&n.title, filter).is_some())
-                        .map(|n| {
-                            let slug = slugify(&n.title);
-                            Action {
-                                label: n.title.clone(),
-                                desc: "Note".into(),
-                                action: format!("note:open:{slug}"),
-                                args: None,
-                            }
+                        .map(|n| Action {
+                            label: n.title.clone(),
+                            desc: "Note".into(),
+                            action: format!("note:open:{}", n.slug),
+                            args: None,
                         })
                         .collect();
                 }
@@ -281,14 +299,11 @@ impl Plugin for NotePlugin {
                                 self.matcher.fuzzy_match(&n.title, filter).is_some()
                             }
                         })
-                        .map(|n| {
-                            let slug = slugify(&n.title);
-                            Action {
-                                label: n.title.clone(),
-                                desc: "Note".into(),
-                                action: format!("note:open:{slug}"),
-                                args: None,
-                            }
+                        .map(|n| Action {
+                            label: n.title.clone(),
+                            desc: "Note".into(),
+                            action: format!("note:open:{}", n.slug),
+                            args: None,
                         })
                         .collect();
                 }
@@ -298,14 +313,11 @@ impl Plugin for NotePlugin {
                         .notes
                         .iter()
                         .filter(|n| self.matcher.fuzzy_match(&n.content, filter).is_some())
-                        .map(|n| {
-                            let slug = slugify(&n.title);
-                            Action {
-                                label: n.title.clone(),
-                                desc: "Note".into(),
-                                action: format!("note:open:{slug}"),
-                                args: None,
-                            }
+                        .map(|n| Action {
+                            label: n.title.clone(),
+                            desc: "Note".into(),
+                            action: format!("note:open:{}", n.slug),
+                            args: None,
                         })
                         .collect();
                 }
@@ -347,7 +359,7 @@ impl Plugin for NotePlugin {
                                 guard
                                     .notes
                                     .iter()
-                                    .find(|n| slugify(&n.title) == *slug)
+                                    .find(|n| n.slug == *slug)
                                     .map(|n| Action {
                                         label: n.title.clone(),
                                         desc: "Note".into(),
@@ -365,14 +377,11 @@ impl Plugin for NotePlugin {
                         .notes
                         .iter()
                         .filter(|n| self.matcher.fuzzy_match(&n.title, filter).is_some())
-                        .map(|n| {
-                            let slug = slugify(&n.title);
-                            Action {
-                                label: format!("Delete {}", n.title),
-                                desc: "Note".into(),
-                                action: format!("note:delete:{slug}"),
-                                args: None,
-                            }
+                        .map(|n| Action {
+                            label: format!("Delete {}", n.title),
+                            desc: "Note".into(),
+                            action: format!("note:delete:{}", n.slug),
+                            args: None,
                         })
                         .collect();
                 }
