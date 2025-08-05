@@ -10,8 +10,8 @@ use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::plugin::Plugin;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use serde::{Deserialize, Serialize};
 use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 pub const TODO_FILE: &str = "todo.json";
@@ -372,19 +372,39 @@ impl Plugin for TodoPlugin {
 
         const LIST_PREFIX: &str = "todo list";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
-            let filter = rest.trim();
+            let mut filter = rest.trim();
             let guard = match self.data.lock() {
                 Ok(g) => g,
                 Err(_) => return Vec::new(),
             };
             let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
 
+            let mut negative = false;
+            if let Some(stripped) = filter.strip_prefix('!') {
+                negative = true;
+                filter = stripped.trim();
+            }
+
             let tag_filter = filter.starts_with('#');
             if tag_filter {
                 let tag = filter.trim_start_matches('#');
-                entries.retain(|(_, t)| t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(tag)));
+                entries.retain(|(_, t)| {
+                    let has_tag = t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(tag));
+                    if negative {
+                        !has_tag
+                    } else {
+                        has_tag
+                    }
+                });
             } else if !filter.is_empty() {
-                entries.retain(|(_, t)| self.matcher.fuzzy_match(&t.text, filter).is_some());
+                entries.retain(|(_, t)| {
+                    let text_match = self.matcher.fuzzy_match(&t.text, filter).is_some();
+                    if negative {
+                        !text_match
+                    } else {
+                        text_match
+                    }
+                });
             }
 
             if filter.is_empty() || tag_filter {
