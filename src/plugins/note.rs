@@ -67,6 +67,9 @@ impl NoteCache {
 static CACHE: Lazy<Arc<Mutex<NoteCache>>> =
     Lazy::new(|| Arc::new(Mutex::new(NoteCache::default())));
 
+static TEMPLATE_CACHE: Lazy<Arc<Mutex<HashMap<String, String>>>> =
+    Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+
 static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"#([A-Za-z0-9_]+)").unwrap());
 static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
 
@@ -85,6 +88,48 @@ fn extract_links(content: &str) -> Vec<String> {
     links.sort();
     links.dedup();
     links
+}
+
+fn templates_dir() -> PathBuf {
+    dirs_next::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".multi_launcher")
+        .join("templates")
+}
+
+fn load_templates() -> anyhow::Result<HashMap<String, String>> {
+    let dir = templates_dir();
+    let mut map = HashMap::new();
+    if dir.exists() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    map.insert(name.to_string(), content);
+                }
+            }
+        }
+    }
+    Ok(map)
+}
+
+fn refresh_template_cache() -> anyhow::Result<()> {
+    let templates = load_templates()?;
+    if let Ok(mut guard) = TEMPLATE_CACHE.lock() {
+        *guard = templates;
+    }
+    Ok(())
+}
+
+pub fn get_template(name: &str) -> Option<String> {
+    TEMPLATE_CACHE
+        .lock()
+        .ok()
+        .and_then(|m| m.get(name).cloned())
 }
 
 fn notes_dir() -> PathBuf {
@@ -222,14 +267,17 @@ pub fn remove_note(index: usize) -> anyhow::Result<()> {
 pub struct NotePlugin {
     matcher: SkimMatcherV2,
     data: Arc<Mutex<NoteCache>>,
+    templates: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl NotePlugin {
     pub fn new() -> Self {
         let _ = refresh_cache();
+        let _ = refresh_template_cache();
         Self {
             matcher: SkimMatcherV2::default(),
             data: CACHE.clone(),
+            templates: TEMPLATE_CACHE.clone(),
         }
     }
 }
@@ -266,13 +314,30 @@ impl Plugin for NotePlugin {
             match cmd.as_str() {
                 "new" => {
                     if !args.is_empty() {
-                        let slug = slugify(args);
-                        return vec![Action {
-                            label: format!("New note {args}"),
-                            desc: "Note".into(),
-                            action: format!("note:new:{slug}"),
-                            args: None,
-                        }];
+                        let mut title = args;
+                        let mut template = None;
+                        if let Some(idx) = args.to_ascii_lowercase().find("--template") {
+                            let (t, rest) = args.split_at(idx);
+                            title = t.trim();
+                            let mut iter = rest["--template".len()..].trim().split_whitespace();
+                            if let Some(name) = iter.next() {
+                                template = Some(name.to_string());
+                            }
+                        }
+                        if !title.is_empty() {
+                            let slug = slugify(title);
+                            let action = if let Some(tpl) = template {
+                                format!("note:new:{slug}:{tpl}")
+                            } else {
+                                format!("note:new:{slug}")
+                            };
+                            return vec![Action {
+                                label: format!("New note {title}"),
+                                desc: "Note".into(),
+                                action,
+                                args: None,
+                            }];
+                        }
                     }
                 }
                 "open" => {
@@ -358,10 +423,28 @@ impl Plugin for NotePlugin {
                 }
                 "today" => {
                     let slug = Local::now().format("%Y-%m-%d").to_string();
+                    let tmpl = self
+                        .templates
+                        .lock()
+                        .ok()
+                        .and_then(|t| {
+                            if t.contains_key("today") {
+                                Some("today")
+                            } else if t.contains_key("default") {
+                                Some("default")
+                            } else {
+                                None
+                            }
+                        });
+                    let action = if let Some(t) = tmpl {
+                        format!("note:new:{slug}:{t}")
+                    } else {
+                        format!("note:open:{slug}")
+                    };
                     return vec![Action {
                         label: format!("Open {slug}"),
                         desc: "Note".into(),
-                        action: format!("note:open:{slug}"),
+                        action,
                         args: None,
                     }];
                 }
@@ -399,6 +482,27 @@ impl Plugin for NotePlugin {
                             args: None,
                         })
                         .collect();
+                }
+                "templates" => {
+                    let filter = args;
+                    if let Ok(tpl) = self.templates.lock() {
+                        return tpl
+                            .keys()
+                            .filter(|name| {
+                                if filter.is_empty() {
+                                    true
+                                } else {
+                                    self.matcher.fuzzy_match(name, filter).is_some()
+                                }
+                            })
+                            .map(|name| Action {
+                                label: name.clone(),
+                                desc: "Note".into(),
+                                action: format!("query:note new --template {name} "),
+                                args: None,
+                            })
+                            .collect();
+                    }
                 }
                 _ => {}
             }
@@ -455,6 +559,12 @@ impl Plugin for NotePlugin {
                 label: "note tags".into(),
                 desc: "Note".into(),
                 action: "query:note tags".into(),
+                args: None,
+            },
+            Action {
+                label: "note templates".into(),
+                desc: "Note".into(),
+                action: "query:note templates".into(),
                 args: None,
             },
             Action {

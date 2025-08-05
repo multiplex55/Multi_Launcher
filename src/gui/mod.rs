@@ -1674,10 +1674,12 @@ impl eframe::App for LauncherApp {
                             self.clipboard_dialog.open();
                         } else if let Some(slug) = a.action.strip_prefix("note:open:") {
                             let slug = slug.to_string();
-                            self.open_note_panel(&slug);
-                        } else if let Some(slug) = a.action.strip_prefix("note:new:") {
-                            let slug = slug.to_string();
-                            self.open_note_panel(&slug);
+                            self.open_note_panel(&slug, None);
+                        } else if let Some(rest) = a.action.strip_prefix("note:new:") {
+                            let mut parts = rest.splitn(2, ':');
+                            let slug = parts.next().unwrap_or("").to_string();
+                            let template = parts.next().map(|s| s.to_string());
+                            self.open_note_panel(&slug, template.as_deref());
                         } else if a.action == "note:tags" {
                             self.open_note_tags();
                             set_focus = true;
@@ -2244,7 +2246,7 @@ impl eframe::App for LauncherApp {
                                 let slug = a.action.rsplit(':').next().unwrap_or("").to_string();
                                 menu_resp.clone().context_menu(|ui| {
                                     if ui.button("Edit Note").clicked() {
-                                        self.open_note_panel(&slug);
+                                        self.open_note_panel(&slug, None);
                                         ui.close_menu();
                                     }
                                     if ui.button("Remove Note").clicked() {
@@ -2355,10 +2357,12 @@ impl eframe::App for LauncherApp {
                             self.clipboard_dialog.open();
                         } else if let Some(slug) = a.action.strip_prefix("note:open:") {
                             let slug = slug.to_string();
-                            self.open_note_panel(&slug);
-                        } else if let Some(slug) = a.action.strip_prefix("note:new:") {
-                            let slug = slug.to_string();
-                            self.open_note_panel(&slug);
+                            self.open_note_panel(&slug, None);
+                        } else if let Some(rest) = a.action.strip_prefix("note:new:") {
+                            let mut parts = rest.splitn(2, ':');
+                            let slug = parts.next().unwrap_or("").to_string();
+                            let template = parts.next().map(|s| s.to_string());
+                            self.open_note_panel(&slug, template.as_deref());
                         } else if a.action == "note:tags" {
                             self.open_note_tags();
                             set_focus = true;
@@ -2714,16 +2718,31 @@ impl LauncherApp {
         &self.rx
     }
 
-    /// Open a note panel for the given slug.
-    pub fn open_note_panel(&mut self, slug: &str) {
-        use crate::plugins::note::{load_notes, Note};
+    /// Open a note panel for the given slug, optionally using a template for new notes.
+    pub fn open_note_panel(&mut self, slug: &str, template: Option<&str>) {
+        use crate::plugins::note::{get_template, load_notes, Note};
         let note = load_notes()
             .unwrap_or_default()
             .into_iter()
             .find(|n| n.slug == slug)
             .unwrap_or_else(|| {
                 let title = slug.replace('-', " ");
-                let content = format!("# {}\n\n", title);
+                let content = if let Some(tpl_name) = template {
+                    if let Some(tpl) = get_template(tpl_name) {
+                        let filled = tpl
+                            .replace("{{title}}", &title)
+                            .replace("{{date}}", slug);
+                        if filled.starts_with("# ") {
+                            filled
+                        } else {
+                            format!("# {}\n\n{}", title, filled)
+                        }
+                    } else {
+                        format!("# {}\n\n", title)
+                    }
+                } else {
+                    format!("# {}\n\n", title)
+                };
                 Note {
                     title,
                     path: std::path::PathBuf::new(),

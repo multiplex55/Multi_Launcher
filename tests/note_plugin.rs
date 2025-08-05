@@ -123,3 +123,28 @@ fn cache_updates_after_changes() {
     let results = plugin.search("note list");
     assert_eq!(results.len(), 0);
 }
+
+#[test]
+fn templates_list_and_new_with_template() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    setup();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let old_home = std::env::var("HOME").unwrap_or_default();
+    std::env::set_var("HOME", tmp.path());
+    let tdir = tmp.path().join(".multi_launcher").join("templates");
+    std::fs::create_dir_all(&tdir).unwrap();
+    std::fs::write(tdir.join("demo.md"), "# {{title}}\n\nhello").unwrap();
+
+    let plugin = NotePlugin::default();
+    let results = plugin.search("note templates");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].label, "demo");
+    assert_eq!(results[0].action, "query:note new --template demo ");
+
+    let results = plugin.search("note new sample --template demo");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "note:new:sample:demo");
+
+    std::env::set_var("HOME", old_home);
+}
