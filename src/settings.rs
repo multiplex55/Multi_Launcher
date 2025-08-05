@@ -1,6 +1,7 @@
 use crate::hotkey::Key;
 
 use crate::hotkey::{parse_hotkey, Hotkey};
+use crate::gui::Panel;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -140,6 +141,8 @@ pub struct Settings {
     pub screenshot_save_file: bool,
     #[serde(default)]
     pub plugin_settings: std::collections::HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub pinned_panels: Vec<Panel>,
 }
 
 fn default_toasts() -> bool {
@@ -254,6 +257,7 @@ impl Default for Settings {
             ),
             screenshot_save_file: true,
             plugin_settings: std::collections::HashMap::new(),
+            pinned_panels: Vec::new(),
         }
     }
 }

@@ -225,6 +225,7 @@ impl SettingsEditor {
             screenshot_save_file: self.screenshot_save_file,
             plugin_settings: self.plugin_settings.clone(),
             show_examples: current.show_examples,
+            pinned_panels: current.pinned_panels.clone(),
         }
     }
 
