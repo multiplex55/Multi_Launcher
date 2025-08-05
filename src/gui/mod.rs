@@ -1636,6 +1636,7 @@ impl eframe::App for LauncherApp {
                     && !self.notes_dialog.open
                     && !self.todo_dialog.open
                     && !self.todo_view_dialog.open
+                    && self.note_panels.is_empty()
                 {
                     launch_idx = self.handle_key(egui::Key::Enter);
                 }

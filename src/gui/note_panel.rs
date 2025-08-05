@@ -33,8 +33,12 @@ impl NotePanel {
                 let resp = ui.add(
                     egui::TextEdit::multiline(&mut self.note.content)
                         .desired_width(f32::INFINITY)
-                        .desired_rows(15),
+                        .desired_rows(15)
+                        .id_source("note_content"),
                 );
+                if !ctx.memory(|m| m.has_focus(resp.id)) {
+                    resp.request_focus();
+                }
                 if resp.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
                     let modifiers = ctx.input(|i| i.modifiers);
                     ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
@@ -233,6 +237,71 @@ mod tests {
         });
 
         assert!(app.note_panels.is_empty());
+    }
+
+    #[test]
+    fn enter_in_note_panel_inserts_newline_without_query_execution() {
+        use crate::actions::Action;
+        use crate::plugins::note::Note;
+        use std::path::PathBuf;
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+
+        app.query = "initial".into();
+        app.results = vec![Action {
+            label: "test".into(),
+            desc: String::new(),
+            action: "query:changed".into(),
+            args: None,
+        }];
+        app.selected = Some(0);
+
+        let note = Note {
+            title: "Title".into(),
+            path: PathBuf::new(),
+            content: String::from("line1"),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: String::new(),
+        };
+        app.note_panels.push(NotePanel::from_note(note));
+
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |_ui| {
+                let mut panel = app.note_panels.remove(0);
+                panel.ui(ctx, &mut app);
+                app.note_panels.insert(0, panel);
+            });
+        });
+
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        input.events.push(egui::Event::Text("\n".into()));
+        input.events.push(egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        });
+
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |_ui| {
+                let mut panel = app.note_panels.remove(0);
+                panel.ui(ctx, &mut app);
+                app.note_panels.insert(0, panel);
+            });
+        });
+
+        assert_eq!(app.query, "initial");
+        assert_eq!(app.note_panels[0].note.content, "line1\n");
     }
 
     #[test]
