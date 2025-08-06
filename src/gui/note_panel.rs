@@ -3,15 +3,17 @@ use crate::gui::LauncherApp;
 use crate::plugin::Plugin;
 use crate::plugins::note::{load_notes, save_note, Note, NotePlugin};
 use eframe::egui::{self, Color32};
+use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use url::Url;
 
-#[derive(Clone)]
 pub struct NotePanel {
     pub open: bool,
     note: Note,
     link_search: String,
+    preview_mode: bool,
+    markdown_cache: CommonMarkCache,
 }
 
 impl NotePanel {
@@ -20,6 +22,8 @@ impl NotePanel {
             open: true,
             note,
             link_search: String::new(),
+            preview_mode: false,
+            markdown_cache: CommonMarkCache::default(),
         }
     }
 
@@ -37,56 +41,84 @@ impl NotePanel {
             .min_height(150.0)
             .movable(true)
             .show(ctx, |ui| {
+                let content_id = egui::Id::new("note_content");
                 let resp = egui::ScrollArea::vertical()
                     .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.note.content)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(15)
-                                .id_source("note_content"),
-                        )
+                        if self.preview_mode {
+                            CommonMarkViewer::new("note_content").show(
+                                ui,
+                                &mut self.markdown_cache,
+                                &self.note.content,
+                            );
+                            None
+                        } else {
+                            Some(
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut self.note.content)
+                                        .desired_width(f32::INFINITY)
+                                        .desired_rows(15)
+                                        .id_source(content_id),
+                                ),
+                            )
+                        }
                     })
                     .inner;
-                resp.context_menu(|ui| {
-                    ui.set_min_width(200.0);
-                    ui.label("Insert link:");
-                    ui.text_edit_singleline(&mut self.link_search);
-                    let plugin = NotePlugin::default();
-                    let results = plugin.search(&format!("note open {}", self.link_search));
-                    for action in results.into_iter().take(10) {
-                        let title = action.label.clone();
-                        if ui.button(&title).clicked() {
-                            let insert = format!("[[{title}]]");
-                            let mut state =
-                                egui::widgets::text_edit::TextEditState::load(ui.ctx(), resp.id)
+                if !self.preview_mode {
+                    if let Some(resp) = resp {
+                        resp.context_menu(|ui| {
+                            ui.set_min_width(200.0);
+                            ui.label("Insert link:");
+                            ui.text_edit_singleline(&mut self.link_search);
+                            let plugin = NotePlugin::default();
+                            let results = plugin.search(&format!("note open {}", self.link_search));
+                            for action in results.into_iter().take(10) {
+                                let title = action.label.clone();
+                                if ui.button(&title).clicked() {
+                                    let insert = format!("[[{title}]]");
+                                    let mut state = egui::widgets::text_edit::TextEditState::load(
+                                        ui.ctx(),
+                                        resp.id,
+                                    )
                                     .unwrap_or_default();
-                            let idx = state
-                                .cursor
-                                .char_range()
-                                .map(|r| r.primary.index)
-                                .unwrap_or_else(|| self.note.content.chars().count());
-                            self.note.content.insert_str(idx, &insert);
-                            state
-                                .cursor
-                                .set_char_range(Some(egui::text::CCursorRange::one(
-                                    egui::text::CCursor::new(idx + insert.chars().count()),
-                                )));
-                            state.store(ui.ctx(), resp.id);
-                            self.link_search.clear();
-                            ui.close_menu();
+                                    let idx = state
+                                        .cursor
+                                        .char_range()
+                                        .map(|r| r.primary.index)
+                                        .unwrap_or_else(|| self.note.content.chars().count());
+                                    self.note.content.insert_str(idx, &insert);
+                                    state.cursor.set_char_range(Some(
+                                        egui::text::CCursorRange::one(egui::text::CCursor::new(
+                                            idx + insert.chars().count(),
+                                        )),
+                                    ));
+                                    state.store(ui.ctx(), resp.id);
+                                    self.link_search.clear();
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        if resp.clicked() {
+                            resp.request_focus();
+                        }
+                        if resp.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            let modifiers = ctx.input(|i| i.modifiers);
+                            ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
                         }
                     }
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        save_now = true;
+                    }
+                    if self.preview_mode {
+                        if ui.button("Edit").clicked() {
+                            self.preview_mode = false;
+                            ui.ctx().memory_mut(|m| m.request_focus(content_id));
+                        }
+                    } else if ui.button("Render").clicked() {
+                        self.preview_mode = true;
+                    }
                 });
-                if resp.clicked() {
-                    resp.request_focus();
-                }
-                if resp.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    let modifiers = ctx.input(|i| i.modifiers);
-                    ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
-                }
-                if ui.button("Save").clicked() {
-                    save_now = true;
-                }
                 ui.separator();
                 let tags = extract_tags(&self.note.content);
                 if !tags.is_empty() {
