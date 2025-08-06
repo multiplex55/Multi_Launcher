@@ -33,16 +33,24 @@ impl NotePanel {
         }
         let mut open = self.open;
         let mut save_now = false;
+        let screen_rect = ctx.available_rect();
+        let max_width = screen_rect.width().min(800.0);
+        let max_height = screen_rect.height().min(600.0);
         egui::Window::new(self.note.title.clone())
             .open(&mut open)
             .resizable(true)
             .default_size(app.note_panel_default_size)
             .min_width(200.0)
             .min_height(150.0)
+            .max_width(max_width)
+            .max_height(max_height)
             .movable(true)
             .show(ctx, |ui| {
                 let content_id = egui::Id::new("note_content");
-                let resp = egui::ScrollArea::vertical()
+                let resp = egui::ScrollArea::both()
+                    // Keep panel size fixed and allow scrolling when content
+                    // exceeds the available space.
+                    .auto_shrink([false; 2])
                     .show(ui, |ui| {
                         if self.preview_mode {
                             CommonMarkViewer::new("note_content").show(
@@ -52,14 +60,11 @@ impl NotePanel {
                             );
                             None
                         } else {
-                            Some(
-                                ui.add(
-                                    egui::TextEdit::multiline(&mut self.note.content)
-                                        .desired_width(f32::INFINITY)
-                                        .desired_rows(15)
-                                        .id_source(content_id),
-                                ),
-                            )
+                            Some(ui.add_sized(
+                                ui.available_size(),
+                                egui::TextEdit::multiline(&mut self.note.content)
+                                    .id_source(content_id),
+                            ))
                         }
                     })
                     .inner;
