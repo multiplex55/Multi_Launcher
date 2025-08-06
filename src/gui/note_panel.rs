@@ -47,13 +47,13 @@ impl NotePanel {
             .movable(true)
             .show(ctx, |ui| {
                 let content_id = egui::Id::new("note_content");
-                let window_size = ui.max_rect().size();
+                let viewport = ui.available_size();
                 let resp = egui::ScrollArea::both()
                     .auto_shrink([false; 2])
                     // Keep panel size fixed to the user's chosen window size
                     // and allow the contents to scroll when they exceed it.
                     .show(ui, |ui| {
-                        ui.set_min_size(window_size);
+                        ui.set_min_size(viewport);
                         if self.preview_mode {
                             CommonMarkViewer::new("note_content").show(
                                 ui,
@@ -62,11 +62,13 @@ impl NotePanel {
                             );
                             None
                         } else {
-                            Some(ui.add(
-                                egui::TextEdit::multiline(&mut self.note.content)
-                                    .id_source(content_id)
-                                    .desired_width(f32::INFINITY),
-                            ))
+                            Some(
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut self.note.content)
+                                        .id_source(content_id)
+                                        .desired_width(f32::INFINITY),
+                                ),
+                            )
                         }
                     })
                     .inner;
