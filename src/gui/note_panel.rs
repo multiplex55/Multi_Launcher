@@ -42,27 +42,29 @@ impl NotePanel {
             .movable(true)
             .show(ctx, |ui| {
                 let content_id = egui::Id::new("note_content");
-                let resp = egui::ScrollArea::vertical()
-                    .show(ui, |ui| {
-                        if self.preview_mode {
+                let available_size = ui.available_size();
+                let resp = if self.preview_mode {
+                    egui::ScrollArea::both()
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            ui.set_min_size(available_size);
                             CommonMarkViewer::new("note_content").show(
                                 ui,
                                 &mut self.markdown_cache,
                                 &self.note.content,
                             );
-                            None
-                        } else {
-                            Some(
-                                ui.add(
-                                    egui::TextEdit::multiline(&mut self.note.content)
-                                        .desired_width(f32::INFINITY)
-                                        .desired_rows(15)
-                                        .id_source(content_id),
-                                ),
-                            )
-                        }
-                    })
-                    .inner;
+                        });
+                    None
+                } else {
+                    Some(
+                        ui.add_sized(
+                            available_size,
+                            egui::TextEdit::multiline(&mut self.note.content)
+                                .desired_width(f32::INFINITY)
+                                .id_source(content_id),
+                        ),
+                    )
+                };
                 if !self.preview_mode {
                     if let Some(resp) = resp {
                         resp.context_menu(|ui| {
