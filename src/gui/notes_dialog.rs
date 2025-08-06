@@ -53,22 +53,27 @@ impl NotesDialog {
             .show(ctx, |ui| {
                 if let Some(idx) = self.edit_idx {
                     ui.label("Text");
-                    let resp = ui.add(
-                        egui::TextEdit::multiline(&mut self.text)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(10),
-                    );
-                    if resp.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        let modifiers = ctx.input(|i| i.modifiers);
-                        ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
-                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(ui.available_height())
+                        .show(ui, |ui| {
+                            let resp = ui.add(
+                                egui::TextEdit::multiline(&mut self.text)
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(10),
+                            );
+                            if resp.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                let modifiers = ctx.input(|i| i.modifiers);
+                                ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+                            }
+                        });
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.text.trim().is_empty() {
                                 app.set_error("Text required".into());
                             } else {
                                 if idx == self.entries.len() {
-                                    let title = self.text.lines().next().unwrap_or("untitled").to_string();
+                                    let title =
+                                        self.text.lines().next().unwrap_or("untitled").to_string();
                                     self.entries.push(Note {
                                         title,
                                         path: std::path::PathBuf::new(),
@@ -79,7 +84,8 @@ impl NotesDialog {
                                     });
                                 } else if let Some(e) = self.entries.get_mut(idx) {
                                     e.content = self.text.clone();
-                                    e.title = self.text.lines().next().unwrap_or(&e.title).to_string();
+                                    e.title =
+                                        self.text.lines().next().unwrap_or(&e.title).to_string();
                                 }
                                 self.edit_idx = None;
                                 self.text.clear();
