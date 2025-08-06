@@ -1,7 +1,7 @@
 use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
-use crate::plugins::note::{load_notes, save_note, Note, NotePlugin};
 use crate::plugin::Plugin;
+use crate::plugins::note::{load_notes, save_note, Note, NotePlugin};
 use eframe::egui::{self, Color32};
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -66,9 +66,11 @@ impl NotePanel {
                                 .map(|r| r.primary.index)
                                 .unwrap_or_else(|| self.note.content.chars().count());
                             self.note.content.insert_str(idx, &insert);
-                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
-                                egui::text::CCursor::new(idx + insert.chars().count()),
-                            )));
+                            state
+                                .cursor
+                                .set_char_range(Some(egui::text::CCursorRange::one(
+                                    egui::text::CCursor::new(idx + insert.chars().count()),
+                                )));
                             state.store(ui.ctx(), resp.id);
                             self.link_search.clear();
                             ui.close_menu();
@@ -120,7 +122,7 @@ impl NotePanel {
                     self.note.title = t.to_string();
                 }
             }
-            if let Err(e) = save_note(&self.note) {
+            if let Err(e) = save_note(&mut self.note) {
                 app.set_error(format!("Failed to save note: {e}"));
             } else {
                 app.search();
@@ -156,16 +158,18 @@ pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui
 
 fn extract_tags(content: &str) -> Vec<String> {
     static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"#([A-Za-z0-9_]+)").unwrap());
-    TAG_RE
+    let mut tags: Vec<String> = TAG_RE
         .captures_iter(content)
         .map(|c| c[1].to_string())
-        .collect()
+        .collect();
+    tags.sort();
+    tags.dedup();
+    tags
 }
 
 pub fn extract_links(content: &str) -> Vec<String> {
-    static LINK_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"([a-zA-Z][a-zA-Z0-9+.-]*://\S+|www\.\S+)").unwrap()
-    });
+    static LINK_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"([a-zA-Z][a-zA-Z0-9+.-]*://\S+|www\.\S+)").unwrap());
     LINK_RE
         .find_iter(content)
         .filter_map(|m| {

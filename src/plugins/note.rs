@@ -74,10 +74,13 @@ static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"#([A-Za-z0-9_]+)").unwrap
 static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
 
 fn extract_tags(content: &str) -> Vec<String> {
-    TAG_RE
+    let mut tags: Vec<String> = TAG_RE
         .captures_iter(content)
         .map(|c| c[1].to_string())
-        .collect()
+        .collect();
+    tags.sort();
+    tags.dedup();
+    tags
 }
 
 fn extract_links(content: &str) -> Vec<String> {
@@ -190,7 +193,7 @@ fn refresh_cache() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn save_note(note: &Note) -> anyhow::Result<()> {
+pub fn save_note(note: &mut Note) -> anyhow::Result<()> {
     let dir = notes_dir();
     std::fs::create_dir_all(&dir)?;
     // Ensure slug lookup is aware of existing notes
@@ -206,6 +209,7 @@ pub fn save_note(note: &Note) -> anyhow::Result<()> {
     } else {
         format!("# {}\n\n{}", note.title, note.content)
     };
+    note.tags = extract_tags(&content);
     std::fs::write(path, content)?;
     refresh_cache()?;
     Ok(())
@@ -247,7 +251,7 @@ pub fn save_notes(notes: &[Note]) -> anyhow::Result<()> {
 }
 
 pub fn append_note(title: &str, content: &str) -> anyhow::Result<()> {
-    let note = Note {
+    let mut note = Note {
         title: title.to_string(),
         path: PathBuf::new(),
         content: content.to_string(),
@@ -255,7 +259,7 @@ pub fn append_note(title: &str, content: &str) -> anyhow::Result<()> {
         links: extract_links(content),
         slug: String::new(),
     };
-    save_note(&note)
+    save_note(&mut note)
 }
 
 pub fn remove_note(index: usize) -> anyhow::Result<()> {

@@ -3,7 +3,7 @@ use eframe::egui;
 use multi_launcher::gui::{extract_links, show_wiki_link, LauncherApp};
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugin::PluginManager;
-use multi_launcher::plugins::note::{append_note, save_notes, NotePlugin};
+use multi_launcher::plugins::note::{append_note, load_notes, save_notes, NotePlugin};
 use multi_launcher::settings::Settings;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
@@ -125,6 +125,17 @@ fn note_tags_parses_edge_cases() {
     assert!(labels.contains(&"#bar".to_string()));
     assert!(labels.contains(&"#baz_1".to_string()));
     assert!(labels.contains(&"#dup".to_string()));
+    let notes = load_notes().unwrap();
+    let note = notes.iter().find(|n| n.title == "alpha").unwrap();
+    assert_eq!(
+        note.tags,
+        vec![
+            "bar".to_string(),
+            "baz_1".to_string(),
+            "dup".to_string(),
+            "foo".to_string(),
+        ]
+    );
     let list_results = plugin.search("note list #bar");
     assert_eq!(list_results.len(), 1);
     assert_eq!(list_results[0].action, "note:open:alpha");
