@@ -47,13 +47,13 @@ impl NotePanel {
             .movable(true)
             .show(ctx, |ui| {
                 let content_id = egui::Id::new("note_content");
-                let viewport = ui.available_size();
-                let resp = egui::ScrollArea::both()
-                    .auto_shrink([false; 2])
-                    // Keep panel size fixed to the user's chosen window size
-                    // and allow the contents to scroll when they exceed it.
-                    .show(ui, |ui| {
-                        ui.set_min_size(viewport);
+                let total_available = ui.available_size();
+                let footer_reserved_height = 90.0; // space for buttons and metadata
+                let scrollable_height = total_available.y - footer_reserved_height;
+                let resp = egui::ScrollArea::vertical()
+                    .id_source(content_id)
+                    .show_viewport(ui, |ui, _viewport| {
+                        ui.set_min_height(scrollable_height);
                         if self.preview_mode {
                             CommonMarkViewer::new("note_content").show(
                                 ui,
@@ -66,14 +66,16 @@ impl NotePanel {
                                 ui.add(
                                     egui::TextEdit::multiline(&mut self.note.content)
                                         .id_source(content_id)
-                                        .desired_width(f32::INFINITY),
+                                        .desired_width(f32::INFINITY)
+                                        .frame(true)
+                                        .lock_focus(true)
+                                        .desired_rows(10),
                                 ),
                             )
                         }
-                    })
-                    .inner;
+                    });
                 if !self.preview_mode {
-                    if let Some(resp) = resp {
+                    if let Some(resp) = resp.inner {
                         resp.context_menu(|ui| {
                             ui.set_min_width(200.0);
                             ui.label("Insert link:");
