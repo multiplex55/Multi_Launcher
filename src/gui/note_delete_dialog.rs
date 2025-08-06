@@ -52,12 +52,10 @@ impl NoteDeleteDialog {
                                             },
                                         );
                                     }
-                                    if app.notes_dialog.open {
-                                        app.notes_dialog.open();
-                                    }
+                                    app.notes_dialog.open();
+                                    app.search();
+                                    app.focus_input();
                                 }
-                                app.search();
-                                app.focus_input();
                             }
                         }
                         self.open = false;
