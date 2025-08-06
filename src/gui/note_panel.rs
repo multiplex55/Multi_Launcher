@@ -42,7 +42,8 @@ impl NotePanel {
             .movable(true)
             .show(ctx, |ui| {
                 let content_id = egui::Id::new("note_content");
-                let resp = egui::ScrollArea::vertical()
+                let resp = egui::ScrollArea::both()
+                    .auto_shrink([false; 2])
                     .show(ui, |ui| {
                         if self.preview_mode {
                             CommonMarkViewer::new("note_content").show(
@@ -55,7 +56,7 @@ impl NotePanel {
                             Some(
                                 ui.add(
                                     egui::TextEdit::multiline(&mut self.note.content)
-                                        .desired_width(f32::INFINITY)
+                                        .desired_width(ui.available_width())
                                         .desired_rows(15)
                                         .id_source(content_id),
                                 ),
