@@ -33,17 +33,27 @@ impl NotePanel {
         }
         let mut open = self.open;
         let mut save_now = false;
+        let screen_rect = ctx.available_rect();
+        let max_width = screen_rect.width().min(800.0);
+        let max_height = screen_rect.height().min(600.0);
         egui::Window::new(self.note.title.clone())
             .open(&mut open)
             .resizable(true)
             .default_size(app.note_panel_default_size)
             .min_width(200.0)
             .min_height(150.0)
+            .max_width(max_width)
+            .max_height(max_height)
             .movable(true)
             .show(ctx, |ui| {
                 let content_id = egui::Id::new("note_content");
+                let total_available = ui.available_size();
+                let footer_reserved_height = 90.0; // space for buttons and metadata
+                let scrollable_height = total_available.y - footer_reserved_height;
                 let resp = egui::ScrollArea::vertical()
-                    .show(ui, |ui| {
+                    .id_source(content_id)
+                    .show_viewport(ui, |ui, _viewport| {
+                        ui.set_min_height(scrollable_height);
                         if self.preview_mode {
                             CommonMarkViewer::new("note_content").show(
                                 ui,
@@ -55,16 +65,17 @@ impl NotePanel {
                             Some(
                                 ui.add(
                                     egui::TextEdit::multiline(&mut self.note.content)
+                                        .id_source(content_id)
                                         .desired_width(f32::INFINITY)
-                                        .desired_rows(15)
-                                        .id_source(content_id),
+                                        .frame(true)
+                                        .lock_focus(true)
+                                        .desired_rows(10),
                                 ),
                             )
                         }
-                    })
-                    .inner;
+                    });
                 if !self.preview_mode {
-                    if let Some(resp) = resp {
+                    if let Some(resp) = resp.inner {
                         resp.context_menu(|ui| {
                             ui.set_min_width(200.0);
                             ui.label("Insert link:");
