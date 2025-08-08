@@ -15,10 +15,11 @@ fn new_app_with_settings(
 ) -> (LauncherApp, Arc<AtomicBool>) {
     let custom_len = actions.len();
     let visible = Arc::new(AtomicBool::new(true));
+    let actions_arc = Arc::new(actions);
     (
         LauncherApp::new(
             ctx,
-            actions,
+            actions_arc,
             custom_len,
             PluginManager::new(),
             "actions.json".into(),

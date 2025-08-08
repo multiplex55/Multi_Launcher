@@ -32,8 +32,15 @@ pub fn request_hotkey_restart(settings: Settings) {
     }
 }
 
+/// Spawn the GUI on a separate thread.
+///
+/// `actions` is wrapped in an [`Arc`] so the main thread and GUI worker can
+/// share a single action list without copying the underlying `Vec`. Cloning the
+/// `Arc` only clones the pointer, leaving the `Vec<Action>` itself shared for
+/// thread-safe reads. When passing the list to other threads or windows,
+/// callers should [`Arc::clone`] the pointer instead of cloning the vector.
 fn spawn_gui(
-    actions: Vec<Action>,
+    actions: Arc<Vec<Action>>,
     custom_len: usize,
     settings: Settings,
     settings_path: String,
@@ -45,19 +52,17 @@ fn spawn_gui(
     Arc<AtomicBool>,
     Arc<Mutex<Option<egui::Context>>>,
 ) {
-    let actions_for_window = actions.clone();
     let custom_len_for_window = custom_len;
     let mut plugins = PluginManager::new();
     let empty_dirs = Vec::new();
     let dirs = settings.plugin_dirs.as_ref().unwrap_or(&empty_dirs);
-    let actions_arc = Arc::new(actions_for_window.clone());
     plugins.reload_from_dirs(
         dirs,
         settings.clipboard_limit,
         settings.net_unit,
         true,
         &settings.plugin_settings,
-        actions_arc,
+        Arc::clone(&actions),
     );
 
     let actions_path = "actions.json".to_string();
@@ -73,6 +78,7 @@ fn spawn_gui(
     let help_clone = help_flag.clone();
     let ctx_handle = Arc::new(Mutex::new(None));
     let ctx_clone = ctx_handle.clone();
+    let actions_for_window = Arc::clone(&actions);
 
     let handle = thread::spawn(move || {
         let (w, h) = settings.window_size.unwrap_or((400, 220));
@@ -136,9 +142,9 @@ fn main() -> anyhow::Result<()> {
     let mut settings = Settings::load("settings.json").unwrap_or_default();
     logging::init(settings.debug_logging, settings.log_file_path());
     tracing::debug!(?settings, "settings loaded");
-    let mut actions = load_actions("actions.json").unwrap_or_default();
-    let custom_len = actions.len();
-    tracing::debug!("{} actions loaded", actions.len());
+    let mut actions_vec = load_actions("actions.json").unwrap_or_default();
+    let custom_len = actions_vec.len();
+    tracing::debug!("{} actions loaded", actions_vec.len());
 
     let (restart_tx, restart_rx) = channel::<Settings>();
     if let Ok(mut guard) = RESTART_TX.lock() {
@@ -148,8 +154,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Some(paths) = &settings.index_paths {
-        actions.extend(indexer::index_paths(paths));
+        actions_vec.extend(indexer::index_paths(paths));
     }
+    let actions = Arc::new(actions_vec);
 
     let hotkey = settings.hotkey();
     tracing::debug!(?hotkey, "configuring hotkeys");
@@ -174,7 +181,7 @@ fn main() -> anyhow::Result<()> {
     // `visibility` holds whether the window is currently restored (true) or
     // minimized (false).
     let (handle, visibility, restore_flag, help_flag, ctx) = spawn_gui(
-        actions.clone(),
+        Arc::clone(&actions),
         custom_len,
         settings.clone(),
         "settings.json".to_string(),
