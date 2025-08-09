@@ -42,7 +42,7 @@ fn new_app(ctx: &egui::Context) -> LauncherApp {
 }
 
 #[test]
-fn note_panel_auto_saves_on_escape() {
+fn note_panel_auto_saves_on_close() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let _tmp = setup();
     append_note("alpha", "original").unwrap();

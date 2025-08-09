@@ -378,8 +378,6 @@ impl SettingsEditor {
                             ui.add(egui::DragValue::new(&mut self.note_panel_h));
                         });
 
-                        ui.checkbox(&mut self.note_save_on_close, "Save note on close (Esc)");
-
                         ui.checkbox(&mut self.follow_mouse, "Follow mouse");
                         ui.add_enabled_ui(!self.follow_mouse, |ui| {
                             ui.checkbox(&mut self.static_enabled, "Use static position");
@@ -418,6 +416,10 @@ impl SettingsEditor {
                             &mut self.screenshot_save_file,
                             "Save file when copying screenshot",
                         );
+                        ui.separator();
+                        ui.collapsing("Note", |ui| {
+                            ui.checkbox(&mut self.note_save_on_close, "Save note on close");
+                        });
 
                         ui.separator();
                         if ui

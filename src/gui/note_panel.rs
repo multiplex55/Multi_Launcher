@@ -3,6 +3,7 @@ use crate::gui::LauncherApp;
 use crate::plugin::Plugin;
 use crate::plugins::note::{load_notes, save_note, Note, NotePlugin};
 use eframe::egui::{self, Color32};
+use egui_toast::{Toast, ToastKind, ToastOptions};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -33,8 +34,7 @@ impl NotePanel {
         }
         let mut open = self.open;
         let mut save_now = false;
-        let esc_pressed = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-        if esc_pressed {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             open = false;
         }
         let screen_rect = ctx.available_rect();
@@ -167,7 +167,7 @@ impl NotePanel {
                     });
                 }
             });
-        if save_now || (esc_pressed && app.note_save_on_close) {
+        if save_now || (!open && app.note_save_on_close) {
             self.note.tags = extract_tags(&self.note.content);
             self.note.links = extract_wiki_links(&self.note.content)
                 .into_iter()
@@ -183,6 +183,14 @@ impl NotePanel {
             } else {
                 app.search();
                 app.focus_input();
+                if app.enable_toasts {
+                    app.add_toast(Toast {
+                        text: format!("Saved note {}", self.note.title).into(),
+                        kind: ToastKind::Success,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(app.toast_duration as f64),
+                    });
+                }
             }
         }
         self.open = open;
