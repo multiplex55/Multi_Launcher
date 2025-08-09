@@ -2530,6 +2530,32 @@ impl eframe::App for LauncherApp {
                                         self.open_note_panel(&slug, None);
                                         ui.close_menu();
                                     }
+                                    #[cfg(target_os = "windows")]
+                                    if ui.button("Open in Notepad").clicked() {
+                                        match crate::plugins::note::load_notes() {
+                                            Ok(notes) => {
+                                                if let Some(note) =
+                                                    notes.iter().find(|n| n.slug == slug)
+                                                {
+                                                    if let Err(e) = std::process::Command::new(
+                                                        "notepad.exe",
+                                                    )
+                                                    .arg(&note.path)
+                                                    .spawn()
+                                                    {
+                                                        self.error = Some(e.to_string());
+                                                    }
+                                                } else {
+                                                    self.error =
+                                                        Some("Note not found".to_string());
+                                                }
+                                            }
+                                            Err(e) => {
+                                                self.error = Some(e.to_string());
+                                            }
+                                        }
+                                        ui.close_menu();
+                                    }
                                     if ui.button("Remove Note").clicked() {
                                         self.delete_note(&slug);
                                         refresh = true;
