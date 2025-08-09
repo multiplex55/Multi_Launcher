@@ -22,7 +22,7 @@ impl NotePanel {
             open: true,
             note,
             link_search: String::new(),
-            preview_mode: false,
+            preview_mode: true,
             markdown_cache: CommonMarkCache::default(),
         }
     }
@@ -365,7 +365,9 @@ mod tests {
             links: Vec::new(),
             slug: String::new(),
         };
-        app.note_panels.push(NotePanel::from_note(note));
+        let mut panel = NotePanel::from_note(note);
+        panel.preview_mode = false;
+        app.note_panels.push(panel);
 
         let _ = ctx.run(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |_ui| {
