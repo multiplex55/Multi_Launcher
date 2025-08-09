@@ -47,6 +47,15 @@ impl NotePanel {
             .movable(true)
             .show(ctx, |ui| {
                 let content_id = egui::Id::new("note_content");
+                if ctx.memory(|m| m.focused() == Some(content_id))
+                    && ctx.input(|i| i.key_pressed(egui::Key::R) && i.modifiers.ctrl)
+                {
+                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::R));
+                    self.preview_mode = !self.preview_mode;
+                    if !self.preview_mode {
+                        ctx.memory_mut(|m| m.request_focus(content_id));
+                    }
+                }
                 let total_available = ui.available_size();
                 let footer_reserved_height = 90.0; // space for buttons and metadata
                 let scrollable_height = total_available.y - footer_reserved_height;
@@ -427,6 +436,62 @@ mod tests {
 
         assert_eq!(app.query, "initial");
         assert_eq!(app.note_panels[0].note.content, "line1\n");
+    }
+
+    #[test]
+    fn ctrl_r_toggles_preview_mode_when_focused() {
+        use crate::plugins::note::Note;
+        use std::path::PathBuf;
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+
+        let note = Note {
+            title: "Title".into(),
+            path: PathBuf::new(),
+            content: String::new(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: String::new(),
+        };
+        app.note_panels.push(NotePanel::from_note(note));
+
+        let content_id = egui::Id::new("note_content");
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |_ui| {
+                let mut panel = app.note_panels.remove(0);
+                panel.ui(ctx, &mut app);
+                app.note_panels.insert(0, panel);
+            });
+            ctx.memory_mut(|m| m.request_focus(content_id));
+        });
+
+        let mut input = egui::RawInput::default();
+        input.modifiers.ctrl = true;
+        input.events.push(egui::Event::Key {
+            key: egui::Key::R,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        });
+        input.events.push(egui::Event::Key {
+            key: egui::Key::R,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        });
+
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |_ui| {
+                let mut panel = app.note_panels.remove(0);
+                panel.ui(ctx, &mut app);
+                app.note_panels.insert(0, panel);
+            });
+        });
+
+        assert!(!app.note_panels[0].preview_mode);
     }
 
     #[test]
