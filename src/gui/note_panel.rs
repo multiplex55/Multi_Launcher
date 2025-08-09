@@ -59,7 +59,7 @@ impl NotePanel {
                 let total_available = ui.available_size();
                 let footer_reserved_height = 90.0; // space for buttons and metadata
                 let scrollable_height = total_available.y - footer_reserved_height;
-                let resp = egui::ScrollArea::vertical()
+                let output = egui::ScrollArea::vertical()
                     .id_source(content_id)
                     .show_viewport(ui, |ui, _viewport| {
                         ui.set_min_height(scrollable_height);
@@ -83,8 +83,17 @@ impl NotePanel {
                             )
                         }
                     });
+                if self.preview_mode {
+                    if let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) {
+                        if output.inner_rect.contains(pos)
+                            && ctx.input(|i| i.pointer.any_click())
+                        {
+                            ctx.memory_mut(|m| m.request_focus(content_id));
+                        }
+                    }
+                }
                 if !self.preview_mode {
-                    if let Some(resp) = resp.inner {
+                    if let Some(resp) = output.inner {
                         resp.context_menu(|ui| {
                             ui.set_min_width(200.0);
                             ui.label("Insert link:");
@@ -456,16 +465,31 @@ mod tests {
         };
         app.note_panels.push(NotePanel::from_note(note));
 
-        let content_id = egui::Id::new("note_content");
-        let _ = ctx.run(Default::default(), |ctx| {
+        // Click inside the panel to focus it
+        let mut input = egui::RawInput::default();
+        let pos = egui::pos2(200.0, 100.0);
+        input.events.push(egui::Event::PointerMoved(pos));
+        input.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        });
+        input.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |_ui| {
                 let mut panel = app.note_panels.remove(0);
                 panel.ui(ctx, &mut app);
                 app.note_panels.insert(0, panel);
             });
-            ctx.memory_mut(|m| m.request_focus(content_id));
         });
 
+        // Now send Ctrl+R to toggle preview mode
         let mut input = egui::RawInput::default();
         input.modifiers.ctrl = true;
         input.events.push(egui::Event::Key {
@@ -482,7 +506,6 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::CTRL,
         });
-
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |_ui| {
                 let mut panel = app.note_panels.remove(0);
