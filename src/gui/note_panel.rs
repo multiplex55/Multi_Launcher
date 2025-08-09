@@ -152,7 +152,7 @@ impl NotePanel {
                 let wiki = extract_wiki_links(&self.note.content);
                 let links = extract_links(&self.note.content);
                 if !wiki.is_empty() || !links.is_empty() {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label("Links:");
                         for l in wiki {
                             show_wiki_link(ui, app, &l);
