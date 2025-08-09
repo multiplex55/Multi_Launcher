@@ -9,7 +9,7 @@ fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
     let custom_len = actions.len();
     LauncherApp::new(
         ctx,
-        actions,
+        Arc::new(actions),
         custom_len,
         PluginManager::new(),
         "actions.json".into(),
@@ -124,7 +124,7 @@ fn page_keys_respect_setting() {
     let custom_len = acts.len();
     let mut app = LauncherApp::new(
         &ctx,
-        acts,
+        Arc::new(acts),
         custom_len,
         PluginManager::new(),
         "actions.json".into(),

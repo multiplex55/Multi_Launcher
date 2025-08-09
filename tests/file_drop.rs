@@ -7,7 +7,7 @@ fn new_app(ctx: &egui::Context) -> LauncherApp {
     let custom_len = actions.len();
     LauncherApp::new(
         ctx,
-        actions,
+        Arc::new(actions),
         custom_len,
         PluginManager::new(),
         "actions.json".into(),

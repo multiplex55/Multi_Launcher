@@ -1,6 +1,7 @@
-use crate::actions::{Action, save_actions};
+use crate::actions::{save_actions, Action};
 use crate::gui::LauncherApp;
 use eframe::egui;
+use std::sync::Arc;
 #[cfg(target_os = "windows")]
 use rfd::FileDialog;
 
@@ -138,7 +139,8 @@ impl AddActionDialog {
                             } else {
                                 match self.mode {
                                     DialogMode::Add => {
-                                        app.actions.push(Action {
+                                        let mut new_actions = (*app.actions).clone();
+                                        new_actions.push(Action {
                                             label: self.label.clone(),
                                             desc: self.desc.clone(),
                                             action: self.path.clone(),
@@ -149,10 +151,12 @@ impl AddActionDialog {
                                             },
                                         });
                                         app.custom_len += 1;
+                                        app.actions = Arc::new(new_actions);
                                         app.update_action_cache();
                                     }
                                     DialogMode::Edit(idx) => {
-                                        if let Some(act) = app.actions.get_mut(idx) {
+                                        let mut new_actions = (*app.actions).clone();
+                                        if let Some(act) = new_actions.get_mut(idx) {
                                             act.label = self.label.clone();
                                             act.desc = self.desc.clone();
                                             act.action = self.path.clone();
@@ -161,6 +165,7 @@ impl AddActionDialog {
                                             } else {
                                                 None
                                             };
+                                            app.actions = Arc::new(new_actions);
                                             app.update_action_cache();
                                         }
                                     }

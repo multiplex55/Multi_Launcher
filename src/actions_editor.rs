@@ -2,6 +2,7 @@ use crate::actions::save_actions;
 use crate::gui::AddActionDialog;
 use crate::gui::LauncherApp;
 use eframe::egui;
+use std::sync::Arc;
 
 /// State container for the app editor window.
 ///
@@ -86,10 +87,12 @@ impl ActionsEditor {
             });
 
             if let Some(i) = remove {
-                app.actions.remove(i);
+                let mut new_actions = (*app.actions).clone();
+                new_actions.remove(i);
                 if i < app.custom_len {
                     app.custom_len -= 1;
                 }
+                app.actions = Arc::new(new_actions);
                 app.search();
                 if let Err(e) = save_actions(&app.actions_path, &app.actions[..app.custom_len]) {
                     app.set_error(format!("Failed to save: {e}"));

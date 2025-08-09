@@ -6,14 +6,28 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use std::sync::Arc;
 
+/// Combined search across folders, bookmarks, and launcher actions.
+///
+/// The action list is provided as an [`Arc<Vec<Action>>`] so the plugin can
+/// participate in searches without holding its own copy. Cloning the `Arc`
+/// replicates only the pointer, keeping the underlying `Vec` shared and
+/// thread-safe.
 pub struct OmniSearchPlugin {
     folders: FoldersPlugin,
     bookmarks: BookmarksPlugin,
+    /// Shared list of launcher actions searched alongside folders and
+    /// bookmarks. Cloning the `Arc` only clones the pointer so the underlying
+    /// `Vec` remains shared.
     actions: Arc<Vec<Action>>,
     matcher: SkimMatcherV2,
 }
 
 impl OmniSearchPlugin {
+    /// Create a new `OmniSearchPlugin`.
+    ///
+    /// `actions` is an [`Arc`] over the application's action list. Cloning the
+    /// `Arc` does not clone the `Vec` itself, so the plugin can read the shared
+    /// action data without duplicating it.
     pub fn new(actions: Arc<Vec<Action>>) -> Self {
         Self {
             folders: FoldersPlugin::default(),

@@ -14,7 +14,7 @@ static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 fn new_app(actions_path: &str, ctx: &egui::Context) -> LauncherApp {
     LauncherApp::new(
         ctx,
-        Vec::new(),
+        Arc::new(Vec::new()),
         0,
         PluginManager::new(),
         actions_path.into(),

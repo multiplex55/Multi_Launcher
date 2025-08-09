@@ -1,6 +1,7 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use eframe::egui;
-use multi_launcher::{gui::LauncherApp, plugin::PluginManager, actions::Action, settings::Settings};
+use multi_launcher::{actions::Action, gui::LauncherApp, plugin::PluginManager, settings::Settings};
+use std::sync::Arc;
 
 fn bench_search(c: &mut Criterion) {
     let ctx = egui::Context::default();
@@ -12,10 +13,11 @@ fn bench_search(c: &mut Criterion) {
             args: None,
         })
         .collect();
+    let actions_arc = Arc::new(actions);
     let settings = Settings::default();
     let mut app = LauncherApp::new(
         &ctx,
-        actions,
+        actions_arc,
         10_000,
         PluginManager::new(),
         "actions.json".into(),
@@ -25,9 +27,9 @@ fn bench_search(c: &mut Criterion) {
         None,
         None,
         None,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
     );
     app.query = "app Item 9999".to_string();
     c.bench_function("search_10k", |b| b.iter(|| app.search()));

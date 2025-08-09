@@ -579,7 +579,7 @@ impl SettingsEditor {
                                                 .plugin_dirs
                                                 .clone()
                                                 .unwrap_or_default();
-                                            let actions_arc = Arc::new(app.actions.clone());
+                                            let actions_arc = Arc::clone(&app.actions);
                                             app.plugins.reload_from_dirs(
                                                 &dirs,
                                                 app.clipboard_limit,

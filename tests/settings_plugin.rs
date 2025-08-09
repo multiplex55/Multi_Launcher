@@ -7,18 +7,18 @@ use eframe::egui;
 fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
     let custom_len = actions.len();
     let mut plugins = PluginManager::new();
-    let actions_arc = Arc::new(actions.clone());
+    let actions_arc = Arc::new(actions);
     plugins.reload_from_dirs(
         &[],
         Settings::default().clipboard_limit,
         Settings::default().net_unit,
         false,
         &std::collections::HashMap::new(),
-        actions_arc,
+        Arc::clone(&actions_arc),
     );
     LauncherApp::new(
         ctx,
-        actions,
+        actions_arc,
         custom_len,
         plugins,
         "actions.json".into(),

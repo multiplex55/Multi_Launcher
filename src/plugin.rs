@@ -103,6 +103,12 @@ impl PluginManager {
     }
 
     /// Rebuild the plugin list, keeping previously loaded libraries alive.
+    ///
+    /// `actions` is the shared list of launcher actions. An [`Arc`] is used so
+    /// plugins such as [`OmniSearchPlugin`](crate::plugins::omni_search::OmniSearchPlugin)
+    /// can cheaply clone the pointer for read-only access without duplicating
+    /// the underlying `Vec`. This keeps the action data consistent across the
+    /// application while allowing plugins to inspect it from their own threads.
     pub fn reload_from_dirs(
         &mut self,
         dirs: &[String],

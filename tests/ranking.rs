@@ -9,7 +9,7 @@ fn new_app_with_settings(ctx: &egui::Context, actions: Vec<Action>, settings: Se
     let custom_len = actions.len();
     LauncherApp::new(
         ctx,
-        actions,
+        Arc::new(actions),
         custom_len,
         PluginManager::new(),
         "actions.json".into(),

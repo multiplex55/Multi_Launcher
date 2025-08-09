@@ -22,11 +22,11 @@ fn new_app(ctx: &egui::Context, settings: Settings) -> LauncherApp {
         Settings::default().net_unit,
         false,
         &std::collections::HashMap::new(),
-        actions_arc,
+        Arc::clone(&actions_arc),
     );
     LauncherApp::new(
         ctx,
-        Vec::new(),
+        actions_arc,
         custom_len,
         plugins,
         "actions.json".into(),

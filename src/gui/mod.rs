@@ -253,8 +253,21 @@ struct PanelStates {
     plugins: bool,
 }
 
+/// Primary GUI state for Multi Launcher.
+///
+/// The application may create multiple windows or helper threads. To keep the
+/// available actions consistent across those components, `LauncherApp` holds
+/// them in an [`Arc<Vec<Action>>`]. Cloning the `Arc` only replicates the
+/// pointer, allowing cheap, thread-safe sharing without duplicating the vector
+/// itself.
 pub struct LauncherApp {
-    pub actions: Vec<Action>,
+    /// Shared list of all actions available to the launcher.
+    ///
+    /// The list is wrapped in an [`Arc`] so windows or background tasks can
+    /// access it without cloning the underlying `Vec`. Cloning this field only
+    /// duplicates the pointer, keeping the action data itself shared. When
+    /// actions are edited the entire `Arc` is replaced with a new one.
+    pub actions: Arc<Vec<Action>>,
     action_cache: Vec<(String, String)>,
     command_cache: Vec<Action>,
     pub query: String,
@@ -494,7 +507,7 @@ impl LauncherApp {
 
     pub fn new(
         ctx: &egui::Context,
-        actions: Vec<Action>,
+        actions: Arc<Vec<Action>>,
         custom_len: usize,
         plugins: PluginManager,
         actions_path: String,
@@ -599,9 +612,9 @@ impl LauncherApp {
         let settings_editor = SettingsEditor::new_with_plugins(&settings);
         let plugin_editor = PluginEditor::new(&settings);
         let mut app = Self {
-            actions: actions.clone(),
+            actions: Arc::clone(&actions),
             query: String::new(),
-            results: actions,
+            results: (*actions).clone(),
             matcher: SkimMatcherV2::default(),
             error: None,
             error_time: None,
@@ -753,7 +766,7 @@ impl LauncherApp {
         self.last_stopwatch_query = trimmed.starts_with("sw list");
         if trimmed.is_empty() {
             let mut res = self.command_cache.clone();
-            for a in &self.actions {
+            for a in self.actions.iter() {
                 res.push(Action {
                     label: format!("app {}", a.label),
                     desc: a.desc.clone(),
@@ -1736,7 +1749,7 @@ impl eframe::App for LauncherApp {
                         if let Some(paths) = &self.index_paths {
                             acts.extend(indexer::index_paths(paths));
                         }
-                        self.actions = acts;
+                        self.actions = Arc::new(acts);
                         self.custom_len = custom_len;
                         self.update_action_cache();
                         self.search();
@@ -3143,7 +3156,7 @@ mod tests {
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
             ctx,
-            Vec::new(),
+            Arc::new(Vec::new()),
             0,
             PluginManager::new(),
             "actions.json".into(),
@@ -3195,7 +3208,7 @@ mod tests {
         let settings_path = dir.path().join("settings.json");
         let mut app = LauncherApp::new(
             &ctx,
-            Vec::new(),
+            Arc::new(Vec::new()),
             0,
             PluginManager::new(),
             actions_path.to_string_lossy().to_string(),

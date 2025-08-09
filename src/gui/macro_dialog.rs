@@ -297,7 +297,7 @@ impl MacroDialog {
                         .id_source("macro_app_list")
                         .max_height(100.0)
                         .show(ui, |ui| {
-                            for act in &app.actions {
+                            for act in app.actions.iter() {
                                 if !filter.is_empty()
                                     && !act.label.to_lowercase().contains(&filter)
                                     && !act.desc.to_lowercase().contains(&filter)

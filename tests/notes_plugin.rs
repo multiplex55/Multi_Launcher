@@ -25,7 +25,7 @@ fn setup() -> tempfile::TempDir {
 fn new_app(ctx: &egui::Context) -> LauncherApp {
     LauncherApp::new(
         ctx,
-        Vec::new(),
+        Arc::new(Vec::new()),
         0,
         PluginManager::new(),
         "actions.json".into(),

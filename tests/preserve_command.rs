@@ -11,7 +11,7 @@ fn new_app(ctx: &egui::Context, actions: Vec<Action>, preserve: bool) -> Launche
     settings.preserve_command = preserve;
     LauncherApp::new(
         ctx,
-        actions,
+        Arc::new(actions),
         custom_len,
         PluginManager::new(),
         "actions.json".into(),
