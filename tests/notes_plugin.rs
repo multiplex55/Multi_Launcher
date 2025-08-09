@@ -116,12 +116,14 @@ fn note_search_finds_content() {
 fn note_tags_parses_edge_cases() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let _tmp = setup();
-    append_note("alpha", "#foo #bar-baz #baz_1 #dup #dup").unwrap();
+    append_note("alpha", "#Foo #foo #bar-baz #baz_1 #dup #dup").unwrap();
     let plugin = NotePlugin::default();
     let results = plugin.search("note tags");
     assert_eq!(results.len(), 4);
     let labels: Vec<String> = results.iter().map(|a| a.label.clone()).collect();
+    assert_eq!(labels.iter().filter(|l| l.as_str() == "#foo").count(), 1);
     assert!(labels.contains(&"#foo".to_string()));
+    assert!(!labels.iter().any(|l| l.as_str() == "#Foo"));
     assert!(labels.contains(&"#bar".to_string()));
     assert!(labels.contains(&"#baz_1".to_string()));
     assert!(labels.contains(&"#dup".to_string()));

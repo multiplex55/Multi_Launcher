@@ -76,7 +76,7 @@ static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwra
 fn extract_tags(content: &str) -> Vec<String> {
     let mut tags: Vec<String> = TAG_RE
         .captures_iter(content)
-        .map(|c| c[1].to_string())
+        .map(|c| c[1].to_lowercase())
         .collect();
     tags.sort();
     tags.dedup();
