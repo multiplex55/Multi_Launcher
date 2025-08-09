@@ -2556,6 +2556,20 @@ impl eframe::App for LauncherApp {
                                         }
                                         ui.close_menu();
                                     }
+                                    if ui.button("Open in Neovim").clicked() {
+                                        if self.open_note_in_neovim(
+                                            &slug,
+                                            crate::plugins::note::load_notes,
+                                            |path| {
+                                                std::process::Command::new("nvim")
+                                                    .arg(path)
+                                                    .spawn()
+                                                    .map(|_| ())
+                                            },
+                                        ) {
+                                            ui.close_menu();
+                                        }
+                                    }
                                     if ui.button("Remove Note").clicked() {
                                         self.delete_note(&slug);
                                         refresh = true;
@@ -3142,6 +3156,37 @@ impl LauncherApp {
         }
     }
 
+    /// Resolve a note by slug and open it in Neovim using injected callbacks.
+    ///
+    /// `load` should mirror [`load_notes`](crate::plugins::note::load_notes) and
+    /// is invoked once to fetch the available notes. `spawn` is called with the
+    /// resolved path and should launch `nvim`. Both closures are `FnOnce` to
+    /// support unit testing of this helper.
+    ///
+    /// Any error from either step is stored in [`self.error`](Self::error); the
+    /// boolean return value is always `true` and currently unused.
+    pub fn open_note_in_neovim<L, S>(&mut self, slug: &str, load: L, spawn: S) -> bool
+    where
+        L: FnOnce() -> anyhow::Result<Vec<crate::plugins::note::Note>>,
+        S: FnOnce(&std::path::Path) -> std::io::Result<()>,
+    {
+        match load() {
+            Ok(notes) => {
+                if let Some(note) = notes.iter().find(|n| n.slug == slug) {
+                    if let Err(e) = spawn(&note.path) {
+                        self.error = Some(e.to_string());
+                    }
+                } else {
+                    self.error = Some("Note not found".to_string());
+                }
+            }
+            Err(e) => {
+                self.error = Some(e.to_string());
+            }
+        }
+        true
+    }
+
     /// Delete a note by its slug identifier.
     pub fn delete_note(&mut self, slug: &str) {
         self.note_delete_dialog.open(slug.to_string());
@@ -3257,5 +3302,71 @@ mod tests {
         app.update_panel_stack();
         assert!(app.close_front_dialog());
         assert!(!app.clipboard_dialog.open);
+    }
+
+    #[test]
+    fn open_note_in_neovim_resolves_and_handles_errors() {
+        use crate::plugins::note::Note;
+        use anyhow::anyhow;
+        use std::cell::Cell;
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+
+        let note_path = tempdir().unwrap().path().join("alpha.md");
+        let load_called = Cell::new(false);
+        let spawn_called = Cell::new(false);
+
+        let closed = app.open_note_in_neovim(
+            "alpha",
+            || {
+                load_called.set(true);
+                Ok(vec![Note {
+                    title: "alpha".into(),
+                    path: note_path.clone(),
+                    content: String::new(),
+                    tags: Vec::new(),
+                    links: Vec::new(),
+                    slug: "alpha".into(),
+                }])
+            },
+            |p| {
+                spawn_called.set(true);
+                assert_eq!(p, &note_path);
+                Ok(())
+            },
+        );
+        assert!(closed);
+        assert!(load_called.get());
+        assert!(spawn_called.get());
+        assert!(app.error.is_none());
+
+        spawn_called.set(false);
+        app.error = None;
+        let closed = app.open_note_in_neovim(
+            "missing",
+            || Ok(Vec::new()),
+            |_| {
+                spawn_called.set(true);
+                Ok(())
+            },
+        );
+        assert!(closed);
+        assert!(!spawn_called.get());
+        assert_eq!(app.error.as_deref(), Some("Note not found"));
+
+        spawn_called.set(false);
+        app.error = None;
+        let closed = app.open_note_in_neovim(
+            "alpha",
+            || Err(anyhow!("load failure")),
+            |_| {
+                spawn_called.set(true);
+                Ok(())
+            },
+        );
+        assert!(closed);
+        assert!(!spawn_called.get());
+        assert!(app.error.as_ref().unwrap().contains("load failure"));
     }
 }
