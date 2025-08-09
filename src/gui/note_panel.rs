@@ -222,7 +222,7 @@ fn extract_tags(content: &str) -> Vec<String> {
 pub fn extract_links(content: &str) -> Vec<String> {
     static LINK_RE: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"([a-zA-Z][a-zA-Z0-9+.-]*://\S+|www\.\S+)").unwrap());
-    LINK_RE
+    let mut links: Vec<String> = LINK_RE
         .find_iter(content)
         .filter_map(|m| {
             let raw = m.as_str();
@@ -236,15 +236,21 @@ pub fn extract_links(content: &str) -> Vec<String> {
                 .filter(|u| u.scheme() == "https")
                 .map(|_| raw.to_string())
         })
-        .collect()
+        .collect();
+    links.sort();
+    links.dedup();
+    links
 }
 
 fn extract_wiki_links(content: &str) -> Vec<String> {
     static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
-    WIKI_RE
+    let mut links: Vec<String> = WIKI_RE
         .captures_iter(content)
         .map(|c| c[1].to_string())
-        .collect()
+        .collect();
+    links.sort();
+    links.dedup();
+    links
 }
 
 #[cfg(test)]
@@ -431,7 +437,7 @@ mod tests {
 
     #[test]
     fn extract_links_filters_invalid() {
-        let content = "visit http://example.com and http://exa%mple.com also https://rust-lang.org and www.example.com and www.exa%mple.com";
+        let content = "visit http://example.com and http://exa%mple.com also https://rust-lang.org and https://rust-lang.org and www.example.com and www.example.com and www.exa%mple.com";
         let links = extract_links(content);
         assert_eq!(
             links,
@@ -440,5 +446,12 @@ mod tests {
                 "www.example.com".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn extract_wiki_links_dedupes() {
+        let content = "links [[alpha]] and [[alpha]] and [[beta]]";
+        let links = extract_wiki_links(content);
+        assert_eq!(links, vec!["alpha".to_string(), "beta".to_string()]);
     }
 }

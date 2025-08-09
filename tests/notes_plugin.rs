@@ -201,7 +201,7 @@ fn missing_link_colored_red() {
 
 #[test]
 fn link_validation_rejects_invalid_urls() {
-    let content = "visit http://example.com and http://exa%mple.com also https://rust-lang.org and www.example.com and www.exa%mple.com";
+    let content = "visit http://example.com and http://exa%mple.com also https://rust-lang.org and https://rust-lang.org and www.example.com and www.example.com and www.exa%mple.com";
     let links = extract_links(content);
     assert_eq!(
         links,
