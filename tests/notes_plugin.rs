@@ -3,9 +3,12 @@ use eframe::egui;
 use multi_launcher::gui::{extract_links, show_wiki_link, LauncherApp};
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugin::PluginManager;
-use multi_launcher::plugins::note::{append_note, load_notes, save_notes, NotePlugin};
+use multi_launcher::plugins::note::{
+    append_note, load_notes, save_note, save_notes, Note, NotePlugin,
+};
 use multi_launcher::settings::Settings;
 use once_cell::sync::Lazy;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::{atomic::AtomicBool, Arc};
 use tempfile::tempdir;
@@ -212,4 +215,42 @@ fn link_validation_rejects_invalid_urls() {
             "www.example.com".to_string(),
         ]
     );
+}
+
+#[test]
+fn save_note_round_trip_preserves_wiki_links() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _tmp = setup();
+    let mut note = Note {
+        title: "alpha".into(),
+        path: PathBuf::new(),
+        content: "[[name]]".into(),
+        tags: vec![],
+        links: vec![],
+        slug: String::new(),
+    };
+    save_note(&mut note).unwrap();
+    let notes = load_notes().unwrap();
+    assert!(!notes[0].content.contains("\\["));
+    assert!(!notes[0].content.contains("\\]"));
+    assert!(notes[0].content.contains("[[name]]"));
+}
+
+#[test]
+fn save_notes_round_trip_preserves_wiki_links() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _tmp = setup();
+    let note = Note {
+        title: "beta".into(),
+        path: PathBuf::new(),
+        content: "[[name]]".into(),
+        tags: vec![],
+        links: vec![],
+        slug: String::new(),
+    };
+    save_notes(&[note]).unwrap();
+    let notes = load_notes().unwrap();
+    assert!(!notes[0].content.contains("\\["));
+    assert!(!notes[0].content.contains("\\]"));
+    assert!(notes[0].content.contains("[[name]]"));
 }

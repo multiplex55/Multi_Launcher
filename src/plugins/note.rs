@@ -93,6 +93,10 @@ fn extract_links(content: &str) -> Vec<String> {
     links
 }
 
+fn unescape_brackets(content: &str) -> String {
+    content.replace("\\[", "[").replace("\\]", "]")
+}
+
 fn templates_dir() -> PathBuf {
     dirs_next::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -204,11 +208,12 @@ pub fn save_note(note: &mut Note) -> anyhow::Result<()> {
         note.slug.clone()
     };
     let path = dir.join(format!("{slug}.md"));
-    let content = if note.content.starts_with("# ") {
+    let mut content = if note.content.starts_with("# ") {
         note.content.clone()
     } else {
         format!("# {}\n\n{}", note.title, note.content)
     };
+    content = unescape_brackets(&content);
     note.tags = extract_tags(&content);
     std::fs::write(path, content)?;
     refresh_cache()?;
@@ -233,11 +238,12 @@ pub fn save_notes(notes: &[Note]) -> anyhow::Result<()> {
         };
         let path = dir.join(format!("{slug}.md"));
         expected.insert(path.clone());
-        let content = if note.content.starts_with("# ") {
+        let mut content = if note.content.starts_with("# ") {
             note.content.clone()
         } else {
             format!("# {}\n\n{}", note.title, note.content)
         };
+        content = unescape_brackets(&content);
         std::fs::write(path, content)?;
     }
     for entry in std::fs::read_dir(&dir)? {
