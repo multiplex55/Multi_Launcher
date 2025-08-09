@@ -82,31 +82,40 @@ impl NotePanel {
                             ui.text_edit_singleline(&mut self.link_search);
                             let plugin = NotePlugin::default();
                             let results = plugin.search(&format!("note open {}", self.link_search));
-                            for action in results.into_iter().take(10) {
-                                let title = action.label.clone();
-                                if ui.button(&title).clicked() {
-                                    let insert = format!("[[{title}]]");
-                                    let mut state = egui::widgets::text_edit::TextEditState::load(
-                                        ui.ctx(),
-                                        resp.id,
-                                    )
-                                    .unwrap_or_default();
-                                    let idx = state
-                                        .cursor
-                                        .char_range()
-                                        .map(|r| r.primary.index)
-                                        .unwrap_or_else(|| self.note.content.chars().count());
-                                    self.note.content.insert_str(idx, &insert);
-                                    state.cursor.set_char_range(Some(
-                                        egui::text::CCursorRange::one(egui::text::CCursor::new(
-                                            idx + insert.chars().count(),
-                                        )),
-                                    ));
-                                    state.store(ui.ctx(), resp.id);
-                                    self.link_search.clear();
-                                    ui.close_menu();
-                                }
-                            }
+                            egui::ScrollArea::vertical()
+                                .max_height(200.0)
+                                .show(ui, |ui| {
+                                    for action in &results {
+                                        let title = action.label.clone();
+                                        if ui.button(&title).clicked() {
+                                            let insert = format!("[[{title}]]");
+                                            let mut state =
+                                                egui::widgets::text_edit::TextEditState::load(
+                                                    ui.ctx(),
+                                                    resp.id,
+                                                )
+                                                .unwrap_or_default();
+                                            let idx = state
+                                                .cursor
+                                                .char_range()
+                                                .map(|r| r.primary.index)
+                                                .unwrap_or_else(|| {
+                                                    self.note.content.chars().count()
+                                                });
+                                            self.note.content.insert_str(idx, &insert);
+                                            state.cursor.set_char_range(Some(
+                                                egui::text::CCursorRange::one(
+                                                    egui::text::CCursor::new(
+                                                        idx + insert.chars().count(),
+                                                    ),
+                                                ),
+                                            ));
+                                            state.store(ui.ctx(), resp.id);
+                                            self.link_search.clear();
+                                            ui.close_menu();
+                                        }
+                                    }
+                                });
                         });
                         if resp.clicked() {
                             resp.request_focus();
