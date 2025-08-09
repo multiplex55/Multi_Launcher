@@ -33,6 +33,10 @@ impl NotePanel {
         }
         let mut open = self.open;
         let mut save_now = false;
+        let esc_pressed = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        if esc_pressed {
+            open = false;
+        }
         let screen_rect = ctx.available_rect();
         let max_width = screen_rect.width().min(800.0);
         let max_height = screen_rect.height().min(600.0);
@@ -163,7 +167,7 @@ impl NotePanel {
                     });
                 }
             });
-        if save_now {
+        if save_now || (esc_pressed && app.note_save_on_close) {
             self.note.tags = extract_tags(&self.note.content);
             self.note.links = extract_wiki_links(&self.note.content)
                 .into_iter()
