@@ -212,7 +212,7 @@ fn extract_tags(content: &str) -> Vec<String> {
     static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"#([A-Za-z0-9_]+)").unwrap());
     let mut tags: Vec<String> = TAG_RE
         .captures_iter(content)
-        .map(|c| c[1].to_string())
+        .map(|c| c[1].to_lowercase())
         .collect();
     tags.sort();
     tags.dedup();
