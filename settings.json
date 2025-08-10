@@ -17,6 +17,7 @@
     420.0,
     320.0
   ],
+  "note_save_on_close": false,
   "enable_toasts": true,
   "toast_duration": 3.0,
   "show_examples": false,
