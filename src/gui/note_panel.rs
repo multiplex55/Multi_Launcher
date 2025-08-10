@@ -4,6 +4,7 @@ use crate::plugin::Plugin;
 use crate::plugins::note::{load_notes, save_note, Note, NotePlugin};
 use eframe::egui::{self, Color32};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+use egui_toast::{Toast, ToastKind, ToastOptions};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use url::Url;
@@ -163,25 +164,42 @@ impl NotePanel {
                     });
                 }
             });
-        if save_now {
-            self.note.tags = extract_tags(&self.note.content);
-            self.note.links = extract_wiki_links(&self.note.content)
-                .into_iter()
-                .map(|l| slugify(&l))
-                .collect();
-            if let Some(first) = self.note.content.lines().next() {
-                if let Some(t) = first.strip_prefix("# ") {
-                    self.note.title = t.to_string();
-                }
-            }
-            if let Err(e) = save_note(&mut self.note) {
-                app.set_error(format!("Failed to save note: {e}"));
-            } else {
-                app.search();
-                app.focus_input();
-            }
+        if save_now || (!open && app.note_save_on_close) {
+            self.save(app);
         }
         self.open = open;
+    }
+
+    /// Persist the current note to disk and update UI state.
+    ///
+    /// This is invoked when the user clicks the **Save** button or when the
+    /// panel closes while [`Settings::note_save_on_close`](crate::settings::Settings::note_save_on_close)
+    /// is `true`. Close events include pressing `Esc`, clicking the window's
+    /// close button, or any programmatic request to close the panel.
+    pub(super) fn save(&mut self, app: &mut LauncherApp) {
+        self.note.tags = extract_tags(&self.note.content);
+        self.note.links = extract_wiki_links(&self.note.content)
+            .into_iter()
+            .map(|l| slugify(&l))
+            .collect();
+        if let Some(first) = self.note.content.lines().next() {
+            if let Some(t) = first.strip_prefix("# ") {
+                self.note.title = t.to_string();
+            }
+        }
+        if let Err(e) = save_note(&mut self.note) {
+            app.set_error(format!("Failed to save note: {e}"));
+        } else {
+            app.search();
+            app.focus_input();
+            if app.enable_toasts {
+                app.add_toast(Toast {
+                    text: format!("Saved note {}", self.note.title).into(),
+                    kind: ToastKind::Success,
+                    options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
+                });
+            }
+        }
     }
 }
 

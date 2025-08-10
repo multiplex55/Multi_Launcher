@@ -8,9 +8,9 @@ mod convert_panel;
 mod cpu_list_dialog;
 mod fav_dialog;
 mod macro_dialog;
+mod note_delete_dialog;
 mod note_panel;
 mod notes_dialog;
-mod note_delete_dialog;
 mod shell_cmd_dialog;
 mod snippet_dialog;
 mod tempfile_alias_dialog;
@@ -31,9 +31,9 @@ pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
 pub use macro_dialog::MacroDialog;
-pub use note_panel::{NotePanel, show_wiki_link, extract_links};
-pub use notes_dialog::NotesDialog;
 pub use note_delete_dialog::NoteDeleteDialog;
+pub use note_panel::{extract_links, show_wiki_link, NotePanel};
+pub use notes_dialog::NotesDialog;
 pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;
 pub use tempfile_alias_dialog::TempfileAliasDialog;
@@ -64,20 +64,20 @@ use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use url::Url;
-use serde::{Serialize, Deserialize};
+use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Mutex;
-use once_cell::sync::Lazy;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
+use url::Url;
 
 const SUBCOMMANDS: &[&str] = &[
     "add", "rm", "list", "clear", "open", "new", "alias", "set", "pause", "resume", "cancel",
@@ -162,8 +162,7 @@ fn push_toast(toasts: &mut Toasts, toast: Toast) {
     toasts.add(toast);
 }
 
-static APP_EVENT_TXS: Lazy<Mutex<Vec<Sender<WatchEvent>>>> =
-    Lazy::new(|| Mutex::new(Vec::new()));
+static APP_EVENT_TXS: Lazy<Mutex<Vec<Sender<WatchEvent>>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 pub fn register_event_sender(tx: Sender<WatchEvent>) {
     if let Ok(mut guard) = APP_EVENT_TXS.lock() {
@@ -349,6 +348,7 @@ pub struct LauncherApp {
     pub usage_weight: f32,
     pub page_jump: usize,
     pub note_panel_default_size: (f32, f32),
+    pub note_save_on_close: bool,
     pub follow_mouse: bool,
     pub static_location_enabled: bool,
     pub static_pos: Option<(i32, i32)>,
@@ -435,6 +435,7 @@ impl LauncherApp {
         always_on_top: Option<bool>,
         page_jump: Option<usize>,
         note_panel_default_size: Option<(f32, f32)>,
+        note_save_on_close: Option<bool>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -502,6 +503,9 @@ impl LauncherApp {
         }
         if let Some(v) = note_panel_default_size {
             self.note_panel_default_size = v;
+        }
+        if let Some(v) = note_save_on_close {
+            self.note_save_on_close = v;
         }
     }
 
@@ -692,6 +696,7 @@ impl LauncherApp {
             usage_weight: settings.usage_weight,
             page_jump: settings.page_jump,
             note_panel_default_size: settings.note_panel_default_size,
+            note_save_on_close: settings.note_save_on_close,
             follow_mouse,
             static_location_enabled: static_enabled,
             static_pos,
@@ -1168,7 +1173,7 @@ impl LauncherApp {
 
     /// Close the top-most open dialog if any is visible.
     /// Returns `true` when a dialog was closed.
-    fn close_front_dialog(&mut self) -> bool {
+    pub fn close_front_dialog(&mut self) -> bool {
         let panel = match self.panel_stack.pop() {
             Some(p) => p,
             None => return false,
@@ -1239,7 +1244,11 @@ impl LauncherApp {
                 self.panel_states.note_delete_dialog = false;
             }
             Panel::NotePanel => {
-                let _ = self.note_panels.pop();
+                if let Some(mut panel) = self.note_panels.pop() {
+                    if self.note_save_on_close {
+                        panel.save(self);
+                    }
+                }
                 self.panel_states.note_panel = false;
             }
             Panel::TodoDialog => {
@@ -1353,7 +1362,11 @@ impl LauncherApp {
                 self.panel_states.note_delete_dialog = false;
             }
             Panel::NotePanel => {
-                let _ = self.note_panels.pop();
+                if let Some(mut panel) = self.note_panels.pop() {
+                    if self.note_save_on_close {
+                        panel.save(self);
+                    }
+                }
                 self.panel_states.note_panel = false;
             }
             Panel::TodoDialog => {
@@ -1421,7 +1434,7 @@ impl LauncherApp {
             Panel::FavDialog => self.fav_dialog.open = true,
             Panel::NotesDialog => self.notes_dialog.open = true,
             Panel::NoteDeleteDialog => self.note_delete_dialog.open = true,
-            Panel::NotePanel => {},
+            Panel::NotePanel => {}
             Panel::TodoDialog => self.todo_dialog.open = true,
             Panel::TodoViewDialog => self.todo_view_dialog.open = true,
             Panel::ClipboardDialog => self.clipboard_dialog.open = true,
@@ -1774,32 +1787,36 @@ impl eframe::App for LauncherApp {
                     .map(|b| (b.url, b.alias))
                     .collect();
                 }
-                WatchEvent::Recycle(res) => {
-                    match res {
-                        Ok(()) => {
-                            if self.enable_toasts {
-                                push_toast(&mut self.toasts, Toast {
+                WatchEvent::Recycle(res) => match res {
+                    Ok(()) => {
+                        if self.enable_toasts {
+                            push_toast(
+                                &mut self.toasts,
+                                Toast {
                                     text: "Emptied Recycle Bin".into(),
                                     kind: ToastKind::Success,
                                     options: ToastOptions::default()
                                         .duration_in_seconds(self.toast_duration as f64),
-                                });
-                            }
+                                },
+                            );
                         }
-                        Err(e) => {
-                            let msg = format!("Failed to empty recycle bin: {e}");
-                            self.set_error(msg.clone());
-                            if self.enable_toasts {
-                                push_toast(&mut self.toasts, Toast {
+                    }
+                    Err(e) => {
+                        let msg = format!("Failed to empty recycle bin: {e}");
+                        self.set_error(msg.clone());
+                        if self.enable_toasts {
+                            push_toast(
+                                &mut self.toasts,
+                                Toast {
                                     text: msg.into(),
                                     kind: ToastKind::Error,
                                     options: ToastOptions::default()
                                         .duration_in_seconds(self.toast_duration as f64),
-                                });
-                            }
+                                },
+                            );
                         }
                     }
-                }
+                },
             }
         }
 
@@ -3050,9 +3067,7 @@ impl LauncherApp {
                 let title = slug.replace('-', " ");
                 let content = if let Some(tpl_name) = template {
                     if let Some(tpl) = get_template(tpl_name) {
-                        let filled = tpl
-                            .replace("{{title}}", &title)
-                            .replace("{{date}}", slug);
+                        let filled = tpl.replace("{{title}}", &title).replace("{{date}}", slug);
                         if filled.starts_with("# ") {
                             filled
                         } else {
@@ -3091,6 +3106,11 @@ impl LauncherApp {
         }
         self.note_panels.push(NotePanel::from_note(note));
         // Allow keyboard shortcuts like Esc/Cmd+W to immediately close the panel
+        self.update_panel_stack();
+    }
+
+    pub fn push_note_panel(&mut self, panel: NotePanel) {
+        self.note_panels.push(panel);
         self.update_panel_stack();
     }
 
@@ -3221,7 +3241,10 @@ mod tests {
     use super::*;
     use crate::{plugin::PluginManager, settings::Settings};
     use eframe::egui;
-    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
     use tempfile::tempdir;
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {

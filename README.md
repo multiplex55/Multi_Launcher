@@ -95,6 +95,7 @@ value as shown below:
     "help"
   ],
   "enabled_capabilities": {"folders": ["search", "show_full_path"]},
+  "note_save_on_close": false,
   "enable_toasts": true,
   "fuzzy_weight": 1.0,
   "usage_weight": 1.0,
@@ -147,6 +148,7 @@ for these fields.
 
 `query_scale` and `list_scale` control the size of the search field and the results list separately. Values around `1.0` keep the default look while higher numbers enlarge the respective element up to five times.
 `enable_toasts` controls short pop-up notifications when saving settings or commands. Set it to `false` to disable these messages.
+`note_save_on_close` automatically saves the contents of note panels whenever the window closes—whether you press `Esc`, click the close button, or trigger another close event. The default is `false`. Toggle this behaviour from the **Settings** window via the "Save note on close (Esc)" checkbox in the **Note** section.
 `fuzzy_weight` and `usage_weight` adjust how results are ranked. The fuzzy weight multiplies the match score while the usage weight favours frequently launched actions. Setting `"fuzzy_weight": 0` in `settings.json` forces case-insensitive substring matching across all plugins.
 Command aliases are checked first and a matching alias ranks above other results.
 

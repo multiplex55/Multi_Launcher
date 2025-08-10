@@ -1,7 +1,7 @@
 use crate::hotkey::Key;
 
-use crate::hotkey::{parse_hotkey, Hotkey};
 use crate::gui::Panel;
+use crate::hotkey::{parse_hotkey, Hotkey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -71,6 +71,12 @@ pub struct Settings {
     /// Default size for note editor panels.
     #[serde(default = "default_note_panel_size")]
     pub note_panel_default_size: (f32, f32),
+    /// When enabled, the note panel saves its contents whenever its window is
+    /// closed—whether by pressing `Esc`, clicking the window's close button, or
+    /// any other close event. Defaults to `false` when the field is missing in
+    /// the settings file.
+    #[serde(default = "default_note_save_on_close")]
+    pub note_save_on_close: bool,
     /// Enable toast notifications in the UI.
     #[serde(default = "default_toasts")]
     pub enable_toasts: bool,
@@ -197,6 +203,10 @@ fn default_note_panel_size() -> (f32, f32) {
     (420.0, 320.0)
 }
 
+fn default_note_save_on_close() -> bool {
+    false
+}
+
 fn default_log_path() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -227,6 +237,7 @@ impl Default for Settings {
             offscreen_pos: Some((2000, 2000)),
             window_size: Some((400, 220)),
             note_panel_default_size: default_note_panel_size(),
+            note_save_on_close: default_note_save_on_close(),
             enable_toasts: true,
             toast_duration: default_toast_duration(),
             query_scale: Some(1.0),
