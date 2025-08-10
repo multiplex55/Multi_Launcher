@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::path::Path;
 
 pub fn new(alias: Option<&str>) -> anyhow::Result<()> {
@@ -28,6 +29,7 @@ pub fn remove(path: &str) -> anyhow::Result<()> {
 }
 
 pub fn set_alias(path: &str, alias: &str) -> anyhow::Result<()> {
-    crate::plugins::tempfile::set_alias(Path::new(path), alias)?;
+    crate::plugins::tempfile::set_alias(Path::new(path), alias)
+        .context("failed to rename tempfile")?;
     Ok(())
 }

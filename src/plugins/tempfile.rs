@@ -85,7 +85,12 @@ pub fn set_alias(path: &Path, alias: &str) -> anyhow::Result<PathBuf> {
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("txt");
     let new_name = format!("temp_{}.{}", alias, ext);
     let new_path = dir.join(new_name);
-    fs::rename(path, &new_path)?;
+    if new_path.exists() && new_path != path {
+        anyhow::bail!("file already exists");
+    }
+    if path != new_path {
+        fs::rename(path, &new_path)?;
+    }
     Ok(new_path)
 }
 
