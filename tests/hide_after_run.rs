@@ -71,6 +71,7 @@ fn run_action(action: &str) -> bool {
         None,
         None,
         None,
+        None,
     );
     flag.store(true, Ordering::SeqCst);
     let a = app.results[0].clone();
