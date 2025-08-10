@@ -1173,7 +1173,7 @@ impl LauncherApp {
 
     /// Close the top-most open dialog if any is visible.
     /// Returns `true` when a dialog was closed.
-    fn close_front_dialog(&mut self) -> bool {
+    pub fn close_front_dialog(&mut self) -> bool {
         let panel = match self.panel_stack.pop() {
             Some(p) => p,
             None => return false,
@@ -1244,7 +1244,11 @@ impl LauncherApp {
                 self.panel_states.note_delete_dialog = false;
             }
             Panel::NotePanel => {
-                let _ = self.note_panels.pop();
+                if let Some(mut panel) = self.note_panels.pop() {
+                    if self.note_save_on_close {
+                        panel.save(self);
+                    }
+                }
                 self.panel_states.note_panel = false;
             }
             Panel::TodoDialog => {
@@ -1358,7 +1362,11 @@ impl LauncherApp {
                 self.panel_states.note_delete_dialog = false;
             }
             Panel::NotePanel => {
-                let _ = self.note_panels.pop();
+                if let Some(mut panel) = self.note_panels.pop() {
+                    if self.note_save_on_close {
+                        panel.save(self);
+                    }
+                }
                 self.panel_states.note_panel = false;
             }
             Panel::TodoDialog => {
@@ -3098,6 +3106,11 @@ impl LauncherApp {
         }
         self.note_panels.push(NotePanel::from_note(note));
         // Allow keyboard shortcuts like Esc/Cmd+W to immediately close the panel
+        self.update_panel_stack();
+    }
+
+    pub fn push_note_panel(&mut self, panel: NotePanel) {
+        self.note_panels.push(panel);
         self.update_panel_stack();
     }
 

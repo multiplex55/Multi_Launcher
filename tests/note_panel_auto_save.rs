@@ -48,33 +48,19 @@ fn note_panel_auto_saves_on_close() {
     append_note("alpha", "original").unwrap();
     let ctx = egui::Context::default();
     let mut app = new_app(&ctx);
+
     let mut note = load_notes()
         .unwrap()
         .into_iter()
         .find(|n| n.slug == "alpha")
         .unwrap();
     note.content.push_str(" updated");
-    let mut panel = NotePanel::from_note(note);
+    let panel = NotePanel::from_note(note);
+    app.push_note_panel(panel);
 
-    ctx.begin_frame(egui::RawInput {
-        events: vec![egui::Event::Key {
-            key: egui::Key::Escape,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::default(),
-        }],
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(800.0, 600.0),
-        )),
-        ..Default::default()
-    });
-    panel.ui(&ctx, &mut app);
-    let _ = ctx.end_frame();
+    app.close_front_dialog();
 
     let notes = load_notes().unwrap();
     let note = notes.into_iter().find(|n| n.slug == "alpha").unwrap();
     assert!(note.content.contains("updated"));
 }
-
