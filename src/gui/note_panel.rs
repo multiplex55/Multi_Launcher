@@ -170,6 +170,12 @@ impl NotePanel {
         self.open = open;
     }
 
+    /// Persist the current note to disk and update UI state.
+    ///
+    /// This is invoked when the user clicks the **Save** button or when the
+    /// panel closes while [`Settings::note_save_on_close`](crate::settings::Settings::note_save_on_close)
+    /// is `true`. Close events include pressing `Esc`, clicking the window's
+    /// close button, or any programmatic request to close the panel.
     pub(super) fn save(&mut self, app: &mut LauncherApp) {
         self.note.tags = extract_tags(&self.note.content);
         self.note.links = extract_wiki_links(&self.note.content)
