@@ -154,6 +154,22 @@ fn set_alias_renames_file() {
 }
 
 #[test]
+fn set_alias_errors_if_target_exists() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    clear_files().unwrap();
+    let file1 = create_file().unwrap();
+    let file2 = create_file().unwrap();
+    let new_path = set_alias(&file1, "alias").unwrap();
+    let res = set_alias(&file2, "alias");
+    assert!(res.is_err());
+    remove_file(&new_path).unwrap();
+    remove_file(&file2).unwrap();
+}
+
+#[test]
 fn create_named_file_rejects_invalid_alias() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
