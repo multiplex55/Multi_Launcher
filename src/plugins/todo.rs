@@ -130,6 +130,24 @@ pub fn clear_done(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn parse_priority(part: &str) -> Option<u8> {
+    part.strip_prefix("p=").and_then(|p| p.parse::<u8>().ok())
+}
+
+fn parse_tag(part: &str) -> Option<String> {
+    part.strip_prefix('#').and_then(|t| {
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    })
+}
+
+fn parse_index(part: &str) -> Option<usize> {
+    part.parse::<usize>().ok()
+}
+
 pub struct TodoPlugin {
     matcher: SkimMatcherV2,
     data: Arc<Mutex<Vec<TodoEntry>>>,
@@ -160,6 +178,128 @@ impl TodoPlugin {
             watcher,
         }
     }
+
+    fn filter_entries<'a>(
+        &self,
+        entries: &mut Vec<(usize, &'a TodoEntry)>,
+        filter: &str,
+        allow_negative: bool,
+    ) {
+        let mut filter = filter.trim();
+        let mut negative = false;
+        if allow_negative {
+            if let Some(stripped) = filter.strip_prefix('!') {
+                negative = true;
+                filter = stripped.trim();
+            }
+        }
+
+        let tag_filter = filter.starts_with('#');
+        if tag_filter {
+            let tag = filter.trim_start_matches('#');
+            entries.retain(|(_, t)| {
+                let has_tag = t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(tag));
+                if negative {
+                    !has_tag
+                } else {
+                    has_tag
+                }
+            });
+        } else if !filter.is_empty() {
+            entries.retain(|(_, t)| {
+                let text_match = self.matcher.fuzzy_match(&t.text, filter).is_some();
+                if negative {
+                    !text_match
+                } else {
+                    text_match
+                }
+            });
+        }
+
+        if filter.is_empty() || tag_filter {
+            entries.sort_by(|a, b| b.1.priority.cmp(&a.1.priority));
+        }
+    }
+
+    fn edit_actions(&self, filter: &str) -> Vec<Action> {
+        let guard = match self.data.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
+        self.filter_entries(&mut entries, filter, false);
+        entries
+            .into_iter()
+            .map(|(idx, t)| Action {
+                label: format!("{} {}", if t.done { "[x]" } else { "[ ]" }, t.text.clone()),
+                desc: "Todo".into(),
+                action: format!("todo:edit:{idx}"),
+                args: None,
+            })
+            .collect()
+    }
+
+    fn list_actions(&self, filter: &str) -> Vec<Action> {
+        let guard = match self.data.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
+        self.filter_entries(&mut entries, filter.trim(), true);
+        entries
+            .into_iter()
+            .map(|(idx, t)| Action {
+                label: format!("{} {}", if t.done { "[x]" } else { "[ ]" }, t.text.clone()),
+                desc: "Todo".into(),
+                action: format!("todo:done:{idx}"),
+                args: None,
+            })
+            .collect()
+    }
+
+    fn tag_actions(&self, rest: &str) -> Vec<Action> {
+        let rest = rest.trim();
+        let mut parts = rest.split_whitespace();
+        if let Some(first) = parts.next() {
+            if let Some(idx) = parse_index(first) {
+                let tags: Vec<String> = parts.filter_map(parse_tag).collect();
+                let tag_str = tags.join(",");
+                let guard = match self.data.lock() {
+                    Ok(g) => g,
+                    Err(_) => return Vec::new(),
+                };
+                if idx < guard.len() {
+                    return vec![Action {
+                        label: format!("Set tags for todo {idx}"),
+                        desc: "Todo".into(),
+                        action: format!("todo:tag:{idx}|{tag_str}"),
+                        args: None,
+                    }];
+                } else {
+                    return Vec::new();
+                }
+            } else {
+                let filter = rest;
+                let guard = match self.data.lock() {
+                    Ok(g) => g,
+                    Err(_) => return Vec::new(),
+                };
+                let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
+                let tag_filter = format!("#{filter}");
+                self.filter_entries(&mut entries, &tag_filter, false);
+                return entries
+                    .into_iter()
+                    .map(|(idx, t)| Action {
+                        label: format!("{} {}", if t.done { "[x]" } else { "[ ]" }, t.text.clone()),
+                        desc: "Todo".into(),
+                        action: format!("query:todo tag {idx} "),
+                        args: None,
+                    })
+                    .collect();
+            }
+        }
+        Vec::new()
+    }
 }
 
 impl Default for TodoPlugin {
@@ -185,34 +325,7 @@ impl Plugin for TodoPlugin {
 
         const EDIT_PREFIX: &str = "todo edit";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, EDIT_PREFIX) {
-            let filter = rest.trim();
-            let guard = match self.data.lock() {
-                Ok(g) => g,
-                Err(_) => return Vec::new(),
-            };
-            let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
-
-            let tag_filter = filter.starts_with('#');
-            if tag_filter {
-                let tag = filter.trim_start_matches('#');
-                entries.retain(|(_, t)| t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(tag)));
-            } else if !filter.is_empty() {
-                entries.retain(|(_, t)| self.matcher.fuzzy_match(&t.text, filter).is_some());
-            }
-
-            if filter.is_empty() || tag_filter {
-                entries.sort_by(|a, b| b.1.priority.cmp(&a.1.priority));
-            }
-
-            return entries
-                .into_iter()
-                .map(|(idx, t)| Action {
-                    label: format!("{} {}", if t.done { "[x]" } else { "[ ]" }, t.text.clone()),
-                    desc: "Todo".into(),
-                    action: format!("todo:edit:{idx}"),
-                    args: None,
-                })
-                .collect();
+            return self.edit_actions(rest.trim());
         }
 
         if trimmed.eq_ignore_ascii_case("todo view") {
@@ -259,14 +372,10 @@ impl Plugin for TodoPlugin {
                 let mut tags: Vec<String> = Vec::new();
                 let mut words: Vec<String> = Vec::new();
                 for part in rest.split_whitespace() {
-                    if let Some(p) = part.strip_prefix("p=") {
-                        if let Ok(n) = p.parse::<u8>() {
-                            priority = n;
-                        }
-                    } else if let Some(tag) = part.strip_prefix('#') {
-                        if !tag.is_empty() {
-                            tags.push(tag.to_string());
-                        }
+                    if let Some(p) = parse_priority(part) {
+                        priority = p;
+                    } else if let Some(tag) = parse_tag(part) {
+                        tags.push(tag);
                     } else {
                         words.push(part.to_string());
                     }
@@ -289,8 +398,8 @@ impl Plugin for TodoPlugin {
             let rest = rest.trim();
             let mut parts = rest.split_whitespace();
             if let (Some(idx_str), Some(priority_str)) = (parts.next(), parts.next()) {
-                if let (Ok(idx), Ok(priority)) =
-                    (idx_str.parse::<usize>(), priority_str.parse::<u8>())
+                if let (Some(idx), Some(priority)) =
+                    (parse_index(idx_str), parse_priority(priority_str))
                 {
                     return vec![Action {
                         label: format!("Set priority {priority} for todo {idx}"),
@@ -304,50 +413,7 @@ impl Plugin for TodoPlugin {
 
         const TAG_PREFIX: &str = "todo tag ";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, TAG_PREFIX) {
-            let rest = rest.trim();
-            let mut parts = rest.split_whitespace();
-            if let Some(first) = parts.next() {
-                if let Ok(idx) = first.parse::<usize>() {
-                    let mut tags: Vec<String> = Vec::new();
-                    for t in parts {
-                        if let Some(tag) = t.strip_prefix('#') {
-                            if !tag.is_empty() {
-                                tags.push(tag.to_string());
-                            }
-                        }
-                    }
-                    let tag_str = tags.join(",");
-                    return vec![Action {
-                        label: format!("Set tags for todo {idx}"),
-                        desc: "Todo".into(),
-                        action: format!("todo:tag:{idx}|{tag_str}"),
-                        args: None,
-                    }];
-                } else {
-                    let filter = rest;
-                    let guard = match self.data.lock() {
-                        Ok(g) => g,
-                        Err(_) => return Vec::new(),
-                    };
-                    let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
-                    entries
-                        .retain(|(_, t)| t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(filter)));
-                    entries.sort_by(|a, b| b.1.priority.cmp(&a.1.priority));
-                    return entries
-                        .into_iter()
-                        .map(|(idx, t)| Action {
-                            label: format!(
-                                "{} {}",
-                                if t.done { "[x]" } else { "[ ]" },
-                                t.text.clone()
-                            ),
-                            desc: "Todo".into(),
-                            action: format!("query:todo tag {idx} "),
-                            args: None,
-                        })
-                        .collect();
-                }
-            }
+            return self.tag_actions(rest);
         }
 
         const RM_PREFIX: &str = "todo rm ";
@@ -372,54 +438,7 @@ impl Plugin for TodoPlugin {
 
         const LIST_PREFIX: &str = "todo list";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
-            let mut filter = rest.trim();
-            let guard = match self.data.lock() {
-                Ok(g) => g,
-                Err(_) => return Vec::new(),
-            };
-            let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
-
-            let mut negative = false;
-            if let Some(stripped) = filter.strip_prefix('!') {
-                negative = true;
-                filter = stripped.trim();
-            }
-
-            let tag_filter = filter.starts_with('#');
-            if tag_filter {
-                let tag = filter.trim_start_matches('#');
-                entries.retain(|(_, t)| {
-                    let has_tag = t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(tag));
-                    if negative {
-                        !has_tag
-                    } else {
-                        has_tag
-                    }
-                });
-            } else if !filter.is_empty() {
-                entries.retain(|(_, t)| {
-                    let text_match = self.matcher.fuzzy_match(&t.text, filter).is_some();
-                    if negative {
-                        !text_match
-                    } else {
-                        text_match
-                    }
-                });
-            }
-
-            if filter.is_empty() || tag_filter {
-                entries.sort_by(|a, b| b.1.priority.cmp(&a.1.priority));
-            }
-
-            return entries
-                .into_iter()
-                .map(|(idx, t)| Action {
-                    label: format!("{} {}", if t.done { "[x]" } else { "[ ]" }, t.text.clone()),
-                    desc: "Todo".into(),
-                    action: format!("todo:done:{idx}"),
-                    args: None,
-                })
-                .collect();
+            return self.list_actions(rest);
         }
 
         Vec::new()
@@ -500,5 +519,155 @@ impl Plugin for TodoPlugin {
                 args: None,
             },
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plugin_with(entries: Vec<TodoEntry>) -> TodoPlugin {
+        TodoPlugin {
+            matcher: SkimMatcherV2::default(),
+            data: Arc::new(Mutex::new(entries)),
+            watcher: None,
+        }
+    }
+
+    #[test]
+    fn parse_helpers() {
+        assert_eq!(parse_priority("p=3"), Some(3));
+        assert_eq!(parse_priority("p=x"), None);
+        assert_eq!(parse_tag("#a"), Some("a".to_string()));
+        assert_eq!(parse_tag("a"), None);
+        assert_eq!(parse_index("2"), Some(2));
+        assert_eq!(parse_index("a"), None);
+    }
+
+    #[test]
+    fn filter_entries_tag_and_negative() {
+        let plugin = plugin_with(Vec::new());
+        let items = vec![
+            TodoEntry {
+                text: "alpha".into(),
+                done: false,
+                priority: 1,
+                tags: vec!["work".into()],
+            },
+            TodoEntry {
+                text: "beta".into(),
+                done: false,
+                priority: 2,
+                tags: vec![],
+            },
+        ];
+        let mut entries: Vec<(usize, &TodoEntry)> = items.iter().enumerate().collect();
+        plugin.filter_entries(&mut entries, "#work", true);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, 0);
+        let mut entries: Vec<(usize, &TodoEntry)> = items.iter().enumerate().collect();
+        plugin.filter_entries(&mut entries, "!beta", true);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, 0);
+    }
+
+    #[test]
+    fn edit_actions_filter() {
+        let plugin = plugin_with(vec![
+            TodoEntry {
+                text: "alpha".into(),
+                done: false,
+                priority: 1,
+                tags: vec![],
+            },
+            TodoEntry {
+                text: "beta".into(),
+                done: false,
+                priority: 2,
+                tags: vec![],
+            },
+        ]);
+        let actions = plugin.edit_actions("beta");
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].label.contains("beta"));
+    }
+
+    #[test]
+    fn list_actions_negative_filter() {
+        let plugin = plugin_with(vec![
+            TodoEntry {
+                text: "alpha".into(),
+                done: false,
+                priority: 1,
+                tags: vec![],
+            },
+            TodoEntry {
+                text: "beta".into(),
+                done: false,
+                priority: 2,
+                tags: vec![],
+            },
+        ]);
+        let actions = plugin.list_actions("!beta");
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].label.contains("alpha"));
+    }
+
+    #[test]
+    fn tag_actions_index_and_filter() {
+        let plugin = plugin_with(vec![
+            TodoEntry {
+                text: "alpha".into(),
+                done: false,
+                priority: 1,
+                tags: vec!["x".into()],
+            },
+            TodoEntry {
+                text: "beta".into(),
+                done: false,
+                priority: 1,
+                tags: vec![],
+            },
+        ]);
+        let res = plugin.tag_actions("1 #a #b");
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].action, "todo:tag:1|a,b");
+        let res = plugin.tag_actions("3 #a");
+        assert!(res.is_empty());
+        let res = plugin.tag_actions("x");
+        assert_eq!(res.len(), 1);
+        assert!(res[0].action.starts_with("query:todo tag 0"));
+    }
+
+    #[test]
+    fn tag_actions_edge_cases() {
+        let plugin = plugin_with(vec![
+            TodoEntry {
+                text: "alpha".into(),
+                done: false,
+                priority: 1,
+                tags: vec!["x".into()],
+            },
+            TodoEntry {
+                text: "beta".into(),
+                done: false,
+                priority: 1,
+                tags: vec![],
+            },
+        ]);
+
+        // Empty input or whitespace should yield no actions
+        assert!(plugin.tag_actions("").is_empty());
+        assert!(plugin.tag_actions("   ").is_empty());
+
+        // Index provided without tags should still be handled
+        let res = plugin.tag_actions("1");
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].action, "todo:tag:1|");
+
+        // Invalid index should behave like a tag filter
+        let res = plugin.tag_actions("x");
+        assert_eq!(res.len(), 1);
+        assert!(res[0].action.starts_with("query:todo tag 0"));
     }
 }
