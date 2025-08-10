@@ -5,13 +5,28 @@ use crate::plugin::{Plugin, PluginManager};
 use crate::settings::Settings;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use once_cell::sync::Lazy;
+use once_cell::sync::{Lazy, OnceCell};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 pub const MACROS_FILE: &str = "macros.json";
 pub static STEP_MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 pub static ERROR_MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+/// Lazily constructed [`PluginManager`] reused across macro executions.
+///
+/// Access is serialized through a [`Mutex`] because the manager is mutable and
+/// not `Sync`. The `OnceCell` ensures the manager is only initialised once,
+/// avoiding the cost of rebuilding the plugin list on every macro step.
+///
+/// The associated [`SETTINGS_HASH`] tracks configuration changes; when relevant
+/// settings differ from the cached hash the manager is refreshed. This design is
+/// safe to call from multiple threads but callers will block while the manager
+/// is reloaded.
+static PLUGIN_MANAGER: OnceCell<Mutex<PluginManager>> = OnceCell::new();
+
+/// Hash of the settings used to populate [`PLUGIN_MANAGER`].
+static SETTINGS_HASH: OnceCell<Mutex<u64>> = OnceCell::new();
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct MacroStep {
@@ -72,20 +87,57 @@ pub fn take_error_messages() -> Vec<String> {
     }
 }
 
-fn search_first_action(query: &str) -> Option<Action> {
+/// Search for the first matching action across all plugins.
+///
+/// The global [`PLUGIN_MANAGER`] is reused between calls. When the relevant
+/// [`Settings`] change the manager is refreshed; otherwise the cached instance
+/// is used to avoid plugin reinitialisation costs.
+///
+/// See `benches/macros_search.rs` for a simple Criterion benchmark measuring
+/// the steady-state performance of this function.
+pub fn search_first_action(query: &str) -> Option<Action> {
     let settings = Settings::load("settings.json").unwrap_or_default();
     let actions = load_actions("actions.json").unwrap_or_default();
-    let mut pm = PluginManager::new();
-    let dirs = settings.plugin_dirs.unwrap_or_default();
+    let dirs = settings.plugin_dirs.clone().unwrap_or_default();
     let actions_arc = Arc::new(actions);
-    pm.reload_from_dirs(
-        &dirs,
-        settings.clipboard_limit,
-        settings.net_unit,
-        false,
-        &settings.plugin_settings,
-        actions_arc,
-    );
+
+    // Compute a hash of the settings fields that influence plugin loading.
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    dirs.hash(&mut hasher);
+    settings.clipboard_limit.hash(&mut hasher);
+    (settings.net_unit as u8).hash(&mut hasher);
+    serde_json::to_string(&settings.enabled_plugins)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    serde_json::to_string(&settings.enabled_capabilities)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    serde_json::to_string(&settings.plugin_settings)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    let settings_hash = hasher.finish();
+
+    // Initialise global manager and update if settings have changed.
+    let pm_cell = PLUGIN_MANAGER.get_or_init(|| Mutex::new(PluginManager::new()));
+    let mut pm = pm_cell.lock().ok()?;
+    let hash_cell = SETTINGS_HASH.get_or_init(|| Mutex::new(0));
+    if let Ok(mut cached_hash) = hash_cell.lock() {
+        if *cached_hash != settings_hash {
+            pm.reload_from_dirs(
+                &dirs,
+                settings.clipboard_limit,
+                settings.net_unit,
+                false,
+                &settings.plugin_settings,
+                actions_arc,
+            );
+            *cached_hash = settings_hash;
+        }
+    }
+
     pm.search_filtered(
         query,
         settings.enabled_plugins.as_ref(),
