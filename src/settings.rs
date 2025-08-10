@@ -71,7 +71,8 @@ pub struct Settings {
     /// Default size for note editor panels.
     #[serde(default = "default_note_panel_size")]
     pub note_panel_default_size: (f32, f32),
-    /// Automatically save note when closing via Esc.
+    /// When enabled, the note panel saves its contents before closing (e.g. via `Esc`).
+    /// Defaults to `false` when the field is missing in the settings file.
     #[serde(default = "default_note_save_on_close")]
     pub note_save_on_close: bool,
     /// Enable toast notifications in the UI.
