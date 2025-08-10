@@ -467,12 +467,27 @@ impl SettingsEditor {
                                     plugin.settings_ui(ui, entry);
                                 });
                         }
-                        self.expand_request = None;
+                        let id = ui.make_persistent_id("plugin_notes");
+                        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                            ui.ctx(),
+                            id,
+                            false,
+                        );
+                        if let Some(open) = self.expand_request {
+                            state.set_open(open);
+                        }
+                        state
+                            .show_header(ui, |ui| {
+                                ui.label("Note settings");
+                            })
+                            .body(|ui| {
+                                ui.checkbox(
+                                    &mut self.note_save_on_close,
+                                    "Save note on close (Esc)",
+                                );
+                            });
 
-                        ui.separator();
-                        ui.collapsing("Note", |ui| {
-                            ui.checkbox(&mut self.note_save_on_close, "Save note on close (Esc)");
-                        });
+                        self.expand_request = None;
                         ui.separator();
 
                         if ui.button("Save").clicked() {
