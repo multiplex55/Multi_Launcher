@@ -417,11 +417,6 @@ impl SettingsEditor {
                             "Save file when copying screenshot",
                         );
                         ui.separator();
-                        ui.collapsing("Note", |ui| {
-                            ui.checkbox(&mut self.note_save_on_close, "Save note on close");
-                        });
-
-                        ui.separator();
                         if ui
                             .button(if self.plugins_expanded {
                                 "Collapse plugin sections"
@@ -473,6 +468,12 @@ impl SettingsEditor {
                                 });
                         }
                         self.expand_request = None;
+
+                        ui.separator();
+                        ui.collapsing("Note", |ui| {
+                            ui.checkbox(&mut self.note_save_on_close, "Save note on close (Esc)");
+                        });
+                        ui.separator();
 
                         if ui.button("Save").clicked() {
                             if parse_hotkey(&self.hotkey).is_none() {
