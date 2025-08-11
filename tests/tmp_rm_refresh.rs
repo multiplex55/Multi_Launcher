@@ -44,7 +44,7 @@ fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
 fn tmp_rm_refreshes_results() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
+    std::env::set_var("ML_TMP_DIR", dir.path());
 
     clear_files().unwrap();
 

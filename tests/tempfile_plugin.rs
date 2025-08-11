@@ -9,9 +9,17 @@ use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
+fn setup() -> tempfile::TempDir {
+    let dir = tempdir().unwrap();
+    std::env::set_var("ML_TMP_DIR", dir.path());
+    clear_files().unwrap();
+    dir
+}
+
 #[test]
 fn search_tmp_returns_dialog() {
     let _lock = TEST_MUTEX.lock().unwrap();
+    let _dir = setup();
     let plugin = TempfilePlugin;
     let results = plugin.search("tmp");
     assert_eq!(results.len(), 1);
@@ -21,6 +29,7 @@ fn search_tmp_returns_dialog() {
 #[test]
 fn search_new_returns_action() {
     let _lock = TEST_MUTEX.lock().unwrap();
+    let _dir = setup();
     let plugin = TempfilePlugin;
     let results = plugin.search("tmp new");
     assert_eq!(results.len(), 1);
@@ -30,6 +39,7 @@ fn search_new_returns_action() {
 #[test]
 fn search_create_returns_action() {
     let _lock = TEST_MUTEX.lock().unwrap();
+    let _dir = setup();
     let plugin = TempfilePlugin;
     let results = plugin.search("tmp create");
     assert_eq!(results.len(), 1);
@@ -39,6 +49,7 @@ fn search_create_returns_action() {
 #[test]
 fn search_new_with_name_returns_action() {
     let _lock = TEST_MUTEX.lock().unwrap();
+    let _dir = setup();
     let plugin = TempfilePlugin;
     let results = plugin.search("tmp new testfile");
     assert_eq!(results.len(), 1);
@@ -48,6 +59,7 @@ fn search_new_with_name_returns_action() {
 #[test]
 fn search_create_with_name_returns_action() {
     let _lock = TEST_MUTEX.lock().unwrap();
+    let _dir = setup();
     let plugin = TempfilePlugin;
     let results = plugin.search("tmp create testfile");
     assert_eq!(results.len(), 1);
@@ -57,6 +69,7 @@ fn search_create_with_name_returns_action() {
 #[test]
 fn search_open_returns_action() {
     let _lock = TEST_MUTEX.lock().unwrap();
+    let _dir = setup();
     let plugin = TempfilePlugin;
     let results = plugin.search("tmp open");
     assert_eq!(results.len(), 1);
@@ -66,6 +79,7 @@ fn search_open_returns_action() {
 #[test]
 fn search_clear_returns_action() {
     let _lock = TEST_MUTEX.lock().unwrap();
+    let _dir = setup();
     let plugin = TempfilePlugin;
     let results = plugin.search("tmp clear");
     assert_eq!(results.len(), 1);
@@ -75,9 +89,7 @@ fn search_clear_returns_action() {
 #[test]
 fn list_returns_existing_files() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    let dir = tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
-
+    let _dir = setup();
     let _ = create_file();
     let _ = create_file();
 
@@ -93,9 +105,7 @@ fn list_returns_existing_files() {
 #[test]
 fn rm_lists_files_for_deletion() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    let dir = tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
-
+    let _dir = setup();
     let file = create_file().unwrap();
     let plugin = TempfilePlugin;
     let results = plugin.search("tmp rm");
@@ -107,9 +117,7 @@ fn rm_lists_files_for_deletion() {
 #[test]
 fn launch_action_remove_deletes_file() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    let dir = tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
-
+    let _dir = setup();
     let file = create_file().unwrap();
     let action = Action {
         label: "".into(),
@@ -124,9 +132,7 @@ fn launch_action_remove_deletes_file() {
 #[test]
 fn rm_refreshes_results() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    let dir = tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
-
+    let _dir = setup();
     let file = create_file().unwrap();
     let plugin = TempfilePlugin;
     let results = plugin.search("tmp rm");
@@ -140,9 +146,7 @@ fn rm_refreshes_results() {
 #[test]
 fn set_alias_renames_file() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    let dir = tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
-
+    let _dir = setup();
     let file = create_file().unwrap();
     let new = set_alias(&file, "alias").unwrap();
     assert!(new
@@ -156,10 +160,7 @@ fn set_alias_renames_file() {
 #[test]
 fn set_alias_errors_if_target_exists() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    let dir = tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
-
-    clear_files().unwrap();
+    let _dir = setup();
     let file1 = create_file().unwrap();
     let file2 = create_file().unwrap();
     let new_path = set_alias(&file1, "alias").unwrap();
@@ -172,9 +173,7 @@ fn set_alias_errors_if_target_exists() {
 #[test]
 fn create_named_file_rejects_invalid_alias() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    let dir = tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
-
+    let _dir = setup();
     let res = create_named_file("bad/alias", "hi");
     assert!(res.is_err());
 }
@@ -182,9 +181,7 @@ fn create_named_file_rejects_invalid_alias() {
 #[test]
 fn set_alias_rejects_invalid_alias() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    let dir = tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
-
+    let _dir = setup();
     let file = create_file().unwrap();
     let res = set_alias(&file, "bad/alias");
     assert!(res.is_err());

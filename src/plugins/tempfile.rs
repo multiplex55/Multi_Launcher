@@ -19,13 +19,15 @@ fn validate_alias(alias: &str) -> anyhow::Result<&str> {
 
 /// Return the directory used to store temporary files.
 pub fn storage_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("ML_TMP_DIR") {
+        return PathBuf::from(dir);
+    }
     #[cfg(test)]
     {
-        return std::env::current_dir()
-            .unwrap_or_else(|_| std::env::temp_dir())
-            .join("multi_launcher_tmp");
+        use std::thread;
+        return std::env::temp_dir()
+            .join(format!("multi_launcher_tmp_{:?}", thread::current().id()));
     }
-
     #[cfg(not(test))]
     {
         let base = std::env::current_exe()
