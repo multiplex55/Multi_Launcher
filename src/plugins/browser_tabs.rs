@@ -364,6 +364,36 @@ mod imp {
             let refreshed = plugin.search("tab ");
             assert!(refreshed.iter().all(|a| !a.label.contains("Dummy")));
         }
+
+        #[test]
+        fn force_refresh_clears_cache() {
+            {
+                let mut cache = CACHE.write().unwrap();
+                cache.clear();
+                cache.push(TabInfo {
+                    title: "Dummy".into(),
+                    url: String::new(),
+                    runtime_id: vec![1],
+                });
+            }
+
+            {
+                let mut last = LAST_REFRESH.lock().unwrap();
+                *last = Instant::now() - Duration::from_secs(60);
+            }
+
+            force_refresh();
+
+            {
+                let cache = CACHE.read().unwrap();
+                assert!(cache.is_empty());
+            }
+
+            {
+                let last = LAST_REFRESH.lock().unwrap();
+                assert!(last.elapsed() < Duration::from_secs(1));
+            }
+        }
     }
 }
 
