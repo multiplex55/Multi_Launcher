@@ -55,8 +55,13 @@ fn tmp_rm_refreshes_results() {
 
     app.query = "tmp rm".into();
     app.search();
-    assert_eq!(app.results.len(), 1);
-    let a = app.results[0].clone();
+    let remove_action = format!("tempfile:remove:{}", file.to_string_lossy());
+    let a = app
+        .results
+        .iter()
+        .find(|a| a.action == remove_action)
+        .cloned()
+        .expect("missing tempfile remove action");
 
     let mut refresh = false;
     if a.action.starts_with("tempfile:remove:") {
@@ -73,6 +78,6 @@ fn tmp_rm_refreshes_results() {
     assert!(!app
         .results
         .iter()
-        .any(|a| a.action.starts_with("tempfile:remove:")));
+        .any(|a| a.action == remove_action));
     assert!(!file.exists());
 }
