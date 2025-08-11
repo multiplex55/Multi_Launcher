@@ -1,7 +1,7 @@
 use eframe::egui;
 use multi_launcher::{
     actions::Action, gui::LauncherApp, launcher::launch_action, plugin::PluginManager,
-    plugins::tempfile::create_file, settings::Settings,
+    plugins::tempfile::{clear_files, create_file}, settings::Settings,
 };
 use once_cell::sync::Lazy;
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
@@ -45,6 +45,8 @@ fn tmp_rm_refreshes_results() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
+
+    clear_files().unwrap();
 
     let file = create_file().unwrap();
     let ctx = egui::Context::default();
