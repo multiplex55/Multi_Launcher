@@ -81,6 +81,7 @@ mod imp {
         }
     }
 
+    #[cfg(not(test))]
     fn enumerate_tabs() -> Vec<TabInfo> {
         use windows::core::{BSTR, VARIANT};
         use windows::Win32::System::Com::{
@@ -199,6 +200,7 @@ mod imp {
         out
     }
 
+    #[cfg(not(test))]
     fn refresh_cache() {
         let tabs = enumerate_tabs();
         if let Ok(mut cache) = CACHE.write() {
@@ -215,6 +217,18 @@ mod imp {
         push_message("Tab cache refreshed".into());
     }
 
+    #[cfg(test)]
+    fn refresh_cache() {
+        if let Ok(mut cache) = CACHE.write() {
+            cache.clear();
+        }
+        if let Ok(mut last) = LAST_REFRESH.lock() {
+            *last = Instant::now();
+        }
+        REFRESHING.store(false, Ordering::Release);
+    }
+
+    #[cfg(not(test))]
     fn trigger_refresh() {
         let refresh_needed = {
             if let Ok(last) = LAST_REFRESH.lock() {
@@ -232,6 +246,21 @@ mod imp {
         }
     }
 
+    #[cfg(test)]
+    fn trigger_refresh() {
+        let refresh_needed = {
+            if let Ok(last) = LAST_REFRESH.lock() {
+                last.elapsed() > Duration::from_secs(2)
+            } else {
+                false
+            }
+        };
+        if refresh_needed {
+            refresh_cache();
+        }
+    }
+
+    #[cfg(not(test))]
     pub(super) fn force_refresh() {
         if REFRESHING
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -239,6 +268,11 @@ mod imp {
         {
             std::thread::spawn(refresh_cache);
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn force_refresh() {
+        refresh_cache();
     }
 
     pub(super) fn clear_cache() {
