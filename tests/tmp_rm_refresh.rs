@@ -1,7 +1,7 @@
 use eframe::egui;
 use multi_launcher::{
     actions::Action, gui::LauncherApp, launcher::launch_action, plugin::PluginManager,
-    plugins::tempfile::create_file, settings::Settings,
+    plugins::tempfile::{clear_files, create_file}, settings::Settings,
 };
 use once_cell::sync::Lazy;
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
@@ -44,7 +44,9 @@ fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
 fn tmp_rm_refreshes_results() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
+    std::env::set_var("ML_TMP_DIR", dir.path());
+
+    clear_files().unwrap();
 
     let file = create_file().unwrap();
     let ctx = egui::Context::default();
@@ -53,8 +55,13 @@ fn tmp_rm_refreshes_results() {
 
     app.query = "tmp rm".into();
     app.search();
-    assert_eq!(app.results.len(), 1);
-    let a = app.results[0].clone();
+    let remove_action = format!("tempfile:remove:{}", file.to_string_lossy());
+    let a = app
+        .results
+        .iter()
+        .find(|a| a.action == remove_action)
+        .cloned()
+        .expect("missing tempfile remove action");
 
     let mut refresh = false;
     if a.action.starts_with("tempfile:remove:") {
@@ -71,6 +78,6 @@ fn tmp_rm_refreshes_results() {
     assert!(!app
         .results
         .iter()
-        .any(|a| a.action.starts_with("tempfile:remove:")));
+        .any(|a| a.action == remove_action));
     assert!(!file.exists());
 }

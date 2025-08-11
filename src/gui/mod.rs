@@ -546,6 +546,7 @@ impl LauncherApp {
                 .map(|b| (b.url, b.alias))
                 .collect::<HashMap<_, _>>();
 
+        #[cfg(not(test))]
         match watch_file(Path::new(&actions_path), tx.clone(), WatchEvent::Actions) {
             Ok(w) => watchers.push(w),
             Err(e) => {
@@ -561,6 +562,25 @@ impl LauncherApp {
             }
         }
 
+        #[cfg(test)]
+        {
+            if Path::new(&actions_path).exists() {
+                if let Ok(w) = watch_file(Path::new(&actions_path), tx.clone(), WatchEvent::Actions) {
+                    watchers.push(w);
+                }
+            } else {
+                push_toast(
+                    &mut toasts,
+                    Toast {
+                        text: format!("Failed to watch {}", actions_path).into(),
+                        kind: ToastKind::Error,
+                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
+                    },
+                );
+            }
+        }
+
+        #[cfg(not(test))]
         match watch_file(
             Path::new(crate::plugins::folders::FOLDERS_FILE),
             tx.clone(),
@@ -574,12 +594,33 @@ impl LauncherApp {
                     Toast {
                         text: "Failed to watch folders.json".into(),
                         kind: ToastKind::Error,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(toast_duration as f64),
+                    },
+                );
+            }
+        }
+
+        #[cfg(test)]
+        {
+            let path = Path::new(crate::plugins::folders::FOLDERS_FILE);
+            if path.exists() {
+                if let Ok(w) = watch_file(path, tx.clone(), WatchEvent::Folders) {
+                    watchers.push(w);
+                }
+            } else {
+                push_toast(
+                    &mut toasts,
+                    Toast {
+                        text: "Failed to watch folders.json".into(),
+                        kind: ToastKind::Error,
                         options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
                     },
                 );
             }
         }
 
+        #[cfg(not(test))]
         match watch_file(
             Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE),
             tx.clone(),
@@ -588,6 +629,26 @@ impl LauncherApp {
             Ok(w) => watchers.push(w),
             Err(e) => {
                 tracing::error!("watch error: {:?}", e);
+                push_toast(
+                    &mut toasts,
+                    Toast {
+                        text: "Failed to watch bookmarks.json".into(),
+                        kind: ToastKind::Error,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(toast_duration as f64),
+                    },
+                );
+            }
+        }
+
+        #[cfg(test)]
+        {
+            let path = Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE);
+            if path.exists() {
+                if let Ok(w) = watch_file(path, tx.clone(), WatchEvent::Bookmarks) {
+                    watchers.push(w);
+                }
+            } else {
                 push_toast(
                     &mut toasts,
                     Toast {

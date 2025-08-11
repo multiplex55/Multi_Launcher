@@ -1,5 +1,4 @@
 use eframe::egui;
-use multi_launcher::actions::Action;
 use multi_launcher::gui::LauncherApp;
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::plugins::bookmarks::{save_bookmarks, BOOKMARKS_FILE};
