@@ -74,10 +74,15 @@ fn macros_file_change_reload() {
         }],
     )
     .unwrap();
-    sleep(Duration::from_millis(200));
-
-    let results = plugin.search("macro list");
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].label, "two");
+    // Wait for the watcher to pick up the changes. The callback may fire
+    // asynchronously, so poll for the updated label with a timeout.
+    for _ in 0..50 {
+        sleep(Duration::from_millis(100));
+        let results = plugin.search("macro list");
+        if results.len() == 1 && results[0].label == "two" {
+            return;
+        }
+    }
+    panic!("macros file did not reload");
 }
 
