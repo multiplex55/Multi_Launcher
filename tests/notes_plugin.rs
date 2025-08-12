@@ -179,6 +179,28 @@ fn note_open_uses_fuzzy_matching() {
 }
 
 #[test]
+fn note_alias_supports_open_rm_and_labels() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _tmp = setup();
+    append_note("alpha", "# alpha\nAlias: special-name\n\ncontent").unwrap();
+    let plugin = NotePlugin::default();
+
+    let open_results = plugin.search("note open special-name");
+    assert_eq!(open_results.len(), 1);
+    assert_eq!(open_results[0].action, "note:open:alpha");
+    assert_eq!(open_results[0].label, "special-name");
+
+    let rm_results = plugin.search("note rm special-name");
+    assert_eq!(rm_results.len(), 1);
+    assert_eq!(rm_results[0].action, "note:remove:alpha");
+    assert_eq!(rm_results[0].label, "Remove special-name");
+
+    let list_results = plugin.search("note list");
+    assert_eq!(list_results.len(), 1);
+    assert_eq!(list_results[0].label, "special-name");
+}
+
+#[test]
 fn missing_link_colored_red() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let _tmp = setup();
