@@ -201,6 +201,28 @@ fn note_alias_supports_open_rm_and_labels() {
 }
 
 #[test]
+fn launcher_app_delete_note_accepts_alias() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _tmp = setup();
+    append_note("alpha", "# alpha\nAlias: special-name\n\ncontent").unwrap();
+
+    let ctx = egui::Context::default();
+    let mut app = new_app(&ctx);
+    app.plugins.register(Box::new(NotePlugin::default()));
+
+    app.query = "note list".into();
+    app.search();
+    assert_eq!(app.results.len(), 1);
+    assert_eq!(app.results[0].label, "special-name");
+
+    app.delete_note("special-name");
+    assert!(load_notes().unwrap().is_empty());
+    let plugin_after = NotePlugin::default();
+    let after_results = plugin_after.search("note list");
+    assert!(after_results.is_empty());
+}
+
+#[test]
 fn missing_link_colored_red() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let _tmp = setup();

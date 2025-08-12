@@ -3338,13 +3338,22 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{plugin::PluginManager, settings::Settings};
+    use crate::{
+        plugin::PluginManager,
+        plugins::note::{append_note, load_notes, save_notes, NotePlugin},
+        settings::Settings,
+        toast_log::TOAST_LOG_FILE,
+    };
     use eframe::egui;
+    use once_cell::sync::Lazy;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
+        Mutex,
     };
     use tempfile::tempdir;
+
+    static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
@@ -3491,5 +3500,42 @@ mod tests {
         assert!(closed);
         assert!(!spawn_called.get());
         assert!(app.error.as_ref().unwrap().contains("load failure"));
+    }
+
+    #[test]
+    fn delete_note_uses_alias_and_logs_message() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let notes_dir = dir.path().join("notes");
+        std::fs::create_dir_all(&notes_dir).unwrap();
+        std::env::set_var("ML_NOTES_DIR", &notes_dir);
+        std::env::set_var("HOME", dir.path());
+        let orig_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        save_notes(&[]).unwrap();
+        append_note("alpha", "# alpha\nAlias: special-name\n\ncontent").unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.plugins.register(Box::new(NotePlugin::default()));
+        app.enable_toasts = true;
+
+        app.query = "note list".into();
+        app.search();
+        assert_eq!(app.results.len(), 1);
+        assert_eq!(app.results[0].label, "special-name");
+
+        app.delete_note("special-name");
+        assert!(load_notes().unwrap().is_empty());
+        if let Some(p) = app.pending_query.take() {
+            app.query = p;
+        }
+        app.last_results_valid = false;
+        app.search();
+        assert!(!app.results.iter().any(|a| a.action == "note:open:alpha"));
+        let log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap();
+        assert!(log.contains("Removed note special-name"));
+
+        std::env::set_current_dir(orig_dir).unwrap();
     }
 }
