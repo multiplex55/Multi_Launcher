@@ -157,6 +157,7 @@ fn example_queries(name: &str) -> Option<&'static [&'static str]> {
             "note",
             "note add buy milk",
             "note new buy milk",
+            "note create buy milk",
             "note list",
             "note rm groceries",
         ]),
