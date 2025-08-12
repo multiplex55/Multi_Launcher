@@ -57,6 +57,7 @@ fn note_root_query_returns_actions_in_order() {
             "query:note tags",
             "query:note templates",
             "query:note new ",
+            "query:note add ",
             "query:note open ",
             "query:note today",
             "query:note link ",
