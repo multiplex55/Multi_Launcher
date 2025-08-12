@@ -62,6 +62,7 @@ fn note_root_query_returns_actions_in_order() {
             "query:note today",
             "query:note link ",
             "query:note rm ",
+            "note:reload",
         ]
     );
 }
@@ -74,6 +75,16 @@ fn note_new_generates_action() {
     let results = plugin.search("note new Hello World");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "note:new:hello-world");
+}
+
+#[test]
+fn note_reload_action_generated() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _tmp = setup();
+    let plugin = NotePlugin::default();
+    let results = plugin.search("note reload");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "note:reload");
 }
 
 #[test]

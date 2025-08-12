@@ -2111,7 +2111,21 @@ impl eframe::App for LauncherApp {
                                 let count = self.usage.entry(a.action.clone()).or_insert(0);
                                 *count += 1;
                             }
-                            if a.action.starts_with("bookmark:add:") {
+                            if a.action == "note:reload" {
+                                refresh = true;
+                                set_focus = true;
+                                if self.enable_toasts {
+                                    push_toast(
+                                        &mut self.toasts,
+                                        Toast {
+                                            text: "Reloaded notes".into(),
+                                            kind: ToastKind::Success,
+                                            options: ToastOptions::default()
+                                                .duration_in_seconds(self.toast_duration as f64),
+                                        },
+                                    );
+                                }
+                            } else if a.action.starts_with("bookmark:add:") {
                                 if self.preserve_command {
                                     self.query = "bm add ".into();
                                 } else {
