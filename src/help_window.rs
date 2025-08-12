@@ -114,7 +114,7 @@ fn example_queries(name: &str) -> Option<&'static [&'static str]> {
         "runescape_search" => Some(&["rs dragon scimitar", "osrs agility guide"]),
         "youtube" => Some(&["yt rust"]),
         "reddit" => Some(&["red cats"]),
-        "calculator" => Some(&["= 1+2"]),
+        "calculator" => Some(&["= 1+2", "= history"]),
         "unit_convert" => Some(&[
             "conv 10 km to mi",
             "conv 1 kwh to j",

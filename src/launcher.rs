@@ -218,6 +218,7 @@ enum ActionKind<'a> {
     ClipboardCopy(usize),
     ClipboardText(&'a str),
     Calc(&'a str),
+    CalcHistory(usize),
     BookmarkAdd(&'a str),
     BookmarkRemove(&'a str),
     FolderAdd(&'a str),
@@ -334,6 +335,11 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
             }
         }
         return ActionKind::ClipboardText(rest);
+    }
+    if let Some(idx) = s.strip_prefix("calc:history:") {
+        if let Ok(i) = idx.parse::<usize>() {
+            return ActionKind::CalcHistory(i);
+        }
     }
     if let Some(val) = s.strip_prefix("calc:") {
         return ActionKind::Calc(val);
@@ -643,6 +649,7 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         ActionKind::ClipboardCopy(i) => clipboard::copy_entry(i),
         ActionKind::ClipboardText(text) => clipboard::set_text(text),
         ActionKind::Calc(val) => clipboard::calc_to_clipboard(val),
+        ActionKind::CalcHistory(i) => crate::actions::calc::copy_history_result(i),
         ActionKind::BookmarkAdd(url) => bookmarks::add(url),
         ActionKind::BookmarkRemove(url) => bookmarks::remove(url),
         ActionKind::FolderAdd(path) => folders::add(path),
