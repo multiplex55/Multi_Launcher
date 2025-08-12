@@ -79,6 +79,9 @@ impl FavDialog {
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.label("Category");
+                        let mut plugin_names: Vec<_> =
+                            app.plugins.iter().map(|p| p.name().to_string()).collect();
+                        plugin_names.sort_unstable();
                         egui::ComboBox::from_id_source("fav_cat")
                             .selected_text(if self.add_plugin.is_empty() {
                                 "Select".to_string()
@@ -86,8 +89,7 @@ impl FavDialog {
                                 self.add_plugin.clone()
                             })
                             .show_ui(ui, |ui| {
-                                for p in app.plugins.iter() {
-                                    let name = p.name();
+                                for name in plugin_names.iter() {
                                     ui.selectable_value(
                                         &mut self.add_plugin,
                                         name.to_string(),
