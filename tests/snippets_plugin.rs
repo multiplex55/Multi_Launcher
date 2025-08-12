@@ -151,3 +151,12 @@ fn search_edit_returns_actions() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "snippet:edit:greet");
 }
+
+#[test]
+fn search_edit_inline_returns_add_action() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let plugin = SnippetsPlugin::default();
+    let results = plugin.search("cs edit greet hi there");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "snippet:add:greet|hi there");
+}

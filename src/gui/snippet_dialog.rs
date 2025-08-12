@@ -1,6 +1,7 @@
-use crate::gui::LauncherApp;
+use super::{push_toast, LauncherApp};
 use crate::plugins::snippets::{load_snippets, save_snippets, SnippetEntry, SNIPPETS_FILE};
 use eframe::egui;
+use egui_toast::{Toast, ToastKind, ToastOptions};
 
 #[derive(Default)]
 pub struct SnippetDialog {
@@ -38,13 +39,26 @@ impl SnippetDialog {
         if let Err(e) = save_snippets(SNIPPETS_FILE, &self.entries) {
             app.set_error(format!("Failed to save snippets: {e}"));
         } else {
+            if app.enable_toasts {
+                push_toast(
+                    &mut app.toasts,
+                    Toast {
+                        text: "Saved snippet".into(),
+                        kind: ToastKind::Success,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(app.toast_duration as f64),
+                    },
+                );
+            }
             app.search();
             app.focus_input();
         }
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
-        if !self.open { return; }
+        if !self.open {
+            return;
+        }
         let mut close = false;
         let mut save_now = false;
         egui::Window::new("Snippets")
@@ -63,7 +77,10 @@ impl SnippetDialog {
                                 app.set_error("Both fields required".into());
                             } else {
                                 if idx == self.entries.len() {
-                                    self.entries.push(SnippetEntry { alias: self.alias.clone(), text: self.text.clone() });
+                                    self.entries.push(SnippetEntry {
+                                        alias: self.alias.clone(),
+                                        text: self.text.clone(),
+                                    });
                                 } else if let Some(e) = self.entries.get_mut(idx) {
                                     e.alias = self.alias.clone();
                                     e.text = self.text.clone();
@@ -80,22 +97,28 @@ impl SnippetDialog {
                     });
                 } else {
                     let mut remove: Option<usize> = None;
-                    egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                        for idx in 0..self.entries.len() {
-                            let entry = self.entries[idx].clone();
-                            ui.horizontal(|ui| {
-                                ui.label(format!("{}: {}", entry.alias, entry.text.replace('\n', " ")));
-                                if ui.button("Edit").clicked() {
-                                    self.edit_idx = Some(idx);
-                                    self.alias = entry.alias.clone();
-                                    self.text = entry.text.clone();
-                                }
-                                if ui.button("Remove").clicked() {
-                                    remove = Some(idx);
-                                }
-                            });
-                        }
-                    });
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            for idx in 0..self.entries.len() {
+                                let entry = self.entries[idx].clone();
+                                ui.horizontal(|ui| {
+                                    ui.label(format!(
+                                        "{}: {}",
+                                        entry.alias,
+                                        entry.text.replace('\n', " ")
+                                    ));
+                                    if ui.button("Edit").clicked() {
+                                        self.edit_idx = Some(idx);
+                                        self.alias = entry.alias.clone();
+                                        self.text = entry.text.clone();
+                                    }
+                                    if ui.button("Remove").clicked() {
+                                        remove = Some(idx);
+                                    }
+                                });
+                            }
+                        });
                     if let Some(idx) = remove {
                         self.entries.remove(idx);
                         save_now = true;
@@ -105,11 +128,16 @@ impl SnippetDialog {
                         self.alias.clear();
                         self.text.clear();
                     }
-                    if ui.button("Close").clicked() { close = true; }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
                 }
             });
-        if save_now { self.save(app); }
-        if close { self.open = false; }
+        if save_now {
+            self.save(app);
+        }
+        if close {
+            self.open = false;
+        }
     }
 }
-

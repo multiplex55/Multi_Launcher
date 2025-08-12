@@ -241,7 +241,9 @@ enum ActionKind<'a> {
     StopwatchPause(u64),
     StopwatchResume(u64),
     StopwatchStop(u64),
-    StopwatchStart { name: &'a str },
+    StopwatchStart {
+        name: &'a str,
+    },
     StopwatchShow(u64),
     TodoAdd {
         text: &'a str,
@@ -261,6 +263,7 @@ enum ActionKind<'a> {
     TodoClear,
     TodoExport,
     SnippetRemove(&'a str),
+    SnippetEdit(&'a str),
     SnippetAdd {
         alias: &'a str,
         text: &'a str,
@@ -499,6 +502,9 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if let Some(alias) = s.strip_prefix("snippet:remove:") {
         return ActionKind::SnippetRemove(alias);
     }
+    if let Some(alias) = s.strip_prefix("snippet:edit:") {
+        return ActionKind::SnippetEdit(alias);
+    }
     if let Some(rest) = s.strip_prefix("snippet:add:") {
         if let Some((alias, text)) = rest.split_once('|') {
             return ActionKind::SnippetAdd { alias, text };
@@ -509,7 +515,11 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
         let label = parts.next().unwrap_or("");
         let cmd = parts.next().unwrap_or("");
         let args = parts.next();
-        return ActionKind::FavAdd { label, command: cmd, args };
+        return ActionKind::FavAdd {
+            label,
+            command: cmd,
+            args,
+        };
     }
     if let Some(label) = s.strip_prefix("fav:remove:") {
         return ActionKind::FavRemove(label);
@@ -716,9 +726,13 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
             Ok(())
         }
         ActionKind::SnippetRemove(alias) => snippets::remove(alias),
+        ActionKind::SnippetEdit(_alias) => Ok(()),
         ActionKind::SnippetAdd { alias, text } => snippets::add(alias, text),
-        ActionKind::FavAdd { label, command, args } =>
-            crate::actions::fav::add(label, command, args),
+        ActionKind::FavAdd {
+            label,
+            command,
+            args,
+        } => crate::actions::fav::add(label, command, args),
         ActionKind::FavRemove(label) => crate::actions::fav::remove(label),
         ActionKind::BrightnessSet(v) => {
             system::set_brightness(v);

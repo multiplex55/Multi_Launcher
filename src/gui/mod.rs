@@ -565,7 +565,8 @@ impl LauncherApp {
         #[cfg(test)]
         {
             if Path::new(&actions_path).exists() {
-                if let Ok(w) = watch_file(Path::new(&actions_path), tx.clone(), WatchEvent::Actions) {
+                if let Ok(w) = watch_file(Path::new(&actions_path), tx.clone(), WatchEvent::Actions)
+                {
                     watchers.push(w);
                 }
             } else {
@@ -594,8 +595,7 @@ impl LauncherApp {
                     Toast {
                         text: "Failed to watch folders.json".into(),
                         kind: ToastKind::Error,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(toast_duration as f64),
+                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
                     },
                 );
             }
@@ -634,8 +634,7 @@ impl LauncherApp {
                     Toast {
                         text: "Failed to watch bookmarks.json".into(),
                         kind: ToastKind::Error,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(toast_duration as f64),
+                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
                     },
                 );
             }
@@ -2013,6 +2012,8 @@ impl eframe::App for LauncherApp {
                             self.add_bookmark_dialog.open();
                         } else if a.action == "snippet:dialog" {
                             self.snippet_dialog.open();
+                        } else if let Some(alias) = a.action.strip_prefix("snippet:edit:") {
+                            self.snippet_dialog.open_edit(alias);
                         } else if a.action == "macro:dialog" {
                             self.macro_dialog.open();
                         } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
@@ -2021,8 +2022,6 @@ impl eframe::App for LauncherApp {
                             } else {
                                 self.fav_dialog.open_edit(label);
                             }
-                        } else if let Some(alias) = a.action.strip_prefix("snippet:edit:") {
-                            self.snippet_dialog.open_edit(alias);
                         } else if a.action == "todo:dialog" {
                             self.todo_dialog.open();
                         } else if a.action == "todo:view" {
@@ -2736,6 +2735,8 @@ impl eframe::App for LauncherApp {
                                     self.add_bookmark_dialog.open();
                         } else if a.action == "snippet:dialog" {
                             self.snippet_dialog.open();
+                        } else if let Some(alias) = a.action.strip_prefix("snippet:edit:") {
+                            self.snippet_dialog.open_edit(alias);
                         } else if a.action == "macro:dialog" {
                             self.macro_dialog.open();
                         } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {

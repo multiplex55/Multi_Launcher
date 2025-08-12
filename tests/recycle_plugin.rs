@@ -68,12 +68,24 @@ fn command_returns_immediately_and_cleans() {
         assert_eq!(app.results.len(), 1);
         let a = app.results[0].clone();
         let rx = app.watch_receiver();
+        // Clear any events that may have fired during app initialization
+        while rx.try_recv().is_ok() {}
         let start = std::time::Instant::now();
         launch_action(&a).unwrap();
         assert!(start.elapsed() < std::time::Duration::from_millis(100));
-        match rx.recv_timeout(std::time::Duration::from_secs(3)) {
-            Ok(WatchEvent::Recycle(_)) => {}
-            _ => panic!("unexpected event"),
+        let start_wait = std::time::Instant::now();
+        loop {
+            let remaining = match std::time::Duration::from_secs(3)
+                .checked_sub(start_wait.elapsed())
+            {
+                Some(dur) => dur,
+                None => panic!("unexpected event"),
+            };
+            match rx.recv_timeout(remaining) {
+                Ok(WatchEvent::Recycle(_)) => break,
+                Ok(_) => continue,
+                Err(_) => panic!("unexpected event"),
+            }
         }
     }
 }
