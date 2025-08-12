@@ -57,6 +57,7 @@ fn note_root_query_returns_actions_in_order() {
             "query:note tags",
             "query:note templates",
             "query:note new ",
+            "query:note add ",
             "query:note open ",
             "query:note today",
             "query:note link ",
@@ -186,6 +187,50 @@ fn note_open_uses_fuzzy_matching() {
     let results = plugin.search("note open fz targ");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "note:open:fuzzy-target");
+}
+
+#[test]
+fn note_alias_supports_open_rm_and_labels() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _tmp = setup();
+    append_note("alpha", "# alpha\nAlias: special-name\n\ncontent").unwrap();
+    let plugin = NotePlugin::default();
+
+    let open_results = plugin.search("note open special-name");
+    assert_eq!(open_results.len(), 1);
+    assert_eq!(open_results[0].action, "note:open:alpha");
+    assert_eq!(open_results[0].label, "special-name");
+
+    let rm_results = plugin.search("note rm special-name");
+    assert_eq!(rm_results.len(), 1);
+    assert_eq!(rm_results[0].action, "note:remove:alpha");
+    assert_eq!(rm_results[0].label, "Remove special-name");
+
+    let list_results = plugin.search("note list");
+    assert_eq!(list_results.len(), 1);
+    assert_eq!(list_results[0].label, "special-name");
+}
+
+#[test]
+fn launcher_app_delete_note_accepts_alias() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _tmp = setup();
+    append_note("alpha", "# alpha\nAlias: special-name\n\ncontent").unwrap();
+
+    let ctx = egui::Context::default();
+    let mut app = new_app(&ctx);
+    app.plugins.register(Box::new(NotePlugin::default()));
+
+    app.query = "note list".into();
+    app.search();
+    assert_eq!(app.results.len(), 1);
+    assert_eq!(app.results[0].label, "special-name");
+
+    app.delete_note("special-name");
+    assert!(load_notes().unwrap().is_empty());
+    let plugin_after = NotePlugin::default();
+    let after_results = plugin_after.search("note list");
+    assert!(after_results.is_empty());
 }
 
 #[test]
