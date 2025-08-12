@@ -1,4 +1,5 @@
 use crate::actions::Action;
+use crate::plugins::calc_history::{self, CalcHistoryEntry, CALC_HISTORY_FILE, MAX_ENTRIES};
 
 #[cfg(target_os = "windows")]
 pub(crate) fn set_system_volume(percent: u32) {
@@ -217,7 +218,8 @@ enum ActionKind<'a> {
     ClipboardClear,
     ClipboardCopy(usize),
     ClipboardText(&'a str),
-    Calc(&'a str),
+    Calc { result: &'a str, expr: Option<&'a str> },
+    CalcHistory(usize),
     BookmarkAdd(&'a str),
     BookmarkRemove(&'a str),
     FolderAdd(&'a str),
@@ -335,8 +337,16 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
         }
         return ActionKind::ClipboardText(rest);
     }
+    if let Some(idx) = s.strip_prefix("calc:history:") {
+        if let Ok(i) = idx.parse::<usize>() {
+            return ActionKind::CalcHistory(i);
+        }
+    }
     if let Some(val) = s.strip_prefix("calc:") {
-        return ActionKind::Calc(val);
+        return ActionKind::Calc {
+            result: val,
+            expr: action.args.as_deref(),
+        };
     }
     if let Some(url) = s.strip_prefix("bookmark:add:") {
         return ActionKind::BookmarkAdd(url);
@@ -642,7 +652,17 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         ActionKind::ClipboardClear => clipboard::clear_history(),
         ActionKind::ClipboardCopy(i) => clipboard::copy_entry(i),
         ActionKind::ClipboardText(text) => clipboard::set_text(text),
-        ActionKind::Calc(val) => clipboard::calc_to_clipboard(val),
+        ActionKind::Calc { result, expr } => {
+            if let Some(e) = expr {
+                let entry = CalcHistoryEntry {
+                    expr: e.to_string(),
+                    result: result.to_string(),
+                };
+                let _ = calc_history::append_entry(CALC_HISTORY_FILE, entry, MAX_ENTRIES);
+            }
+            clipboard::calc_to_clipboard(result)
+        }
+        ActionKind::CalcHistory(i) => crate::actions::calc::copy_history_result(i),
         ActionKind::BookmarkAdd(url) => bookmarks::add(url),
         ActionKind::BookmarkRemove(url) => bookmarks::remove(url),
         ActionKind::FolderAdd(path) => folders::add(path),
