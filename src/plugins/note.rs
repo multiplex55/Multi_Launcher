@@ -184,7 +184,7 @@ pub fn load_notes() -> anyhow::Result<Vec<Note>> {
     Ok(notes)
 }
 
-fn refresh_cache() -> anyhow::Result<()> {
+pub fn refresh_cache() -> anyhow::Result<()> {
     let notes = load_notes()?;
     let cache = NoteCache::from_notes(notes);
     if let Ok(mut guard) = CACHE.lock() {
@@ -362,6 +362,12 @@ impl Plugin for NotePlugin {
                         action: "query:note rm ".into(),
                         args: None,
                     },
+                    Action {
+                        label: "note reload".into(),
+                        desc: "Note".into(),
+                        action: "note:reload".into(),
+                        args: None,
+                    },
                 ]);
                 return actions;
             }
@@ -376,6 +382,16 @@ impl Plugin for NotePlugin {
             };
 
             match cmd.as_str() {
+                "reload" => {
+                    if args.is_empty() {
+                        return vec![Action {
+                            label: "Reload notes".into(),
+                            desc: "Note".into(),
+                            action: "note:reload".into(),
+                            args: None,
+                        }];
+                    }
+                }
                 "new" => {
                     if !args.is_empty() {
                         let mut title = args;
@@ -643,6 +659,12 @@ impl Plugin for NotePlugin {
                 label: "note rm".into(),
                 desc: "Note".into(),
                 action: "query:note rm ".into(),
+                args: None,
+            },
+            Action {
+                label: "note reload".into(),
+                desc: "Note".into(),
+                action: "note:reload".into(),
                 args: None,
             },
         ]

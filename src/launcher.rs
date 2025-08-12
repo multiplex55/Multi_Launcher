@@ -303,6 +303,7 @@ enum ActionKind<'a> {
         path: &'a str,
         alias: &'a str,
     },
+    NoteReload,
     ExecPath {
         path: &'a str,
         args: Option<&'a str>,
@@ -592,6 +593,9 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if s == "recycle:clean" {
         return ActionKind::RecycleClean;
     }
+    if s == "note:reload" {
+        return ActionKind::NoteReload;
+    }
     if let Some(alias) = s.strip_prefix("tempfile:new:") {
         return ActionKind::TempfileNew(Some(alias));
     }
@@ -772,6 +776,11 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         }
         ActionKind::RecycleClean => {
             system::recycle_clean();
+            Ok(())
+        }
+        ActionKind::NoteReload => {
+            crate::plugins::note::load_notes()?;
+            crate::plugins::note::refresh_cache()?;
             Ok(())
         }
         ActionKind::TempfileNew(alias) => tempfiles::new(alias),
