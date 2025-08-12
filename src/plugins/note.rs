@@ -444,7 +444,7 @@ impl Plugin for NotePlugin {
                         }];
                     }
                 }
-              "new" | "add" => {
+              "new" | "add" | "create" => {
                     if !args.is_empty() {
                         let mut title = args;
                         let mut template = None;
@@ -707,6 +707,12 @@ impl Plugin for NotePlugin {
                 label: "note add".into(),
                 desc: "Note".into(),
                 action: "query:note add ".into(),
+                args: None,
+            },
+            Action {
+                label: "note create".into(),
+                desc: "Note".into(),
+                action: "query:note create ".into(),
                 args: None,
             },
             Action {
