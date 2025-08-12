@@ -397,6 +397,7 @@ mod tests {
             tags: Vec::new(),
             links: Vec::new(),
             slug: String::new(),
+            alias: None,
         };
         let mut panel = NotePanel::from_note(note);
         panel.preview_mode = false;

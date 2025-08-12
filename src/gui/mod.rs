@@ -8,7 +8,6 @@ mod convert_panel;
 mod cpu_list_dialog;
 mod fav_dialog;
 mod macro_dialog;
-mod note_delete_dialog;
 mod note_panel;
 mod notes_dialog;
 mod shell_cmd_dialog;
@@ -31,7 +30,6 @@ pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
 pub use macro_dialog::MacroDialog;
-pub use note_delete_dialog::NoteDeleteDialog;
 pub use note_panel::{extract_links, show_wiki_link, NotePanel};
 pub use notes_dialog::NotesDialog;
 pub use shell_cmd_dialog::ShellCmdDialog;
@@ -206,7 +204,6 @@ pub enum Panel {
     MacroDialog,
     FavDialog,
     NotesDialog,
-    NoteDeleteDialog,
     NotePanel,
     TodoDialog,
     TodoViewDialog,
@@ -237,7 +234,6 @@ struct PanelStates {
     macro_dialog: bool,
     fav_dialog: bool,
     notes_dialog: bool,
-    note_delete_dialog: bool,
     note_panel: bool,
     todo_dialog: bool,
     todo_view_dialog: bool,
@@ -321,7 +317,6 @@ pub struct LauncherApp {
     macro_dialog: MacroDialog,
     fav_dialog: FavDialog,
     notes_dialog: NotesDialog,
-    note_delete_dialog: NoteDeleteDialog,
     note_panels: Vec<NotePanel>,
     todo_dialog: TodoDialog,
     todo_view_dialog: TodoViewDialog,
@@ -730,7 +725,6 @@ impl LauncherApp {
             macro_dialog: MacroDialog::default(),
             fav_dialog: FavDialog::default(),
             notes_dialog: NotesDialog::default(),
-            note_delete_dialog: NoteDeleteDialog::default(),
             note_panels: Vec::new(),
             todo_dialog: TodoDialog::default(),
             todo_view_dialog: TodoViewDialog::default(),
@@ -1299,10 +1293,6 @@ impl LauncherApp {
                 self.notes_dialog.open = false;
                 self.panel_states.notes_dialog = false;
             }
-            Panel::NoteDeleteDialog => {
-                self.note_delete_dialog.open = false;
-                self.panel_states.note_delete_dialog = false;
-            }
             Panel::NotePanel => {
                 if let Some(mut panel) = self.note_panels.pop() {
                     if self.note_save_on_close {
@@ -1417,10 +1407,6 @@ impl LauncherApp {
                 self.notes_dialog.open = false;
                 self.panel_states.notes_dialog = false;
             }
-            Panel::NoteDeleteDialog => {
-                self.note_delete_dialog.open = false;
-                self.panel_states.note_delete_dialog = false;
-            }
             Panel::NotePanel => {
                 if let Some(mut panel) = self.note_panels.pop() {
                     if self.note_save_on_close {
@@ -1493,7 +1479,6 @@ impl LauncherApp {
             Panel::MacroDialog => self.macro_dialog.open = true,
             Panel::FavDialog => self.fav_dialog.open = true,
             Panel::NotesDialog => self.notes_dialog.open = true,
-            Panel::NoteDeleteDialog => self.note_delete_dialog.open = true,
             Panel::NotePanel => {}
             Panel::TodoDialog => self.todo_dialog.open = true,
             Panel::TodoViewDialog => self.todo_view_dialog.open = true,
@@ -1605,11 +1590,6 @@ impl LauncherApp {
         check!(self.macro_dialog.open, macro_dialog, Panel::MacroDialog);
         check!(self.fav_dialog.open, fav_dialog, Panel::FavDialog);
         check!(self.notes_dialog.open, notes_dialog, Panel::NotesDialog);
-        check!(
-            self.note_delete_dialog.open,
-            note_delete_dialog,
-            Panel::NoteDeleteDialog
-        );
         check!(!self.note_panels.is_empty(), note_panel, Panel::NotePanel);
         check!(self.todo_dialog.open, todo_dialog, Panel::TodoDialog);
         check!(
@@ -2183,6 +2163,9 @@ impl eframe::App for LauncherApp {
                             } else if a.action.starts_with("todo:remove:") {
                                 refresh = true;
                                 set_focus = true;
+                                if current.starts_with("note list") {
+                                    self.pending_query = Some(current.clone());
+                                }
                                 if self.enable_toasts {
                                     let label =
                                         a.label.strip_prefix("Remove todo ").unwrap_or(&a.label);
@@ -2879,6 +2862,9 @@ impl eframe::App for LauncherApp {
                                     } else if a.action.starts_with("todo:remove:") {
                                         refresh = true;
                                         set_focus = true;
+                                        if current.starts_with("note list") {
+                                            clicked_query = Some(current.clone());
+                                        }
                                         if self.enable_toasts {
                                             let label = a
                                                 .label
@@ -3058,9 +3044,6 @@ impl eframe::App for LauncherApp {
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
         notes_dlg.ui(ctx, self);
         self.notes_dialog = notes_dlg;
-        let mut del_dlg = std::mem::take(&mut self.note_delete_dialog);
-        del_dlg.ui(ctx, self);
-        self.note_delete_dialog = del_dlg;
         let mut i = 0;
         while i < self.note_panels.len() {
             let mut panel = self.note_panels.remove(i);
@@ -3120,11 +3103,17 @@ impl LauncherApp {
 
     /// Open a note panel for the given slug, optionally using a template for new notes.
     pub fn open_note_panel(&mut self, slug: &str, template: Option<&str>) {
-        use crate::plugins::note::{get_template, load_notes, Note};
+        use crate::plugins::note::{extract_alias, get_template, load_notes, Note};
         let note = load_notes()
             .unwrap_or_default()
             .into_iter()
-            .find(|n| n.slug == slug)
+            .find(|n| {
+                n.slug == slug
+                    || n.alias
+                        .as_ref()
+                        .map(|a| a.eq_ignore_ascii_case(slug))
+                        .unwrap_or(false)
+            })
             .unwrap_or_else(|| {
                 let title = slug.replace('-', " ");
                 let content = if let Some(tpl_name) = template {
@@ -3141,6 +3130,7 @@ impl LauncherApp {
                 } else {
                     format!("# {}\n\n", title)
                 };
+                let alias = extract_alias(&content);
                 Note {
                     title,
                     path: std::path::PathBuf::new(),
@@ -3148,6 +3138,7 @@ impl LauncherApp {
                     tags: Vec::new(),
                     links: Vec::new(),
                     slug: String::new(),
+                    alias,
                 }
             });
         let word_count = note.content.split_whitespace().count();
@@ -3271,7 +3262,53 @@ impl LauncherApp {
 
     /// Delete a note by its slug identifier.
     pub fn delete_note(&mut self, slug: &str) {
-        self.note_delete_dialog.open(slug.to_string());
+        use crate::plugins::note::{load_notes, remove_note};
+        match load_notes() {
+            Ok(notes) => {
+                if let Some((idx, note)) = notes
+                    .into_iter()
+                    .enumerate()
+                    .find(|(_, n)| {
+                        n.slug == slug
+                            || n.alias
+                                .as_ref()
+                                .map(|a| a.eq_ignore_ascii_case(slug))
+                                .unwrap_or(false)
+                    })
+                {
+                    let word_count = note.content.split_whitespace().count();
+                    if let Err(e) = remove_note(idx) {
+                        self.set_error(format!("Failed to remove note: {e}"));
+                    } else {
+                        if self.enable_toasts {
+                            push_toast(
+                                &mut self.toasts,
+                                Toast {
+                                    text: format!(
+                                        "Removed note {} ({} words)",
+                                        note.alias.as_ref().unwrap_or(&note.title),
+                                        word_count
+                                    )
+                                    .into(),
+                                    kind: ToastKind::Success,
+                                    options: ToastOptions::default()
+                                        .duration_in_seconds(self.toast_duration as f64),
+                                },
+                            );
+                        }
+                        if self.query.trim_start().starts_with("note list") {
+                            self.pending_query = Some(self.query.clone());
+                            self.search();
+                        }
+                        self.notes_dialog.open();
+                    }
+                } else {
+                    self.set_error("Note not found".into());
+                }
+            }
+            Err(e) => self.set_error(format!("Failed to load notes: {e}")),
+        }
+        self.focus_input();
     }
 
     /// Process dropped files or directories.
@@ -3413,6 +3450,7 @@ mod tests {
                     tags: Vec::new(),
                     links: Vec::new(),
                     slug: "alpha".into(),
+                    alias: None,
                 }])
             },
             |p| {

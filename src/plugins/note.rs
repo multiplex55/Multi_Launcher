@@ -18,6 +18,7 @@ pub struct Note {
     pub tags: Vec<String>,
     pub links: Vec<String>,
     pub slug: String,
+    pub alias: Option<String>,
 }
 
 #[derive(Default)]
@@ -30,12 +31,15 @@ pub struct NoteCache {
     pub links: HashMap<String, Vec<String>>,
     /// Lowercased contents for simple full-text search.
     pub index: Vec<String>,
+    /// Map of note alias -> note slug for quick lookup.
+    pub aliases: HashMap<String, String>,
 }
 
 impl NoteCache {
     fn from_notes(notes: Vec<Note>) -> Self {
         let mut tag_set: HashSet<String> = HashSet::new();
         let mut link_map: HashMap<String, Vec<String>> = HashMap::new();
+        let mut alias_map: HashMap<String, String> = HashMap::new();
 
         for n in &notes {
             let slug = n.slug.clone();
@@ -48,18 +52,32 @@ impl NoteCache {
                     entry.push(slug.clone());
                 }
             }
+            if let Some(a) = &n.alias {
+                alias_map.insert(a.to_lowercase(), slug.clone());
+            }
         }
 
         let mut tags: Vec<String> = tag_set.into_iter().collect();
         tags.sort();
 
-        let index = notes.iter().map(|n| n.content.to_lowercase()).collect();
+        let index = notes
+            .iter()
+            .map(|n| {
+                let mut txt = n.content.to_lowercase();
+                if let Some(a) = &n.alias {
+                    txt.push('\n');
+                    txt.push_str(&a.to_lowercase());
+                }
+                txt
+            })
+            .collect();
 
         Self {
             notes,
             tags,
             links: link_map,
             index,
+            aliases: alias_map,
         }
     }
 }
@@ -91,6 +109,14 @@ fn extract_links(content: &str) -> Vec<String> {
     links.sort();
     links.dedup();
     links
+}
+
+pub fn extract_alias(content: &str) -> Option<String> {
+    content
+        .lines()
+        .skip(1)
+        .take_while(|l| !l.trim().is_empty())
+        .find_map(|l| l.strip_prefix("Alias:").map(|a| a.trim().to_string()))
 }
 
 fn templates_dir() -> PathBuf {
@@ -164,6 +190,7 @@ pub fn load_notes() -> anyhow::Result<Vec<Note>> {
             .to_string();
         register_slug(&slug);
         let content = std::fs::read_to_string(&path)?;
+        let alias = extract_alias(&content);
         let title = content
             .lines()
             .next()
@@ -179,6 +206,7 @@ pub fn load_notes() -> anyhow::Result<Vec<Note>> {
             tags,
             links,
             slug,
+            alias,
         });
     }
     Ok(notes)
@@ -204,11 +232,20 @@ pub fn save_note(note: &mut Note) -> anyhow::Result<()> {
         note.slug.clone()
     };
     let path = dir.join(format!("{slug}.md"));
-    let content = if note.content.starts_with("# ") {
+    let mut content = if note.content.starts_with("# ") {
         note.content.clone()
     } else {
         format!("# {}\n\n{}", note.title, note.content)
     };
+    if let Some(a) = &note.alias {
+        if !content.lines().any(|l| l.starts_with("Alias:")) {
+            let mut lines = content.lines();
+            let first = lines.next().unwrap_or("");
+            let rest = lines.collect::<Vec<_>>().join("\n");
+            content = format!("{first}\nAlias: {a}\n{rest}");
+        }
+    }
+    note.alias = extract_alias(&content);
     note.tags = extract_tags(&content);
     std::fs::write(path, content)?;
     refresh_cache()?;
@@ -233,11 +270,19 @@ pub fn save_notes(notes: &[Note]) -> anyhow::Result<()> {
         };
         let path = dir.join(format!("{slug}.md"));
         expected.insert(path.clone());
-        let content = if note.content.starts_with("# ") {
+        let mut content = if note.content.starts_with("# ") {
             note.content.clone()
         } else {
             format!("# {}\n\n{}", note.title, note.content)
         };
+        if let Some(a) = &note.alias {
+            if !content.lines().any(|l| l.starts_with("Alias:")) {
+                let mut lines = content.lines();
+                let first = lines.next().unwrap_or("");
+                let rest = lines.collect::<Vec<_>>().join("\n");
+                content = format!("{first}\nAlias: {a}\n{rest}");
+            }
+        }
         std::fs::write(path, content)?;
     }
     for entry in std::fs::read_dir(&dir)? {
@@ -258,6 +303,7 @@ pub fn append_note(title: &str, content: &str) -> anyhow::Result<()> {
         tags: extract_tags(content),
         links: extract_links(content),
         slug: String::new(),
+        alias: None,
     };
     save_note(&mut note)
 }
@@ -339,6 +385,12 @@ impl Plugin for NotePlugin {
                         args: None,
                     },
                     Action {
+                        label: "note add".into(),
+                        desc: "Note".into(),
+                        action: "query:note add ".into(),
+                        args: None,
+                    },
+                    Action {
                         label: "note open".into(),
                         desc: "Note".into(),
                         action: "query:note open ".into(),
@@ -376,7 +428,7 @@ impl Plugin for NotePlugin {
             };
 
             match cmd.as_str() {
-                "new" => {
+                "new" | "add" => {
                     if !args.is_empty() {
                         let mut title = args;
                         let mut template = None;
@@ -409,9 +461,20 @@ impl Plugin for NotePlugin {
                     return guard
                         .notes
                         .iter()
-                        .filter(|n| self.matcher.fuzzy_match(&n.title, filter).is_some())
+                        .filter(|n| {
+                            self.matcher.fuzzy_match(&n.title, filter).is_some()
+                                || n
+                                    .alias
+                                    .as_ref()
+                                    .and_then(|a| self.matcher.fuzzy_match(a, filter))
+                                    .is_some()
+                        })
                         .map(|n| Action {
-                            label: n.title.clone(),
+                            label: n
+                                .alias
+                                .as_ref()
+                                .unwrap_or(&n.title)
+                                .clone(),
                             desc: "Note".into(),
                             action: format!("note:open:{}", n.slug),
                             args: None,
@@ -432,10 +495,19 @@ impl Plugin for NotePlugin {
                                 n.tags.iter().any(|t| t.eq_ignore_ascii_case(tag))
                             } else {
                                 self.matcher.fuzzy_match(&n.title, filter).is_some()
+                                    || n
+                                        .alias
+                                        .as_ref()
+                                        .and_then(|a| self.matcher.fuzzy_match(a, filter))
+                                        .is_some()
                             }
                         })
                         .map(|n| Action {
-                            label: n.title.clone(),
+                            label: n
+                                .alias
+                                .as_ref()
+                                .unwrap_or(&n.title)
+                                .clone(),
                             desc: "Note".into(),
                             action: format!("note:open:{}", n.slug),
                             args: None,
@@ -458,7 +530,11 @@ impl Plugin for NotePlugin {
                     return matches
                         .into_iter()
                         .map(|(_, n)| Action {
-                            label: n.title.clone(),
+                            label: n
+                                .alias
+                                .as_ref()
+                                .unwrap_or(&n.title)
+                                .clone(),
                             desc: "Note".into(),
                             action: format!("note:open:{}", n.slug),
                             args: None,
@@ -518,12 +594,16 @@ impl Plugin for NotePlugin {
                                     .notes
                                     .iter()
                                     .find(|n| n.slug == *slug)
-                                    .map(|n| Action {
-                                        label: n.title.clone(),
-                                        desc: "Note".into(),
-                                        action: format!("note:open:{slug}"),
-                                        args: None,
-                                    })
+                            .map(|n| Action {
+                                label: n
+                                    .alias
+                                    .as_ref()
+                                    .unwrap_or(&n.title)
+                                    .clone(),
+                                desc: "Note".into(),
+                                action: format!("note:open:{slug}"),
+                                args: None,
+                            })
                             })
                             .collect();
                     }
@@ -534,9 +614,19 @@ impl Plugin for NotePlugin {
                     return guard
                         .notes
                         .iter()
-                        .filter(|n| self.matcher.fuzzy_match(&n.title, filter).is_some())
+                        .filter(|n| {
+                            self.matcher.fuzzy_match(&n.title, filter).is_some()
+                                || n
+                                    .alias
+                                    .as_ref()
+                                    .and_then(|a| self.matcher.fuzzy_match(a, filter))
+                                    .is_some()
+                        })
                         .map(|n| Action {
-                            label: format!("Remove {}", n.title),
+                            label: format!(
+                                "Remove {}",
+                                n.alias.as_ref().unwrap_or(&n.title)
+                            ),
                             desc: "Note".into(),
                             action: format!("note:remove:{}", n.slug),
                             args: None,
@@ -595,6 +685,12 @@ impl Plugin for NotePlugin {
                 label: "note new".into(),
                 desc: "Note".into(),
                 action: "query:note new ".into(),
+                args: None,
+            },
+            Action {
+                label: "note add".into(),
+                desc: "Note".into(),
+                action: "query:note add ".into(),
                 args: None,
             },
             Action {
