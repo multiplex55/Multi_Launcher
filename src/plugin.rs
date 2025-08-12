@@ -26,6 +26,7 @@ use crate::plugins::omni_search::OmniSearchPlugin;
 use crate::plugins::sysinfo::SysInfoPlugin;
 use crate::plugins::system::SystemPlugin;
 use crate::plugins::settings::SettingsPlugin;
+use crate::plugins::missing::MissingPlugin;
 #[cfg(target_os = "windows")]
 use crate::plugins::task_manager::TaskManagerPlugin;
 use crate::plugins::tempfile::TempfilePlugin;
@@ -146,6 +147,7 @@ impl PluginManager {
         self.register_with_settings(SnippetsPlugin::default(), plugin_settings);
         self.register_with_settings(MacrosPlugin::default(), plugin_settings);
         self.register_with_settings(FavPlugin::default(), plugin_settings);
+        self.register_with_settings(MissingPlugin, plugin_settings);
         self.register_with_settings(RecyclePlugin, plugin_settings);
         self.register_with_settings(TempfilePlugin, plugin_settings);
         self.register_with_settings(MediaPlugin, plugin_settings);

@@ -42,3 +42,4 @@ pub mod timestamp;
 pub mod random;
 pub mod lorem;
 pub mod convert_panel;
+pub mod missing;
