@@ -2,6 +2,8 @@ use serde::{Serialize, Deserialize};
 use std::collections::VecDeque;
 
 pub const CALC_HISTORY_FILE: &str = "calc_history.json";
+/// Maximum number of entries kept in the calculator history.
+pub const MAX_ENTRIES: usize = 20;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct CalcHistoryEntry {

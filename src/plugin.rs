@@ -124,7 +124,7 @@ impl PluginManager {
         // duplicate handles when reloading plugins.
         self.libs.clear();
         self.register_with_settings(WebSearchPlugin, plugin_settings);
-        self.register_with_settings(CalculatorPlugin, plugin_settings);
+        self.register_with_settings(CalculatorPlugin::default(), plugin_settings);
         self.register_with_settings(UnitConvertPlugin, plugin_settings);
         self.register_with_settings(BaseConvertPlugin, plugin_settings);
         self.register_with_settings(DropCalcPlugin, plugin_settings);
