@@ -160,7 +160,20 @@ impl Plugin for SnippetsPlugin {
         }
 
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs edit") {
-            let filter = rest.trim();
+            let rest = rest.trim();
+            if let Some((alias, text)) = rest.split_once(' ') {
+                let alias = alias.trim();
+                let text = text.trim();
+                if !alias.is_empty() && !text.is_empty() {
+                    return vec![Action {
+                        label: format!("Edit snippet {alias}"),
+                        desc: "Snippet".into(),
+                        action: format!("snippet:add:{alias}|{text}"),
+                        args: None,
+                    }];
+                }
+            }
+            let filter = rest;
             let guard = match self.data.lock() {
                 Ok(g) => g,
                 Err(_) => return Vec::new(),
