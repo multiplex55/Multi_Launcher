@@ -20,6 +20,13 @@ quickly open applications or files.
 - Monitor network traffic with the `net` command.
 - Control media playback using the `media` prefix.
 - Trigger sequences of commands through the `macro` plugin.
+- Capture screenshots to a file or the clipboard.
+- Switch between open browser tabs.
+- Check local and public IP addresses.
+- Generate random numbers, dice rolls or passwords.
+- Create lorem ipsum filler text or search for emoji.
+- Convert text between cases like `snake_case` or `camelCase`.
+- Track time with a built-in stopwatch or open the Windows Task Manager.
 
 
 ## Building
@@ -401,6 +408,11 @@ and aliases.
 The omni search plugin uses the `o` prefix to search folders, bookmarks and saved apps at once. Use `o list` to show all entries or `o list <query>` to filter them.
 The system information plugin uses the `info` prefix. Type `info` to show CPU,
 memory and disk usage or `info cpu` for a single metric.
+Other handy prefixes include `ip` to show local and public addresses, `tab` to switch
+browser tabs, `rand` for random numbers, dice rolls or passwords, and `lorem` for filler
+text. Use `emoji` to search emoji or kaomoji, `case` to transform text casing,
+`sw` for a stopwatch, `ss` to capture screenshots, `tm` to open the Windows
+Task Manager and `settings` to bring up the settings dialog.
 ### Security Considerations
 The shell plugin runs commands using the system shell without sanitising input. Only enable it if you trust the commands you type. Errors while spawning the process are logged.
 Type `sh` in the launcher to open the shell command editor for managing predefined commands. Saved commands can also be added with `sh add <name> <command>`, removed via `sh rm <pattern>` or listed with `sh list`.
