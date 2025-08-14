@@ -3001,6 +3001,7 @@ dependencies = [
  "exmex",
  "figlet-rs",
  "fuzzy-matcher",
+ "hashbrown 0.14.5",
  "hex",
  "image 0.24.9",
  "ipconfig",

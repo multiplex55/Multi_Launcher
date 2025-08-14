@@ -7,6 +7,7 @@
 
 use crate::actions::Action;
 use crate::common::json_watch::{watch_json, JsonWatcher};
+use crate::common::lru::LruCache;
 use crate::plugin::Plugin;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -31,6 +32,15 @@ pub struct TodoEntry {
 /// to all plugin instances and tests.
 pub static TODO_DATA: Lazy<Arc<Mutex<Vec<TodoEntry>>>> =
     Lazy::new(|| Arc::new(Mutex::new(load_todos(TODO_FILE).unwrap_or_default())));
+
+static TODO_CACHE: Lazy<Arc<Mutex<LruCache<String, Vec<Action>>>>> =
+    Lazy::new(|| Arc::new(Mutex::new(LruCache::new(64))));
+
+fn invalidate_todo_cache() {
+    if let Ok(mut cache) = TODO_CACHE.lock() {
+        cache.clear();
+    }
+}
 
 /// Sort todo entries by priority descending (highest priority first).
 pub fn sort_by_priority_desc(entries: &mut Vec<TodoEntry>) {
@@ -58,6 +68,7 @@ fn update_cache(list: Vec<TodoEntry>) {
     if let Ok(mut lock) = TODO_DATA.lock() {
         *lock = list;
     }
+    invalidate_todo_cache();
 }
 
 /// Append a new todo entry with `text`, `priority` and `tags`.
@@ -133,6 +144,7 @@ pub fn clear_done(path: &str) -> anyhow::Result<()> {
 pub struct TodoPlugin {
     matcher: SkimMatcherV2,
     data: Arc<Mutex<Vec<TodoEntry>>>,
+    cache: Arc<Mutex<LruCache<String, Vec<Action>>>>,
     #[allow(dead_code)]
     watcher: Option<JsonWatcher>,
 }
@@ -141,14 +153,19 @@ impl TodoPlugin {
     /// Create a new todo plugin with a fuzzy matcher.
     pub fn new() -> Self {
         let data = TODO_DATA.clone();
+        let cache = TODO_CACHE.clone();
         let watch_path = TODO_FILE.to_string();
         let watcher = watch_json(&watch_path, {
             let watch_path = watch_path.clone();
             let data_clone = data.clone();
+            let cache_clone = cache.clone();
             move || {
                 if let Ok(list) = load_todos(&watch_path) {
                     if let Ok(mut lock) = data_clone.lock() {
                         *lock = list;
+                    }
+                    if let Ok(mut c) = cache_clone.lock() {
+                        c.clear();
                     }
                 }
             }
@@ -157,21 +174,12 @@ impl TodoPlugin {
         Self {
             matcher: SkimMatcherV2::default(),
             data,
+            cache,
             watcher,
         }
     }
-}
 
-impl Default for TodoPlugin {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Plugin for TodoPlugin {
-    fn search(&self, query: &str) -> Vec<Action> {
-        let trimmed = query.trim();
-
+    fn search_internal(&self, trimmed: &str) -> Vec<Action> {
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "todo") {
             if rest.is_empty() {
                 return vec![Action {
@@ -423,6 +431,32 @@ impl Plugin for TodoPlugin {
         }
 
         Vec::new()
+    }
+}
+
+impl Default for TodoPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Plugin for TodoPlugin {
+    fn search(&self, query: &str) -> Vec<Action> {
+        let trimmed = query.trim();
+        let key = trimmed.to_string();
+        if let Ok(mut cache) = self.cache.lock() {
+            if let Some(res) = cache.get(&key) {
+                return res;
+            }
+        }
+
+        let result = self.search_internal(trimmed);
+
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.put(key, result.clone());
+        }
+
+        result
     }
 
     fn name(&self) -> &str {
