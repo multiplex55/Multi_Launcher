@@ -154,7 +154,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Some(paths) = &settings.index_paths {
-        actions_vec.extend(indexer::index_paths(paths));
+        actions_vec.extend(indexer::index_paths(paths)?);
     }
     let actions = Arc::new(actions_vec);
 

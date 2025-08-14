@@ -1800,7 +1800,13 @@ impl eframe::App for LauncherApp {
                     if let Ok(mut acts) = load_actions(&self.actions_path) {
                         let custom_len = acts.len();
                         if let Some(paths) = &self.index_paths {
-                            acts.extend(indexer::index_paths(paths));
+                            match indexer::index_paths(paths) {
+                                Ok(idx) => acts.extend(idx),
+                                Err(e) => {
+                                    tracing::error!(error = %e, "failed to index paths");
+                                    self.set_error(format!("Failed to index paths: {e}"));
+                                }
+                            }
                         }
                         self.actions = Arc::new(acts);
                         self.custom_len = custom_len;
@@ -3279,17 +3285,13 @@ impl LauncherApp {
         use crate::plugins::note::{load_notes, remove_note};
         match load_notes() {
             Ok(notes) => {
-                if let Some((idx, note)) = notes
-                    .into_iter()
-                    .enumerate()
-                    .find(|(_, n)| {
-                        n.slug == slug
-                            || n.alias
-                                .as_ref()
-                                .map(|a| a.eq_ignore_ascii_case(slug))
-                                .unwrap_or(false)
-                    })
-                {
+                if let Some((idx, note)) = notes.into_iter().enumerate().find(|(_, n)| {
+                    n.slug == slug
+                        || n.alias
+                            .as_ref()
+                            .map(|a| a.eq_ignore_ascii_case(slug))
+                            .unwrap_or(false)
+                }) {
                     let word_count = note.content.split_whitespace().count();
                     if let Err(e) = remove_note(idx) {
                         self.set_error(format!("Failed to remove note: {e}"));
@@ -3362,8 +3364,7 @@ mod tests {
     use once_cell::sync::Lazy;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
-        Mutex,
+        Arc, Mutex,
     };
     use tempfile::tempdir;
 
