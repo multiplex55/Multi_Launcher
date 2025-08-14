@@ -3296,21 +3296,23 @@ impl LauncherApp {
                     if let Err(e) = remove_note(idx) {
                         self.set_error(format!("Failed to remove note: {e}"));
                     } else {
+                        let msg = format!(
+                            "Removed note {} ({} words)",
+                            note.alias.as_ref().unwrap_or(&note.title),
+                            word_count
+                        );
                         if self.enable_toasts {
                             push_toast(
                                 &mut self.toasts,
                                 Toast {
-                                    text: format!(
-                                        "Removed note {} ({} words)",
-                                        note.alias.as_ref().unwrap_or(&note.title),
-                                        word_count
-                                    )
-                                    .into(),
+                                    text: msg.clone().into(),
                                     kind: ToastKind::Success,
                                     options: ToastOptions::default()
                                         .duration_in_seconds(self.toast_duration as f64),
                                 },
                             );
+                        } else {
+                            append_toast_log(&msg);
                         }
                         if self.query.trim_start().starts_with("note list") {
                             self.pending_query = Some(self.query.clone());
@@ -3548,7 +3550,8 @@ mod tests {
         app.last_results_valid = false;
         app.search();
         assert!(!app.results.iter().any(|a| a.action == "note:open:alpha"));
-        let log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap();
+        let log_path = dir.path().join(TOAST_LOG_FILE);
+        let log = std::fs::read_to_string(log_path).unwrap();
         assert!(log.contains("Removed note special-name"));
 
         std::env::set_current_dir(orig_dir).unwrap();
