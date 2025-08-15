@@ -9,7 +9,11 @@ pub struct MissingPlugin;
 
 impl Plugin for MissingPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        if !query.trim().eq_ignore_ascii_case("check missing") {
+        let trimmed = query.trim();
+        let prefix = "check missing";
+        if crate::common::strip_prefix_ci(trimmed, prefix).is_none()
+            && !prefix.starts_with(&trimmed.to_ascii_lowercase())
+        {
             return Vec::new();
         }
         let mut out = Vec::new();
@@ -91,9 +95,9 @@ impl Plugin for MissingPlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![Action {
-            label: "check missing".into(),
+            label: "check miss".into(),
             desc: "Maintenance".into(),
-            action: "query:check missing".into(),
+            action: "query:check miss".into(),
             args: None,
         }]
     }
