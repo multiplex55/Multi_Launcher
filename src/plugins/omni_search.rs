@@ -2,8 +2,8 @@ use crate::actions::Action;
 use crate::plugin::Plugin;
 use crate::plugins::bookmarks::BookmarksPlugin;
 use crate::plugins::folders::FoldersPlugin;
-use fuzzy_matcher::skim::SkimMatcherV2;
-use fuzzy_matcher::FuzzyMatcher;
+use fst::{automaton::Subsequence, IntoStreamer, Map, MapBuilder, Streamer};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Combined search across folders, bookmarks, and launcher actions.
@@ -19,7 +19,7 @@ pub struct OmniSearchPlugin {
     /// bookmarks. Cloning the `Arc` only clones the pointer so the underlying
     /// `Vec` remains shared.
     actions: Arc<Vec<Action>>,
-    matcher: SkimMatcherV2,
+    index: Map<Vec<u8>>,
 }
 
 impl OmniSearchPlugin {
@@ -29,11 +29,25 @@ impl OmniSearchPlugin {
     /// `Arc` does not clone the `Vec` itself, so the plugin can read the shared
     /// action data without duplicating it.
     pub fn new(actions: Arc<Vec<Action>>) -> Self {
+        let mut entries: Vec<(String, u64)> = Vec::new();
+        for (i, a) in actions.iter().enumerate() {
+            entries.push((a.label.to_lowercase(), i as u64));
+            if !a.desc.is_empty() {
+                entries.push((a.desc.to_lowercase(), i as u64));
+            }
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut builder = MapBuilder::memory();
+        for (k, v) in entries {
+            builder.insert(k, v).unwrap();
+        }
+        let index = Map::new(builder.into_inner().unwrap()).unwrap();
+
         Self {
             folders: FoldersPlugin::default(),
             bookmarks: BookmarksPlugin::default(),
             actions,
-            matcher: SkimMatcherV2::default(),
+            index,
         }
     }
 }
@@ -96,11 +110,15 @@ impl OmniSearchPlugin {
         if q.is_empty() {
             out.extend(self.actions.iter().cloned());
         } else {
-            for a in self.actions.iter() {
-                if self.matcher.fuzzy_match(&a.label, q).is_some()
-                    || self.matcher.fuzzy_match(&a.desc, q).is_some()
-                {
-                    out.push(a.clone());
+            let q_lc = q.to_lowercase();
+            let automaton = Subsequence::new(&q_lc);
+            let mut stream = self.index.search(automaton).into_stream();
+            let mut seen = HashSet::new();
+            while let Some((_, idx)) = stream.next() {
+                if seen.insert(idx) {
+                    if let Some(a) = self.actions.get(idx as usize) {
+                        out.push(a.clone());
+                    }
                 }
             }
         }

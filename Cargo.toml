@@ -9,6 +9,7 @@ eframe = "0.27"               # egui-based GUI
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 fuzzy-matcher = "0.3"
+fst = { version = "0.4", features = ["levenshtein"] }
 open = "5.0"                   # Open files/folders/apps cross-platform
 anyhow = "1.0"
 walkdir = "2.4"
@@ -79,4 +80,8 @@ embed-resource = "2"
 
 [[bench]]
 name = "search"
+harness = false
+
+[[bench]]
+name = "omni_search"
 harness = false
