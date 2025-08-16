@@ -27,6 +27,25 @@ pub(crate) fn set_system_volume(percent: u32) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_volume_pid_toggle_mute() {
+        let action = Action {
+            label: String::new(),
+            desc: String::new(),
+            action: "volume:pid_toggle_mute:42".into(),
+            args: None,
+        };
+        assert_eq!(
+            parse_action_kind(&action),
+            ActionKind::VolumeToggleMuteProcess { pid: 42 }
+        );
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn mute_active_window() {
     use windows::core::Interface;
@@ -104,6 +123,50 @@ pub(crate) fn set_process_volume(pid: u32, level: u32) {
                                                     level as f32 / 100.0,
                                                     std::ptr::null(),
                                                 );
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        CoUninitialize();
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn toggle_process_mute(pid: u32) {
+    use windows::core::Interface;
+    use windows::Win32::Media::Audio::{
+        eMultimedia, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator,
+        ISimpleAudioVolume, MMDeviceEnumerator,
+    };
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+    };
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        if let Ok(enm) =
+            CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+        {
+            if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
+                if let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
+                    if let Ok(list) = manager.GetSessionEnumerator() {
+                        let count = list.GetCount().unwrap_or(0);
+                        for i in 0..count {
+                            if let Ok(ctrl) = list.GetSession(i) {
+                                if let Ok(c2) = ctrl.cast::<IAudioSessionControl2>() {
+                                    if let Ok(session_pid) = c2.GetProcessId() {
+                                        if session_pid == pid {
+                                            if let Ok(vol) = ctrl.cast::<ISimpleAudioVolume>() {
+                                                if let Ok(m) = vol.GetMute() {
+                                                    let _ = vol.SetMute(!m, std::ptr::null());
+                                                }
                                             }
                                             break;
                                         }
@@ -281,6 +344,9 @@ enum ActionKind<'a> {
     VolumeSetProcess {
         pid: u32,
         level: u32,
+    },
+    VolumeToggleMuteProcess {
+        pid: u32,
     },
     VolumeMuteActive,
     Screenshot {
@@ -552,6 +618,11 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
             }
         }
     }
+    if let Some(pid) = s.strip_prefix("volume:pid_toggle_mute:") {
+        if let Ok(pid) = pid.parse::<u32>() {
+            return ActionKind::VolumeToggleMuteProcess { pid };
+        }
+    }
     if s == "volume:mute_active" {
         return ActionKind::VolumeMuteActive;
     }
@@ -768,6 +839,10 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         }
         ActionKind::VolumeSetProcess { pid, level } => {
             system::set_process_volume(pid, level);
+            Ok(())
+        }
+        ActionKind::VolumeToggleMuteProcess { pid } => {
+            system::toggle_process_mute(pid);
             Ok(())
         }
         ActionKind::VolumeMuteActive => {

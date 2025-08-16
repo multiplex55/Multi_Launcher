@@ -67,6 +67,12 @@ pub fn set_process_volume(pid: u32, level: u32) {
     super::super::launcher::set_process_volume(pid, level);
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+pub fn toggle_process_mute(pid: u32) {
+    #[cfg(target_os = "windows")]
+    super::super::launcher::toggle_process_mute(pid);
+}
+
 pub fn recycle_clean() {
     #[cfg(target_os = "windows")]
     {
