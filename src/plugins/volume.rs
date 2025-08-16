@@ -7,7 +7,7 @@ use std::sync::Mutex;
 #[cfg(target_os = "windows")]
 use std::time::{Duration, Instant};
 #[cfg(target_os = "windows")]
-use sysinfo::System;
+use sysinfo::{ProcessesToUpdate, System};
 
 pub struct VolumePlugin;
 
@@ -70,7 +70,7 @@ impl Plugin for VolumePlugin {
                             let pid_opt = {
                                 let mut guard = SYSTEM_CACHE.lock().unwrap();
                                 if guard.1.elapsed() > CACHE_TIMEOUT {
-                                    guard.0.refresh_processes();
+                                    guard.0.refresh_processes(ProcessesToUpdate::All, true);
                                     guard.1 = Instant::now();
                                 }
                                 guard
