@@ -59,9 +59,9 @@ hex = "0.4"
 rand = "0.8"
 lipsum = "0.9"
 egui_commonmark = "0.15.0"
+rfd = { version = "0.15.3", features = ["xdg-portal", "common-controls-v6"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-rfd = { version = "0.15.3", default-features = false, features = ["common-controls-v6"] }
 rdev = { git = "https://github.com/Narsil/rdev", rev = "c14f2dc5c8100a96c5d7e3013de59d6aa0b9eae2" }
 rodio = { version = "0.17", default-features = false, features = ["wav"] }
 
