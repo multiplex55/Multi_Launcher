@@ -25,6 +25,7 @@ pub use add_bookmark_dialog::AddBookmarkDialog;
 pub use alias_dialog::AliasDialog;
 pub use bookmark_alias_dialog::BookmarkAliasDialog;
 pub use brightness_dialog::BrightnessDialog;
+pub use brightness_dialog::BRIGHTNESS_QUERIES;
 pub use clipboard_dialog::ClipboardDialog;
 pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;

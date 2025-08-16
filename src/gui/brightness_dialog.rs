@@ -2,21 +2,29 @@ use crate::gui::LauncherApp;
 use crate::launcher::launch_action;
 use crate::actions::Action;
 use eframe::egui;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+pub static BRIGHTNESS_QUERIES: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Default)]
 pub struct BrightnessDialog {
     pub open: bool,
     value: u8,
+    value_loaded: bool,
 }
 
 impl BrightnessDialog {
     pub fn open(&mut self) {
         self.open = true;
-        self.value = get_main_display_brightness().unwrap_or(50);
+        self.value_loaded = false;
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         if !self.open { return; }
+        if !self.value_loaded {
+            self.value = get_main_display_brightness().unwrap_or(50);
+            self.value_loaded = true;
+        }
         let mut close = false;
         egui::Window::new("Brightness")
             .resizable(false)
@@ -90,10 +98,12 @@ fn get_main_display_brightness() -> Option<u8> {
             LPARAM(&mut percent as *mut u32 as isize),
         );
     }
+    BRIGHTNESS_QUERIES.fetch_add(1, Ordering::Relaxed);
     Some(percent as u8)
 }
 
 #[cfg(not(target_os = "windows"))]
 fn get_main_display_brightness() -> Option<u8> {
+    BRIGHTNESS_QUERIES.fetch_add(1, Ordering::Relaxed);
     None
 }
