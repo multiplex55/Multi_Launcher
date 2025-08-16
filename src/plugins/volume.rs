@@ -1,13 +1,22 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
 #[cfg(target_os = "windows")]
-use sysinfo::System;
+use once_cell::sync::Lazy;
+#[cfg(target_os = "windows")]
+use std::sync::Mutex;
+#[cfg(target_os = "windows")]
+use std::time::{Duration, Instant};
+#[cfg(target_os = "windows")]
+use sysinfo::{ProcessesToUpdate, System};
 
 pub struct VolumePlugin;
 
 impl Plugin for VolumePlugin {
     #[cfg(target_os = "windows")]
     fn search(&self, query: &str) -> Vec<Action> {
+        static SYSTEM_CACHE: Lazy<Mutex<(System, Instant)>> =
+            Lazy::new(|| Mutex::new((System::new_all(), Instant::now())));
+        const CACHE_TIMEOUT: Duration = Duration::from_secs(5);
         let trimmed = query.trim();
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "vol") {
             if rest.is_empty() {
@@ -58,13 +67,20 @@ impl Plugin for VolumePlugin {
                 ["name", exe, level_str] => {
                     if let Ok(level) = level_str.parse::<u32>() {
                         if level <= 100 {
-                            let system = System::new_all();
-                            if let Some(proc) = system
-                                .processes()
-                                .values()
-                                .find(|p| p.name().to_string_lossy().eq_ignore_ascii_case(exe))
-                            {
-                                let pid = proc.pid().as_u32();
+                            let pid_opt = {
+                                let mut guard = SYSTEM_CACHE.lock().unwrap();
+                                if guard.1.elapsed() > CACHE_TIMEOUT {
+                                    guard.0.refresh_processes(ProcessesToUpdate::All, true);
+                                    guard.1 = Instant::now();
+                                }
+                                guard
+                                    .0
+                                    .processes()
+                                    .values()
+                                    .find(|p| p.name().to_string_lossy().eq_ignore_ascii_case(exe))
+                                    .map(|p| p.pid().as_u32())
+                            };
+                            if let Some(pid) = pid_opt {
                                 return vec![Action {
                                     label: format!("Set {exe} volume to {level}%"),
                                     desc: format!("PID {pid}"),
