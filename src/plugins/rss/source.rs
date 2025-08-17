@@ -30,7 +30,7 @@ pub struct ResolvedSource {
     pub source_type: SourceType,
 }
 
-/// Resolve a user provided source string to a concrete feed.
+/// Resolve a user provided source string to one or more feeds.
 ///
 /// The resolver handles a number of common cases:
 /// * `@handle` – YouTube channel handle which is resolved to a channel id
@@ -38,7 +38,7 @@ pub struct ResolvedSource {
 /// * YouTube channel / playlist URLs – turned into feed URLs.
 /// * Direct feed URLs – simply verified and normalised.
 /// * Generic site URLs – feed autodiscovery is attempted.
-pub fn resolve(source: &str) -> Result<ResolvedSource> {
+pub fn resolve(source: &str) -> Result<Vec<ResolvedSource>> {
     let source = source.trim();
     if source.is_empty() {
         bail!("empty source");
@@ -50,7 +50,7 @@ pub fn resolve(source: &str) -> Result<ResolvedSource> {
 
     // 1) YouTube handle starting with '@'.
     if let Some(handle) = source.strip_prefix('@') {
-        return resolve_youtube_handle(&client, handle);
+        return resolve_youtube_handle(&client, handle).map(|r| vec![r]);
     }
 
     // Try to parse as URL; prepend https:// if no scheme.
@@ -66,36 +66,44 @@ pub fn resolve(source: &str) -> Result<ResolvedSource> {
         .unwrap_or(false)
     {
         if let Some(handle) = url.path().strip_prefix("/@") {
-            return resolve_youtube_handle(&client, handle);
+            return resolve_youtube_handle(&client, handle).map(|r| vec![r]);
         }
         if let Some(id) = youtube_channel_id_from_url(&url) {
-            return resolve_youtube_channel(&client, id);
+            return resolve_youtube_channel(&client, id).map(|r| vec![r]);
         }
         if let Some(id) = youtube_playlist_id_from_url(&url) {
-            return resolve_youtube_playlist(&client, id);
+            return resolve_youtube_playlist(&client, id).map(|r| vec![r]);
         }
     }
 
     // 3) Direct feed URL – attempt to detect feed type.
     if let Ok(feed_type) = detect_feed_type(&client, url.as_str()) {
         let url_str = url.to_string();
-        return Ok(ResolvedSource {
+        return Ok(vec![ResolvedSource {
             feed_url: url_str.clone(),
             site_url: Some(url_str),
             feed_type,
             source_type: SourceType::Generic,
-        });
+        }]);
     }
 
     // 4) Generic site URL – attempt feed autodiscovery.
-    if let Some(feed_url) = discover_feed_url(&client, &url)? {
-        let feed_type = detect_feed_type(&client, &feed_url)?;
-        return Ok(ResolvedSource {
-            feed_url,
-            site_url: Some(url.to_string()),
-            feed_type,
-            source_type: SourceType::Generic,
-        });
+    let feeds = discover_feed_urls(&client, &url)?;
+    if !feeds.is_empty() {
+        let mut resolved = Vec::new();
+        for feed_url in feeds {
+            if let Ok(feed_type) = detect_feed_type(&client, &feed_url) {
+                resolved.push(ResolvedSource {
+                    feed_url,
+                    site_url: Some(url.to_string()),
+                    feed_type,
+                    source_type: SourceType::Generic,
+                });
+            }
+        }
+        if !resolved.is_empty() {
+            return Ok(resolved);
+        }
     }
 
     bail!("could not resolve feed source");
@@ -225,12 +233,13 @@ fn parse_feed_response(resp: Response) -> Result<FeedType> {
     bail!("unknown feed format");
 }
 
-fn discover_feed_url(client: &Client, url: &Url) -> Result<Option<String>> {
+fn discover_feed_urls(client: &Client, url: &Url) -> Result<Vec<String>> {
     let resp = client.get(url.clone()).send().context("fetch page")?;
     let base_url = resp.url().clone();
     let body = resp.text().context("read page")?;
     let document = Html::parse_document(&body);
     let selector = Selector::parse("link[rel=\"alternate\"]").unwrap();
+    let mut feeds = Vec::new();
     for elem in document.select(&selector) {
         let ty = elem.value().attr("type").unwrap_or("");
         if !(ty.contains("rss") || ty.contains("atom") || ty.contains("json")) {
@@ -238,9 +247,12 @@ fn discover_feed_url(client: &Client, url: &Url) -> Result<Option<String>> {
         }
         if let Some(href) = elem.value().attr("href") {
             if let Ok(feed_url) = base_url.join(href) {
-                return Ok(Some(feed_url.to_string()));
+                let s = feed_url.to_string();
+                if !feeds.contains(&s) {
+                    feeds.push(s);
+                }
             }
         }
     }
-    Ok(None)
+    Ok(feeds)
 }
