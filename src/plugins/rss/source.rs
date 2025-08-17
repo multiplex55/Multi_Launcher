@@ -59,12 +59,21 @@ pub fn resolve(source: &str) -> Result<ResolvedSource> {
         Err(_) => Url::parse(&format!("https://{source}"))?,
     };
 
-    // 2) YouTube URLs for channels / playlists.
-    if let Some(id) = youtube_channel_id_from_url(&url) {
-        return resolve_youtube_channel(&client, id);
-    }
-    if let Some(id) = youtube_playlist_id_from_url(&url) {
-        return resolve_youtube_playlist(&client, id);
+    // 2) YouTube URLs for handles/channels/playlists.
+    if url
+        .host_str()
+        .map(|h| h.ends_with("youtube.com") || h == "youtu.be")
+        .unwrap_or(false)
+    {
+        if let Some(handle) = url.path().strip_prefix("/@") {
+            return resolve_youtube_handle(&client, handle);
+        }
+        if let Some(id) = youtube_channel_id_from_url(&url) {
+            return resolve_youtube_channel(&client, id);
+        }
+        if let Some(id) = youtube_playlist_id_from_url(&url) {
+            return resolve_youtube_playlist(&client, id);
+        }
     }
 
     // 3) Direct feed URL – attempt to detect feed type.
@@ -93,6 +102,23 @@ pub fn resolve(source: &str) -> Result<ResolvedSource> {
 }
 
 fn resolve_youtube_handle(client: &Client, handle: &str) -> Result<ResolvedSource> {
+    if let Ok(api_key) = std::env::var("YOUTUBE_API_KEY") {
+        let api_url = format!("https://www.googleapis.com/youtube/v3/channels?part=id&forHandle={handle}&key={api_key}");
+        if let Ok(resp) = client.get(&api_url).send() {
+            if let Ok(text) = resp.text() {
+                if let Ok(json) = serde_json::from_str::<Value>(&text) {
+                    if let Some(id) = json["items"]
+                        .as_array()
+                        .and_then(|a| a.get(0))
+                        .and_then(|i| i["id"].as_str())
+                    {
+                        return resolve_youtube_channel(client, id.to_string());
+                    }
+                }
+            }
+        }
+    }
+
     let url = format!("https://www.youtube.com/@{handle}");
     let body = client
         .get(&url)
@@ -109,26 +135,24 @@ fn resolve_youtube_handle(client: &Client, handle: &str) -> Result<ResolvedSourc
     resolve_youtube_channel(client, channel_id)
 }
 
-fn resolve_youtube_channel(client: &Client, channel_id: String) -> Result<ResolvedSource> {
+fn resolve_youtube_channel(_client: &Client, channel_id: String) -> Result<ResolvedSource> {
     let feed_url = format!("https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}");
-    let feed_type = detect_feed_type(client, &feed_url)?;
     Ok(ResolvedSource {
         feed_url,
         site_url: Some(format!("https://www.youtube.com/channel/{channel_id}")),
-        feed_type,
+        feed_type: FeedType::Atom,
         source_type: SourceType::YoutubeChannel,
     })
 }
 
-fn resolve_youtube_playlist(client: &Client, playlist_id: String) -> Result<ResolvedSource> {
+fn resolve_youtube_playlist(_client: &Client, playlist_id: String) -> Result<ResolvedSource> {
     let feed_url = format!("https://www.youtube.com/feeds/videos.xml?playlist_id={playlist_id}");
-    let feed_type = detect_feed_type(client, &feed_url)?;
     Ok(ResolvedSource {
         feed_url,
         site_url: Some(format!(
             "https://www.youtube.com/playlist?list={playlist_id}"
         )),
-        feed_type,
+        feed_type: FeedType::Atom,
         source_type: SourceType::YoutubePlaylist,
     })
 }

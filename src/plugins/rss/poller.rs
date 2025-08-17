@@ -1,11 +1,9 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use reqwest::blocking::Client;
-use reqwest::header::{
-    HeaderMap, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LOCATION,
-};
-use reqwest::StatusCode;
 use rand::{thread_rng, Rng};
+use reqwest::blocking::Client;
+use reqwest::header::{HeaderMap, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LOCATION};
+use reqwest::StatusCode;
 use std::time::Duration;
 
 use super::storage::{CachedItem, FeedCache, FeedConfig, FeedState, StateFile};
@@ -141,6 +139,40 @@ impl Poller {
         let headers = resp.headers().clone();
         let bytes = resp.bytes().context("read feed body")?;
         let feed_model = feed_rs::parser::parse(&bytes[..]).context("parse feed")?;
+
+        // On first successful fetch, treat existing items as historical and
+        // advance the catch-up cursor to the newest entry.
+        if entry.last_guid.is_none() && entry.catchup.is_none() {
+            if let Some(max_ts) = feed_model
+                .entries
+                .iter()
+                .filter_map(|e| e.published.or(e.updated).map(|d| d.timestamp() as u64))
+                .max()
+            {
+                entry.catchup = Some(max_ts);
+            }
+            entry.last_guid = feed_model.entries.first().map(|e| e.id.clone());
+            if cache_items {
+                let mut cache = FeedCache::load(&feed.id);
+                for e in &feed_model.entries {
+                    let item = convert_entry(e);
+                    cache.items.push(CachedItem {
+                        guid: item.id.clone(),
+                        title: item.title.clone().unwrap_or_default(),
+                        link: item.link.clone(),
+                        timestamp: item.published,
+                    });
+                }
+                cache.save(&feed.id)?;
+            }
+            update_success(entry, now, &headers);
+            feed.last_poll = Some(now);
+            let delay = thread_rng().gen_range(600..=1800);
+            feed.cadence = Some(delay);
+            feed.next_poll = Some(now + delay);
+            state.save()?;
+            return Ok(Vec::new());
+        }
 
         // Collect new items until the last known GUID is encountered.
         let mut new_items = Vec::new();
