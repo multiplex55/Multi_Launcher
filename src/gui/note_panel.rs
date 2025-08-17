@@ -16,13 +16,17 @@ use url::Url;
 
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
 
-fn preprocess_note_links(content: &str) -> String {
+fn preprocess_note_links(content: &str, current_slug: &str) -> String {
     static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
     WIKI_RE
         .replace_all(content, |caps: &regex::Captures| {
             let text = &caps[1];
             let slug = slugify(text);
-            format!("[{text}](note://{slug})")
+            if slug == current_slug {
+                caps[0].to_string()
+            } else {
+                format!("[{text}](note://{slug})")
+            }
         })
         .to_string()
 }
@@ -95,7 +99,8 @@ impl NotePanel {
                         ui.set_min_height(scrollable_height);
                         if self.preview_mode {
                             let mut last = 0usize;
-                            let content = preprocess_note_links(&self.note.content);
+                            let content =
+                                preprocess_note_links(&self.note.content, &self.note.slug);
                             let mut modified = false;
                             for (i, cap) in IMAGE_RE.captures_iter(&content).enumerate() {
                                 let m = cap.get(0).unwrap();
@@ -243,6 +248,9 @@ impl NotePanel {
                                     .show(ui, |ui| {
                                         for action in &results {
                                             let title = action.label.clone();
+                                            if slugify(&title) == self.note.slug {
+                                                continue;
+                                            }
                                             if ui.button(&title).clicked() {
                                                 let insert = format!("[[{title}]]");
                                                 let mut state =
@@ -399,7 +407,10 @@ impl NotePanel {
                         }
                     });
                 }
-                let wiki = extract_wiki_links(&self.note.content);
+                let wiki = extract_wiki_links(&self.note.content)
+                    .into_iter()
+                    .filter(|l| slugify(l) != self.note.slug)
+                    .collect::<Vec<_>>();
                 let links = extract_links(&self.note.content);
                 if !wiki.is_empty() || !links.is_empty() {
                     ui.horizontal_wrapped(|ui| {
@@ -430,6 +441,7 @@ impl NotePanel {
         self.note.links = extract_wiki_links(&self.note.content)
             .into_iter()
             .map(|l| slugify(&l))
+            .filter(|l| l != &self.note.slug)
             .collect();
         if let Some(first) = self.note.content.lines().next() {
             if let Some(t) = first.strip_prefix("# ") {
@@ -726,8 +738,15 @@ mod tests {
     #[test]
     fn preprocess_wiki_links_rewrites() {
         let content = "See [[Target Note]]";
-        let processed = preprocess_note_links(content);
+        let processed = preprocess_note_links(content, "current-note");
         assert_eq!(processed, "See [Target Note](note://target-note)");
+    }
+
+    #[test]
+    fn preprocess_wiki_links_skips_self() {
+        let content = "See [[Target Note]]";
+        let processed = preprocess_note_links(content, "target-note");
+        assert_eq!(processed, content);
     }
 
     #[test]
