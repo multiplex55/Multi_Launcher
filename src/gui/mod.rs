@@ -9,6 +9,7 @@ mod cpu_list_dialog;
 mod fav_dialog;
 mod macro_dialog;
 mod note_panel;
+mod image_panel;
 mod notes_dialog;
 mod shell_cmd_dialog;
 mod snippet_dialog;
@@ -32,6 +33,7 @@ pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
 pub use macro_dialog::MacroDialog;
 pub use note_panel::{extract_links, show_wiki_link, NotePanel};
+pub use image_panel::ImagePanel;
 pub use notes_dialog::NotesDialog;
 pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;
@@ -206,6 +208,7 @@ pub enum Panel {
     FavDialog,
     NotesDialog,
     NotePanel,
+    ImagePanel,
     TodoDialog,
     TodoViewDialog,
     ClipboardDialog,
@@ -236,6 +239,7 @@ struct PanelStates {
     fav_dialog: bool,
     notes_dialog: bool,
     note_panel: bool,
+    image_panel: bool,
     todo_dialog: bool,
     todo_view_dialog: bool,
     clipboard_dialog: bool,
@@ -319,6 +323,7 @@ pub struct LauncherApp {
     fav_dialog: FavDialog,
     notes_dialog: NotesDialog,
     note_panels: Vec<NotePanel>,
+    image_panels: Vec<ImagePanel>,
     todo_dialog: TodoDialog,
     todo_view_dialog: TodoViewDialog,
     clipboard_dialog: ClipboardDialog,
@@ -727,6 +732,7 @@ impl LauncherApp {
             fav_dialog: FavDialog::default(),
             notes_dialog: NotesDialog::default(),
             note_panels: Vec::new(),
+            image_panels: Vec::new(),
             todo_dialog: TodoDialog::default(),
             todo_view_dialog: TodoViewDialog::default(),
             clipboard_dialog: ClipboardDialog::default(),
@@ -1183,6 +1189,7 @@ impl LauncherApp {
             || self.fav_dialog.open
             || self.notes_dialog.open
             || !self.note_panels.is_empty()
+            || !self.image_panels.is_empty()
             || self.todo_dialog.open
             || self.todo_view_dialog.open
             || self.clipboard_dialog.open
@@ -1302,6 +1309,10 @@ impl LauncherApp {
                 }
                 self.panel_states.note_panel = false;
             }
+            Panel::ImagePanel => {
+                let _ = self.image_panels.pop();
+                self.panel_states.image_panel = false;
+            }
             Panel::TodoDialog => {
                 self.todo_dialog.open = false;
                 self.panel_states.todo_dialog = false;
@@ -1416,6 +1427,10 @@ impl LauncherApp {
                 }
                 self.panel_states.note_panel = false;
             }
+            Panel::ImagePanel => {
+                let _ = self.image_panels.pop();
+                self.panel_states.image_panel = false;
+            }
             Panel::TodoDialog => {
                 self.todo_dialog.open = false;
                 self.panel_states.todo_dialog = false;
@@ -1481,6 +1496,7 @@ impl LauncherApp {
             Panel::FavDialog => self.fav_dialog.open = true,
             Panel::NotesDialog => self.notes_dialog.open = true,
             Panel::NotePanel => {}
+            Panel::ImagePanel => {}
             Panel::TodoDialog => self.todo_dialog.open = true,
             Panel::TodoViewDialog => self.todo_view_dialog.open = true,
             Panel::ClipboardDialog => self.clipboard_dialog.open = true,
@@ -1592,6 +1608,7 @@ impl LauncherApp {
         check!(self.fav_dialog.open, fav_dialog, Panel::FavDialog);
         check!(self.notes_dialog.open, notes_dialog, Panel::NotesDialog);
         check!(!self.note_panels.is_empty(), note_panel, Panel::NotePanel);
+        check!(!self.image_panels.is_empty(), image_panel, Panel::ImagePanel);
         check!(self.todo_dialog.open, todo_dialog, Panel::TodoDialog);
         check!(
             self.todo_view_dialog.open,
@@ -1966,6 +1983,7 @@ impl eframe::App for LauncherApp {
                     && !self.todo_dialog.open
                     && !self.todo_view_dialog.open
                     && self.note_panels.is_empty()
+                    && self.image_panels.is_empty()
                 {
                     launch_idx = self.handle_key(egui::Key::Enter);
                 }
@@ -3074,6 +3092,15 @@ impl eframe::App for LauncherApp {
                 i += 1;
             }
         }
+        let mut i = 0;
+        while i < self.image_panels.len() {
+            let mut panel = self.image_panels.remove(i);
+            panel.ui(ctx);
+            if panel.open {
+                self.image_panels.insert(i, panel);
+                i += 1;
+            }
+        }
         let mut todo_dlg = std::mem::take(&mut self.todo_dialog);
         todo_dlg.ui(ctx, self);
         self.todo_dialog = todo_dlg;
@@ -3185,6 +3212,16 @@ impl LauncherApp {
 
     pub fn push_note_panel(&mut self, panel: NotePanel) {
         self.note_panels.push(panel);
+        self.update_panel_stack();
+    }
+
+    /// Open an image viewer panel for the given file path.
+    pub fn open_image_panel(&mut self, path: &Path) {
+        if !path.exists() {
+            self.set_error(format!("Image not found: {}", path.display()));
+            return;
+        }
+        self.image_panels.push(ImagePanel::new(path.to_path_buf()));
         self.update_panel_stack();
     }
 

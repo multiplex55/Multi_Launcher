@@ -12,6 +12,9 @@ use regex::Regex;
 use rfd::FileDialog;
 use url::Url;
 
+static IMAGE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"!\[[^\]]*\]\(([^)]+)\)").unwrap());
+
 pub struct NotePanel {
     pub open: bool,
     note: Note,
@@ -61,11 +64,43 @@ impl NotePanel {
                     .show_viewport(ui, |ui, _viewport| {
                         ui.set_min_height(scrollable_height);
                         if self.preview_mode {
-                            CommonMarkViewer::new("note_content").show(
-                                ui,
-                                &mut self.markdown_cache,
-                                &self.note.content,
-                            );
+                            let mut last = 0usize;
+                            let content = &self.note.content;
+                            for (i, cap) in IMAGE_RE.captures_iter(content).enumerate() {
+                                let m = cap.get(0).unwrap();
+                                let before = &content[last..m.start()];
+                                if !before.is_empty() {
+                                    CommonMarkViewer::new(format!("note_seg_{i}_t"))
+                                        .show(ui, &mut self.markdown_cache, before);
+                                }
+                                let rel = cap.get(1).unwrap().as_str();
+                                let full = if let Some(stripped) = rel.strip_prefix("assets/") {
+                                    assets_dir().join(stripped)
+                                } else {
+                                    std::path::PathBuf::from(rel)
+                                };
+                                if let Ok(img) = image::open(&full) {
+                                    let size = [img.width() as usize, img.height() as usize];
+                                    let rgba = img.to_rgba8();
+                                    let tex = ui.ctx().load_texture(
+                                        format!("note_img_{}_{}", self.note.slug, i),
+                                        egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
+                                        egui::TextureOptions::LINEAR,
+                                    );
+                                    let image = egui::Image::new(&tex)
+                                        .fit_to_exact_size(tex.size_vec2())
+                                        .sense(egui::Sense::click());
+                                    if ui.add(image).clicked() {
+                                        app.open_image_panel(&full);
+                                    }
+                                }
+                                last = m.end();
+                            }
+                            let rest = &content[last..];
+                            if !rest.is_empty() {
+                                CommonMarkViewer::new("note_content_rest")
+                                    .show(ui, &mut self.markdown_cache, rest);
+                            }
                             None
                         } else {
                             Some(
