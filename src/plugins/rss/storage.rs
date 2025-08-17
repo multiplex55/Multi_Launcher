@@ -106,10 +106,12 @@ pub struct FeedsFile {
     pub version: u32,
     #[serde(default)]
     pub feeds: Vec<FeedConfig>,
+    #[serde(default)]
+    pub groups: Vec<String>,
 }
 
 impl FeedsFile {
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
 
     pub fn load() -> Self {
         load_json(&feeds_path()).unwrap_or_default()
@@ -125,6 +127,7 @@ impl Default for FeedsFile {
         Self {
             version: Self::VERSION,
             feeds: Vec::new(),
+            groups: Vec::new(),
         }
     }
 }
