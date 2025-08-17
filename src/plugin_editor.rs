@@ -127,6 +127,7 @@ impl PluginEditor {
                         None,
                         None,
                         None,
+                        None,
                     );
                     let dirs = s.plugin_dirs.clone().unwrap_or_default();
                     let actions_arc = Arc::clone(&app.actions);

@@ -7,10 +7,14 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use image::imageops::FilterType;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use rfd::FileDialog;
+use std::collections::HashMap;
 use url::Url;
+
+static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
 
 pub struct NotePanel {
     pub open: bool,
@@ -19,6 +23,7 @@ pub struct NotePanel {
     image_search: String,
     preview_mode: bool,
     markdown_cache: CommonMarkCache,
+    image_cache: HashMap<std::path::PathBuf, egui::TextureHandle>,
 }
 
 impl NotePanel {
@@ -30,6 +35,7 @@ impl NotePanel {
             image_search: String::new(),
             preview_mode: true,
             markdown_cache: CommonMarkCache::default(),
+            image_cache: HashMap::new(),
         }
     }
 
@@ -61,11 +67,124 @@ impl NotePanel {
                     .show_viewport(ui, |ui, _viewport| {
                         ui.set_min_height(scrollable_height);
                         if self.preview_mode {
-                            CommonMarkViewer::new("note_content").show(
-                                ui,
-                                &mut self.markdown_cache,
-                                &self.note.content,
-                            );
+                            let mut last = 0usize;
+                            let content = self.note.content.clone();
+                            let mut modified = false;
+                            for (i, cap) in IMAGE_RE.captures_iter(&content).enumerate() {
+                                let m = cap.get(0).unwrap();
+                                let range = m.range();
+                                let before = &content[last..range.start];
+                                if !before.is_empty() {
+                                    CommonMarkViewer::new(format!("note_seg_{i}_t")).show(
+                                        ui,
+                                        &mut self.markdown_cache,
+                                        before,
+                                    );
+                                }
+                                let alt = cap.get(1).unwrap().as_str();
+                                let target = cap.get(2).unwrap().as_str();
+                                let (rel, width) = if let Some((p, w)) = target.split_once('|') {
+                                    (p, w.parse::<f32>().ok())
+                                } else {
+                                    (target, None)
+                                };
+                                let full = if let Some(stripped) = rel.strip_prefix("assets/") {
+                                    assets_dir().join(stripped)
+                                } else {
+                                    std::path::PathBuf::from(rel)
+                                };
+                                if app.note_images_as_links {
+                                    let label = if alt.is_empty() { rel } else { alt };
+                                    if ui.link(label).clicked() {
+                                        app.open_image_panel(&full);
+                                    }
+                                } else {
+                                    let tex = if let Some(t) = self.image_cache.get(&full) {
+                                        t.clone()
+                                    } else if let Ok(mut img) = image::open(&full) {
+                                        if img.width() > 512 || img.height() > 512 {
+                                            img = img.resize(512, 512, FilterType::Triangle);
+                                        }
+                                        let size = [img.width() as usize, img.height() as usize];
+                                        let rgba = img.to_rgba8();
+                                        let tex = ui.ctx().load_texture(
+                                            full.to_string_lossy().to_string(),
+                                            egui::ColorImage::from_rgba_unmultiplied(
+                                                size,
+                                                rgba.as_raw(),
+                                            ),
+                                            egui::TextureOptions::LINEAR,
+                                        );
+                                        self.image_cache.insert(full.clone(), tex.clone());
+                                        tex
+                                    } else {
+                                        last = range.end;
+                                        continue;
+                                    };
+                                    let mut display = tex.size_vec2();
+                                    if let Some(w) = width {
+                                        display *= w / display.x;
+                                    }
+                                    let response = ui.add(
+                                        egui::Image::new(&tex)
+                                            .fit_to_exact_size(display)
+                                            .sense(egui::Sense::click()),
+                                    );
+                                    if response.clicked() {
+                                        app.open_image_panel(&full);
+                                    }
+                                    if response.hovered() {
+                                        let scroll = ui.ctx().input(|i| {
+                                            if i.modifiers.ctrl {
+                                                i.raw_scroll_delta.y
+                                            } else {
+                                                0.0
+                                            }
+                                        });
+                                        if scroll != 0.0 {
+                                            let new_w = (display.x + scroll).clamp(20.0, 4096.0);
+                                            let repl =
+                                                format!("![{alt}]({rel}|{:.0})", new_w.round());
+                                            self.note.content.replace_range(range.clone(), &repl);
+                                            self.markdown_cache.clear_scrollable();
+
+                                            modified = true;
+                                            break;
+                                        }
+                                    }
+                                    response.context_menu(|ui| {
+                                        let mut w = width.unwrap_or(display.x);
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut w)
+                                                    .clamp_range(20.0..=4096.0),
+                                            )
+                                            .changed()
+                                        {
+                                            let repl = format!("![{alt}]({rel}|{:.0})", w.round());
+                                            self.note.content.replace_range(range.clone(), &repl);
+                                            self.markdown_cache.clear_scrollable();
+                                            modified = true;
+                                        }
+                                        if ui.button("Reset size").clicked() {
+                                            let repl = format!("![{alt}]({rel})");
+                                            self.note.content.replace_range(range.clone(), &repl);
+                                            self.markdown_cache.clear_scrollable();
+                                            modified = true;
+                                            ui.close_menu();
+                                        }
+                                    });
+                                }
+                                last = range.end;
+                            }
+                            let rest = &content[last..];
+                            if !rest.is_empty() && !modified {
+                                CommonMarkViewer::new("note_content_rest").show(
+                                    ui,
+                                    &mut self.markdown_cache,
+                                    rest,
+                                );
+                            }
                             None
                         } else {
                             Some(
@@ -172,7 +291,13 @@ impl NotePanel {
                                         }
                                     });
                                 if ui.button("Upload...").clicked() {
-                                    if let Some(path) = FileDialog::new().pick_file() {
+                                    if let Some(path) = FileDialog::new()
+                                        .add_filter(
+                                            "Image",
+                                            &["png", "jpg", "jpeg", "gif", "bmp", "webp"],
+                                        )
+                                        .pick_file()
+                                    {
                                         if let Some(fname) =
                                             path.file_name().and_then(|s| s.to_str())
                                         {
