@@ -47,3 +47,24 @@ fn o_list_filters_results() {
     assert_eq!(results[0].action, "bar");
 }
 
+#[test]
+fn label_and_desc_same_returns_action() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let action = Action {
+        label: "dup".into(),
+        desc: "dup".into(),
+        action: "dup_action".into(),
+        args: None,
+    };
+    let actions = Arc::new(vec![action]);
+
+    let plugin = OmniSearchPlugin::new(actions);
+
+    let results = plugin.search("o dup");
+
+    assert!(results.iter().any(|a| a.action == "dup_action"));
+}
+
