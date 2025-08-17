@@ -30,6 +30,7 @@ pub struct SettingsEditor {
     note_panel_w: f32,
     note_panel_h: f32,
     note_save_on_close: bool,
+    note_images_as_links: bool,
     query_scale: f32,
     list_scale: f32,
     history_limit: usize,
@@ -113,6 +114,7 @@ impl SettingsEditor {
             note_panel_w: settings.note_panel_default_size.0,
             note_panel_h: settings.note_panel_default_size.1,
             note_save_on_close: settings.note_save_on_close,
+            note_images_as_links: settings.note_images_as_links,
             query_scale: settings.query_scale.unwrap_or(1.0),
             list_scale: settings.list_scale.unwrap_or(1.0),
             history_limit: settings.history_limit,
@@ -202,6 +204,7 @@ impl SettingsEditor {
             window_size: Some((self.window_w, self.window_h)),
             note_panel_default_size: (self.note_panel_w, self.note_panel_h),
             note_save_on_close: self.note_save_on_close,
+            note_images_as_links: self.note_images_as_links,
             query_scale: Some(self.query_scale),
             list_scale: Some(self.list_scale),
             history_limit: self.history_limit,
@@ -485,6 +488,10 @@ impl SettingsEditor {
                                     &mut self.note_save_on_close,
                                     "Save note on close (Esc)",
                                 );
+                                ui.checkbox(
+                                    &mut self.note_images_as_links,
+                                    "Display images as links",
+                                );
                             });
 
                         self.expand_request = None;
@@ -571,6 +578,7 @@ impl SettingsEditor {
                                                 Some(new_settings.page_jump),
                                                 Some(new_settings.note_panel_default_size),
                                                 Some(new_settings.note_save_on_close),
+                                                Some(new_settings.note_images_as_links),
                                             );
                                             ctx.send_viewport_cmd(
                                                 egui::ViewportCommand::WindowLevel(

@@ -77,6 +77,10 @@ pub struct Settings {
     /// the settings file.
     #[serde(default = "default_note_save_on_close")]
     pub note_save_on_close: bool,
+    /// When true, images in notes are rendered as links to avoid loading large
+    /// textures directly in the preview.
+    #[serde(default)]
+    pub note_images_as_links: bool,
     /// Enable toast notifications in the UI.
     #[serde(default = "default_toasts")]
     pub enable_toasts: bool,
@@ -238,6 +242,7 @@ impl Default for Settings {
             window_size: Some((400, 220)),
             note_panel_default_size: default_note_panel_size(),
             note_save_on_close: default_note_save_on_close(),
+            note_images_as_links: false,
             enable_toasts: true,
             toast_duration: default_toast_duration(),
             query_scale: Some(1.0),
