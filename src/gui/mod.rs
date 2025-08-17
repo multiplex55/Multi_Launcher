@@ -3417,6 +3417,7 @@ mod tests {
         Arc, Mutex,
     };
     use tempfile::tempdir;
+    use image::RgbaImage;
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -3498,6 +3499,20 @@ mod tests {
         app.update_panel_stack();
         assert!(app.close_front_dialog());
         assert!(!app.clipboard_dialog.open);
+    }
+
+    #[test]
+    fn image_panel_closes_with_escape() {
+        let ctx = egui::Context::default();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("img.png");
+        RgbaImage::new(1, 1).save(&path).unwrap();
+
+        let mut app = new_app(&ctx);
+        app.open_image_panel(&path);
+        assert_eq!(app.image_panels.len(), 1);
+        assert!(app.close_front_dialog());
+        assert!(app.image_panels.is_empty());
     }
 
     #[test]
