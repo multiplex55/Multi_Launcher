@@ -96,17 +96,9 @@ fn refresh(args: &str) -> Result<()> {
     let mut feeds = storage::FeedsFile::load();
     let mut state = storage::StateFile::load();
     let poller = Poller::new()?;
-    let now = chrono::Utc::now().timestamp() as u64;
     let mut changed = false;
     let targets = resolve_targets_mut(&mut feeds, target);
     for feed in targets {
-        if !force {
-            if let Some(next) = feed.next_poll {
-                if next > now {
-                    continue;
-                }
-            }
-        }
         let _ = poller.poll_feed(feed, &mut state, true, force);
         changed = true;
     }
