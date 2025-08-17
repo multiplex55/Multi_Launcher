@@ -10,7 +10,11 @@ fn parse_prob(input: &str) -> Option<f64> {
     if let Some((num, den)) = input.split_once('/') {
         let num: f64 = num.trim().parse().ok()?;
         let den: f64 = den.trim().parse().ok()?;
-        if den != 0.0 { Some(num / den) } else { None }
+        if den != 0.0 {
+            Some(num / den)
+        } else {
+            None
+        }
     } else {
         input.trim().parse::<f64>().ok()
     }
@@ -67,4 +71,3 @@ impl Plugin for DropCalcPlugin {
         }]
     }
 }
-

@@ -1,19 +1,16 @@
 use arboard::Clipboard;
 
 pub fn clear_history() -> anyhow::Result<()> {
-    crate::plugins::clipboard::clear_history_file(
-        crate::plugins::clipboard::CLIPBOARD_FILE,
-    )?;
+    crate::plugins::clipboard::clear_history_file(crate::plugins::clipboard::CLIPBOARD_FILE)?;
     Ok(())
 }
 
 pub fn copy_entry(i: usize) -> anyhow::Result<()> {
-    if let Some(entry) = crate::plugins::clipboard::load_history(
-        crate::plugins::clipboard::CLIPBOARD_FILE,
-    )
-    .unwrap_or_default()
-    .get(i)
-    .cloned()
+    if let Some(entry) =
+        crate::plugins::clipboard::load_history(crate::plugins::clipboard::CLIPBOARD_FILE)
+            .unwrap_or_default()
+            .get(i)
+            .cloned()
     {
         let mut cb = Clipboard::new()?;
         cb.set_text(entry)?;

@@ -237,7 +237,9 @@ impl ConvertPanel {
         match self.category.as_str() {
             "Distance" => {
                 if let Ok(v) = self.input.trim().parse::<f64>() {
-                    if let (Some(ff), Some(tf)) = (distance_factor(&self.from), distance_factor(&self.to)) {
+                    if let (Some(ff), Some(tf)) =
+                        (distance_factor(&self.from), distance_factor(&self.to))
+                    {
                         let res = v * ff / tf;
                         self.result = res.to_string();
                     }
@@ -253,7 +255,9 @@ impl ConvertPanel {
             }
             "Volume" => {
                 if let Ok(v) = self.input.trim().parse::<f64>() {
-                    if let (Some(ff), Some(tf)) = (volume_factor(&self.from), volume_factor(&self.to)) {
+                    if let (Some(ff), Some(tf)) =
+                        (volume_factor(&self.from), volume_factor(&self.to))
+                    {
                         let res = v * ff / tf;
                         self.result = res.to_string();
                     }

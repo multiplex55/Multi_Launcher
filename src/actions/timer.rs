@@ -25,7 +25,13 @@ pub fn set_alarm(time: &str, name: &str) {
         if name.is_empty() {
             crate::plugins::timer::start_alarm(h, m, date, "None".to_string());
         } else {
-            crate::plugins::timer::start_alarm_named(h, m, date, Some(name.to_string()), "None".to_string());
+            crate::plugins::timer::start_alarm_named(
+                h,
+                m,
+                date,
+                Some(name.to_string()),
+                "None".to_string(),
+            );
         }
     }
 }

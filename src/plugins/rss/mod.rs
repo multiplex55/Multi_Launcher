@@ -1,6 +1,7 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
 
+pub mod source;
 pub mod storage;
 
 /// RSS plugin registering the `rss` prefix.

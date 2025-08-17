@@ -1,7 +1,11 @@
 use eframe::egui;
 use multi_launcher::{
-    actions::Action, gui::LauncherApp, launcher::launch_action, plugin::PluginManager,
-    plugins::tempfile::{clear_files, create_file}, settings::Settings,
+    actions::Action,
+    gui::LauncherApp,
+    launcher::launch_action,
+    plugin::PluginManager,
+    plugins::tempfile::{clear_files, create_file},
+    settings::Settings,
 };
 use once_cell::sync::Lazy;
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
@@ -75,9 +79,6 @@ fn tmp_rm_refreshes_results() {
         app.search();
     }
 
-    assert!(!app
-        .results
-        .iter()
-        .any(|a| a.action == remove_action));
+    assert!(!app.results.iter().any(|a| a.action == remove_action));
     assert!(!file.exists());
 }

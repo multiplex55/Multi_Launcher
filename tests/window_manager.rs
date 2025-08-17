@@ -1,7 +1,5 @@
 use multi_launcher::window_manager::{
-    set_mock_mouse_position,
-    clear_mock_mouse_position,
-    current_mouse_position,
+    clear_mock_mouse_position, current_mouse_position, set_mock_mouse_position,
     virtual_key_from_string,
 };
 
@@ -29,4 +27,3 @@ fn virtual_key_from_string_cases() {
         assert_eq!(virtual_key_from_string(input), expected, "input: {input}");
     }
 }
-

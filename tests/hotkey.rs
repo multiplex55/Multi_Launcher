@@ -1,5 +1,5 @@
-use multi_launcher::hotkey::{parse_hotkey, Hotkey, HotkeyTrigger};
 use multi_launcher::hotkey::Key;
+use multi_launcher::hotkey::{parse_hotkey, Hotkey, HotkeyTrigger};
 
 #[test]
 fn parse_simple_f_key() {

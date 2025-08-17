@@ -44,4 +44,3 @@ impl Plugin for TaskManagerPlugin {
         }]
     }
 }
-

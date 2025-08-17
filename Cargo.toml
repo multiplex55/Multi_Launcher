@@ -61,6 +61,7 @@ lipsum = "0.9"
 egui_commonmark = "0.15.0"
 rfd = { version = "0.15.3", features = ["xdg-portal", "common-controls-v6"] }
 slab = "0.4.11"
+scraper = "0.18"
 tempfile = "3"
 
 [target.'cfg(target_os = "windows")'.dependencies]

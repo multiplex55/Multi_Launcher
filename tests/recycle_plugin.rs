@@ -1,3 +1,4 @@
+use eframe::egui;
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::recycle::RecyclePlugin;
 use multi_launcher::{
@@ -7,7 +8,6 @@ use multi_launcher::{
     plugin::PluginManager,
     settings::Settings,
 };
-use eframe::egui;
 use std::sync::{atomic::AtomicBool, Arc};
 
 fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
@@ -75,12 +75,11 @@ fn command_returns_immediately_and_cleans() {
         assert!(start.elapsed() < std::time::Duration::from_millis(100));
         let start_wait = std::time::Instant::now();
         loop {
-            let remaining = match std::time::Duration::from_secs(3)
-                .checked_sub(start_wait.elapsed())
-            {
-                Some(dur) => dur,
-                None => panic!("unexpected event"),
-            };
+            let remaining =
+                match std::time::Duration::from_secs(3).checked_sub(start_wait.elapsed()) {
+                    Some(dur) => dur,
+                    None => panic!("unexpected event"),
+                };
             match rx.recv_timeout(remaining) {
                 Ok(WatchEvent::Recycle(_)) => break,
                 Ok(_) => continue,

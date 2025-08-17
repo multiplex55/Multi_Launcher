@@ -1,4 +1,4 @@
-use multi_launcher::usage::{save_usage, load_usage};
+use multi_launcher::usage::{load_usage, save_usage};
 use std::collections::HashMap;
 use tempfile::tempdir;
 

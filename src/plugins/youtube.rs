@@ -14,10 +14,7 @@ impl Plugin for YoutubePlugin {
                 return vec![Action {
                     label: format!("Search YouTube for {q}"),
                     desc: "Web search".into(),
-                    action: format!(
-                        "https://www.youtube.com/results?search_query={}",
-                        encode(q)
-                    ),
+                    action: format!("https://www.youtube.com/results?search_query={}", encode(q)),
                     args: None,
                 }];
             }
@@ -38,6 +35,11 @@ impl Plugin for YoutubePlugin {
     }
 
     fn commands(&self) -> Vec<Action> {
-        vec![Action { label: "yt".into(), desc: "YouTube".into(), action: "query:yt ".into(), args: None }]
+        vec![Action {
+            label: "yt".into(),
+            desc: "YouTube".into(),
+            action: "query:yt ".into(),
+            args: None,
+        }]
     }
 }

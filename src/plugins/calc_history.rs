@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 pub const CALC_HISTORY_FILE: &str = "calc_history.json";
@@ -48,7 +48,10 @@ pub fn clear_history_file(path: &str) -> anyhow::Result<()> {
 /// Append an entry to calc history at `path` keeping up to `max` items.
 pub fn append_entry(path: &str, entry: CalcHistoryEntry, max: usize) -> anyhow::Result<()> {
     let mut history = load_history(path).unwrap_or_default();
-    if let Some(pos) = history.iter().position(|e| e.expr == entry.expr && e.result == entry.result) {
+    if let Some(pos) = history
+        .iter()
+        .position(|e| e.expr == entry.expr && e.result == entry.result)
+    {
         history.remove(pos);
     }
     history.push_front(entry);
@@ -57,4 +60,3 @@ pub fn append_entry(path: &str, entry: CalcHistoryEntry, max: usize) -> anyhow::
     }
     save_history(path, &history)
 }
-

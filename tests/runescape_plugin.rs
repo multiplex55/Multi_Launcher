@@ -17,5 +17,8 @@ fn osrs_search_returns_action() {
     let plugin = RunescapeSearchPlugin;
     let results = plugin.search("osrs agility");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].action, "https://oldschool.runescape.wiki/?search=agility");
+    assert_eq!(
+        results[0].action,
+        "https://oldschool.runescape.wiki/?search=agility"
+    );
 }

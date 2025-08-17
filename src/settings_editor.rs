@@ -471,11 +471,12 @@ impl SettingsEditor {
                                 });
                         }
                         let id = ui.make_persistent_id("plugin_notes");
-                        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
-                            ui.ctx(),
-                            id,
-                            false,
-                        );
+                        let mut state =
+                            egui::collapsing_header::CollapsingState::load_with_default_open(
+                                ui.ctx(),
+                                id,
+                                false,
+                            );
                         if let Some(open) = self.expand_request {
                             state.set_open(open);
                         }

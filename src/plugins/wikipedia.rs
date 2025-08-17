@@ -38,7 +38,11 @@ impl Plugin for WikipediaPlugin {
     }
 
     fn commands(&self) -> Vec<Action> {
-        vec![Action { label: "wiki".into(), desc: "Wikipedia".into(), action: "query:wiki ".into(), args: None }]
+        vec![Action {
+            label: "wiki".into(),
+            desc: "Wikipedia".into(),
+            action: "query:wiki ".into(),
+            args: None,
+        }]
     }
 }
-
