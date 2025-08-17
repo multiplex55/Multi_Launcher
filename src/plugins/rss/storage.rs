@@ -146,6 +146,18 @@ pub struct FeedState {
     pub last_guid: Option<String>,
     #[serde(default)]
     pub last_fetch: Option<u64>,
+    #[serde(default)]
+    pub etag: Option<String>,
+    #[serde(default)]
+    pub last_modified: Option<String>,
+    #[serde(default)]
+    pub unread: u32,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub error_count: u32,
+    #[serde(default)]
+    pub backoff_until: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -156,7 +168,7 @@ pub struct StateFile {
 }
 
 impl StateFile {
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
 
     pub fn load() -> Self {
         load_json(&state_path()).unwrap_or_default()

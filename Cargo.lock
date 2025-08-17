@@ -1854,6 +1854,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "feed-rs"
+version = "1.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e02a15dbb4ba5223a427ec7c678c47e295ec9ecd48cd15ab015a205d15388a43"
+dependencies = [
+ "chrono",
+ "mime",
+ "quick-xml 0.31.0",
+ "regex",
+ "serde",
+ "serde_json",
+ "siphasher 1.0.1",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "figlet-rs"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3213,6 +3230,7 @@ dependencies = [
  "egui_commonmark",
  "embed-resource",
  "exmex",
+ "feed-rs",
  "figlet-rs",
  "fst",
  "fuzzy-matcher",
@@ -4115,6 +4133,16 @@ version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eff6510e86862b57b210fd8cbe8ed3f0d7d600b9c2863cd4549a2e033c66e956"
 dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1004a344b30a54e2ee58d66a71b32d2db2feb0a31f9a2d302bf0536f15de2a33"
+dependencies = [
+ "encoding_rs",
  "memchr",
 ]
 
@@ -5507,6 +5535,17 @@ name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
+
+[[package]]
+name = "uuid"
+version = "1.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f33196643e165781c20a5ead5582283a7dacbb87855d867fbc2df3f81eddc1be"
+dependencies = [
+ "getrandom 0.3.3",
+ "js-sys",
+ "wasm-bindgen",
+]
 
 [[package]]
 name = "valuable"
