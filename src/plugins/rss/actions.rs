@@ -1,5 +1,6 @@
+use super::source::FeedType;
+use super::{source, storage};
 use crate::actions::Action;
-use super::storage;
 
 /// Return the top-level `rss` subcommands.
 pub fn root() -> Vec<Action> {
@@ -15,8 +16,7 @@ pub fn root() -> Vec<Action> {
         ("import", "Import OPML"),
         ("export", "Export OPML"),
     ];
-    cmds
-        .iter()
+    cmds.iter()
         .map(|(c, d)| Action {
             label: format!("rss {c}"),
             desc: d.to_string(),
@@ -37,12 +37,40 @@ pub fn add(args: &str) -> Vec<Action> {
             args: None,
         }];
     }
-    vec![Action {
-        label: format!("Add feed {src}"),
-        desc: "RSS".into(),
-        action: format!("rss:add {src}"),
-        args: None,
-    }]
+
+    match source::resolve(src) {
+        Ok(resolved) if !resolved.is_empty() => {
+            let multiple = resolved.len() > 1;
+            resolved
+                .into_iter()
+                .map(|r| {
+                    let label_target = if multiple {
+                        r.feed_url.clone()
+                    } else {
+                        r.site_url.clone().unwrap_or_else(|| r.feed_url.clone())
+                    };
+                    let label = format!("Add feed {label_target}");
+                    let desc = match r.feed_type {
+                        FeedType::Atom => "Atom",
+                        FeedType::Rss => "RSS",
+                        FeedType::Json => "JSON",
+                    };
+                    Action {
+                        label,
+                        desc: desc.into(),
+                        action: format!("rss:add {}", r.feed_url),
+                        args: None,
+                    }
+                })
+                .collect()
+        }
+        _ => vec![Action {
+            label: format!("Add feed {src}"),
+            desc: "RSS".into(),
+            action: format!("rss:add {src}"),
+            args: None,
+        }],
+    }
 }
 
 /// Handle `rss rm` prompting with known feed ids.

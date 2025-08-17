@@ -4,7 +4,7 @@ use shlex;
 use std::collections::HashSet;
 use std::fs;
 
-use crate::plugins::rss::{poller::Poller, storage, source};
+use crate::plugins::rss::{poller::Poller, source, storage};
 use roxmltree::Document;
 use slug::slugify;
 use url::Url;
@@ -41,7 +41,11 @@ fn add(args: &str) -> Result<()> {
         return Ok(());
     }
     let src = &parts[0];
-    let resolved = source::resolve(src).map(|r| r.feed_url).unwrap_or_else(|_| src.to_string());
+    let resolved = source::resolve(src)
+        .ok()
+        .and_then(|v| v.into_iter().next())
+        .map(|r| r.feed_url)
+        .unwrap_or_else(|| src.to_string());
     let mut feeds = storage::FeedsFile::load();
     let mut id_base = slugify(&resolved);
     if id_base.is_empty() {
@@ -324,10 +328,8 @@ fn import(args: &str) -> Result<()> {
     }
 
     let mut feeds = storage::FeedsFile::load();
-    let mut existing_urls: HashSet<String> =
-        feeds.feeds.iter().map(|f| f.url.clone()).collect();
-    let mut existing_ids: HashSet<String> =
-        feeds.feeds.iter().map(|f| f.id.clone()).collect();
+    let mut existing_urls: HashSet<String> = feeds.feeds.iter().map(|f| f.url.clone()).collect();
+    let mut existing_ids: HashSet<String> = feeds.feeds.iter().map(|f| f.id.clone()).collect();
     let mut added = 0;
     let mut duplicates = 0;
     let mut invalid = 0;
@@ -364,7 +366,11 @@ fn import(args: &str) -> Result<()> {
         feeds.feeds.push(storage::FeedConfig {
             id,
             url: o.url,
-            title: if o.title.is_empty() { None } else { Some(o.title) },
+            title: if o.title.is_empty() {
+                None
+            } else {
+                Some(o.title)
+            },
             group: o.group,
             last_poll: None,
             next_poll: None,
@@ -393,10 +399,7 @@ fn export(args: &str) -> Result<()> {
     for g in &feeds.groups {
         out.push_str(&format!("  <outline text=\"{}\">\n", xml_escape(g)));
         for f in feeds.feeds.iter().filter(|f| f.group.as_deref() == Some(g)) {
-            let title = f
-                .title
-                .clone()
-                .unwrap_or_else(|| f.url.clone());
+            let title = f.title.clone().unwrap_or_else(|| f.url.clone());
             out.push_str(&format!(
                 "    <outline type=\"rss\" text=\"{}\" xmlUrl=\"{}\"",
                 xml_escape(&title),
@@ -410,10 +413,7 @@ fn export(args: &str) -> Result<()> {
         out.push_str("  </outline>\n");
     }
     for f in feeds.feeds.iter().filter(|f| f.group.is_none()) {
-        let title = f
-            .title
-            .clone()
-            .unwrap_or_else(|| f.url.clone());
+        let title = f.title.clone().unwrap_or_else(|| f.url.clone());
         out.push_str(&format!(
             "  <outline type=\"rss\" text=\"{}\" xmlUrl=\"{}\"",
             xml_escape(&title),
