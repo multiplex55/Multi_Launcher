@@ -22,7 +22,7 @@ pub fn clear_mock_mouse_position() {
     }
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn virtual_key_from_string(key: &str) -> Option<u32> {
     match key.to_uppercase().as_str() {
         "F1" => Some(0x70),
