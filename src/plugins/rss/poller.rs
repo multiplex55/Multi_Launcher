@@ -1,7 +1,11 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
+use reqwest::header::{
+    HeaderMap, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LOCATION,
+};
+use reqwest::StatusCode;
+use rand::{thread_rng, Rng};
 use std::time::Duration;
 
 use super::storage::{CachedItem, FeedCache, FeedConfig, FeedState, StateFile};
@@ -34,6 +38,7 @@ impl Poller {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("multi-launcher rss poller")
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Ok(Self { client })
     }
@@ -43,51 +48,92 @@ impl Poller {
     /// Updates state and optional cache on success.
     pub fn poll_feed(
         &self,
-        feed: &FeedConfig,
+        feed: &mut FeedConfig,
         state: &mut StateFile,
         cache_items: bool,
+        force: bool,
     ) -> Result<Vec<Item>> {
         let now = Utc::now().timestamp() as u64;
         let entry = state.feeds.entry(feed.id.clone()).or_default();
 
-        // Respect backoff if a previous error requested it.
-        if let Some(until) = entry.backoff_until {
-            if until > now {
-                return Ok(Vec::new());
+        // Respect backoff if a previous error requested it unless forced.
+        if !force {
+            if let Some(until) = entry.backoff_until {
+                if until > now {
+                    return Ok(Vec::new());
+                }
             }
         }
 
-        // Conditional request using stored ETag / Last-Modified headers.
-        let mut req = self.client.get(&feed.url);
-        if let Some(etag) = &entry.etag {
-            req = req.header(IF_NONE_MATCH, etag.as_str());
-        }
-        if let Some(lm) = &entry.last_modified {
-            req = req.header(IF_MODIFIED_SINCE, lm.as_str());
-        }
-
-        let resp = match req.send() {
-            Ok(r) => r,
-            Err(err) => {
-                record_error(entry, now, err.to_string());
+        // Handle redirects manually.
+        let mut url = feed.url.clone();
+        let resp = loop {
+            let mut req = self.client.get(&url);
+            if !force {
+                if let Some(etag) = &entry.etag {
+                    req = req.header(IF_NONE_MATCH, etag.as_str());
+                }
+                if let Some(lm) = &entry.last_modified {
+                    req = req.header(IF_MODIFIED_SINCE, lm.as_str());
+                }
+            }
+            let resp = match req.send() {
+                Ok(r) => r,
+                Err(err) => {
+                    let delay = record_error(entry, now, err.to_string());
+                    feed.last_poll = Some(now);
+                    feed.cadence = Some(delay);
+                    feed.next_poll = Some(now + delay);
+                    state.save()?;
+                    return Err(err.into());
+                }
+            };
+            if resp.status().is_redirection() {
+                if let Some(loc) = resp.headers().get(LOCATION).and_then(|h| h.to_str().ok()) {
+                    if resp.status() == StatusCode::MOVED_PERMANENTLY
+                        || resp.status() == StatusCode::PERMANENT_REDIRECT
+                    {
+                        if let Ok(new_url) = resp.url().join(loc) {
+                            feed.url = new_url.to_string();
+                            url = feed.url.clone();
+                            continue;
+                        }
+                    }
+                    if let Ok(new_url) = resp.url().join(loc) {
+                        url = new_url.to_string();
+                        continue;
+                    }
+                }
+                let delay = record_error(entry, now, "redirect without location".into());
+                feed.last_poll = Some(now);
+                feed.cadence = Some(delay);
+                feed.next_poll = Some(now + delay);
                 state.save()?;
-                return Err(err.into());
+                anyhow::bail!("redirect without location");
             }
+            break resp;
         };
 
-        if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+        if !force && resp.status() == StatusCode::NOT_MODIFIED {
             // Nothing new; update fetch timestamp and reset errors.
             entry.last_fetch = Some(now);
             entry.error = None;
             entry.error_count = 0;
             entry.backoff_until = None;
             state.save()?;
+            feed.last_poll = Some(now);
+            let delay = thread_rng().gen_range(600..=1800);
+            feed.cadence = Some(delay);
+            feed.next_poll = Some(now + delay);
             return Ok(Vec::new());
         }
 
         if !resp.status().is_success() {
             let msg = format!("http status {}", resp.status());
-            record_error(entry, now, msg.clone());
+            let delay = record_error(entry, now, msg.clone());
+            feed.last_poll = Some(now);
+            feed.cadence = Some(delay);
+            feed.next_poll = Some(now + delay);
             state.save()?;
             anyhow::bail!(msg);
         }
@@ -125,16 +171,21 @@ impl Poller {
         }
 
         update_success(entry, now, &headers);
+        feed.last_poll = Some(now);
+        let delay = thread_rng().gen_range(600..=1800);
+        feed.cadence = Some(delay);
+        feed.next_poll = Some(now + delay);
         state.save()?;
         Ok(new_items)
     }
 }
 
-fn record_error(state: &mut FeedState, now: u64, msg: String) {
+fn record_error(state: &mut FeedState, now: u64, msg: String) -> u64 {
     state.error = Some(msg);
     state.error_count += 1;
     let delay = 2u64.pow(state.error_count.min(5)) * 60; // seconds
     state.backoff_until = Some(now + delay);
+    delay
 }
 
 fn update_success(state: &mut FeedState, now: u64, headers: &HeaderMap) {

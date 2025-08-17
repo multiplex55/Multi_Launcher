@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use chrono::DateTime;
 use shlex;
 
-use crate::plugins::rss::storage;
+use crate::plugins::rss::{poller::Poller, storage};
 
 /// Execute an RSS command routed from the launcher.
 ///
@@ -26,8 +26,34 @@ pub fn run(command: &str) -> Result<()> {
     }
 }
 
-fn refresh(_target: &str) -> Result<()> {
-    // Refresh feed(s); accepts id, name, group or `all`.
+fn refresh(args: &str) -> Result<()> {
+    let parts = shlex::split(args).unwrap_or_default();
+    if parts.is_empty() {
+        return Ok(());
+    }
+    let target = &parts[0];
+    let force = parts.iter().any(|p| p == "--force");
+
+    let mut feeds = storage::FeedsFile::load();
+    let mut state = storage::StateFile::load();
+    let poller = Poller::new()?;
+    let now = chrono::Utc::now().timestamp() as u64;
+    let mut changed = false;
+    let targets = resolve_targets_mut(&mut feeds, target);
+    for feed in targets {
+        if !force {
+            if let Some(next) = feed.next_poll {
+                if next > now {
+                    continue;
+                }
+            }
+        }
+        let _ = poller.poll_feed(feed, &mut state, true, force);
+        changed = true;
+    }
+    if changed {
+        feeds.save()?;
+    }
     Ok(())
 }
 
@@ -283,6 +309,27 @@ fn resolve_targets<'a>(
     feeds
         .feeds
         .iter()
+        .filter(|f| f.group.as_deref() == Some(target))
+        .collect()
+}
+
+fn resolve_targets_mut<'a>(
+    feeds: &'a mut storage::FeedsFile,
+    target: &str,
+) -> Vec<&'a mut storage::FeedConfig> {
+    if target == "all" {
+        return feeds.feeds.iter_mut().collect();
+    }
+    if let Some(idx) = feeds
+        .feeds
+        .iter()
+        .position(|f| f.id == target || f.title.as_deref() == Some(target))
+    {
+        return vec![&mut feeds.feeds[idx]];
+    }
+    feeds
+        .feeds
+        .iter_mut()
         .filter(|f| f.group.as_deref() == Some(target))
         .collect()
 }
