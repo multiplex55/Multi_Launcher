@@ -4,7 +4,7 @@ use shlex;
 use std::collections::HashSet;
 use std::fs;
 
-use crate::plugins::rss::{poller::Poller, storage};
+use crate::plugins::rss::{poller::Poller, storage, source};
 use roxmltree::Document;
 use slug::slugify;
 use url::Url;
@@ -19,6 +19,8 @@ pub fn run(command: &str) -> Result<()> {
     let verb = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("");
     match verb {
+        "add" => add(rest),
+        "rm" => rm(rest),
         "refresh" => refresh(rest),
         "ls" => ls(rest),
         "items" => items(rest),
@@ -31,6 +33,52 @@ pub fn run(command: &str) -> Result<()> {
         "dialog" => Ok(()),
         _ => Ok(()),
     }
+}
+
+fn add(args: &str) -> Result<()> {
+    let parts = shlex::split(args).unwrap_or_default();
+    if parts.is_empty() {
+        return Ok(());
+    }
+    let src = &parts[0];
+    let resolved = source::resolve(src).map(|r| r.feed_url).unwrap_or_else(|_| src.to_string());
+    let mut feeds = storage::FeedsFile::load();
+    let mut id_base = slugify(&resolved);
+    if id_base.is_empty() {
+        id_base = format!("feed{}", feeds.feeds.len());
+    }
+    let mut id = id_base.clone();
+    let mut idx = 1;
+    while feeds.feeds.iter().any(|f| f.id == id) {
+        id = format!("{id_base}-{idx}");
+        idx += 1;
+    }
+    feeds.feeds.push(storage::FeedConfig {
+        id: id.clone(),
+        url: resolved,
+        title: None,
+        group: None,
+        last_poll: None,
+        next_poll: None,
+        cadence: None,
+    });
+    feeds.save()?;
+    Ok(())
+}
+
+fn rm(args: &str) -> Result<()> {
+    let parts = shlex::split(args).unwrap_or_default();
+    if parts.is_empty() {
+        return Ok(());
+    }
+    let id = &parts[0];
+    let mut feeds = storage::FeedsFile::load();
+    feeds.feeds.retain(|f| f.id != *id);
+    feeds.save()?;
+    let mut state = storage::StateFile::load();
+    state.feeds.remove(id);
+    state.save()?;
+    Ok(())
 }
 
 fn refresh(args: &str) -> Result<()> {

@@ -1,6 +1,7 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
 
+pub mod actions;
 pub mod poller;
 pub mod source;
 pub mod storage;
@@ -46,22 +47,28 @@ impl Plugin for RssPlugin {
             }];
         }
 
-        if let Some(rest) = crate::common::strip_prefix_ci(query, "rss ") {
-            let cmd = rest.trim();
-            if cmd.is_empty() {
-                return vec![Action {
-                    label: "rss: manage feeds".into(),
-                    desc: "RSS".into(),
-                    action: "rss:dialog".into(),
-                    args: None,
-                }];
+        // `rss ` (with space) should list subcommands handled below.
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "rss ") {
+            let rest = rest.trim_start();
+            if rest.is_empty() {
+                return actions::root();
             }
-            return vec![Action {
-                label: format!("rss {cmd}"),
-                desc: "RSS".into(),
-                action: format!("rss:{cmd}"),
-                args: None,
-            }];
+            let mut parts = rest.splitn(2, ' ');
+            let sub = parts.next().unwrap_or("");
+            let args = parts.next().unwrap_or("");
+            return match sub {
+                "add" => actions::add(args),
+                "rm" => actions::rm(args),
+                "refresh" => actions::refresh(args),
+                "ls" => actions::ls(args),
+                "items" => actions::items(args),
+                "open" => actions::open(args),
+                "group" => actions::group(args),
+                "mark" => actions::mark(args),
+                "import" => actions::import(args),
+                "export" => actions::export(args),
+                _ => Vec::new(),
+            };
         }
         Vec::new()
     }
