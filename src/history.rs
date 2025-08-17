@@ -2,7 +2,7 @@ use crate::actions::Action;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::RwLock;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct HistoryEntry {
@@ -14,17 +14,17 @@ pub struct HistoryEntry {
 
 const HISTORY_FILE: &str = "history.json";
 
-static HISTORY: Lazy<Mutex<VecDeque<HistoryEntry>>> = Lazy::new(|| {
+static HISTORY: Lazy<RwLock<VecDeque<HistoryEntry>>> = Lazy::new(|| {
     let hist = load_history_internal().unwrap_or_else(|e| {
         tracing::error!("failed to load history: {e}");
         VecDeque::new()
     });
-    Mutex::new(hist)
+    RwLock::new(hist)
 });
 
 pub fn poison_history_lock() {
     let _ = std::panic::catch_unwind(|| {
-        if let Ok(_guard) = HISTORY.lock() {
+        if let Ok(_guard) = HISTORY.write() {
             panic!("poison");
         }
     });
@@ -44,7 +44,7 @@ fn load_history_internal() -> anyhow::Result<VecDeque<HistoryEntry>> {
 
 /// Save the current HISTORY list to `history.json`.
 pub fn save_history() -> anyhow::Result<()> {
-    let Some(h) = HISTORY.lock().ok() else {
+    let Some(h) = HISTORY.read().ok() else {
         return Ok(());
     };
     let list: Vec<HistoryEntry> = h.iter().cloned().collect();
@@ -58,7 +58,7 @@ pub fn save_history() -> anyhow::Result<()> {
 pub fn append_history(mut entry: HistoryEntry, limit: usize) -> anyhow::Result<()> {
     entry.query_lc = entry.query.to_lowercase();
     {
-        let Some(mut h) = HISTORY.lock().ok() else {
+        let Some(mut h) = HISTORY.write().ok() else {
             return Ok(());
         };
         h.push_front(entry);
@@ -75,7 +75,7 @@ pub fn append_history(mut entry: HistoryEntry, limit: usize) -> anyhow::Result<(
 /// used within the scope of the closure. This avoids cloning the entire
 /// history for read-only operations.
 pub fn with_history<R>(f: impl FnOnce(&VecDeque<HistoryEntry>) -> R) -> Option<R> {
-    let h = HISTORY.lock().ok()?;
+    let h = HISTORY.read().ok()?;
     Some(f(&h))
 }
 
@@ -87,7 +87,7 @@ pub fn get_history() -> VecDeque<HistoryEntry> {
 /// Clear all history entries and persist the empty list to `history.json`.
 pub fn clear_history() -> anyhow::Result<()> {
     {
-        let Some(mut h) = HISTORY.lock().ok() else {
+        let Some(mut h) = HISTORY.write().ok() else {
             return Ok(());
         };
         h.clear();
