@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -158,6 +158,12 @@ pub struct FeedState {
     pub error_count: u32,
     #[serde(default)]
     pub backoff_until: Option<u64>,
+    /// Timestamp cursor up to which all items are considered read.
+    #[serde(default)]
+    pub catchup: Option<u64>,
+    /// Explicit set of read item IDs beyond the catch-up cursor.
+    #[serde(default)]
+    pub read: HashSet<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -168,7 +174,7 @@ pub struct StateFile {
 }
 
 impl StateFile {
-    pub const VERSION: u32 = 2;
+    pub const VERSION: u32 = 3;
 
     pub fn load() -> Self {
         load_json(&state_path()).unwrap_or_default()
