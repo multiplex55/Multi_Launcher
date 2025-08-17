@@ -13,7 +13,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 pub const TODO_FILE: &str = "todo.json";
 
@@ -30,14 +30,14 @@ pub struct TodoEntry {
 /// Shared in-memory todo cache kept in sync with `todo.json`.
 /// Disk writes and the [`JsonWatcher`] ensure updates are visible immediately
 /// to all plugin instances and tests.
-pub static TODO_DATA: Lazy<Arc<Mutex<Vec<TodoEntry>>>> =
-    Lazy::new(|| Arc::new(Mutex::new(load_todos(TODO_FILE).unwrap_or_default())));
+pub static TODO_DATA: Lazy<Arc<RwLock<Vec<TodoEntry>>>> =
+    Lazy::new(|| Arc::new(RwLock::new(load_todos(TODO_FILE).unwrap_or_default())));
 
-static TODO_CACHE: Lazy<Arc<Mutex<LruCache<String, Vec<Action>>>>> =
-    Lazy::new(|| Arc::new(Mutex::new(LruCache::new(64))));
+static TODO_CACHE: Lazy<Arc<RwLock<LruCache<String, Vec<Action>>>>> =
+    Lazy::new(|| Arc::new(RwLock::new(LruCache::new(64))));
 
 fn invalidate_todo_cache() {
-    if let Ok(mut cache) = TODO_CACHE.lock() {
+    if let Ok(mut cache) = TODO_CACHE.write() {
         cache.clear();
     }
 }
@@ -65,7 +65,7 @@ pub fn save_todos(path: &str, todos: &[TodoEntry]) -> anyhow::Result<()> {
 }
 
 fn update_cache(list: Vec<TodoEntry>) {
-    if let Ok(mut lock) = TODO_DATA.lock() {
+    if let Ok(mut lock) = TODO_DATA.write() {
         *lock = list;
     }
     invalidate_todo_cache();
@@ -143,8 +143,8 @@ pub fn clear_done(path: &str) -> anyhow::Result<()> {
 
 pub struct TodoPlugin {
     matcher: SkimMatcherV2,
-    data: Arc<Mutex<Vec<TodoEntry>>>,
-    cache: Arc<Mutex<LruCache<String, Vec<Action>>>>,
+    data: Arc<RwLock<Vec<TodoEntry>>>,
+    cache: Arc<RwLock<LruCache<String, Vec<Action>>>>,
     #[allow(dead_code)]
     watcher: Option<JsonWatcher>,
 }
@@ -161,10 +161,10 @@ impl TodoPlugin {
             let cache_clone = cache.clone();
             move || {
                 if let Ok(list) = load_todos(&watch_path) {
-                    if let Ok(mut lock) = data_clone.lock() {
+                    if let Ok(mut lock) = data_clone.write() {
                         *lock = list;
                     }
-                    if let Ok(mut c) = cache_clone.lock() {
+                    if let Ok(mut c) = cache_clone.write() {
                         c.clear();
                     }
                 }
@@ -194,7 +194,7 @@ impl TodoPlugin {
         const EDIT_PREFIX: &str = "todo edit";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, EDIT_PREFIX) {
             let filter = rest.trim();
-            let guard = match self.data.lock() {
+            let guard = match self.data.read() {
                 Ok(g) => g,
                 Err(_) => return Vec::new(),
             };
@@ -333,7 +333,7 @@ impl TodoPlugin {
                     }];
                 } else {
                     let filter = rest;
-                    let guard = match self.data.lock() {
+                    let guard = match self.data.read() {
                         Ok(g) => g,
                         Err(_) => return Vec::new(),
                     };
@@ -361,7 +361,7 @@ impl TodoPlugin {
         const RM_PREFIX: &str = "todo rm ";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, RM_PREFIX) {
             let filter = rest.trim();
-            let guard = match self.data.lock() {
+            let guard = match self.data.read() {
                 Ok(g) => g,
                 Err(_) => return Vec::new(),
             };
@@ -381,7 +381,7 @@ impl TodoPlugin {
         const LIST_PREFIX: &str = "todo list";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
             let mut filter = rest.trim();
-            let guard = match self.data.lock() {
+            let guard = match self.data.read() {
                 Ok(g) => g,
                 Err(_) => return Vec::new(),
             };
@@ -444,7 +444,7 @@ impl Plugin for TodoPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
         let key = trimmed.to_string();
-        if let Ok(mut cache) = self.cache.lock() {
+        if let Ok(mut cache) = self.cache.write() {
             if let Some(res) = cache.get(&key) {
                 return res;
             }
@@ -452,7 +452,7 @@ impl Plugin for TodoPlugin {
 
         let result = self.search_internal(trimmed);
 
-        if let Ok(mut cache) = self.cache.lock() {
+        if let Ok(mut cache) = self.cache.write() {
             cache.put(key, result.clone());
         }
 
