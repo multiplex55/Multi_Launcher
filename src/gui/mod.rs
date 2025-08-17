@@ -4,6 +4,7 @@ mod alias_dialog;
 mod bookmark_alias_dialog;
 mod brightness_dialog;
 mod clipboard_dialog;
+mod rss_dialog;
 mod convert_panel;
 mod cpu_list_dialog;
 mod fav_dialog;
@@ -28,6 +29,7 @@ pub use bookmark_alias_dialog::BookmarkAliasDialog;
 pub use brightness_dialog::BrightnessDialog;
 pub use brightness_dialog::BRIGHTNESS_QUERIES;
 pub use clipboard_dialog::ClipboardDialog;
+pub use rss_dialog::RssDialog;
 pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
@@ -326,6 +328,7 @@ pub struct LauncherApp {
     image_panels: Vec<ImagePanel>,
     todo_dialog: TodoDialog,
     todo_view_dialog: TodoViewDialog,
+    rss_dialog: RssDialog,
     clipboard_dialog: ClipboardDialog,
     convert_panel: ConvertPanel,
     volume_dialog: VolumeDialog,
@@ -740,6 +743,7 @@ impl LauncherApp {
             image_panels: Vec::new(),
             todo_dialog: TodoDialog::default(),
             todo_view_dialog: TodoViewDialog::default(),
+            rss_dialog: RssDialog::default(),
             clipboard_dialog: ClipboardDialog::default(),
             convert_panel: ConvertPanel::default(),
             volume_dialog: VolumeDialog::default(),
@@ -2039,6 +2043,8 @@ impl eframe::App for LauncherApp {
                             }
                         } else if a.action == "todo:dialog" {
                             self.todo_dialog.open();
+                        } else if a.action == "rss:dialog" {
+                            self.rss_dialog.open();
                         } else if a.action == "todo:view" {
                             self.todo_view_dialog.open();
                         } else if let Some(idx) = a.action.strip_prefix("todo:edit:") {
@@ -2779,6 +2785,8 @@ impl eframe::App for LauncherApp {
                             }
                         } else if a.action == "todo:dialog" {
                             self.todo_dialog.open();
+                        } else if a.action == "rss:dialog" {
+                            self.rss_dialog.open();
                         } else if a.action == "todo:view" {
                             self.todo_view_dialog.open();
                         } else if let Some(idx) = a.action.strip_prefix("todo:edit:") {
@@ -3114,6 +3122,9 @@ impl eframe::App for LauncherApp {
         let mut todo_dlg = std::mem::take(&mut self.todo_dialog);
         todo_dlg.ui(ctx, self);
         self.todo_dialog = todo_dlg;
+        let mut rss_dlg = std::mem::take(&mut self.rss_dialog);
+        rss_dlg.ui(ctx, self);
+        self.rss_dialog = rss_dlg;
         let mut todo_view = std::mem::take(&mut self.todo_view_dialog);
         todo_view.ui(ctx, self);
         self.todo_view_dialog = todo_view;

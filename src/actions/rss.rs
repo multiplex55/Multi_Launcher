@@ -15,7 +15,10 @@ pub fn run(command: &str) -> Result<()> {
     let rest = parts.next().unwrap_or("");
     match verb {
         "refresh" => refresh(rest),
+        "ls" => ls(rest),
+        "items" => items(rest),
         "open" => open(rest),
+        "group" => group(rest),
         "mark" => mark(rest),
         // `dialog` opens the UI; nothing to do in CLI.
         "dialog" => Ok(()),
@@ -28,34 +31,260 @@ fn refresh(_target: &str) -> Result<()> {
     Ok(())
 }
 
-fn open(target: &str) -> Result<()> {
-    let feed_id = target.trim();
-    if feed_id.is_empty() {
+fn open(args: &str) -> Result<()> {
+    let parts = shlex::split(args).unwrap_or_default();
+    if parts.is_empty() {
         return Ok(());
+    }
+    let target = &parts[0];
+    let mut unread_only = false;
+    let mut limit: Option<usize> = None;
+    let mut since: Option<u64> = None;
+    let mut newest_first = true;
+    let mut i = 1;
+    while i < parts.len() {
+        match parts[i].as_str() {
+            "--unread" => unread_only = true,
+            "--n" if i + 1 < parts.len() => {
+                limit = parts[i + 1].parse().ok();
+                i += 1;
+            }
+            "--since" if i + 1 < parts.len() => {
+                if let Ok(dt) = DateTime::parse_from_rfc3339(&parts[i + 1]) {
+                    since = Some(dt.timestamp() as u64);
+                }
+                i += 1;
+            }
+            "--order" if i + 1 < parts.len() => {
+                newest_first = parts[i + 1].to_lowercase() != "oldest";
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
     }
     let mut state = storage::StateFile::load();
     let feeds = storage::FeedsFile::load();
-    let feed = feeds
-        .feeds
-        .iter()
-        .find(|f| f.id == feed_id || f.title.as_deref() == Some(feed_id))
-        .ok_or_else(|| anyhow!("feed not found"))?;
-
-    let cache = storage::FeedCache::load(&feed.id);
-    let entry = state.feeds.entry(feed.id.clone()).or_default();
-    let cursor = entry.catchup.unwrap_or(0);
-    for item in &cache.items {
-        let ts = item.timestamp.unwrap_or(0);
-        if ts <= cursor || entry.read.contains(&item.guid) {
-            continue;
-        }
+    let targets = resolve_targets(&feeds, target);
+    let mut items = collect_items(&targets, &state, unread_only, since);
+    items.sort_by_key(|i| i.timestamp);
+    if newest_first {
+        items.reverse();
+    }
+    if let Some(n) = limit {
+        items.truncate(n);
+    }
+    for item in &items {
         if let Some(link) = &item.link {
             let _ = open::that(link);
         }
+        let entry = state.feeds.entry(item.feed_id.clone()).or_default();
         entry.read.insert(item.guid.clone());
+        recompute_unread(&item.feed_id, entry);
     }
-    recompute_unread(&feed.id, entry);
     state.save()
+}
+
+fn ls(args: &str) -> Result<()> {
+    let parts = shlex::split(args).unwrap_or_default();
+    let target = parts.get(0).map(|s| s.as_str()).unwrap_or("groups");
+    let mut unread_only = false;
+    if parts.iter().any(|p| p == "--unread") {
+        unread_only = true;
+    }
+    let feeds = storage::FeedsFile::load();
+    let state = storage::StateFile::load();
+    if target == "groups" {
+        for g in &feeds.groups {
+            let unread: u32 = feeds
+                .feeds
+                .iter()
+                .filter(|f| f.group.as_deref() == Some(g))
+                .map(|f| state.feeds.get(&f.id).map(|s| s.unread).unwrap_or(0))
+                .sum();
+            if unread_only && unread == 0 {
+                continue;
+            }
+            println!("{g}\t{unread}");
+        }
+    } else {
+        for f in resolve_targets(&feeds, target) {
+            let unread = state.feeds.get(&f.id).map(|s| s.unread).unwrap_or(0);
+            if unread_only && unread == 0 {
+                continue;
+            }
+            let title = f.title.clone().unwrap_or_else(|| f.id.clone());
+            println!("{}\t{}\t{}", f.id, title, unread);
+        }
+    }
+    Ok(())
+}
+
+fn items(args: &str) -> Result<()> {
+    let parts = shlex::split(args).unwrap_or_default();
+    if parts.is_empty() {
+        return Ok(());
+    }
+    let target = &parts[0];
+    let mut unread_only = false;
+    let mut limit: Option<usize> = None;
+    let mut since: Option<u64> = None;
+    let mut newest_first = true;
+    let mut i = 1;
+    while i < parts.len() {
+        match parts[i].as_str() {
+            "--unread" => unread_only = true,
+            "--n" if i + 1 < parts.len() => {
+                limit = parts[i + 1].parse().ok();
+                i += 1;
+            }
+            "--since" if i + 1 < parts.len() => {
+                if let Ok(dt) = DateTime::parse_from_rfc3339(&parts[i + 1]) {
+                    since = Some(dt.timestamp() as u64);
+                }
+                i += 1;
+            }
+            "--order" if i + 1 < parts.len() => {
+                newest_first = parts[i + 1].to_lowercase() != "oldest";
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let state = storage::StateFile::load();
+    let feeds = storage::FeedsFile::load();
+    let targets = resolve_targets(&feeds, target);
+    let mut items = collect_items(&targets, &state, unread_only, since);
+    items.sort_by_key(|i| i.timestamp);
+    if newest_first {
+        items.reverse();
+    }
+    if let Some(n) = limit {
+        items.truncate(n);
+    }
+    for item in &items {
+        let title = &item.title;
+        let link = item.link.as_deref().unwrap_or("");
+        println!("{}\t{}\t{}", item.feed_id, title, link);
+    }
+    Ok(())
+}
+
+fn group(args: &str) -> Result<()> {
+    let parts = shlex::split(args).unwrap_or_default();
+    if parts.is_empty() {
+        return Ok(());
+    }
+    let sub = parts[0].as_str();
+    match sub {
+        "add" if parts.len() >= 2 => group_add(&parts[1]),
+        "rm" if parts.len() >= 2 => group_rm(&parts[1]),
+        "mv" if parts.len() >= 3 => group_mv(&parts[1], &parts[2]),
+        _ => Ok(()),
+    }
+}
+
+fn group_add(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Ok(());
+    }
+    let mut feeds = storage::FeedsFile::load();
+    if !feeds.groups.iter().any(|g| g == name) {
+        feeds.groups.push(name.to_string());
+        feeds.save()?;
+    }
+    Ok(())
+}
+
+fn group_rm(name: &str) -> Result<()> {
+    let mut feeds = storage::FeedsFile::load();
+    feeds.groups.retain(|g| g != name);
+    for f in feeds.feeds.iter_mut() {
+        if f.group.as_deref() == Some(name) {
+            f.group = None;
+        }
+    }
+    feeds.save()?;
+    Ok(())
+}
+
+fn group_mv(old: &str, new: &str) -> Result<()> {
+    let mut feeds = storage::FeedsFile::load();
+    if let Some(g) = feeds.groups.iter_mut().find(|g| g.as_str() == old) {
+        *g = new.to_string();
+    }
+    for f in feeds.feeds.iter_mut() {
+        if f.group.as_deref() == Some(old) {
+            f.group = Some(new.to_string());
+        }
+    }
+    feeds.save()?;
+    Ok(())
+}
+
+#[derive(Clone)]
+struct ItemInfo {
+    feed_id: String,
+    guid: String,
+    title: String,
+    link: Option<String>,
+    timestamp: u64,
+}
+
+fn collect_items(
+    feeds: &[&storage::FeedConfig],
+    state: &storage::StateFile,
+    unread_only: bool,
+    since: Option<u64>,
+) -> Vec<ItemInfo> {
+    let mut items = Vec::new();
+    for feed in feeds {
+        let entry = state.feeds.get(&feed.id).cloned().unwrap_or_default();
+        let cursor = entry.catchup.unwrap_or(0);
+        let cache = storage::FeedCache::load(&feed.id);
+        for item in cache.items {
+            let ts = item.timestamp.unwrap_or(0);
+            if let Some(min) = since {
+                if ts < min {
+                    continue;
+                }
+            }
+            let unread = ts > cursor && !entry.read.contains(&item.guid);
+            if unread_only && !unread {
+                continue;
+            }
+            items.push(ItemInfo {
+                feed_id: feed.id.clone(),
+                guid: item.guid,
+                title: item.title,
+                link: item.link,
+                timestamp: ts,
+            });
+        }
+    }
+    items
+}
+
+fn resolve_targets<'a>(
+    feeds: &'a storage::FeedsFile,
+    target: &str,
+) -> Vec<&'a storage::FeedConfig> {
+    if target == "all" {
+        return feeds.feeds.iter().collect();
+    }
+    if let Some(feed) = feeds
+        .feeds
+        .iter()
+        .find(|f| f.id == target || f.title.as_deref() == Some(target))
+    {
+        return vec![feed];
+    }
+    feeds
+        .feeds
+        .iter()
+        .filter(|f| f.group.as_deref() == Some(target))
+        .collect()
 }
 
 fn mark(command: &str) -> Result<()> {
