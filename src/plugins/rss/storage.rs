@@ -13,11 +13,8 @@ use tempfile::NamedTempFile;
 /// subsequent operations can assume they exist.
 pub fn ensure_config_dir() -> PathBuf {
     static DIR: Lazy<PathBuf> = Lazy::new(|| {
-        let base = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("rss");
+        let base = PathBuf::from("config").join("rss");
+        // Create the configuration directory and the `cache` sub directory.
         let _ = fs::create_dir_all(&base);
         let _ = fs::create_dir_all(base.join("cache"));
         base
@@ -37,7 +34,7 @@ fn state_path() -> PathBuf {
 pub fn cache_path(feed_id: &str) -> PathBuf {
     ensure_config_dir()
         .join("cache")
-        .join(format!("{feed_id}.json"))
+        .join(format!("{feed_id}.items.json"))
 }
 
 fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
