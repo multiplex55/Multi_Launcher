@@ -50,7 +50,7 @@ fn zero_key_events_toggle_visibility() {
     let restore = Arc::new(AtomicBool::new(false));
     let mut queued_visibility: Option<bool> = None;
 
-    handle_visibility_trigger(
+    let changed = handle_visibility_trigger(
         &trigger,
         &visibility,
         &restore,
@@ -63,10 +63,11 @@ fn zero_key_events_toggle_visibility() {
         None,
         (400.0, 220.0),
     );
+    assert!(changed);
     assert_eq!(visibility.load(Ordering::SeqCst), true);
 
     process_test_events(&triggers, &events);
-    handle_visibility_trigger(
+    let changed = handle_visibility_trigger(
         &trigger,
         &visibility,
         &restore,
@@ -79,6 +80,7 @@ fn zero_key_events_toggle_visibility() {
         None,
         (400.0, 220.0),
     );
+    assert!(changed);
     assert_eq!(visibility.load(Ordering::SeqCst), false);
 }
 

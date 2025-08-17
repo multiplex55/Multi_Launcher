@@ -17,7 +17,7 @@ fn queued_visibility_applies_when_context_available() {
 
     // simulate hotkey press while no context is available
     *trigger.open.lock().unwrap() = true;
-    handle_visibility_trigger(
+    let changed = handle_visibility_trigger(
         &trigger,
         &visibility,
         &restore,
@@ -30,6 +30,7 @@ fn queued_visibility_applies_when_context_available() {
         None,
         (400.0, 220.0),
     );
+    assert!(changed);
 
     assert_eq!(visibility.load(Ordering::SeqCst), true);
     assert_eq!(queued_visibility, Some(true));
@@ -41,7 +42,7 @@ fn queued_visibility_applies_when_context_available() {
         *guard = Some(ctx.clone());
     }
 
-    handle_visibility_trigger(
+    let changed = handle_visibility_trigger(
         &trigger,
         &visibility,
         &restore,
@@ -54,6 +55,7 @@ fn queued_visibility_applies_when_context_available() {
         None,
         (400.0, 220.0),
     );
+    assert!(!changed);
 
     assert!(queued_visibility.is_none());
     let cmds = ctx.commands.lock().unwrap();

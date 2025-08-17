@@ -97,6 +97,7 @@ pub enum EventType {
 }
 use std::sync::{
     atomic::{AtomicBool, Ordering},
+    mpsc::Sender,
     Arc, Mutex,
 };
 #[cfg(target_os = "windows")]
@@ -290,6 +291,7 @@ impl HotkeyTrigger {
     pub fn start_listener(
         triggers: Vec<Arc<HotkeyTrigger>>,
         _label: &'static str,
+        event_tx: Sender<()>,
     ) -> HotkeyListener {
         use windows::Win32::System::Threading::{
             GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
@@ -420,6 +422,7 @@ impl HotkeyTrigger {
                                 if let Ok(mut flag) = open_listeners[i].lock() {
                                     *flag = true;
                                 }
+                                let _ = event_tx.send(());
                             }
                         } else {
                             triggered[i] = false;
@@ -437,6 +440,7 @@ impl HotkeyTrigger {
     pub fn start_listener(
         _triggers: Vec<Arc<HotkeyTrigger>>,
         _label: &'static str,
+        _event_tx: Sender<()>,
     ) -> HotkeyListener {
         HotkeyListener {
             stop: Arc::new(AtomicBool::new(false)),

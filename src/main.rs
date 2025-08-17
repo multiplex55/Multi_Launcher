@@ -18,6 +18,7 @@ use std::sync::{
 use std::thread;
 
 static RESTART_TX: Lazy<Mutex<Option<Sender<Settings>>>> = Lazy::new(|| Mutex::new(None));
+static EVENT_TX: Lazy<Mutex<Option<Sender<()>>>> = Lazy::new(|| Mutex::new(None));
 
 pub fn request_hotkey_restart(settings: Settings) {
     match RESTART_TX.lock() {
@@ -28,6 +29,11 @@ pub fn request_hotkey_restart(settings: Settings) {
         }
         Err(e) => {
             tracing::error!("failed to lock RESTART_TX: {e}");
+        }
+    }
+    if let Ok(guard) = EVENT_TX.lock() {
+        if let Some(tx) = guard.as_ref() {
+            let _ = tx.send(());
         }
     }
 }
@@ -45,6 +51,7 @@ fn spawn_gui(
     settings: Settings,
     settings_path: String,
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
+    event_tx: Sender<()>,
 ) -> (
     thread::JoinHandle<()>,
     Arc<AtomicBool>,
@@ -133,6 +140,7 @@ fn spawn_gui(
                 ))
             }),
         );
+        let _ = event_tx.send(());
     });
 
     (handle, visible_flag, restore_flag, help_flag, ctx_handle)
@@ -151,6 +159,11 @@ fn main() -> anyhow::Result<()> {
         *guard = Some(restart_tx);
     } else {
         tracing::error!("failed to lock RESTART_TX while starting");
+    }
+
+    let (event_tx, event_rx) = channel::<()>();
+    if let Ok(mut guard) = EVENT_TX.lock() {
+        *guard = Some(event_tx.clone());
     }
 
     if let Some(paths) = &settings.index_paths {
@@ -176,7 +189,7 @@ fn main() -> anyhow::Result<()> {
         watched.push(ht.clone());
     }
 
-    let mut listener = HotkeyTrigger::start_listener(watched, "main");
+    let mut listener = HotkeyTrigger::start_listener(watched, "main", event_tx.clone());
 
     // `visibility` holds whether the window is currently restored (true) or
     // minimized (false).
@@ -186,10 +199,13 @@ fn main() -> anyhow::Result<()> {
         settings.clone(),
         "settings.json".to_string(),
         settings.enabled_capabilities.clone(),
+        event_tx.clone(),
     );
     let mut queued_visibility: Option<bool> = None;
 
     loop {
+        let _ = event_rx.recv();
+
         if handle.is_finished() {
             listener.stop();
             let _ = handle.join();
@@ -240,10 +256,10 @@ fn main() -> anyhow::Result<()> {
             if let Some(ht) = &help_trigger {
                 watched.push(ht.clone());
             }
-            listener = HotkeyTrigger::start_listener(watched, "main");
+            listener = HotkeyTrigger::start_listener(watched, "main", event_tx.clone());
         }
 
-        handle_visibility_trigger(
+        if handle_visibility_trigger(
             trigger.as_ref(),
             &visibility,
             &restore_flag,
@@ -261,8 +277,8 @@ fn main() -> anyhow::Result<()> {
                 let (w, h) = settings.window_size.unwrap_or((400, 220));
                 (w as f32, h as f32)
             },
-        );
-
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        ) {
+            let _ = event_tx.send(());
+        }
     }
 }
