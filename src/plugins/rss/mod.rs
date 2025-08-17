@@ -1,6 +1,8 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
 
+pub mod storage;
+
 /// RSS plugin registering the `rss` prefix.
 ///
 /// Commands are routed to the handlers in `crate::actions::rss` via
@@ -10,6 +12,22 @@ use crate::plugin::Plugin;
 ///   rss refresh all
 ///   rss open feed-name
 pub struct RssPlugin;
+
+impl RssPlugin {
+    /// Create a new instance of the RSS plugin.
+    ///
+    /// Ensures the configuration directory exists on initialization.
+    pub fn new() -> Self {
+        storage::ensure_config_dir();
+        Self
+    }
+}
+
+impl Default for RssPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Plugin for RssPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
@@ -67,4 +85,3 @@ impl Plugin for RssPlugin {
         }]
     }
 }
-
