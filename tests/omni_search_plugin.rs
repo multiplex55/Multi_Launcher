@@ -1,12 +1,12 @@
+use multi_launcher::actions::Action;
 use multi_launcher::plugin::Plugin;
-use multi_launcher::plugins::omni_search::OmniSearchPlugin;
-use std::sync::Arc;
 use multi_launcher::plugins::bookmarks::{save_bookmarks, BookmarkEntry, BOOKMARKS_FILE};
 use multi_launcher::plugins::folders::{save_folders, FolderEntry, FOLDERS_FILE};
-use multi_launcher::actions::Action;
-use tempfile::tempdir;
+use multi_launcher::plugins::omni_search::OmniSearchPlugin;
 use once_cell::sync::Lazy;
+use std::sync::Arc;
 use std::sync::Mutex;
+use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -16,10 +16,30 @@ fn o_list_combines_all_sources() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    save_bookmarks(BOOKMARKS_FILE, &[BookmarkEntry { url: "https://example.com".into(), alias: None }]).unwrap();
-    save_folders(FOLDERS_FILE, &[FolderEntry { label: "Foo".into(), path: "/foo".into(), alias: None }]).unwrap();
+    save_bookmarks(
+        BOOKMARKS_FILE,
+        &[BookmarkEntry {
+            url: "https://example.com".into(),
+            alias: None,
+        }],
+    )
+    .unwrap();
+    save_folders(
+        FOLDERS_FILE,
+        &[FolderEntry {
+            label: "Foo".into(),
+            path: "/foo".into(),
+            alias: None,
+        }],
+    )
+    .unwrap();
 
-    let actions = Arc::new(vec![Action { label: "myapp".into(), desc: "app".into(), action: "myapp".into(), args: None }]);
+    let actions = Arc::new(vec![Action {
+        label: "myapp".into(),
+        desc: "app".into(),
+        action: "myapp".into(),
+        args: None,
+    }]);
     let plugin = OmniSearchPlugin::new(actions);
 
     let results = plugin.search("o list");
@@ -35,10 +55,30 @@ fn o_list_filters_results() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    save_bookmarks(BOOKMARKS_FILE, &[BookmarkEntry { url: "https://example.com".into(), alias: None }]).unwrap();
-    save_folders(FOLDERS_FILE, &[FolderEntry { label: "Foo".into(), path: "/foo".into(), alias: None }]).unwrap();
+    save_bookmarks(
+        BOOKMARKS_FILE,
+        &[BookmarkEntry {
+            url: "https://example.com".into(),
+            alias: None,
+        }],
+    )
+    .unwrap();
+    save_folders(
+        FOLDERS_FILE,
+        &[FolderEntry {
+            label: "Foo".into(),
+            path: "/foo".into(),
+            alias: None,
+        }],
+    )
+    .unwrap();
 
-    let actions = Arc::new(vec![Action { label: "barapp".into(), desc: "app".into(), action: "bar".into(), args: None }]);
+    let actions = Arc::new(vec![Action {
+        label: "barapp".into(),
+        desc: "app".into(),
+        action: "bar".into(),
+        args: None,
+    }]);
     let plugin = OmniSearchPlugin::new(actions);
 
     let results = plugin.search("o list bar");
@@ -67,4 +107,3 @@ fn label_and_desc_same_returns_action() {
 
     assert!(results.iter().any(|a| a.action == "dup_action"));
 }
-

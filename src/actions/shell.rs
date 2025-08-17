@@ -16,18 +16,11 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
 }
 
 pub fn add(name: &str, args: &str) -> anyhow::Result<()> {
-    crate::plugins::shell::append_shell_cmd(
-        crate::plugins::shell::SHELL_CMDS_FILE,
-        name,
-        args,
-    )?;
+    crate::plugins::shell::append_shell_cmd(crate::plugins::shell::SHELL_CMDS_FILE, name, args)?;
     Ok(())
 }
 
 pub fn remove(name: &str) -> anyhow::Result<()> {
-    crate::plugins::shell::remove_shell_cmd(
-        crate::plugins::shell::SHELL_CMDS_FILE,
-        name,
-    )?;
+    crate::plugins::shell::remove_shell_cmd(crate::plugins::shell::SHELL_CMDS_FILE, name)?;
     Ok(())
 }

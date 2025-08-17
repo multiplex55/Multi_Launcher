@@ -12,12 +12,16 @@ pub struct RandomPlugin {
 impl RandomPlugin {
     /// Create a new plugin using randomness from the operating system.
     pub fn new() -> Self {
-        Self { rng: Mutex::new(StdRng::from_entropy()) }
+        Self {
+            rng: Mutex::new(StdRng::from_entropy()),
+        }
     }
 
     /// Create a plugin with a fixed seed (useful for deterministic tests).
     pub fn from_seed(seed: u64) -> Self {
-        Self { rng: Mutex::new(StdRng::seed_from_u64(seed)) }
+        Self {
+            rng: Mutex::new(StdRng::seed_from_u64(seed)),
+        }
     }
 }
 

@@ -77,8 +77,7 @@ pub fn recycle_clean() {
     #[cfg(target_os = "windows")]
     {
         std::thread::spawn(|| {
-            let res = super::super::launcher::clean_recycle_bin()
-                .map_err(|e| format!("{e:?}"));
+            let res = super::super::launcher::clean_recycle_bin().map_err(|e| format!("{e:?}"));
             crate::gui::send_event(crate::gui::WatchEvent::Recycle(res));
         });
     }
@@ -89,6 +88,7 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
     #[cfg(target_os = "windows")]
     {
         use windows::core::VARIANT;
+        use windows::Win32::Foundation::{HWND, POINT};
         use windows::Win32::System::Com::{
             CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
             COINIT_APARTMENTTHREADED,
@@ -98,12 +98,11 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
         };
         use windows::Win32::System::Variant::VT_I4;
         use windows::Win32::UI::Accessibility::*;
-        use windows::Win32::Foundation::{HWND, POINT};
-        use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
         use windows::Win32::UI::Input::KeyboardAndMouse::{
-            SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEINPUT, MOUSEEVENTF_LEFTDOWN,
-            MOUSEEVENTF_LEFTUP,
+            SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+            MOUSEINPUT,
         };
+        use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
 
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -190,17 +189,25 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
                                                                 if let Ok(rect) =
                                                                     elem.CurrentBoundingRectangle()
                                                                 {
-                                                                    let x = (rect.left + rect.right) / 2;
-                                                                    let y = (rect.top + rect.bottom) / 2;
+                                                                    let x = (rect.left
+                                                                        + rect.right)
+                                                                        / 2;
+                                                                    let y = (rect.top
+                                                                        + rect.bottom)
+                                                                        / 2;
 
                                                                     let mut hwnd = elem
                                                                         .CurrentNativeWindowHandle()
-                                                                        .unwrap_or(HWND(std::ptr::null_mut()));
+                                                                        .unwrap_or(HWND(
+                                                                            std::ptr::null_mut(),
+                                                                        ));
                                                                     if hwnd.0.is_null() {
                                                                         if let Ok(walker) =
-                                                                            automation.RawViewWalker()
+                                                                            automation
+                                                                                .RawViewWalker()
                                                                         {
-                                                                            let mut cur = elem.clone();
+                                                                            let mut cur =
+                                                                                elem.clone();
                                                                             loop {
                                                                                 if let Ok(h) = cur
                                                                                     .CurrentNativeWindowHandle()
@@ -259,10 +266,12 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
                                                                     ];
                                                                     let _ = SendInput(
                                                                         &inputs,
-                                                                        core::mem::size_of::<INPUT>()
+                                                                        core::mem::size_of::<INPUT>(
+                                                                        )
                                                                             as i32,
                                                                     );
-                                                                    let _ = SetCursorPos(old.x, old.y);
+                                                                    let _ =
+                                                                        SetCursorPos(old.x, old.y);
                                                                     tracing::debug!(
                                                                         "simulated click for browser tab"
                                                                     );

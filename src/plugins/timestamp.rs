@@ -33,7 +33,11 @@ impl TimestampPlugin {
                 );
             }
         }
-        for fmt in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"] {
+        for fmt in [
+            "%Y-%m-%d %H:%M:%S%.f",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+        ] {
             if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
                 let midnight = dt.date().and_hms_opt(0, 0, 0)?;
                 return Some((dt - midnight).num_milliseconds());
@@ -77,8 +81,15 @@ impl Plugin for TimestampPlugin {
                 return Vec::new();
             }
             if let Ok(num) = arg.parse::<i64>() {
-                let ts_sec = if num.abs() > 1_000_000_000_000 { num / 1000 } else { num };
-                let dt = Local.timestamp_opt(ts_sec, 0).single().or_else(|| Local.timestamp_opt(0, 0).single());
+                let ts_sec = if num.abs() > 1_000_000_000_000 {
+                    num / 1000
+                } else {
+                    num
+                };
+                let dt = Local
+                    .timestamp_opt(ts_sec, 0)
+                    .single()
+                    .or_else(|| Local.timestamp_opt(0, 0).single());
                 if let Some(dt) = dt {
                     let out = dt.format("%Y-%m-%d %H:%M:%S").to_string();
                     return vec![Action {
@@ -136,4 +147,3 @@ impl Plugin for TimestampPlugin {
         ]
     }
 }
-

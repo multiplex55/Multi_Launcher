@@ -1,7 +1,10 @@
-use multi_launcher::hotkey::{parse_hotkey, HotkeyTrigger, process_test_events};
-use multi_launcher::visibility::handle_visibility_trigger;
+use multi_launcher::hotkey::{parse_hotkey, process_test_events, HotkeyTrigger};
 use multi_launcher::hotkey::{EventType, Key};
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use multi_launcher::visibility::handle_visibility_trigger;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 #[path = "mock_ctx.rs"]
 mod mock_ctx;

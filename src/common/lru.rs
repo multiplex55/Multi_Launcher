@@ -59,4 +59,3 @@ impl<K: Eq + Hash + Clone, V: Clone> LruCache<K, V> {
         self.order.clear();
     }
 }
-

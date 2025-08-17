@@ -1,6 +1,8 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use eframe::egui;
-use multi_launcher::{actions::Action, gui::LauncherApp, plugin::PluginManager, settings::Settings};
+use multi_launcher::{
+    actions::Action, gui::LauncherApp, plugin::PluginManager, settings::Settings,
+};
 use std::sync::Arc;
 
 fn bench_search(c: &mut Criterion) {

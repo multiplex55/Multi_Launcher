@@ -281,7 +281,10 @@ enum ActionKind<'a> {
     ClipboardClear,
     ClipboardCopy(usize),
     ClipboardText(&'a str),
-    Calc { result: &'a str, expr: Option<&'a str> },
+    Calc {
+        result: &'a str,
+        expr: Option<&'a str>,
+    },
     CalcHistory(usize),
     BookmarkAdd(&'a str),
     BookmarkRemove(&'a str),

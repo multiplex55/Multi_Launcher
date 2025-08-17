@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_ALT, MOD_SHIFT, MOD_WIN,
+    RegisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -72,7 +72,4 @@ impl Hotkey {
 
         false
     }
-
-
-
 }

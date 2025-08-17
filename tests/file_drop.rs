@@ -1,6 +1,8 @@
-use multi_launcher::{gui::LauncherApp, actions::Action, plugin::PluginManager, settings::Settings};
-use std::sync::{Arc, atomic::AtomicBool};
 use eframe::egui;
+use multi_launcher::{
+    actions::Action, gui::LauncherApp, plugin::PluginManager, settings::Settings,
+};
+use std::sync::{atomic::AtomicBool, Arc};
 
 fn new_app(ctx: &egui::Context) -> LauncherApp {
     let actions: Vec<Action> = Vec::new();
@@ -28,7 +30,10 @@ fn dropping_file_opens_add_dialog() {
     let ctx = egui::Context::default();
     let mut app = new_app(&ctx);
     let tmp = std::env::temp_dir().join("dummy.txt");
-    let dropped = egui::DroppedFile { path: Some(tmp), ..Default::default() };
+    let dropped = egui::DroppedFile {
+        path: Some(tmp),
+        ..Default::default()
+    };
     app.handle_dropped_files(vec![dropped]);
     assert!(app.show_editor);
     assert!(app.editor.is_dialog_open());

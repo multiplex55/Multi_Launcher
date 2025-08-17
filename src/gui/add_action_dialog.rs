@@ -1,9 +1,9 @@
 use crate::actions::{save_actions, Action};
 use crate::gui::LauncherApp;
 use eframe::egui;
-use std::sync::Arc;
 #[cfg(target_os = "windows")]
 use rfd::FileDialog;
+use std::sync::Arc;
 
 /// Dialog state used when adding a new user defined command.
 ///
@@ -35,7 +35,9 @@ enum DialogMode {
 }
 
 impl Default for DialogMode {
-    fn default() -> Self { DialogMode::Add }
+    fn default() -> Self {
+        DialogMode::Add
+    }
 }
 
 impl Default for AddActionDialog {
@@ -144,7 +146,8 @@ impl AddActionDialog {
                                             label: self.label.clone(),
                                             desc: self.desc.clone(),
                                             action: self.path.clone(),
-                                            args: if self.show_args && !self.args.trim().is_empty() {
+                                            args: if self.show_args && !self.args.trim().is_empty()
+                                            {
                                                 Some(self.args.clone())
                                             } else {
                                                 None
@@ -160,11 +163,12 @@ impl AddActionDialog {
                                             act.label = self.label.clone();
                                             act.desc = self.desc.clone();
                                             act.action = self.path.clone();
-                                            act.args = if self.show_args && !self.args.trim().is_empty() {
-                                                Some(self.args.clone())
-                                            } else {
-                                                None
-                                            };
+                                            act.args =
+                                                if self.show_args && !self.args.trim().is_empty() {
+                                                    Some(self.args.clone())
+                                                } else {
+                                                    None
+                                                };
                                             app.actions = Arc::new(new_actions);
                                             app.update_action_cache();
                                         }
@@ -177,7 +181,9 @@ impl AddActionDialog {
                                 self.show_args = false;
                                 should_close = true;
                                 app.search();
-                                if let Err(e) = save_actions(&app.actions_path, &app.actions[..app.custom_len]) {
+                                if let Err(e) =
+                                    save_actions(&app.actions_path, &app.actions[..app.custom_len])
+                                {
                                     app.set_error(format!("Failed to save: {e}"));
                                 }
                             }
@@ -196,4 +202,3 @@ impl AddActionDialog {
         }
     }
 }
-

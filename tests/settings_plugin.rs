@@ -1,8 +1,10 @@
+use eframe::egui;
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::settings::SettingsPlugin;
-use multi_launcher::{actions::Action, gui::LauncherApp, plugin::PluginManager, settings::Settings};
-use std::sync::{Arc, atomic::AtomicBool};
-use eframe::egui;
+use multi_launcher::{
+    actions::Action, gui::LauncherApp, plugin::PluginManager, settings::Settings,
+};
+use std::sync::{atomic::AtomicBool, Arc};
 
 fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
     let custom_len = actions.len();
@@ -46,7 +48,11 @@ fn search_settings_opens_panel() {
     let mut app = new_app(&ctx, actions);
     app.query = "settings".into();
     app.search();
-    let idx = app.results.iter().position(|a| a.action == "settings:dialog").unwrap();
+    let idx = app
+        .results
+        .iter()
+        .position(|a| a.action == "settings:dialog")
+        .unwrap();
     app.selected = Some(idx);
     let launch_idx = app.handle_key(egui::Key::Enter);
     assert_eq!(launch_idx, Some(idx));
@@ -58,4 +64,3 @@ fn search_settings_opens_panel() {
     }
     assert!(app.show_settings);
 }
-

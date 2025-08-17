@@ -40,4 +40,3 @@ impl Plugin for SettingsPlugin {
         }]
     }
 }
-

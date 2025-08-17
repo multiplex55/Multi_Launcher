@@ -1,8 +1,8 @@
 use crate::actions::Action;
+use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::plugin::Plugin;
 use arboard::Clipboard;
 use eframe::egui;
-use crate::common::json_watch::{watch_json, JsonWatcher};
 use serde_json;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};

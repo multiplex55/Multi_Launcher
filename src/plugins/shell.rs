@@ -59,12 +59,12 @@ impl Plugin for ShellPlugin {
         let trimmed = query.trim();
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "sh") {
             if rest.is_empty() {
-            return vec![Action {
-                label: "sh: edit saved commands".into(),
-                desc: "Shell".into(),
-                action: "shell:dialog".into(),
-                args: None,
-            }];
+                return vec![Action {
+                    label: "sh: edit saved commands".into(),
+                    desc: "Shell".into(),
+                    action: "shell:dialog".into(),
+                    args: None,
+                }];
             }
         }
 
@@ -175,10 +175,30 @@ impl Plugin for ShellPlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![
-            Action { label: "sh".into(), desc: "Shell".into(), action: "query:sh".into(), args: None },
-            Action { label: "sh add".into(), desc: "Shell".into(), action: "query:sh add ".into(), args: None },
-            Action { label: "sh rm".into(), desc: "Shell".into(), action: "query:sh rm ".into(), args: None },
-            Action { label: "sh list".into(), desc: "Shell".into(), action: "query:sh list".into(), args: None },
+            Action {
+                label: "sh".into(),
+                desc: "Shell".into(),
+                action: "query:sh".into(),
+                args: None,
+            },
+            Action {
+                label: "sh add".into(),
+                desc: "Shell".into(),
+                action: "query:sh add ".into(),
+                args: None,
+            },
+            Action {
+                label: "sh rm".into(),
+                desc: "Shell".into(),
+                action: "query:sh rm ".into(),
+                args: None,
+            },
+            Action {
+                label: "sh list".into(),
+                desc: "Shell".into(),
+                action: "query:sh list".into(),
+                args: None,
+            },
         ]
     }
 }

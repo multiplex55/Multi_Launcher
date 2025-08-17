@@ -1,8 +1,10 @@
+use multi_launcher::actions::Action;
+use multi_launcher::history::{
+    append_history, clear_history, get_history, poison_history_lock, HistoryEntry,
+};
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::folders::{FoldersPlugin, FOLDERS_FILE};
 use multi_launcher::plugins::timer::{active_timers, ACTIVE_TIMERS};
-use multi_launcher::history::{append_history, clear_history, get_history, poison_history_lock, HistoryEntry};
-use multi_launcher::actions::Action;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use tempfile::tempdir;

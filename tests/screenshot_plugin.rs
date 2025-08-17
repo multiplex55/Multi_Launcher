@@ -16,7 +16,11 @@ fn search_lists_screenshot_actions() {
             "screenshot:desktop_clip",
         ];
         for prefix in prefixes.iter() {
-            assert!(results.iter().any(|a| a.action == *prefix), "missing action {}", prefix);
+            assert!(
+                results.iter().any(|a| a.action == *prefix),
+                "missing action {}",
+                prefix
+            );
         }
     } else {
         assert!(results.is_empty());

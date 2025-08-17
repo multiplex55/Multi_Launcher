@@ -1,4 +1,3 @@
-
 pub fn clear() -> anyhow::Result<()> {
     crate::history::clear_history()?;
     Ok(())

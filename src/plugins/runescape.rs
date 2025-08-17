@@ -25,10 +25,7 @@ impl Plugin for RunescapeSearchPlugin {
                 return vec![Action {
                     label: format!("Search Old School RuneScape Wiki for {q}"),
                     desc: "Web search".into(),
-                    action: format!(
-                        "https://oldschool.runescape.wiki/?search={}",
-                        encode(q)
-                    ),
+                    action: format!("https://oldschool.runescape.wiki/?search={}", encode(q)),
                     args: None,
                 }];
             }
@@ -50,9 +47,18 @@ impl Plugin for RunescapeSearchPlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![
-            Action { label: "rs".into(), desc: "Runescape".into(), action: "query:rs ".into(), args: None },
-            Action { label: "osrs".into(), desc: "Runescape".into(), action: "query:osrs ".into(), args: None },
+            Action {
+                label: "rs".into(),
+                desc: "Runescape".into(),
+                action: "query:rs ".into(),
+                args: None,
+            },
+            Action {
+                label: "osrs".into(),
+                desc: "Runescape".into(),
+                action: "query:osrs ".into(),
+                args: None,
+            },
         ]
     }
 }
-

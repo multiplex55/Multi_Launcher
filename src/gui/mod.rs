@@ -7,9 +7,9 @@ mod clipboard_dialog;
 mod convert_panel;
 mod cpu_list_dialog;
 mod fav_dialog;
+mod image_panel;
 mod macro_dialog;
 mod note_panel;
-mod image_panel;
 mod notes_dialog;
 mod shell_cmd_dialog;
 mod snippet_dialog;
@@ -31,9 +31,9 @@ pub use clipboard_dialog::ClipboardDialog;
 pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
+pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
 pub use note_panel::{extract_links, show_wiki_link, NotePanel};
-pub use image_panel::ImagePanel;
 pub use notes_dialog::NotesDialog;
 pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;
@@ -1614,7 +1614,11 @@ impl LauncherApp {
         check!(self.fav_dialog.open, fav_dialog, Panel::FavDialog);
         check!(self.notes_dialog.open, notes_dialog, Panel::NotesDialog);
         check!(!self.note_panels.is_empty(), note_panel, Panel::NotePanel);
-        check!(!self.image_panels.is_empty(), image_panel, Panel::ImagePanel);
+        check!(
+            !self.image_panels.is_empty(),
+            image_panel,
+            Panel::ImagePanel
+        );
         check!(self.todo_dialog.open, todo_dialog, Panel::TodoDialog);
         check!(
             self.todo_view_dialog.open,
@@ -3411,13 +3415,13 @@ mod tests {
         toast_log::TOAST_LOG_FILE,
     };
     use eframe::egui;
+    use image::RgbaImage;
     use once_cell::sync::Lazy;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     };
     use tempfile::tempdir;
-    use image::RgbaImage;
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
