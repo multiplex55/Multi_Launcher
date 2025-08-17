@@ -63,6 +63,7 @@ rfd = { version = "0.15.3", features = ["xdg-portal", "common-controls-v6"] }
 slab = "0.4.11"
 scraper = "0.18"
 tempfile = "3"
+feed-rs = "1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 rdev = { git = "https://github.com/Narsil/rdev", rev = "c14f2dc5c8100a96c5d7e3013de59d6aa0b9eae2" }

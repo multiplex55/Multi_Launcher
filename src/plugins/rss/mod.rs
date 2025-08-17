@@ -1,6 +1,7 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
 
+pub mod poller;
 pub mod source;
 pub mod storage;
 
