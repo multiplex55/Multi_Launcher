@@ -30,16 +30,31 @@ impl OmniSearchPlugin {
     /// action data without duplicating it.
     pub fn new(actions: Arc<Vec<Action>>) -> Self {
         let mut entries: Vec<(String, u64)> = Vec::new();
+        let mut seen = HashSet::new();
         for (i, a) in actions.iter().enumerate() {
-            entries.push((a.label.to_lowercase(), i as u64));
+            let label_key = a.label.to_lowercase();
+            if seen.insert(label_key.clone()) {
+                entries.push((label_key.clone(), i as u64));
+            } else {
+                tracing::warn!(key = %label_key, "duplicate search key; skipping");
+            }
             if !a.desc.is_empty() {
-                entries.push((a.desc.to_lowercase(), i as u64));
+                let desc_key = a.desc.to_lowercase();
+                if desc_key != label_key {
+                    if seen.insert(desc_key.clone()) {
+                        entries.push((desc_key.clone(), i as u64));
+                    } else {
+                        tracing::warn!(key = %desc_key, "duplicate search key; skipping");
+                    }
+                }
             }
         }
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         let mut builder = MapBuilder::memory();
         for (k, v) in entries {
-            builder.insert(k, v).unwrap();
+            if let Err(err) = builder.insert(k.as_str(), v) {
+                tracing::warn!(%k, value = v, ?err, "failed to insert key into search index");
+            }
         }
         let index = Map::new(builder.into_inner().unwrap()).unwrap();
 
