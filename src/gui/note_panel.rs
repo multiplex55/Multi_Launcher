@@ -11,7 +11,6 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use rfd::FileDialog;
 use url::Url;
-use image::imageops::FilterType;
 
 static IMAGE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
@@ -93,20 +92,9 @@ impl NotePanel {
                                     if ui.link(label).clicked() {
                                         app.open_image_panel(&full);
                                     }
-                                } else if let Ok(mut img) = image::open(&full) {
-                                    if img.width() > 512 || img.height() > 512 {
-                                        img = img.resize(512, 512, FilterType::Lanczos3);
-                                    }
-                                    let size = [img.width() as usize, img.height() as usize];
-                                    let rgba = img.to_rgba8();
-                                    let tex = ui.ctx().load_texture(
-                                        format!("note_img_{}_{}", self.note.slug, i),
-                                        egui::ColorImage::from_rgba_unmultiplied(
-                                            size,
-                                            rgba.as_raw(),
-                                        ),
-                                        egui::TextureOptions::LINEAR,
-                                    );
+                                } else if let Some(tex) =
+                                    app.note_image_texture(&full, ui.ctx())
+                                {
                                     let mut display = tex.size_vec2();
                                     if let Some(w) = width {
                                         display *= w / display.x;
@@ -136,7 +124,7 @@ impl NotePanel {
                                                 .content
                                                 .replace_range(range.clone(), &repl);
                                             self.markdown_cache.clear_scrollable();
-                        
+
                                             modified = true;
                                             break;
                                         }

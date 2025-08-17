@@ -61,6 +61,7 @@ use crate::toast_log::{append_toast_log, TOAST_LOG_FILE};
 use crate::usage::{self, USAGE_FILE};
 use crate::visibility::apply_visibility;
 use eframe::egui;
+use image::imageops::FilterType;
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -68,7 +69,7 @@ use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -351,6 +352,7 @@ pub struct LauncherApp {
     pub note_panel_default_size: (f32, f32),
     pub note_save_on_close: bool,
     pub note_images_as_links: bool,
+    note_image_cache: HashMap<PathBuf, egui::TextureHandle>,
     pub follow_mouse: bool,
     pub static_location_enabled: bool,
     pub static_pos: Option<(i32, i32)>,
@@ -764,6 +766,7 @@ impl LauncherApp {
             note_panel_default_size: settings.note_panel_default_size,
             note_save_on_close: settings.note_save_on_close,
             note_images_as_links: settings.note_images_as_links,
+            note_image_cache: HashMap::new(),
             follow_mouse,
             static_location_enabled: static_enabled,
             static_pos,
@@ -3219,6 +3222,32 @@ impl LauncherApp {
     pub fn push_note_panel(&mut self, panel: NotePanel) {
         self.note_panels.push(panel);
         self.update_panel_stack();
+    }
+
+    pub fn note_image_texture(
+        &mut self,
+        path: &Path,
+        ctx: &egui::Context,
+    ) -> Option<egui::TextureHandle> {
+        if let Some(tex) = self.note_image_cache.get(path) {
+            return Some(tex.clone());
+        }
+        if let Ok(mut img) = image::open(path) {
+            if img.width() > 512 || img.height() > 512 {
+                img = img.resize(512, 512, FilterType::Lanczos3);
+            }
+            let size = [img.width() as usize, img.height() as usize];
+            let rgba = img.to_rgba8();
+            let tex = ctx.load_texture(
+                format!("note_img_cache_{}", path.display()),
+                egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
+                egui::TextureOptions::LINEAR,
+            );
+            self.note_image_cache.insert(path.to_path_buf(), tex.clone());
+            Some(tex)
+        } else {
+            None
+        }
     }
 
     /// Open an image viewer panel for the given file path.
