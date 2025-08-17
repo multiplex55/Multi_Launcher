@@ -99,6 +99,15 @@ pub struct FeedConfig {
     pub title: Option<String>,
     #[serde(default)]
     pub group: Option<String>,
+    /// Last successful poll timestamp (seconds since epoch).
+    #[serde(default)]
+    pub last_poll: Option<u64>,
+    /// Next scheduled poll timestamp (seconds since epoch).
+    #[serde(default)]
+    pub next_poll: Option<u64>,
+    /// Current poll cadence in seconds.
+    #[serde(default)]
+    pub cadence: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -111,7 +120,7 @@ pub struct FeedsFile {
 }
 
 impl FeedsFile {
-    pub const VERSION: u32 = 2;
+    pub const VERSION: u32 = 3;
 
     pub fn load() -> Self {
         load_json(&feeds_path()).unwrap_or_default()
