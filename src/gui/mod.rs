@@ -350,6 +350,7 @@ pub struct LauncherApp {
     pub page_jump: usize,
     pub note_panel_default_size: (f32, f32),
     pub note_save_on_close: bool,
+    pub note_images_as_links: bool,
     pub follow_mouse: bool,
     pub static_location_enabled: bool,
     pub static_pos: Option<(i32, i32)>,
@@ -437,6 +438,7 @@ impl LauncherApp {
         page_jump: Option<usize>,
         note_panel_default_size: Option<(f32, f32)>,
         note_save_on_close: Option<bool>,
+        note_images_as_links: Option<bool>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -507,6 +509,9 @@ impl LauncherApp {
         }
         if let Some(v) = note_save_on_close {
             self.note_save_on_close = v;
+        }
+        if let Some(v) = note_images_as_links {
+            self.note_images_as_links = v;
         }
     }
 
@@ -758,6 +763,7 @@ impl LauncherApp {
             page_jump: settings.page_jump,
             note_panel_default_size: settings.note_panel_default_size,
             note_save_on_close: settings.note_save_on_close,
+            note_images_as_links: settings.note_images_as_links,
             follow_mouse,
             static_location_enabled: static_enabled,
             static_pos,
@@ -3219,6 +3225,10 @@ impl LauncherApp {
     pub fn open_image_panel(&mut self, path: &Path) {
         if !path.exists() {
             self.set_error(format!("Image not found: {}", path.display()));
+            return;
+        }
+        if image::ImageFormat::from_path(path).is_err() {
+            self.set_error(format!("Unsupported image format: {}", path.display()));
             return;
         }
         self.image_panels.push(ImagePanel::new(path.to_path_buf()));
