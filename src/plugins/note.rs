@@ -193,9 +193,10 @@ pub fn image_files() -> Vec<String> {
             if path.is_file() {
                 if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                     let ext = ext.to_ascii_lowercase();
+                    // Only allow formats supported by `egui`/`image` for rendering.
                     if matches!(
                         ext.as_str(),
-                        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "svg" | "webp"
+                        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
                     ) {
                         if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
                             files.push(name.to_string());
