@@ -1,8 +1,13 @@
 use anyhow::{anyhow, Result};
 use chrono::DateTime;
 use shlex;
+use std::collections::HashSet;
+use std::fs;
 
 use crate::plugins::rss::{poller::Poller, storage};
+use roxmltree::Document;
+use slug::slugify;
+use url::Url;
 
 /// Execute an RSS command routed from the launcher.
 ///
@@ -20,6 +25,8 @@ pub fn run(command: &str) -> Result<()> {
         "open" => open(rest),
         "group" => group(rest),
         "mark" => mark(rest),
+        "import" => import(rest),
+        "export" => export(rest),
         // `dialog` opens the UI; nothing to do in CLI.
         "dialog" => Ok(()),
         _ => Ok(()),
@@ -247,6 +254,182 @@ fn group_mv(old: &str, new: &str) -> Result<()> {
     }
     feeds.save()?;
     Ok(())
+}
+
+fn import(args: &str) -> Result<()> {
+    let parts = shlex::split(args).unwrap_or_default();
+    if parts.is_empty() {
+        return Ok(());
+    }
+    let path = &parts[0];
+    let data = fs::read_to_string(path)?;
+    let doc = Document::parse(&data)?;
+
+    let mut outlines = Vec::new();
+    if let Some(body) = doc.descendants().find(|n| n.has_tag_name("body")) {
+        for node in body
+            .children()
+            .filter(|n| n.is_element() && n.has_tag_name("outline"))
+        {
+            collect_outline(node, None, &mut outlines);
+        }
+    }
+
+    let mut feeds = storage::FeedsFile::load();
+    let mut existing_urls: HashSet<String> =
+        feeds.feeds.iter().map(|f| f.url.clone()).collect();
+    let mut existing_ids: HashSet<String> =
+        feeds.feeds.iter().map(|f| f.id.clone()).collect();
+    let mut added = 0;
+    let mut duplicates = 0;
+    let mut invalid = 0;
+
+    for o in outlines {
+        if existing_urls.contains(&o.url) {
+            duplicates += 1;
+            continue;
+        }
+        if Url::parse(&o.url).is_err() {
+            invalid += 1;
+            continue;
+        }
+        if let Some(g) = &o.group {
+            if !feeds.groups.iter().any(|x| x == g) {
+                feeds.groups.push(g.clone());
+            }
+        }
+        let mut id_base = slugify(&o.title);
+        if id_base.is_empty() {
+            id_base = slugify(&o.url);
+        }
+        if id_base.is_empty() {
+            id_base = format!("feed{}", feeds.feeds.len());
+        }
+        let mut id = id_base.clone();
+        let mut idx = 1;
+        while existing_ids.contains(&id) {
+            id = format!("{id_base}-{idx}");
+            idx += 1;
+        }
+        existing_ids.insert(id.clone());
+        existing_urls.insert(o.url.clone());
+        feeds.feeds.push(storage::FeedConfig {
+            id,
+            url: o.url,
+            title: if o.title.is_empty() { None } else { Some(o.title) },
+            group: o.group,
+            last_poll: None,
+            next_poll: None,
+            cadence: None,
+        });
+        added += 1;
+    }
+
+    if added > 0 {
+        feeds.save()?;
+    }
+    println!("imported {added}, duplicates {duplicates}, invalid {invalid}");
+    Ok(())
+}
+
+fn export(args: &str) -> Result<()> {
+    let parts = shlex::split(args).unwrap_or_default();
+    if parts.is_empty() {
+        return Ok(());
+    }
+    let path = &parts[0];
+    let feeds = storage::FeedsFile::load();
+    let mut out = String::new();
+    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    out.push_str("<opml version=\"1.0\">\n<head><title>feeds</title></head>\n<body>\n");
+    for g in &feeds.groups {
+        out.push_str(&format!("  <outline text=\"{}\">\n", xml_escape(g)));
+        for f in feeds.feeds.iter().filter(|f| f.group.as_deref() == Some(g)) {
+            let title = f
+                .title
+                .clone()
+                .unwrap_or_else(|| f.url.clone());
+            out.push_str(&format!(
+                "    <outline type=\"rss\" text=\"{}\" xmlUrl=\"{}\"",
+                xml_escape(&title),
+                xml_escape(&f.url)
+            ));
+            if let Some(t) = &f.title {
+                out.push_str(&format!(" title=\"{}\"", xml_escape(t)));
+            }
+            out.push_str(" />\n");
+        }
+        out.push_str("  </outline>\n");
+    }
+    for f in feeds.feeds.iter().filter(|f| f.group.is_none()) {
+        let title = f
+            .title
+            .clone()
+            .unwrap_or_else(|| f.url.clone());
+        out.push_str(&format!(
+            "  <outline type=\"rss\" text=\"{}\" xmlUrl=\"{}\"",
+            xml_escape(&title),
+            xml_escape(&f.url)
+        ));
+        if let Some(t) = &f.title {
+            out.push_str(&format!(" title=\"{}\"", xml_escape(t)));
+        }
+        out.push_str(" />\n");
+    }
+    out.push_str("</body>\n</opml>\n");
+    fs::write(path, out)?;
+    println!("exported {} feeds", feeds.feeds.len());
+    Ok(())
+}
+
+struct OutlineFeed {
+    title: String,
+    url: String,
+    group: Option<String>,
+}
+
+fn collect_outline(node: roxmltree::Node, group: Option<&str>, out: &mut Vec<OutlineFeed>) {
+    if node.attribute("xmlUrl").is_some() || node.attribute("xmlURL").is_some() {
+        let url = node
+            .attribute("xmlUrl")
+            .or_else(|| node.attribute("xmlURL"))
+            .unwrap();
+        let title = node
+            .attribute("title")
+            .or_else(|| node.attribute("text"))
+            .unwrap_or(url);
+        out.push(OutlineFeed {
+            title: title.to_string(),
+            url: url.to_string(),
+            group: group.map(|s| s.to_string()),
+        });
+    } else {
+        let next_group = node
+            .attribute("text")
+            .or_else(|| node.attribute("title"))
+            .or(group);
+        for child in node
+            .children()
+            .filter(|n| n.is_element() && n.has_tag_name("outline"))
+        {
+            collect_outline(child, next_group, out);
+        }
+    }
+}
+
+fn xml_escape(s: &str) -> String {
+    let mut escaped = String::new();
+    for c in s.chars() {
+        match c {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(c),
+        }
+    }
+    escaped
 }
 
 #[derive(Clone)]
