@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
+pub use crate::plugins::rss::RssPlugin;
 use urlencoding::encode;
 use crate::plugins::calc_history::{self, CalcHistoryEntry, CALC_HISTORY_FILE, MAX_ENTRIES};
 use eframe::egui;

@@ -49,6 +49,7 @@ use crate::plugins::timestamp::TimestampPlugin;
 use crate::plugins::random::RandomPlugin;
 use crate::plugins::lorem::LoremPlugin;
 use crate::plugins::convert_panel::ConvertPanelPlugin;
+use crate::plugins::rss::RssPlugin;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::NetUnit;
 use std::collections::HashSet;
@@ -160,6 +161,7 @@ impl PluginManager {
         self.register_with_settings(RandomPlugin::default(), plugin_settings);
         self.register_with_settings(LoremPlugin, plugin_settings);
         self.register_with_settings(ConvertPanelPlugin, plugin_settings);
+        self.register_with_settings(RssPlugin, plugin_settings);
         #[cfg(target_os = "windows")]
         {
             self.register_with_settings(VolumePlugin, plugin_settings);
