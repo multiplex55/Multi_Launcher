@@ -377,6 +377,7 @@ enum ActionKind<'a> {
         args: Option<&'a str>,
     },
     Macro(&'a str),
+    Rss(&'a str),
 }
 
 fn parse_action_kind(action: &Action) -> ActionKind<'_> {
@@ -697,6 +698,9 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
             return ActionKind::TempfileAlias { path, alias };
         }
     }
+    if let Some(cmd) = s.strip_prefix("rss:") {
+        return ActionKind::Rss(cmd);
+    }
     if let Some(name) = s.strip_prefix("macro:") {
         return ActionKind::Macro(name);
     }
@@ -883,6 +887,7 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         ActionKind::TempfileClear => tempfiles::clear(),
         ActionKind::TempfileRemove(path) => tempfiles::remove(path),
         ActionKind::TempfileAlias { path, alias } => tempfiles::set_alias(path, alias),
+        ActionKind::Rss(cmd) => rss::run(cmd),
         ActionKind::Macro(name) => {
             crate::plugins::macros::run_macro(name)?;
             Ok(())

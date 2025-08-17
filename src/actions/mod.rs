@@ -37,3 +37,4 @@ pub mod exec;
 pub mod fav;
 pub mod screenshot;
 pub mod calc;
+pub mod rss;
