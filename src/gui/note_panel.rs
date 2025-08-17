@@ -16,6 +16,33 @@ use url::Url;
 
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
 
+fn preprocess_note_links(content: &str) -> String {
+    static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
+    WIKI_RE
+        .replace_all(content, |caps: &regex::Captures| {
+            let text = &caps[1];
+            let slug = slugify(text);
+            format!("[{text}](note://{slug})")
+        })
+        .to_string()
+}
+
+fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
+    if let Some(open_url) = ui.ctx().output_mut(|o| o.open_url.take()) {
+        if let Ok(url) = Url::parse(&open_url.url) {
+            if url.scheme() == "note" {
+                if let Some(slug) = url.host_str() {
+                    app.open_note_panel(slug, None);
+                }
+            } else {
+                ui.ctx().open_url(open_url);
+            }
+        } else {
+            ui.ctx().open_url(open_url);
+        }
+    }
+}
+
 pub struct NotePanel {
     pub open: bool,
     note: Note,
@@ -68,7 +95,7 @@ impl NotePanel {
                         ui.set_min_height(scrollable_height);
                         if self.preview_mode {
                             let mut last = 0usize;
-                            let content = self.note.content.clone();
+                            let content = preprocess_note_links(&self.note.content);
                             let mut modified = false;
                             for (i, cap) in IMAGE_RE.captures_iter(&content).enumerate() {
                                 let m = cap.get(0).unwrap();
@@ -80,6 +107,7 @@ impl NotePanel {
                                         &mut self.markdown_cache,
                                         before,
                                     );
+                                    handle_markdown_links(ui, app);
                                 }
                                 let alt = cap.get(1).unwrap().as_str();
                                 let target = cap.get(2).unwrap().as_str();
@@ -184,6 +212,7 @@ impl NotePanel {
                                     &mut self.markdown_cache,
                                     rest,
                                 );
+                                handle_markdown_links(ui, app);
                             }
                             None
                         } else {
@@ -692,5 +721,50 @@ mod tests {
         let content = "links [[alpha]] and [[alpha]] and [[beta]]";
         let links = extract_wiki_links(content);
         assert_eq!(links, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn preprocess_wiki_links_rewrites() {
+        let content = "See [[Target Note]]";
+        let processed = preprocess_note_links(content);
+        assert_eq!(processed, "See [Target Note](note://target-note)");
+    }
+
+    #[test]
+    fn note_scheme_link_opens_panel() {
+        use crate::plugins::note::Note;
+        use std::path::PathBuf;
+        use tempfile::tempdir;
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let dir = tempdir().unwrap();
+        let prev = std::env::var("ML_NOTES_DIR").ok();
+        std::env::set_var("ML_NOTES_DIR", dir.path());
+        let note = Note {
+            title: "Title".into(),
+            path: PathBuf::new(),
+            content: String::from("dummy"),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: String::new(),
+            alias: None,
+        };
+        let mut panel = NotePanel::from_note(note);
+        let _ = ctx.run(Default::default(), |ctx| {
+            ctx.output_mut(|o| {
+                o.open_url = Some(egui::OpenUrl::same_tab("note://linked-note"));
+            });
+            panel.ui(ctx, &mut app);
+        });
+        drop(dir);
+        if let Some(p) = prev {
+            std::env::set_var("ML_NOTES_DIR", p);
+        } else {
+            std::env::remove_var("ML_NOTES_DIR");
+        }
+        let _ = crate::plugins::note::refresh_cache();
+        assert_eq!(app.note_panels.len(), 1);
+        assert_eq!(slugify(&app.note_panels[0].note.title), "linked-note");
     }
 }
