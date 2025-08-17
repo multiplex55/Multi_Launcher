@@ -34,12 +34,14 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
     static_pos: Option<(f32, f32)>,
     static_size: Option<(f32, f32)>,
     window_size: (f32, f32),
-) {
+) -> bool {
+    let mut changed = false;
     if trigger.take() {
         let old = visibility.load(Ordering::SeqCst);
         let next = !old;
         tracing::debug!(from=?old, to=?next, "visibility updated");
         visibility.store(next, Ordering::SeqCst);
+        changed = old != next;
         if let Ok(guard) = ctx_handle.lock() {
             if let Some(c) = &*guard {
                 apply_visibility(
@@ -75,6 +77,7 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
             if let Some(c) = &*guard {
                 let old = visibility.load(Ordering::SeqCst);
                 visibility.store(next, Ordering::SeqCst);
+                changed = old != next;
                 tracing::debug!(from=?old, to=?next, "visibility updated");
                 apply_visibility(
                     next,
@@ -94,6 +97,7 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
             }
         }
     }
+    changed
 }
 
 /// Apply the current visibility state to the viewport.

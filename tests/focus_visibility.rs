@@ -19,7 +19,7 @@ fn focus_when_becoming_visible() {
     // simulate hotkey press
     *trigger.open.lock().unwrap() = true;
 
-    handle_visibility_trigger(
+    let changed = handle_visibility_trigger(
         &trigger,
         &visibility,
         &restore,
@@ -32,6 +32,7 @@ fn focus_when_becoming_visible() {
         None,
         (400.0, 220.0),
     );
+    assert!(changed);
 
     assert_eq!(visibility.load(Ordering::SeqCst), true);
     assert!(queued_visibility.is_none());
