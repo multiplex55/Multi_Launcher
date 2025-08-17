@@ -1,20 +1,60 @@
 use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::plugin::Plugin;
-use crate::plugins::note::{load_notes, save_note, Note, NotePlugin};
+use crate::plugins::note::{assets_dir, image_files, load_notes, save_note, Note, NotePlugin};
 use eframe::egui::{self, Color32};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
+use image::imageops::FilterType;
 use once_cell::sync::Lazy;
 use regex::Regex;
+use rfd::FileDialog;
+use std::collections::HashMap;
 use url::Url;
+
+static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
+
+fn preprocess_note_links(content: &str, current_slug: &str) -> String {
+    static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
+    WIKI_RE
+        .replace_all(content, |caps: &regex::Captures| {
+            let text = &caps[1];
+            let slug = slugify(text);
+            if slug == current_slug {
+                caps[0].to_string()
+            } else {
+                format!("[{text}](note://{slug})")
+            }
+        })
+        .to_string()
+}
+
+fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
+    if let Some(open_url) = ui.ctx().output_mut(|o| o.open_url.take()) {
+        if let Ok(url) = Url::parse(&open_url.url) {
+            if url.scheme() == "note" {
+                if let Some(slug) = url.host_str() {
+                    app.open_note_panel(slug, None);
+                }
+            } else {
+                ui.ctx().open_url(open_url);
+            }
+        } else {
+            ui.ctx().open_url(open_url);
+        }
+    }
+}
 
 pub struct NotePanel {
     pub open: bool,
     note: Note,
     link_search: String,
+    image_search: String,
     preview_mode: bool,
     markdown_cache: CommonMarkCache,
+    image_cache: HashMap<std::path::PathBuf, egui::TextureHandle>,
 }
 
 impl NotePanel {
@@ -23,8 +63,10 @@ impl NotePanel {
             open: true,
             note,
             link_search: String::new(),
+            image_search: String::new(),
             preview_mode: true,
             markdown_cache: CommonMarkCache::default(),
+            image_cache: HashMap::new(),
         }
     }
 
@@ -56,11 +98,127 @@ impl NotePanel {
                     .show_viewport(ui, |ui, _viewport| {
                         ui.set_min_height(scrollable_height);
                         if self.preview_mode {
-                            CommonMarkViewer::new("note_content").show(
-                                ui,
-                                &mut self.markdown_cache,
-                                &self.note.content,
-                            );
+                            let mut last = 0usize;
+                            let content =
+                                preprocess_note_links(&self.note.content, &self.note.slug);
+                            let mut modified = false;
+                            for (i, cap) in IMAGE_RE.captures_iter(&content).enumerate() {
+                                let m = cap.get(0).unwrap();
+                                let range = m.range();
+                                let before = &content[last..range.start];
+                                if !before.is_empty() {
+                                    CommonMarkViewer::new(format!("note_seg_{i}_t")).show(
+                                        ui,
+                                        &mut self.markdown_cache,
+                                        before,
+                                    );
+                                    handle_markdown_links(ui, app);
+                                }
+                                let alt = cap.get(1).unwrap().as_str();
+                                let target = cap.get(2).unwrap().as_str();
+                                let (rel, width) = if let Some((p, w)) = target.split_once('|') {
+                                    (p, w.parse::<f32>().ok())
+                                } else {
+                                    (target, None)
+                                };
+                                let full = if let Some(stripped) = rel.strip_prefix("assets/") {
+                                    assets_dir().join(stripped)
+                                } else {
+                                    std::path::PathBuf::from(rel)
+                                };
+                                if app.note_images_as_links {
+                                    let label = if alt.is_empty() { rel } else { alt };
+                                    if ui.link(label).clicked() {
+                                        app.open_image_panel(&full);
+                                    }
+                                } else {
+                                    let tex = if let Some(t) = self.image_cache.get(&full) {
+                                        t.clone()
+                                    } else if let Ok(mut img) = image::open(&full) {
+                                        if img.width() > 512 || img.height() > 512 {
+                                            img = img.resize(512, 512, FilterType::Triangle);
+                                        }
+                                        let size = [img.width() as usize, img.height() as usize];
+                                        let rgba = img.to_rgba8();
+                                        let tex = ui.ctx().load_texture(
+                                            full.to_string_lossy().to_string(),
+                                            egui::ColorImage::from_rgba_unmultiplied(
+                                                size,
+                                                rgba.as_raw(),
+                                            ),
+                                            egui::TextureOptions::LINEAR,
+                                        );
+                                        self.image_cache.insert(full.clone(), tex.clone());
+                                        tex
+                                    } else {
+                                        last = range.end;
+                                        continue;
+                                    };
+                                    let mut display = tex.size_vec2();
+                                    if let Some(w) = width {
+                                        display *= w / display.x;
+                                    }
+                                    let response = ui.add(
+                                        egui::Image::new(&tex)
+                                            .fit_to_exact_size(display)
+                                            .sense(egui::Sense::click()),
+                                    );
+                                    if response.clicked() {
+                                        app.open_image_panel(&full);
+                                    }
+                                    if response.hovered() {
+                                        let scroll = ui.ctx().input(|i| {
+                                            if i.modifiers.ctrl {
+                                                i.raw_scroll_delta.y
+                                            } else {
+                                                0.0
+                                            }
+                                        });
+                                        if scroll != 0.0 {
+                                            let new_w = (display.x + scroll).clamp(20.0, 4096.0);
+                                            let repl =
+                                                format!("![{alt}]({rel}|{:.0})", new_w.round());
+                                            self.note.content.replace_range(range.clone(), &repl);
+                                            self.markdown_cache.clear_scrollable();
+
+                                            modified = true;
+                                            break;
+                                        }
+                                    }
+                                    response.context_menu(|ui| {
+                                        let mut w = width.unwrap_or(display.x);
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut w)
+                                                    .clamp_range(20.0..=4096.0),
+                                            )
+                                            .changed()
+                                        {
+                                            let repl = format!("![{alt}]({rel}|{:.0})", w.round());
+                                            self.note.content.replace_range(range.clone(), &repl);
+                                            self.markdown_cache.clear_scrollable();
+                                            modified = true;
+                                        }
+                                        if ui.button("Reset size").clicked() {
+                                            let repl = format!("![{alt}]({rel})");
+                                            self.note.content.replace_range(range.clone(), &repl);
+                                            self.markdown_cache.clear_scrollable();
+                                            modified = true;
+                                            ui.close_menu();
+                                        }
+                                    });
+                                }
+                                last = range.end;
+                            }
+                            let rest = &content[last..];
+                            if !rest.is_empty() && !modified {
+                                CommonMarkViewer::new("note_content_rest").show(
+                                    ui,
+                                    &mut self.markdown_cache,
+                                    rest,
+                                );
+                                handle_markdown_links(ui, app);
+                            }
                             None
                         } else {
                             Some(
@@ -78,45 +236,144 @@ impl NotePanel {
                 if !self.preview_mode {
                     if let Some(resp) = resp.inner {
                         resp.context_menu(|ui| {
-                            ui.set_min_width(200.0);
-                            ui.label("Insert link:");
-                            ui.text_edit_singleline(&mut self.link_search);
-                            let plugin = NotePlugin::default();
-                            let results = plugin.search(&format!("note open {}", self.link_search));
-                            egui::ScrollArea::vertical()
-                                .max_height(200.0)
-                                .show(ui, |ui| {
-                                    for action in &results {
-                                        let title = action.label.clone();
-                                        if ui.button(&title).clicked() {
-                                            let insert = format!("[[{title}]]");
-                                            let mut state =
-                                                egui::widgets::text_edit::TextEditState::load(
-                                                    ui.ctx(),
-                                                    resp.id,
-                                                )
-                                                .unwrap_or_default();
-                                            let idx = state
-                                                .cursor
-                                                .char_range()
-                                                .map(|r| r.primary.index)
-                                                .unwrap_or_else(|| {
-                                                    self.note.content.chars().count()
-                                                });
-                                            self.note.content.insert_str(idx, &insert);
-                                            state.cursor.set_char_range(Some(
-                                                egui::text::CCursorRange::one(
-                                                    egui::text::CCursor::new(
-                                                        idx + insert.chars().count(),
+                            ui.menu_button("Insert link", |ui| {
+                                ui.set_min_width(200.0);
+                                ui.label("Insert link:");
+                                ui.text_edit_singleline(&mut self.link_search);
+                                let plugin = NotePlugin::default();
+                                let results =
+                                    plugin.search(&format!("note open {}", self.link_search));
+                                egui::ScrollArea::vertical()
+                                    .max_height(200.0)
+                                    .show(ui, |ui| {
+                                        for action in &results {
+                                            let title = action.label.clone();
+                                            if slugify(&title) == self.note.slug {
+                                                continue;
+                                            }
+                                            if ui.button(&title).clicked() {
+                                                let insert = format!("[[{title}]]");
+                                                let mut state =
+                                                    egui::widgets::text_edit::TextEditState::load(
+                                                        ui.ctx(),
+                                                        resp.id,
+                                                    )
+                                                    .unwrap_or_default();
+                                                let idx = state
+                                                    .cursor
+                                                    .char_range()
+                                                    .map(|r| r.primary.index)
+                                                    .unwrap_or_else(|| {
+                                                        self.note.content.chars().count()
+                                                    });
+                                                self.note.content.insert_str(idx, &insert);
+                                                state.cursor.set_char_range(Some(
+                                                    egui::text::CCursorRange::one(
+                                                        egui::text::CCursor::new(
+                                                            idx + insert.chars().count(),
+                                                        ),
                                                     ),
-                                                ),
-                                            ));
-                                            state.store(ui.ctx(), resp.id);
-                                            self.link_search.clear();
-                                            ui.close_menu();
+                                                ));
+                                                state.store(ui.ctx(), resp.id);
+                                                self.link_search.clear();
+                                                ui.close_menu();
+                                            }
+                                        }
+                                    });
+                            });
+
+                            ui.menu_button("Insert image", |ui| {
+                                ui.set_min_width(200.0);
+                                ui.label("Insert image:");
+                                ui.text_edit_singleline(&mut self.image_search);
+                                let matcher = SkimMatcherV2::default();
+                                let filter = self.image_search.to_lowercase();
+                                let images = image_files();
+                                egui::ScrollArea::vertical()
+                                    .max_height(200.0)
+                                    .show(ui, |ui| {
+                                        for img in images.into_iter().filter(|name| {
+                                            filter.is_empty()
+                                                || matcher
+                                                    .fuzzy_match(&name.to_lowercase(), &filter)
+                                                    .is_some()
+                                        }) {
+                                            if ui.button(&img).clicked() {
+                                                let insert = format!("![{0}](assets/{0})", img);
+                                                let mut state =
+                                                    egui::widgets::text_edit::TextEditState::load(
+                                                        ui.ctx(),
+                                                        resp.id,
+                                                    )
+                                                    .unwrap_or_default();
+                                                let idx = state
+                                                    .cursor
+                                                    .char_range()
+                                                    .map(|r| r.primary.index)
+                                                    .unwrap_or_else(|| {
+                                                        self.note.content.chars().count()
+                                                    });
+                                                self.note.content.insert_str(idx, &insert);
+                                                state.cursor.set_char_range(Some(
+                                                    egui::text::CCursorRange::one(
+                                                        egui::text::CCursor::new(
+                                                            idx + insert.chars().count(),
+                                                        ),
+                                                    ),
+                                                ));
+                                                state.store(ui.ctx(), resp.id);
+                                                self.image_search.clear();
+                                                ui.close_menu();
+                                            }
+                                        }
+                                    });
+                                if ui.button("Upload...").clicked() {
+                                    if let Some(path) = FileDialog::new()
+                                        .add_filter(
+                                            "Image",
+                                            &["png", "jpg", "jpeg", "gif", "bmp", "webp"],
+                                        )
+                                        .pick_file()
+                                    {
+                                        if let Some(fname) =
+                                            path.file_name().and_then(|s| s.to_str())
+                                        {
+                                            let dest = assets_dir().join(fname);
+                                            if let Err(e) = std::fs::copy(&path, &dest) {
+                                                app.set_error(
+                                                    format!("Failed to copy image: {e}",),
+                                                );
+                                            } else {
+                                                let insert = format!("![{0}](assets/{0})", fname);
+                                                let mut state =
+                                                    egui::widgets::text_edit::TextEditState::load(
+                                                        ui.ctx(),
+                                                        resp.id,
+                                                    )
+                                                    .unwrap_or_default();
+                                                let idx = state
+                                                    .cursor
+                                                    .char_range()
+                                                    .map(|r| r.primary.index)
+                                                    .unwrap_or_else(|| {
+                                                        self.note.content.chars().count()
+                                                    });
+                                                self.note.content.insert_str(idx, &insert);
+                                                state.cursor.set_char_range(Some(
+                                                    egui::text::CCursorRange::one(
+                                                        egui::text::CCursor::new(
+                                                            idx + insert.chars().count(),
+                                                        ),
+                                                    ),
+                                                ));
+                                                state.store(ui.ctx(), resp.id);
+                                                self.image_search.clear();
+                                                ui.close_menu();
+                                            }
                                         }
                                     }
-                                });
+                                }
+                            });
                         });
                         if resp.clicked() {
                             resp.request_focus();
@@ -150,7 +407,10 @@ impl NotePanel {
                         }
                     });
                 }
-                let wiki = extract_wiki_links(&self.note.content);
+                let wiki = extract_wiki_links(&self.note.content)
+                    .into_iter()
+                    .filter(|l| slugify(l) != self.note.slug)
+                    .collect::<Vec<_>>();
                 let links = extract_links(&self.note.content);
                 if !wiki.is_empty() || !links.is_empty() {
                     ui.horizontal_wrapped(|ui| {
@@ -181,6 +441,7 @@ impl NotePanel {
         self.note.links = extract_wiki_links(&self.note.content)
             .into_iter()
             .map(|l| slugify(&l))
+            .filter(|l| l != &self.note.slug)
             .collect();
         if let Some(first) = self.note.content.lines().next() {
             if let Some(t) = first.strip_prefix("# ") {
@@ -472,5 +733,57 @@ mod tests {
         let content = "links [[alpha]] and [[alpha]] and [[beta]]";
         let links = extract_wiki_links(content);
         assert_eq!(links, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn preprocess_wiki_links_rewrites() {
+        let content = "See [[Target Note]]";
+        let processed = preprocess_note_links(content, "current-note");
+        assert_eq!(processed, "See [Target Note](note://target-note)");
+    }
+
+    #[test]
+    fn preprocess_wiki_links_skips_self() {
+        let content = "See [[Target Note]]";
+        let processed = preprocess_note_links(content, "target-note");
+        assert_eq!(processed, content);
+    }
+
+    #[test]
+    fn note_scheme_link_opens_panel() {
+        use crate::plugins::note::Note;
+        use std::path::PathBuf;
+        use tempfile::tempdir;
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let dir = tempdir().unwrap();
+        let prev = std::env::var("ML_NOTES_DIR").ok();
+        std::env::set_var("ML_NOTES_DIR", dir.path());
+        let note = Note {
+            title: "Title".into(),
+            path: PathBuf::new(),
+            content: String::from("dummy"),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: String::new(),
+            alias: None,
+        };
+        let mut panel = NotePanel::from_note(note);
+        let _ = ctx.run(Default::default(), |ctx| {
+            ctx.output_mut(|o| {
+                o.open_url = Some(egui::OpenUrl::same_tab("note://linked-note"));
+            });
+            panel.ui(ctx, &mut app);
+        });
+        drop(dir);
+        if let Some(p) = prev {
+            std::env::set_var("ML_NOTES_DIR", p);
+        } else {
+            std::env::remove_var("ML_NOTES_DIR");
+        }
+        let _ = crate::plugins::note::refresh_cache();
+        assert_eq!(app.note_panels.len(), 1);
+        assert_eq!(slugify(&app.note_panels[0].note.title), "linked-note");
     }
 }
