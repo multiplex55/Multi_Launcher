@@ -3,6 +3,7 @@ use chrono::DateTime;
 use shlex;
 use std::collections::HashSet;
 use std::fs;
+use std::path::Path;
 
 use crate::plugins::rss::{poller::Poller, source, storage};
 use roxmltree::Document;
@@ -318,13 +319,15 @@ fn group_mv(old: &str, new: &str) -> Result<()> {
     Ok(())
 }
 
-fn import(args: &str) -> Result<()> {
-    let parts = shlex::split(args).unwrap_or_default();
-    if parts.is_empty() {
-        return Ok(());
-    }
-    let path = &parts[0];
-    let data = fs::read_to_string(path)?;
+pub struct ImportStats {
+    pub added: usize,
+    pub duplicates: usize,
+    pub invalid: usize,
+}
+
+/// Import feeds from the OPML file at `path`.
+pub fn import_file<P: AsRef<Path>>(path: P) -> Result<ImportStats> {
+    let data = fs::read_to_string(path.as_ref())?;
     let doc = Document::parse(&data)?;
 
     let mut outlines = Vec::new();
@@ -392,16 +395,28 @@ fn import(args: &str) -> Result<()> {
     if added > 0 {
         feeds.save()?;
     }
-    println!("imported {added}, duplicates {duplicates}, invalid {invalid}");
-    Ok(())
+    Ok(ImportStats {
+        added,
+        duplicates,
+        invalid,
+    })
 }
 
-fn export(args: &str) -> Result<()> {
+fn import(args: &str) -> Result<()> {
     let parts = shlex::split(args).unwrap_or_default();
     if parts.is_empty() {
         return Ok(());
     }
-    let path = &parts[0];
+    let stats = import_file(&parts[0])?;
+    println!(
+        "imported {}, duplicates {}, invalid {}",
+        stats.added, stats.duplicates, stats.invalid
+    );
+    Ok(())
+}
+
+/// Export feeds to OPML at `path`.
+pub fn export_file<P: AsRef<Path>>(path: P) -> Result<usize> {
     let feeds = storage::FeedsFile::load();
     let mut out = String::new();
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
@@ -435,8 +450,17 @@ fn export(args: &str) -> Result<()> {
         out.push_str(" />\n");
     }
     out.push_str("</body>\n</opml>\n");
-    fs::write(path, out)?;
-    println!("exported {} feeds", feeds.feeds.len());
+    fs::write(path.as_ref(), out)?;
+    Ok(feeds.feeds.len())
+}
+
+fn export(args: &str) -> Result<()> {
+    let parts = shlex::split(args).unwrap_or_default();
+    if parts.is_empty() {
+        return Ok(());
+    }
+    let count = export_file(&parts[0])?;
+    println!("exported {} feeds", count);
     Ok(())
 }
 

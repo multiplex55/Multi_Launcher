@@ -297,12 +297,20 @@ pub fn mark(args: &str) -> Vec<Action> {
 pub fn import(args: &str) -> Vec<Action> {
     let trimmed = args.trim();
     if trimmed.is_empty() {
-        return vec![Action {
-            label: "rss import <file>".into(),
-            desc: "Import OPML".into(),
-            action: "query:rss import ".into(),
-            args: None,
-        }];
+        return vec![
+            Action {
+                label: "Import OPML from file".into(),
+                desc: "RSS".into(),
+                action: "rss:import".into(),
+                args: None,
+            },
+            Action {
+                label: "rss import <file>".into(),
+                desc: "Import OPML".into(),
+                action: "query:rss import ".into(),
+                args: None,
+            },
+        ];
     }
     vec![Action {
         label: format!("Import {trimmed}"),
@@ -316,12 +324,20 @@ pub fn import(args: &str) -> Vec<Action> {
 pub fn export(args: &str) -> Vec<Action> {
     let trimmed = args.trim();
     if trimmed.is_empty() {
-        return vec![Action {
-            label: "rss export <file>".into(),
-            desc: "Export OPML".into(),
-            action: "query:rss export ".into(),
-            args: None,
-        }];
+        return vec![
+            Action {
+                label: "Export OPML to file".into(),
+                desc: "RSS".into(),
+                action: "rss:export".into(),
+                args: None,
+            },
+            Action {
+                label: "rss export <file>".into(),
+                desc: "Export OPML".into(),
+                action: "query:rss export ".into(),
+                args: None,
+            },
+        ];
     }
     vec![Action {
         label: format!("Export to {trimmed}"),
