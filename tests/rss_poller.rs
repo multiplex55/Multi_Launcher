@@ -3,7 +3,7 @@ use multi_launcher::plugins::rss::poller::Poller;
 use multi_launcher::plugins::rss::storage::{FeedConfig, StateFile};
 
 #[test]
-fn poller_sets_catchup_on_first_poll() {
+fn poller_sets_last_read_published_on_first_poll() {
     let server = MockServer::start();
     let feed_body = r#"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <feed xmlns=\"http://www.w3.org/2005/Atom\">
@@ -45,6 +45,6 @@ fn poller_sets_catchup_on_first_poll() {
         .unwrap();
     assert!(items.is_empty());
     let entry = state.feeds.get("f").unwrap();
-    assert!(entry.catchup.is_some());
+    assert!(entry.last_read_published.is_some());
     assert_eq!(entry.unread, 0);
 }

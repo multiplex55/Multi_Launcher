@@ -118,6 +118,7 @@ fn open(args: &str) -> Result<()> {
     let mut limit: Option<usize> = None;
     let mut since: Option<u64> = None;
     let mut newest_first = true;
+    let mut copy = false;
     let mut i = 1;
     while i < parts.len() {
         match parts[i].as_str() {
@@ -136,6 +137,7 @@ fn open(args: &str) -> Result<()> {
                 newest_first = parts[i + 1].to_lowercase() != "oldest";
                 i += 1;
             }
+            "--copy" => copy = true,
             _ => {}
         }
         i += 1;
@@ -153,7 +155,11 @@ fn open(args: &str) -> Result<()> {
     }
     for item in &items {
         if let Some(link) = &item.link {
-            let _ = open::that(link);
+            if copy {
+                let _ = crate::actions::clipboard::set_text(link);
+            } else {
+                let _ = open::that(link);
+            }
         }
         let entry = state.feeds.entry(item.feed_id.clone()).or_default();
         entry.read.insert(item.guid.clone());
@@ -490,7 +496,7 @@ fn collect_items(
     let mut items = Vec::new();
     for feed in feeds {
         let entry = state.feeds.get(&feed.id).cloned().unwrap_or_default();
-        let cursor = entry.catchup.unwrap_or(0);
+        let cursor = entry.last_read_published.unwrap_or(0);
         let cache = storage::FeedCache::load(&feed.id);
         for item in cache.items {
             let ts = item.timestamp.unwrap_or(0);
@@ -610,12 +616,12 @@ fn mark_read(args: &str) -> Result<()> {
         } else {
             DateTime::parse_from_rfc3339(&through)?.timestamp() as u64
         };
-        if let Some(cur) = entry.catchup {
+        if let Some(cur) = entry.last_read_published {
             if new_ts < cur {
                 new_ts = cur;
             }
         }
-        entry.catchup = Some(new_ts);
+        entry.last_read_published = Some(new_ts);
         // Build map of guid -> timestamp for pruning
         let ts_map: std::collections::HashMap<_, _> = cache
             .items
@@ -650,7 +656,7 @@ fn mark_unread(args: &str) -> Result<()> {
 
 fn recompute_unread(feed_id: &str, entry: &mut storage::FeedState) {
     let cache = storage::FeedCache::load(feed_id);
-    let cursor = entry.catchup.unwrap_or(0);
+    let cursor = entry.last_read_published.unwrap_or(0);
     let count = cache
         .items
         .iter()
