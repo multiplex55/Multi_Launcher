@@ -1,6 +1,9 @@
-use eframe::egui;
+use super::{open_link, LauncherApp};
+use crate::actions::rss as rss_actions;
 use crate::plugins::rss::storage;
-use super::{LauncherApp, open_link};
+use eframe::egui;
+
+const OPEN_BATCH: usize = 5;
 
 #[derive(Default)]
 pub struct RssDialog {
@@ -98,6 +101,27 @@ impl RssDialog {
                         }
                     }
                 });
+
+                // Keyboard shortcuts operating on the selected feed.
+                if let Some(fid) = &self.selected_feed {
+                    let modifiers = ctx.input(|i| i.modifiers);
+                    if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        let n = if modifiers.shift { OPEN_BATCH } else { 1 };
+                        let cmd = format!("open {fid} --unread --n {n}");
+                        let _ = rss_actions::run(&cmd);
+                        ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+                    }
+                    if modifiers.alt && ctx.input(|i| i.key_pressed(egui::Key::R)) {
+                        let cmd = format!("mark read {fid} --through newest");
+                        let _ = rss_actions::run(&cmd);
+                        ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::R));
+                    }
+                }
+
+                ui.separator();
+                ui.label(format!(
+                    "Enter: open newest unread\nShift+Enter: open next {OPEN_BATCH}\nAlt+R: mark visible items read"
+                ));
             });
         self.open = open;
     }

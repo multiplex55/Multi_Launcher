@@ -53,6 +53,8 @@ impl Plugin for RssPlugin {
             if rest.is_empty() {
                 return actions::root();
             }
+            // Allow using colon-separated subcommands like `group:add`.
+            let rest = rest.replacen(':', " ", 1);
             let mut parts = rest.splitn(2, ' ');
             let sub = parts.next().unwrap_or("");
             let args = parts.next().unwrap_or("");
