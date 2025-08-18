@@ -23,7 +23,7 @@ pub fn run(command: &str) -> Result<()> {
         "add" => add(rest),
         "rm" => rm(rest),
         "refresh" => refresh(rest),
-        "ls" => ls(rest),
+        "list" => list(rest),
         "items" => items(rest),
         "open" => open(rest),
         "group" => group(rest),
@@ -181,7 +181,7 @@ fn open(args: &str) -> Result<()> {
     state.save()
 }
 
-fn ls(args: &str) -> Result<()> {
+fn list(args: &str) -> Result<()> {
     let parts = shlex::split(args).unwrap_or_default();
     let target = parts.get(0).map(|s| s.as_str()).unwrap_or("groups");
     let mut unread_only = false;

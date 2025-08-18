@@ -37,14 +37,19 @@ impl Plugin for RssPlugin {
         const PREFIX: &str = "rss";
         let trimmed = query.trim();
 
-        // Bare `rss` opens the feed management UI.
+        // Bare `rss` discovers available subcommands and offers to manage feeds.
         if trimmed.eq_ignore_ascii_case(PREFIX) {
-            return vec![Action {
-                label: "rss: manage feeds".into(),
-                desc: "RSS".into(),
-                action: "rss:dialog".into(),
-                args: None,
-            }];
+            let mut acts = actions::root();
+            acts.insert(
+                0,
+                Action {
+                    label: "rss: manage feeds".into(),
+                    desc: "RSS".into(),
+                    action: "rss:dialog".into(),
+                    args: None,
+                },
+            );
+            return acts;
         }
 
         // `rss ` (with space) should list subcommands handled below.
@@ -62,7 +67,7 @@ impl Plugin for RssPlugin {
                 "add" => actions::add(args),
                 "rm" => actions::rm(args),
                 "refresh" => actions::refresh(args),
-                "ls" => actions::ls(args),
+                "list" => actions::list(args),
                 "items" => actions::items(args),
                 "open" => actions::open(args),
                 "group" => actions::group(args),
@@ -88,11 +93,31 @@ impl Plugin for RssPlugin {
     }
 
     fn commands(&self) -> Vec<Action> {
-        vec![Action {
-            label: "rss".into(),
-            desc: "RSS feeds".into(),
-            action: "query:rss ".into(),
-            args: None,
-        }]
+        vec![
+            Action {
+                label: "rss".into(),
+                desc: "RSS feeds".into(),
+                action: "query:rss ".into(),
+                args: None,
+            },
+            Action {
+                label: "rss add".into(),
+                desc: "RSS feeds".into(),
+                action: "query:rss add ".into(),
+                args: None,
+            },
+            Action {
+                label: "rss list".into(),
+                desc: "RSS feeds".into(),
+                action: "query:rss list".into(),
+                args: None,
+            },
+            Action {
+                label: "rss rm".into(),
+                desc: "RSS feeds".into(),
+                action: "query:rss rm ".into(),
+                args: None,
+            },
+        ]
     }
 }
