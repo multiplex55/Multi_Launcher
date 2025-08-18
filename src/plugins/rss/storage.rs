@@ -117,7 +117,7 @@ pub struct FeedsFile {
 }
 
 impl FeedsFile {
-    pub const VERSION: u32 = 3;
+    pub const VERSION: u32 = 4;
 
     pub fn load() -> Self {
         load_json(&feeds_path()).unwrap_or_default()
@@ -168,9 +168,9 @@ pub struct FeedState {
     #[serde(default)]
     pub backoff_until: Option<u64>,
     /// Timestamp cursor up to which all items are considered read.
-    #[serde(default)]
-    pub catchup: Option<u64>,
-    /// Explicit set of read item IDs beyond the catch-up cursor.
+    #[serde(default, alias = "catchup")]
+    pub last_read_published: Option<u64>,
+    /// Explicit set of read item IDs beyond the read cursor.
     #[serde(default)]
     pub read: HashSet<String>,
 }
@@ -183,7 +183,7 @@ pub struct StateFile {
 }
 
 impl StateFile {
-    pub const VERSION: u32 = 3;
+    pub const VERSION: u32 = 4;
 
     pub fn load() -> Self {
         load_json(&state_path()).unwrap_or_default()

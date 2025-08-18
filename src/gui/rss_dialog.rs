@@ -66,7 +66,7 @@ impl RssDialog {
                     if let Some(fid) = &self.selected_feed {
                         let cache = storage::FeedCache::load(fid);
                         let entry = state.feeds.entry(fid.clone()).or_default();
-                        let cursor = entry.catchup.unwrap_or(0);
+                        let cursor = entry.last_read_published.unwrap_or(0);
                         let mut changed = false;
                         for item in cache.items.iter().rev() {
                             let ts = item.timestamp.unwrap_or(0);

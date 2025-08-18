@@ -142,14 +142,14 @@ impl Poller {
 
         // On first successful fetch, treat existing items as historical and
         // advance the catch-up cursor to the newest entry.
-        if entry.last_guid.is_none() && entry.catchup.is_none() {
+        if entry.last_guid.is_none() && entry.last_read_published.is_none() {
             if let Some(max_ts) = feed_model
                 .entries
                 .iter()
                 .filter_map(|e| e.published.or(e.updated).map(|d| d.timestamp() as u64))
                 .max()
             {
-                entry.catchup = Some(max_ts);
+                entry.last_read_published = Some(max_ts);
             }
             entry.last_guid = feed_model.entries.first().map(|e| e.id.clone());
             if cache_items {
