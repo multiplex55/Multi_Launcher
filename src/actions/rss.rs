@@ -59,6 +59,22 @@ fn add(args: &str) -> Result<()> {
         .and_then(|v| v.into_iter().next())
         .map(|r| r.feed_url)
         .unwrap_or_else(|| src.to_string());
+
+    // Log the normalised feed URL or YouTube identifier before attempting to add.
+    if tracing::enabled!(tracing::Level::INFO) {
+        if let Some(id) =
+            resolved.strip_prefix("https://www.youtube.com/feeds/videos.xml?channel_id=")
+        {
+            tracing::info!(channel_id = id, "adding feed");
+        } else if let Some(id) =
+            resolved.strip_prefix("https://www.youtube.com/feeds/videos.xml?playlist_id=")
+        {
+            tracing::info!(playlist_id = id, "adding feed");
+        } else {
+            tracing::info!(feed_url = %resolved, "adding feed");
+        }
+    }
+
     let mut feeds = storage::FeedsFile::load();
     let mut id_base = slugify(&resolved);
     if id_base.is_empty() {
@@ -79,7 +95,15 @@ fn add(args: &str) -> Result<()> {
         next_poll: None,
         cadence: None,
     });
-    feeds.save()?;
+
+    let res = feeds.save();
+    if tracing::enabled!(tracing::Level::INFO) {
+        match &res {
+            Ok(_) => tracing::info!(feed_id = %id, "feed added"),
+            Err(e) => tracing::info!(feed_id = %id, error = %e, "failed to add feed"),
+        }
+    }
+    res?;
     Ok(())
 }
 
