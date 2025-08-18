@@ -49,6 +49,7 @@ pub use volume_dialog::VolumeDialog;
 
 use crate::actions::folders;
 use crate::actions::{load_actions, Action};
+use crate::actions::rss;
 use crate::actions_editor::ActionsEditor;
 use crate::help_window::HelpWindow;
 use crate::history::{self, HistoryEntry};
@@ -81,6 +82,7 @@ use std::sync::{
 };
 use std::time::Instant;
 use url::Url;
+use rfd::FileDialog;
 
 const SUBCOMMANDS: &[&str] = &[
     "add", "rm", "list", "clear", "open", "new", "alias", "set", "pause", "resume", "cancel",
@@ -2045,6 +2047,60 @@ impl eframe::App for LauncherApp {
                             self.todo_dialog.open();
                         } else if a.action == "rss:dialog" {
                             self.rss_dialog.open();
+                        } else if a.action == "rss:import" {
+                            if let Some(path) = FileDialog::new()
+                                .add_filter("OPML", &["opml", "xml"])
+                                .pick_file()
+                            {
+                                match rss::import_file(&path) {
+                                    Ok(stats) => {
+                                        if self.enable_toasts {
+                                            let msg = format!(
+                                                "Imported {} feeds (duplicates {}, invalid {})",
+                                                stats.added, stats.duplicates, stats.invalid
+                                            );
+                                            push_toast(
+                                                &mut self.toasts,
+                                                Toast {
+                                                    text: msg.into(),
+                                                    kind: ToastKind::Success,
+                                                    options: ToastOptions::default()
+                                                        .duration_in_seconds(
+                                                            self.toast_duration as f64,
+                                                        ),
+                                                },
+                                            );
+                                        }
+                                        self.search();
+                                    }
+                                    Err(e) => self.set_error(format!("Failed to import: {e}")),
+                                }
+                            }
+                        } else if a.action == "rss:export" {
+                            if let Some(path) = FileDialog::new()
+                                .add_filter("OPML", &["opml", "xml"])
+                                .set_file_name("feeds.opml")
+                                .save_file()
+                            {
+                                match rss::export_file(&path) {
+                                    Ok(count) => {
+                                        if self.enable_toasts {
+                                            push_toast(
+                                                &mut self.toasts,
+                                                Toast {
+                                                    text: format!("Exported {} feeds", count).into(),
+                                                    kind: ToastKind::Success,
+                                                    options: ToastOptions::default()
+                                                        .duration_in_seconds(
+                                                            self.toast_duration as f64,
+                                                        ),
+                                                },
+                                            );
+                                        }
+                                    }
+                                    Err(e) => self.set_error(format!("Failed to export: {e}")),
+                                }
+                            }
                         } else if a.action == "todo:view" {
                             self.todo_view_dialog.open();
                         } else if let Some(idx) = a.action.strip_prefix("todo:edit:") {
@@ -2787,6 +2843,60 @@ impl eframe::App for LauncherApp {
                             self.todo_dialog.open();
                         } else if a.action == "rss:dialog" {
                             self.rss_dialog.open();
+                        } else if a.action == "rss:import" {
+                            if let Some(path) = FileDialog::new()
+                                .add_filter("OPML", &["opml", "xml"])
+                                .pick_file()
+                            {
+                                match rss::import_file(&path) {
+                                    Ok(stats) => {
+                                        if self.enable_toasts {
+                                            let msg = format!(
+                                                "Imported {} feeds (duplicates {}, invalid {})",
+                                                stats.added, stats.duplicates, stats.invalid
+                                            );
+                                            push_toast(
+                                                &mut self.toasts,
+                                                Toast {
+                                                    text: msg.into(),
+                                                    kind: ToastKind::Success,
+                                                    options: ToastOptions::default()
+                                                        .duration_in_seconds(
+                                                            self.toast_duration as f64,
+                                                        ),
+                                                },
+                                            );
+                                        }
+                                        self.search();
+                                    }
+                                    Err(e) => self.set_error(format!("Failed to import: {e}")),
+                                }
+                            }
+                        } else if a.action == "rss:export" {
+                            if let Some(path) = FileDialog::new()
+                                .add_filter("OPML", &["opml", "xml"])
+                                .set_file_name("feeds.opml")
+                                .save_file()
+                            {
+                                match rss::export_file(&path) {
+                                    Ok(count) => {
+                                        if self.enable_toasts {
+                                            push_toast(
+                                                &mut self.toasts,
+                                                Toast {
+                                                    text: format!("Exported {} feeds", count).into(),
+                                                    kind: ToastKind::Success,
+                                                    options: ToastOptions::default()
+                                                        .duration_in_seconds(
+                                                            self.toast_duration as f64,
+                                                        ),
+                                                },
+                                            );
+                                        }
+                                    }
+                                    Err(e) => self.set_error(format!("Failed to export: {e}")),
+                                }
+                            }
                         } else if a.action == "todo:view" {
                             self.todo_view_dialog.open();
                         } else if let Some(idx) = a.action.strip_prefix("todo:edit:") {
