@@ -285,6 +285,8 @@ enum ActionKind<'a> {
     CalcHistory(usize),
     BookmarkAdd(&'a str),
     BookmarkRemove(&'a str),
+    RssAdd(&'a str),
+    RssRemove(&'a str),
     FolderAdd(&'a str),
     FolderRemove(&'a str),
     HistoryClear,
@@ -419,6 +421,12 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     }
     if let Some(url) = s.strip_prefix("bookmark:remove:") {
         return ActionKind::BookmarkRemove(url);
+    }
+    if let Some(url) = s.strip_prefix("rss:add:") {
+        return ActionKind::RssAdd(url);
+    }
+    if let Some(url) = s.strip_prefix("rss:remove:") {
+        return ActionKind::RssRemove(url);
     }
     if let Some(path) = s.strip_prefix("folder:add:") {
         return ActionKind::FolderAdd(path);
@@ -736,6 +744,8 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         ActionKind::CalcHistory(i) => crate::actions::calc::copy_history_result(i),
         ActionKind::BookmarkAdd(url) => bookmarks::add(url),
         ActionKind::BookmarkRemove(url) => bookmarks::remove(url),
+        ActionKind::RssAdd(url) => rss::add(url),
+        ActionKind::RssRemove(url) => rss::remove(url),
         ActionKind::FolderAdd(path) => folders::add(path),
         ActionKind::FolderRemove(path) => folders::remove(path),
         ActionKind::HistoryClear => history::clear(),
