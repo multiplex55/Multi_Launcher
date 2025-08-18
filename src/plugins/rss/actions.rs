@@ -8,7 +8,7 @@ pub fn root() -> Vec<Action> {
         ("add", "Add feed"),
         ("rm", "Remove feed"),
         ("refresh", "Refresh feeds"),
-        ("ls", "List feeds/groups"),
+        ("list", "List feeds/groups"),
         ("items", "Show feed items"),
         ("open", "Open feed items"),
         ("group", "Manage groups"),
@@ -139,21 +139,21 @@ pub fn refresh(args: &str) -> Vec<Action> {
     }]
 }
 
-/// Handle `rss ls` subcommand.
-pub fn ls(args: &str) -> Vec<Action> {
+/// Handle `rss list` subcommand.
+pub fn list(args: &str) -> Vec<Action> {
     let trimmed = args.trim();
     if trimmed.is_empty() {
         return vec![
             Action {
-                label: "rss ls groups".into(),
+                label: "rss list groups".into(),
                 desc: "RSS".into(),
-                action: "rss:ls groups".into(),
+                action: "rss:list groups".into(),
                 args: None,
             },
             Action {
-                label: "rss ls feeds".into(),
+                label: "rss list feeds".into(),
                 desc: "RSS".into(),
-                action: "rss:ls feeds".into(),
+                action: "rss:list feeds".into(),
                 args: None,
             },
         ];
@@ -161,7 +161,7 @@ pub fn ls(args: &str) -> Vec<Action> {
     vec![Action {
         label: format!("List {trimmed}"),
         desc: "RSS".into(),
-        action: format!("rss:ls {trimmed}"),
+        action: format!("rss:list {trimmed}"),
         args: None,
     }]
 }

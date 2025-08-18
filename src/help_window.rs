@@ -131,6 +131,7 @@ fn example_queries(name: &str) -> Option<&'static [&'static str]> {
         ]),
         "clipboard" => Some(&["cb"]),
         "bookmarks" => Some(&["bm add https://example.com", "bm rm", "bm list"]),
+        "rss" => Some(&["rss add <url>", "rss list"]),
         "folders" => Some(&["f add C:/path", "f rm docs"]),
         "shell" => Some(&["sh", "sh echo hello"]),
         "system" => Some(&["sys shutdown"]),
