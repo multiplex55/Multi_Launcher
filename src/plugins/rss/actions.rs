@@ -169,21 +169,49 @@ pub fn ls(args: &str) -> Vec<Action> {
 /// Handle `rss items`.
 pub fn items(args: &str) -> Vec<Action> {
     let feeds = storage::FeedsFile::load();
+    let state = storage::StateFile::load();
     let trimmed = args.trim();
     if trimmed.is_empty() {
-        return feeds
+        let mut acts = Vec::new();
+        // All feeds summary
+        let total_unread: u32 = feeds
             .feeds
             .iter()
-            .map(|f| {
-                let title = f.title.clone().unwrap_or_else(|| f.id.clone());
-                Action {
-                    label: format!("Items for {title}"),
-                    desc: "RSS".into(),
-                    action: format!("rss:items {}", f.id),
-                    args: None,
-                }
-            })
-            .collect();
+            .map(|f| state.feeds.get(&f.id).map(|s| s.unread).unwrap_or(0))
+            .sum();
+        acts.push(Action {
+            label: format!("Items for all ({total_unread})"),
+            desc: "RSS".into(),
+            action: "rss:items all".into(),
+            args: None,
+        });
+        // Groups
+        for g in &feeds.groups {
+            let unread: u32 = feeds
+                .feeds
+                .iter()
+                .filter(|f| f.group.as_deref() == Some(g))
+                .map(|f| state.feeds.get(&f.id).map(|s| s.unread).unwrap_or(0))
+                .sum();
+            acts.push(Action {
+                label: format!("Items for group {g} ({unread})"),
+                desc: "RSS".into(),
+                action: format!("rss:items {g}"),
+                args: None,
+            });
+        }
+        // Individual feeds
+        for f in &feeds.feeds {
+            let unread = state.feeds.get(&f.id).map(|s| s.unread).unwrap_or(0);
+            let title = f.title.clone().unwrap_or_else(|| f.id.clone());
+            acts.push(Action {
+                label: format!("Items for {title} ({unread})"),
+                desc: "RSS".into(),
+                action: format!("rss:items {}", f.id),
+                args: None,
+            });
+        }
+        return acts;
     }
     vec![Action {
         label: format!("Items for {trimmed}"),
@@ -213,19 +241,19 @@ pub fn group(args: &str) -> Vec<Action> {
             Action {
                 label: "rss group add <name>".into(),
                 desc: "Add group".into(),
-                action: "query:rss group add ".into(),
+                action: "query:rss group:add ".into(),
                 args: None,
             },
             Action {
                 label: "rss group rm <name>".into(),
                 desc: "Remove group".into(),
-                action: "query:rss group rm ".into(),
+                action: "query:rss group:rm ".into(),
                 args: None,
             },
             Action {
                 label: "rss group mv <old> <new>".into(),
                 desc: "Rename group".into(),
-                action: "query:rss group mv ".into(),
+                action: "query:rss group:mv ".into(),
                 args: None,
             },
         ];
@@ -233,7 +261,7 @@ pub fn group(args: &str) -> Vec<Action> {
     vec![Action {
         label: format!("rss group {trimmed}"),
         desc: "RSS".into(),
-        action: format!("rss:group {trimmed}"),
+        action: format!("rss:group:{trimmed}"),
         args: None,
     }]
 }

@@ -26,6 +26,18 @@ pub fn run(command: &str) -> Result<()> {
         "items" => items(rest),
         "open" => open(rest),
         "group" => group(rest),
+        // Direct group maintenance verbs with colon notation: `group:add`,
+        // `group:rm`, `group:mv`.
+        "group:add" => group_add(rest.trim()),
+        "group:rm" => group_rm(rest.trim()),
+        "group:mv" => {
+            let parts = shlex::split(rest).unwrap_or_default();
+            if parts.len() >= 2 {
+                group_mv(&parts[0], &parts[1])
+            } else {
+                Ok(())
+            }
+        }
         "mark" => mark(rest),
         "import" => import(rest),
         "export" => export(rest),
