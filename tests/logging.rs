@@ -16,11 +16,18 @@ fn a_writes_log_file() {
     multi_launcher::logging::init(true, Some(path.clone()));
     tracing::info!("test");
 
-    sleep(Duration::from_millis(100));
-
-    assert!(path.exists(), "log file was not created");
-    let contents = fs::read_to_string(path).unwrap();
-    assert!(contents.contains("test"));
+    // The non-blocking logging writer flushes asynchronously, so poll the
+    // file until the entry appears or a timeout is reached.
+    for _ in 0..50 {
+        sleep(Duration::from_millis(100));
+        if path.exists() {
+            let contents = fs::read_to_string(&path).unwrap_or_default();
+            if contents.contains("test") {
+                return;
+            }
+        }
+    }
+    panic!("log file did not contain entry");
 }
 
 #[test]

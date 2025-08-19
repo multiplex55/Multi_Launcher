@@ -6,16 +6,12 @@ use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use std::thread::sleep;
 use std::time::Duration;
-use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[test]
 fn run_macro_executes_steps() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    let dir = tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
-
     let macros = vec![MacroEntry {
         label: "demo".into(),
         desc: String::new(),
@@ -45,9 +41,6 @@ fn run_macro_executes_steps() {
 #[test]
 fn macros_file_change_reload() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    let dir = tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
-
     save_macros(
         MACROS_FILE,
         &[MacroEntry {

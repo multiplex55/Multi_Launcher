@@ -7,6 +7,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use once_cell::sync::{Lazy, OnceCell};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub const MACROS_FILE: &str = "macros.json";
@@ -52,7 +53,23 @@ pub struct MacroEntry {
     pub steps: Vec<MacroStep>,
 }
 
-pub fn load_macros(path: &str) -> anyhow::Result<Vec<MacroEntry>> {
+fn macros_path<P: AsRef<Path>>(path: P) -> PathBuf {
+    let p = path.as_ref();
+    if p.is_absolute() {
+        return p.to_path_buf();
+    }
+    if let Ok(tmp) = std::env::var("CARGO_TARGET_TMPDIR") {
+        let tid = format!("{:?}", std::thread::current().id());
+        let base = PathBuf::from(tmp).join("config").join("macros").join(tid);
+        let _ = std::fs::create_dir_all(&base);
+        base.join(p)
+    } else {
+        p.to_path_buf()
+    }
+}
+
+pub fn load_macros<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<MacroEntry>> {
+    let path = macros_path(path);
     let content = std::fs::read_to_string(path).unwrap_or_default();
     if content.trim().is_empty() {
         return Ok(Vec::new());
@@ -61,7 +78,11 @@ pub fn load_macros(path: &str) -> anyhow::Result<Vec<MacroEntry>> {
     Ok(list)
 }
 
-pub fn save_macros(path: &str, macros: &[MacroEntry]) -> anyhow::Result<()> {
+pub fn save_macros<P: AsRef<Path>>(path: P, macros: &[MacroEntry]) -> anyhow::Result<()> {
+    let path = macros_path(path);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let json = serde_json::to_string_pretty(macros)?;
     std::fs::write(path, json)?;
     Ok(())
@@ -221,9 +242,9 @@ pub struct MacrosPlugin {
 
 impl MacrosPlugin {
     pub fn new() -> Self {
-        let data = Arc::new(Mutex::new(load_macros(MACROS_FILE).unwrap_or_default()));
+        let path = macros_path(MACROS_FILE);
+        let data = Arc::new(Mutex::new(load_macros(&path).unwrap_or_default()));
         let data_clone = data.clone();
-        let path = MACROS_FILE.to_string();
         let watch_path = path.clone();
         let watcher = watch_json(&watch_path, {
             let watch_path = watch_path.clone();
