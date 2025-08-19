@@ -3708,6 +3708,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn delete_note_uses_alias_and_logs_message() {
         let _lock = TEST_MUTEX.lock().unwrap();
         let dir = tempdir().unwrap();
@@ -3715,7 +3716,7 @@ mod tests {
         std::fs::create_dir_all(&notes_dir).unwrap();
         std::env::set_var("ML_NOTES_DIR", &notes_dir);
         std::env::set_var("HOME", dir.path());
-        let orig_dir = std::env::current_dir().unwrap();
+        let orig_dir = std::env::current_dir().ok();
         std::env::set_current_dir(dir.path()).unwrap();
         save_notes(&[]).unwrap();
         append_note("alpha", "# alpha\nAlias: special-name\n\ncontent").unwrap();
@@ -3742,6 +3743,8 @@ mod tests {
         let log = std::fs::read_to_string(log_path).unwrap();
         assert!(log.contains("Removed note special-name"));
 
-        std::env::set_current_dir(orig_dir).unwrap();
+        if let Some(orig_dir) = orig_dir {
+            let _ = std::env::set_current_dir(orig_dir);
+        }
     }
 }
