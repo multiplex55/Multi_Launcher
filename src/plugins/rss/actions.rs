@@ -82,7 +82,10 @@ pub fn rm(args: &str) -> Vec<Action> {
             .feeds
             .iter()
             .map(|f| {
-                let title = f.title.clone().unwrap_or_else(|| f.id.clone());
+                // Display the stored feed title when available, otherwise fall back to
+                // the feed URL instead of the internal slugged identifier. Using the
+                // slug resulted in truncated labels like `http(0)`.
+                let title = f.title.clone().unwrap_or_else(|| f.url.clone());
                 Action {
                     label: format!("Remove {title}"),
                     desc: "RSS".into(),
@@ -121,7 +124,9 @@ pub fn refresh(args: &str) -> Vec<Action> {
             });
         }
         for f in &feeds.feeds {
-            let title = f.title.clone().unwrap_or_else(|| f.id.clone());
+            // Use the feed URL as a fallback to avoid showing the slugged id such
+            // as `http(0)` when no explicit title has been stored yet.
+            let title = f.title.clone().unwrap_or_else(|| f.url.clone());
             acts.push(Action {
                 label: format!("Refresh {title}"),
                 desc: "RSS".into(),
@@ -203,7 +208,9 @@ pub fn items(args: &str) -> Vec<Action> {
         // Individual feeds
         for f in &feeds.feeds {
             let unread = state.feeds.get(&f.id).map(|s| s.unread).unwrap_or(0);
-            let title = f.title.clone().unwrap_or_else(|| f.id.clone());
+            // When no title is present use the feed URL instead of the slugged id
+            // to ensure the UI reflects the actual feed source.
+            let title = f.title.clone().unwrap_or_else(|| f.url.clone());
             acts.push(Action {
                 label: format!("Items for {title} ({unread})"),
                 desc: "RSS".into(),

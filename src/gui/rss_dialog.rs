@@ -56,7 +56,9 @@ impl RssDialog {
                     });
                     for f in feed_iter {
                         let unread = state.feeds.get(&f.id).map(|s| s.unread).unwrap_or(0);
-                        let title = f.title.clone().unwrap_or_else(|| f.id.clone());
+                        // Prefer the stored title but fall back to the feed URL instead of
+                        // the internal slug identifier to avoid labels like `http(0)`.
+                        let title = f.title.clone().unwrap_or_else(|| f.url.clone());
                         if cols[1]
                             .selectable_label(self.selected_feed.as_deref() == Some(&f.id), format!("{title} ({unread})"))
                             .clicked()
