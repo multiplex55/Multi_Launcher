@@ -163,7 +163,7 @@ pub fn current_mouse_position() -> Option<(f32, f32)> {
         tracing::error!("failed to lock MOCK_MOUSE_POSITION");
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", not(test)))]
     {
         use windows::Win32::Foundation::POINT;
         use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
@@ -175,8 +175,11 @@ pub fn current_mouse_position() -> Option<(f32, f32)> {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(any(test, not(target_os = "windows")))]
     {
+        // During tests (and on non-Windows platforms) we return a deterministic
+        // value rather than querying the real cursor position. This keeps unit
+        // tests independent of the host environment.
         Some((0.0, 0.0))
     }
 }

@@ -3,9 +3,13 @@ use std::{fs, thread::sleep, time::Duration};
 use serial_test::serial;
 use tempfile::tempdir;
 
+// Ensure this test runs before `init_without_file_creates_no_log` so that the
+// logging system is initialised with a file sink. `tracing` does not support
+// re-initialising the global subscriber, so later tests rely on the first
+// initialisation.
 #[test]
 #[serial]
-fn writes_log_file() {
+fn a_writes_log_file() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("log.txt");
 
@@ -21,7 +25,7 @@ fn writes_log_file() {
 
 #[test]
 #[serial]
-fn init_without_file_creates_no_log() {
+fn b_init_without_file_creates_no_log() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("log.txt");
 

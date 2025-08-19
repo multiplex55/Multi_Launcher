@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -9,17 +8,19 @@ use tempfile::NamedTempFile;
 
 /// Return the configuration directory for the RSS plugin.
 ///
-/// The directory and the `cache` sub-directory are created on first use so
-/// subsequent operations can assume they exist.
+/// This function ensures the base directory and the `cache` sub-directory
+/// exist every time it is called. Tests frequently remove the configuration
+/// directory to start from a clean state, so lazily caching the path (and only
+/// creating the directories once) caused subsequent operations to fail when
+/// the directory was missing. By eagerly creating the directories on each call
+/// we avoid those failures while keeping the API simple.
 pub fn ensure_config_dir() -> PathBuf {
-    static DIR: Lazy<PathBuf> = Lazy::new(|| {
-        let base = PathBuf::from("config").join("rss");
-        // Create the configuration directory and the `cache` sub directory.
-        let _ = fs::create_dir_all(&base);
-        let _ = fs::create_dir_all(base.join("cache"));
-        base
-    });
-    DIR.clone()
+    let base = PathBuf::from("config").join("rss");
+    // Ignore errors – the following operations will fail with a more useful
+    // error if the directory can't be created.
+    let _ = fs::create_dir_all(&base);
+    let _ = fs::create_dir_all(base.join("cache"));
+    base
 }
 
 fn feeds_path() -> PathBuf {

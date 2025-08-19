@@ -559,6 +559,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn ctrl_click_opens_linked_note() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
@@ -598,6 +599,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn regular_click_does_not_navigate() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
@@ -634,6 +636,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn enter_in_note_panel_inserts_newline_without_query_execution() {
         use crate::actions::Action;
         use crate::plugins::note::Note;
@@ -750,6 +753,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn note_scheme_link_opens_panel() {
         use crate::plugins::note::Note;
         use std::path::PathBuf;
