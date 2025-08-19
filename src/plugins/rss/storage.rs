@@ -16,12 +16,14 @@ use tempfile::NamedTempFile;
 /// we avoid those failures while keeping the API simple.
 ///
 /// When running inside Cargo integration tests, the `CARGO_TARGET_TMPDIR`
-/// environment variable points at a unique temporary directory. Using that as
-/// the base ensures tests run in isolation without clobbering each other's
-/// state.
+/// environment variable points at a unique temporary directory for each test
+/// binary. To avoid race conditions between concurrently executing tests within
+/// the same binary, the thread id is also incorporated so every test thread
+/// uses its own configuration directory.
 pub fn ensure_config_dir() -> PathBuf {
     let base = if let Ok(tmp) = std::env::var("CARGO_TARGET_TMPDIR") {
-        PathBuf::from(tmp).join("config").join("rss")
+        let tid = format!("{:?}", std::thread::current().id());
+        PathBuf::from(tmp).join("config").join("rss").join(tid)
     } else {
         PathBuf::from("config").join("rss")
     };
