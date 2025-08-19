@@ -86,10 +86,14 @@ fn add(args: &str) -> Result<()> {
         id = format!("{id_base}-{idx}");
         idx += 1;
     }
+    // Store the canonical feed URL both in the `url` field and as the initial
+    // title so it can be rendered meaningfully in the UI before a poll populates
+    // a feed-provided title. Without this the UI falls back to using the slugged
+    // identifier which produced labels such as `http(0)`.
     feeds.feeds.push(storage::FeedConfig {
         id: id.clone(),
-        url: resolved,
-        title: None,
+        url: resolved.clone(),
+        title: Some(resolved),
         group: None,
         last_poll: None,
         next_poll: None,
