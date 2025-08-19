@@ -268,6 +268,7 @@ mod tests {
     use crate::settings::Settings;
     use std::sync::{atomic::AtomicBool, Arc};
     use tempfile::tempdir;
+    use serial_test::serial;
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
@@ -289,6 +290,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn enter_adds_todo_with_filter_focus() {
         let dir = tempdir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
@@ -317,6 +319,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn enter_adds_todo_with_tags() {
         let dir = tempdir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
