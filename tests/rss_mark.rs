@@ -1,7 +1,10 @@
 use std::fs;
 
 use multi_launcher::actions::rss;
-use multi_launcher::plugins::rss::storage::{self, FeedCache, FeedConfig, FeedsFile, StateFile, CachedItem};
+use multi_launcher::plugins::rss::storage::{
+    self, CachedItem, FeedCache, FeedConfig, FeedsFile, StateFile,
+};
+use serial_test::serial;
 
 fn setup_feed_with_cache(items: Vec<CachedItem>) {
     let _ = fs::remove_dir_all("config/rss");
@@ -22,6 +25,7 @@ fn setup_feed_with_cache(items: Vec<CachedItem>) {
 }
 
 #[test]
+#[serial]
 fn open_marks_items_read() {
     setup_feed_with_cache(vec![CachedItem {
         guid: "a".into(),
@@ -30,7 +34,13 @@ fn open_marks_items_read() {
         timestamp: Some(1),
     }]);
     let mut state = StateFile::default();
-    state.feeds.insert("f".into(), storage::FeedState { unread: 1, ..Default::default() });
+    state.feeds.insert(
+        "f".into(),
+        storage::FeedState {
+            unread: 1,
+            ..Default::default()
+        },
+    );
     state.save().unwrap();
 
     rss::run("open f --n 1").unwrap();
@@ -42,6 +52,7 @@ fn open_marks_items_read() {
 }
 
 #[test]
+#[serial]
 fn open_copy_marks_items_read() {
     setup_feed_with_cache(vec![CachedItem {
         guid: "a".into(),
@@ -50,7 +61,13 @@ fn open_copy_marks_items_read() {
         timestamp: Some(1),
     }]);
     let mut state = StateFile::default();
-    state.feeds.insert("f".into(), storage::FeedState { unread: 1, ..Default::default() });
+    state.feeds.insert(
+        "f".into(),
+        storage::FeedState {
+            unread: 1,
+            ..Default::default()
+        },
+    );
     state.save().unwrap();
 
     rss::run("open f --n 1 --copy").unwrap();
@@ -62,14 +79,34 @@ fn open_copy_marks_items_read() {
 }
 
 #[test]
+#[serial]
 fn mark_read_and_unread_updates_state() {
     setup_feed_with_cache(vec![
-        CachedItem { guid: "a".into(), title: "A".into(), link: None, timestamp: Some(1) },
-        CachedItem { guid: "b".into(), title: "B".into(), link: None, timestamp: Some(2) },
-        CachedItem { guid: "c".into(), title: "C".into(), link: None, timestamp: Some(3) },
+        CachedItem {
+            guid: "a".into(),
+            title: "A".into(),
+            link: None,
+            timestamp: Some(1),
+        },
+        CachedItem {
+            guid: "b".into(),
+            title: "B".into(),
+            link: None,
+            timestamp: Some(2),
+        },
+        CachedItem {
+            guid: "c".into(),
+            title: "C".into(),
+            link: None,
+            timestamp: Some(3),
+        },
     ]);
     let mut state = StateFile::default();
-    let mut entry = storage::FeedState { last_read_published: Some(1), unread: 1, ..Default::default() };
+    let mut entry = storage::FeedState {
+        last_read_published: Some(1),
+        unread: 1,
+        ..Default::default()
+    };
     entry.read.insert("a".into());
     entry.read.insert("c".into());
     state.feeds.insert("f".into(), entry);
