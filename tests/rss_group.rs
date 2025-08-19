@@ -2,8 +2,10 @@ use std::fs;
 
 use multi_launcher::actions::rss;
 use multi_launcher::plugins::rss::storage::{FeedConfig, FeedsFile};
+use serial_test::serial;
 
 #[test]
+#[serial]
 fn group_add_mv_rm_updates_feeds() {
     let _ = fs::remove_dir_all("config/rss");
     let mut feeds = FeedsFile::default();
