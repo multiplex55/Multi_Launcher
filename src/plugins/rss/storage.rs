@@ -14,8 +14,17 @@ use tempfile::NamedTempFile;
 /// creating the directories once) caused subsequent operations to fail when
 /// the directory was missing. By eagerly creating the directories on each call
 /// we avoid those failures while keeping the API simple.
+///
+/// When running inside Cargo integration tests, the `CARGO_TARGET_TMPDIR`
+/// environment variable points at a unique temporary directory. Using that as
+/// the base ensures tests run in isolation without clobbering each other's
+/// state.
 pub fn ensure_config_dir() -> PathBuf {
-    let base = PathBuf::from("config").join("rss");
+    let base = if let Ok(tmp) = std::env::var("CARGO_TARGET_TMPDIR") {
+        PathBuf::from(tmp).join("config").join("rss")
+    } else {
+        PathBuf::from("config").join("rss")
+    };
     // Ignore errors – the following operations will fail with a more useful
     // error if the directory can't be created.
     let _ = fs::create_dir_all(&base);
