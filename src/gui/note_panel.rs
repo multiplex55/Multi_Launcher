@@ -108,19 +108,75 @@ impl NotePanel {
             .movable(true)
             .show(ctx, |ui| {
                 let content_id = egui::Id::new("note_content");
-                if ui.ctx().input(|i| i.modifiers.ctrl && i.key_pressed(Key::Equals)) {
+                if ui
+                    .ctx()
+                    .input(|i| i.modifiers.ctrl && i.key_pressed(Key::Equals))
+                {
                     app.note_font_size += 1.0;
                 }
-                if ui.ctx().input(|i| i.modifiers.ctrl && i.key_pressed(Key::Minus)) {
+                if ui
+                    .ctx()
+                    .input(|i| i.modifiers.ctrl && i.key_pressed(Key::Minus))
+                {
                     app.note_font_size = (app.note_font_size - 1.0).max(8.0);
                 }
-                let total_available = ui.available_size();
-                let footer_reserved_height = 90.0; // space for buttons and metadata
-                let scrollable_height = total_available.y - footer_reserved_height;
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        save_now = true;
+                    }
+                    if ui.button("Open Externally").clicked() {
+                        self.save(app);
+                        self.open_external(app);
+                    }
+                    if self.preview_mode {
+                        if ui.button("Edit").clicked() {
+                            self.preview_mode = false;
+                            ui.ctx().memory_mut(|m| m.request_focus(content_id));
+                        }
+                    } else if ui.button("Render").clicked() {
+                        self.preview_mode = true;
+                    }
+                    ui.separator();
+                    if ui.button("A-").clicked() {
+                        app.note_font_size = (app.note_font_size - 1.0).max(8.0);
+                    }
+                    if ui.button("A+").clicked() {
+                        app.note_font_size += 1.0;
+                    }
+                });
+                let tags = extract_tags(&self.note.content);
+                if !tags.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Tags:");
+                        for t in tags {
+                            if ui.link(format!("#{t}")).clicked() {
+                                app.filter_notes_by_tag(&t);
+                            }
+                        }
+                    });
+                }
+                let wiki = extract_wiki_links(&self.note.content)
+                    .into_iter()
+                    .filter(|l| slugify(l) != self.note.slug)
+                    .collect::<Vec<_>>();
+                let links = extract_links(&self.note.content);
+                if !wiki.is_empty() || !links.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Links:");
+                        for l in wiki {
+                            show_wiki_link(ui, app, &l);
+                        }
+                        for l in links {
+                            ui.hyperlink(l);
+                        }
+                    });
+                }
+                ui.separator();
+                let scroll_height = ui.available_height();
                 let resp = egui::ScrollArea::vertical()
                     .id_source(content_id)
-                    .show_viewport(ui, |ui, _viewport| {
-                        ui.set_min_height(scrollable_height);
+                    .show(ui, |ui| {
+                        ui.set_min_height(scroll_height);
                         if self.preview_mode {
                             let mut last = 0usize;
                             let content_clone = self.note.content.clone();
@@ -208,7 +264,10 @@ impl NotePanel {
                                     response.context_menu(|ui| {
                                         let mut w = width.unwrap_or(display.x);
                                         if ui
-                                            .add(egui::DragValue::new(&mut w).clamp_range(20.0..=4096.0))
+                                            .add(
+                                                egui::DragValue::new(&mut w)
+                                                    .clamp_range(20.0..=4096.0),
+                                            )
                                             .changed()
                                         {
                                             let repl = format!("![{alt}]({rel}|{:.0})", w.round());
@@ -260,11 +319,16 @@ impl NotePanel {
                             && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Period))
                         {
                             let pos = resp.rect.left_top();
-                            popup::show_tooltip_at(ctx, egui::Id::new("note_ctx_menu"), Some(pos), |ui| {
-                                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                                    self.build_textedit_menu(ui, &resp, app);
-                                });
-                            });
+                            popup::show_tooltip_at(
+                                ctx,
+                                egui::Id::new("note_ctx_menu"),
+                                Some(pos),
+                                |ui| {
+                                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                        self.build_textedit_menu(ui, &resp, app);
+                                    });
+                                },
+                            );
                         }
                         if resp.has_focus() && app.vim_mode {
                             let mut state =
@@ -319,9 +383,11 @@ impl NotePanel {
                                 });
                             }
                             if moved {
-                                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
-                                    egui::text::CCursor::new(idx),
-                                )));
+                                state
+                                    .cursor
+                                    .set_char_range(Some(egui::text::CCursorRange::one(
+                                        egui::text::CCursor::new(idx),
+                                    )));
                                 state.store(ctx, resp.id);
                             }
                         }
@@ -333,58 +399,6 @@ impl NotePanel {
                             ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
                         }
                     }
-                }
-                ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
-                        save_now = true;
-                    }
-                    if ui.button("Open Externally").clicked() {
-                        self.save(app);
-                        self.open_external(app);
-                    }
-                    if self.preview_mode {
-                        if ui.button("Edit").clicked() {
-                            self.preview_mode = false;
-                            ui.ctx().memory_mut(|m| m.request_focus(content_id));
-                        }
-                    } else if ui.button("Render").clicked() {
-                        self.preview_mode = true;
-                    }
-                    ui.separator();
-                    if ui.button("A-").clicked() {
-                        app.note_font_size = (app.note_font_size - 1.0).max(8.0);
-                    }
-                    if ui.button("A+").clicked() {
-                        app.note_font_size += 1.0;
-                    }
-                });
-                ui.separator();
-                let tags = extract_tags(&self.note.content);
-                if !tags.is_empty() {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("Tags:");
-                        for t in tags {
-                            if ui.link(format!("#{t}")).clicked() {
-                                app.filter_notes_by_tag(&t);
-                            }
-                        }
-                    });
-                }
-                let wiki = extract_wiki_links(&self.note.content)
-                    .into_iter()
-                    .filter(|l| slugify(l) != self.note.slug)
-                    .collect::<Vec<_>>();
-                let links = extract_links(&self.note.content);
-                if !wiki.is_empty() || !links.is_empty() {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("Links:");
-                        for l in wiki {
-                            show_wiki_link(ui, app, &l);
-                        }
-                        for l in links {
-                            ui.hyperlink(l);
-                        }
-                    });
                 }
             });
         if save_now || (!open && app.note_save_on_close) {
@@ -463,8 +477,7 @@ impl NotePanel {
             app.add_toast(Toast {
                 text: format!("Saved note {}", self.note.title).into(),
                 kind: ToastKind::Success,
-                options: ToastOptions::default()
-                    .duration_in_seconds(app.toast_duration as f64),
+                options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
             });
         }
     }
@@ -536,9 +549,11 @@ impl NotePanel {
                     .map(|r| r.primary.index)
                     .unwrap_or_else(|| self.note.content.chars().count());
                 self.note.content.insert_str(idx, "- [ ] ");
-                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
-                    egui::text::CCursor::new(idx + 6),
-                )));
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(
+                        egui::text::CCursor::new(idx + 6),
+                    )));
                 state.store(ui.ctx(), resp.id);
                 ui.close_menu();
             }
@@ -553,10 +568,12 @@ impl NotePanel {
                     self.note.content.insert_str(start, "**");
                     start += 2;
                     end += 2;
-                    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
-                        egui::text::CCursor::new(start),
-                        egui::text::CCursor::new(end),
-                    )));
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::two(
+                            egui::text::CCursor::new(start),
+                            egui::text::CCursor::new(end),
+                        )));
                     state.store(ui.ctx(), resp.id);
                 }
                 ui.close_menu();
@@ -572,10 +589,12 @@ impl NotePanel {
                     self.note.content.insert_str(start, "__");
                     start += 2;
                     end += 2;
-                    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
-                        egui::text::CCursor::new(start),
-                        egui::text::CCursor::new(end),
-                    )));
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::two(
+                            egui::text::CCursor::new(start),
+                            egui::text::CCursor::new(end),
+                        )));
                     state.store(ui.ctx(), resp.id);
                 }
                 ui.close_menu();
@@ -607,9 +626,11 @@ impl NotePanel {
                                 .map(|r| r.primary.index)
                                 .unwrap_or_else(|| self.note.content.chars().count());
                             self.note.content.insert_str(idx, &insert);
-                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
-                                egui::text::CCursor::new(idx + insert.chars().count()),
-                            )));
+                            state
+                                .cursor
+                                .set_char_range(Some(egui::text::CCursorRange::one(
+                                    egui::text::CCursor::new(idx + insert.chars().count()),
+                                )));
                             state.store(ui.ctx(), resp.id);
                             self.link_search.clear();
                             ui.close_menu();
@@ -625,35 +646,35 @@ impl NotePanel {
             let matcher = SkimMatcherV2::default();
             let filter = self.image_search.to_lowercase();
             let images = image_files();
-            egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                for img in images.into_iter().filter(|name| {
-                    filter.is_empty()
-                        || matcher
-                            .fuzzy_match(&name.to_lowercase(), &filter)
-                            .is_some()
-                }) {
-                    if ui.button(&img).clicked() {
-                        let insert = format!("![{0}](assets/{0})", img);
-                        let mut state = egui::widgets::text_edit::TextEditState::load(
-                            ui.ctx(),
-                            resp.id,
-                        )
-                        .unwrap_or_default();
-                        let idx = state
-                            .cursor
-                            .char_range()
-                            .map(|r| r.primary.index)
-                            .unwrap_or_else(|| self.note.content.chars().count());
-                        self.note.content.insert_str(idx, &insert);
-                        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
-                            egui::text::CCursor::new(idx + insert.chars().count()),
-                        )));
-                        state.store(ui.ctx(), resp.id);
-                        self.image_search.clear();
-                        ui.close_menu();
+            egui::ScrollArea::vertical()
+                .max_height(200.0)
+                .show(ui, |ui| {
+                    for img in images.into_iter().filter(|name| {
+                        filter.is_empty()
+                            || matcher.fuzzy_match(&name.to_lowercase(), &filter).is_some()
+                    }) {
+                        if ui.button(&img).clicked() {
+                            let insert = format!("![{0}](assets/{0})", img);
+                            let mut state =
+                                egui::widgets::text_edit::TextEditState::load(ui.ctx(), resp.id)
+                                    .unwrap_or_default();
+                            let idx = state
+                                .cursor
+                                .char_range()
+                                .map(|r| r.primary.index)
+                                .unwrap_or_else(|| self.note.content.chars().count());
+                            self.note.content.insert_str(idx, &insert);
+                            state
+                                .cursor
+                                .set_char_range(Some(egui::text::CCursorRange::one(
+                                    egui::text::CCursor::new(idx + insert.chars().count()),
+                                )));
+                            state.store(ui.ctx(), resp.id);
+                            self.image_search.clear();
+                            ui.close_menu();
+                        }
                     }
-                }
-            });
+                });
             if ui.button("Upload...").clicked() {
                 if let Some(path) = FileDialog::new()
                     .add_filter("Image", &["png", "jpg", "jpeg", "gif", "bmp", "webp"])
@@ -665,20 +686,20 @@ impl NotePanel {
                             app.set_error(format!("Failed to copy image: {e}"));
                         } else {
                             let insert = format!("![{0}](assets/{0})", fname);
-                            let mut state = egui::widgets::text_edit::TextEditState::load(
-                                ui.ctx(),
-                                resp.id,
-                            )
-                            .unwrap_or_default();
+                            let mut state =
+                                egui::widgets::text_edit::TextEditState::load(ui.ctx(), resp.id)
+                                    .unwrap_or_default();
                             let idx = state
                                 .cursor
                                 .char_range()
                                 .map(|r| r.primary.index)
                                 .unwrap_or_else(|| self.note.content.chars().count());
                             self.note.content.insert_str(idx, &insert);
-                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
-                                egui::text::CCursor::new(idx + insert.chars().count()),
-                            )));
+                            state
+                                .cursor
+                                .set_char_range(Some(egui::text::CCursorRange::one(
+                                    egui::text::CCursor::new(idx + insert.chars().count()),
+                                )));
                             state.store(ui.ctx(), resp.id);
                             self.image_search.clear();
                             ui.close_menu();
@@ -710,9 +731,11 @@ impl NotePanel {
                                     .map(|r| r.primary.index)
                                     .unwrap_or_else(|| self.note.content.chars().count());
                                 self.note.content.insert_str(idx, &insert);
-                                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
-                                    egui::text::CCursor::new(idx + insert.chars().count()),
-                                )));
+                                state
+                                    .cursor
+                                    .set_char_range(Some(egui::text::CCursorRange::one(
+                                        egui::text::CCursor::new(idx + insert.chars().count()),
+                                    )));
                                 state.store(ui.ctx(), resp.id);
                                 self.image_search.clear();
                                 ui.close_menu();
@@ -798,35 +821,34 @@ fn insert_tag_menu(
     let matcher = SkimMatcherV2::default();
     let filter = search.to_lowercase();
     let tags = available_tags();
-    egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-        for tag in tags.into_iter().filter(|t| {
-            filter.is_empty()
-                || matcher
-                    .fuzzy_match(&t.to_lowercase(), &filter)
-                    .is_some()
-        }) {
-            if ui.button(format!("#{tag}")).clicked() {
-                let insert = format!("#{tag}");
-                let mut state = egui::widgets::text_edit::TextEditState::load(
-                    ui.ctx(),
-                    resp.id,
-                )
-                .unwrap_or_default();
-                let idx = state
-                    .cursor
-                    .char_range()
-                    .map(|r| r.primary.index)
-                    .unwrap_or_else(|| content.chars().count());
-                content.insert_str(idx, &insert);
-                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
-                    egui::text::CCursor::new(idx + insert.chars().count()),
-                )));
-                state.store(ui.ctx(), resp.id);
-                search.clear();
-                ui.close_menu();
+    egui::ScrollArea::vertical()
+        .max_height(200.0)
+        .show(ui, |ui| {
+            for tag in tags.into_iter().filter(|t| {
+                filter.is_empty() || matcher.fuzzy_match(&t.to_lowercase(), &filter).is_some()
+            }) {
+                if ui.button(format!("#{tag}")).clicked() {
+                    let insert = format!("#{tag}");
+                    let mut state =
+                        egui::widgets::text_edit::TextEditState::load(ui.ctx(), resp.id)
+                            .unwrap_or_default();
+                    let idx = state
+                        .cursor
+                        .char_range()
+                        .map(|r| r.primary.index)
+                        .unwrap_or_else(|| content.chars().count());
+                    content.insert_str(idx, &insert);
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::one(
+                            egui::text::CCursor::new(idx + insert.chars().count()),
+                        )));
+                    state.store(ui.ctx(), resp.id);
+                    search.clear();
+                    ui.close_menu();
+                }
             }
-        }
-    });
+        });
 }
 
 fn extract_tags(content: &str) -> Vec<String> {
