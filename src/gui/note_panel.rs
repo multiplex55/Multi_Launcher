@@ -1,3 +1,4 @@
+use crate::actions::screenshot::{capture, Mode as ScreenshotMode};
 use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::plugin::Plugin;
@@ -638,6 +639,42 @@ impl NotePanel {
                             ui.close_menu();
                         }
                     }
+                }
+            }
+            if ui.button("Screenshot...").clicked() {
+                match capture(ScreenshotMode::Region, true) {
+                    Ok(path) => {
+                        if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
+                            let dest = assets_dir().join(fname);
+                            let result = std::fs::rename(&path, &dest).or_else(|_| {
+                                std::fs::copy(&path, &dest)
+                                    .map(|_| std::fs::remove_file(&path).unwrap_or(()))
+                            });
+                            if let Err(e) = result {
+                                app.set_error(format!("Failed to save screenshot: {e}"));
+                            } else {
+                                let insert = format!("![{0}](assets/{0})", fname);
+                                let mut state = egui::widgets::text_edit::TextEditState::load(
+                                    ui.ctx(),
+                                    resp.id,
+                                )
+                                .unwrap_or_default();
+                                let idx = state
+                                    .cursor
+                                    .char_range()
+                                    .map(|r| r.primary.index)
+                                    .unwrap_or_else(|| self.note.content.chars().count());
+                                self.note.content.insert_str(idx, &insert);
+                                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                                    egui::text::CCursor::new(idx + insert.chars().count()),
+                                )));
+                                state.store(ui.ctx(), resp.id);
+                                self.image_search.clear();
+                                ui.close_menu();
+                            }
+                        }
+                    }
+                    Err(e) => app.set_error(format!("Screenshot failed: {e}")),
                 }
             }
         });

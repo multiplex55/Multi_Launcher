@@ -90,6 +90,9 @@ static TEMPLATE_CACHE: Lazy<Arc<Mutex<HashMap<String, String>>>> =
 
 static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"#([A-Za-z0-9_]+)").unwrap());
 static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
+// Matches markdown image syntax `![alt](path)` capturing the path portion.
+static IMAGE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"!\[[^\]]*\]\(([^)]+)\)").unwrap());
 
 fn extract_tags(content: &str) -> Vec<String> {
     let mut tags: Vec<String> = Vec::new();
@@ -219,6 +222,36 @@ pub fn image_files() -> Vec<String> {
     }
     files.sort();
     files
+}
+
+/// Return a list of asset filenames that are not referenced by any note.
+///
+/// This scans all notes for markdown image links using [`IMAGE_RE`] and
+/// compares the referenced files to the contents of [`assets_dir`]. Only files
+/// directly inside the assets directory are considered.
+pub fn unused_assets() -> Vec<String> {
+    let mut referenced = HashSet::new();
+    if let Ok(notes) = load_notes() {
+        for note in notes {
+            for cap in IMAGE_RE.captures_iter(&note.content) {
+                let target = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                // Remove optional width specifier like `path|300`
+                let (path, _) = target.split_once('|').unwrap_or((target, ""));
+                if let Some(stripped) = path.strip_prefix("assets/") {
+                    if let Some(name) = std::path::Path::new(stripped)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                    {
+                        referenced.insert(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    image_files()
+        .into_iter()
+        .filter(|f| !referenced.contains(f))
+        .collect()
 }
 
 pub fn load_notes() -> anyhow::Result<Vec<Note>> {

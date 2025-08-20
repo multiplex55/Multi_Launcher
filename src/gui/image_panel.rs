@@ -53,7 +53,12 @@ impl ImagePanel {
             .open(&mut open)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.add(egui::Slider::new(&mut self.zoom, 0.1..=5.0).text("Zoom"));
+                ui.horizontal(|ui| {
+                    ui.add(egui::Slider::new(&mut self.zoom, 0.1..=5.0).text("Zoom"));
+                    if ui.button("Open in Default Viewer").clicked() {
+                        let _ = open::that(&self.path);
+                    }
+                });
                 if let Some(tex) = &self.texture {
                     let size = tex.size_vec2() * self.zoom;
                     egui::ScrollArea::both().show(ui, |ui| {

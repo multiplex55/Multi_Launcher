@@ -11,6 +11,7 @@ mod macro_dialog;
 mod note_panel;
 mod image_panel;
 mod notes_dialog;
+mod unused_assets_dialog;
 mod shell_cmd_dialog;
 mod snippet_dialog;
 mod tempfile_alias_dialog;
@@ -35,6 +36,7 @@ pub use macro_dialog::MacroDialog;
 pub use note_panel::{extract_links, show_wiki_link, NotePanel};
 pub use image_panel::ImagePanel;
 pub use notes_dialog::NotesDialog;
+pub use unused_assets_dialog::UnusedAssetsDialog;
 pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;
 pub use tempfile_alias_dialog::TempfileAliasDialog;
@@ -207,6 +209,7 @@ pub enum Panel {
     MacroDialog,
     FavDialog,
     NotesDialog,
+    UnusedAssetsDialog,
     NotePanel,
     ImagePanel,
     TodoDialog,
@@ -238,6 +241,7 @@ struct PanelStates {
     macro_dialog: bool,
     fav_dialog: bool,
     notes_dialog: bool,
+    unused_assets_dialog: bool,
     note_panel: bool,
     image_panel: bool,
     todo_dialog: bool,
@@ -322,6 +326,7 @@ pub struct LauncherApp {
     macro_dialog: MacroDialog,
     fav_dialog: FavDialog,
     notes_dialog: NotesDialog,
+    unused_assets_dialog: UnusedAssetsDialog,
     note_panels: Vec<NotePanel>,
     image_panels: Vec<ImagePanel>,
     todo_dialog: TodoDialog,
@@ -743,6 +748,7 @@ impl LauncherApp {
             macro_dialog: MacroDialog::default(),
             fav_dialog: FavDialog::default(),
             notes_dialog: NotesDialog::default(),
+            unused_assets_dialog: UnusedAssetsDialog::default(),
             note_panels: Vec::new(),
             image_panels: Vec::new(),
             todo_dialog: TodoDialog::default(),
@@ -1204,6 +1210,7 @@ impl LauncherApp {
             || self.macro_dialog.open
             || self.fav_dialog.open
             || self.notes_dialog.open
+            || self.unused_assets_dialog.open
             || !self.note_panels.is_empty()
             || !self.image_panels.is_empty()
             || self.todo_dialog.open
@@ -1316,6 +1323,10 @@ impl LauncherApp {
             Panel::NotesDialog => {
                 self.notes_dialog.open = false;
                 self.panel_states.notes_dialog = false;
+            }
+            Panel::UnusedAssetsDialog => {
+                self.unused_assets_dialog.open = false;
+                self.panel_states.unused_assets_dialog = false;
             }
             Panel::NotePanel => {
                 if let Some(mut panel) = self.note_panels.pop() {
@@ -1435,6 +1446,10 @@ impl LauncherApp {
                 self.notes_dialog.open = false;
                 self.panel_states.notes_dialog = false;
             }
+            Panel::UnusedAssetsDialog => {
+                self.unused_assets_dialog.open = false;
+                self.panel_states.unused_assets_dialog = false;
+            }
             Panel::NotePanel => {
                 if let Some(mut panel) = self.note_panels.pop() {
                     if self.note_save_on_close {
@@ -1511,6 +1526,7 @@ impl LauncherApp {
             Panel::MacroDialog => self.macro_dialog.open = true,
             Panel::FavDialog => self.fav_dialog.open = true,
             Panel::NotesDialog => self.notes_dialog.open = true,
+            Panel::UnusedAssetsDialog => self.unused_assets_dialog.open = true,
             Panel::NotePanel => {}
             Panel::ImagePanel => {}
             Panel::TodoDialog => self.todo_dialog.open = true,
@@ -1623,6 +1639,11 @@ impl LauncherApp {
         check!(self.macro_dialog.open, macro_dialog, Panel::MacroDialog);
         check!(self.fav_dialog.open, fav_dialog, Panel::FavDialog);
         check!(self.notes_dialog.open, notes_dialog, Panel::NotesDialog);
+        check!(
+            self.unused_assets_dialog.open,
+            unused_assets_dialog,
+            Panel::UnusedAssetsDialog
+        );
         check!(!self.note_panels.is_empty(), note_panel, Panel::NotePanel);
         check!(!self.image_panels.is_empty(), image_panel, Panel::ImagePanel);
         check!(self.todo_dialog.open, todo_dialog, Panel::TodoDialog);
@@ -3099,6 +3120,9 @@ impl eframe::App for LauncherApp {
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
         notes_dlg.ui(ctx, self);
         self.notes_dialog = notes_dlg;
+        let mut assets_dlg = std::mem::take(&mut self.unused_assets_dialog);
+        assets_dlg.ui(ctx, self);
+        self.unused_assets_dialog = assets_dlg;
         let mut i = 0;
         while i < self.note_panels.len() {
             let mut panel = self.note_panels.remove(i);
@@ -3366,6 +3390,7 @@ impl LauncherApp {
                             note.alias.as_ref().unwrap_or(&note.title),
                             word_count
                         );
+                        append_toast_log(&msg);
                         if self.enable_toasts {
                             push_toast(
                                 &mut self.toasts,
@@ -3376,8 +3401,6 @@ impl LauncherApp {
                                         .duration_in_seconds(self.toast_duration as f64),
                                 },
                             );
-                        } else {
-                            append_toast_log(&msg);
                         }
                         if self.query.trim_start().starts_with("note list") {
                             self.pending_query = Some(self.query.clone());

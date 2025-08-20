@@ -169,6 +169,9 @@ impl NotesDialog {
                         self.edit_idx = Some(self.entries.len());
                         self.text.clear();
                     }
+                    if ui.button("Unused Assets").clicked() {
+                        app.unused_assets_dialog.open();
+                    }
                     if ui.button("Close").clicked() {
                         close = true;
                     }
