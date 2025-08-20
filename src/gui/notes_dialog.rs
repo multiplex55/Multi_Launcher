@@ -6,20 +6,25 @@ use eframe::egui;
 pub struct NotesDialog {
     pub open: bool,
     entries: Vec<Note>,
+    index: Vec<String>,
     edit_idx: Option<usize>,
     text: String,
+    search: String,
 }
 
 impl NotesDialog {
     pub fn open(&mut self) {
         self.entries = load_notes().unwrap_or_default();
+        self.rebuild_index();
         self.open = true;
         self.edit_idx = None;
         self.text.clear();
+        self.search.clear();
     }
 
     pub fn open_edit(&mut self, idx: usize) {
         self.entries = load_notes().unwrap_or_default();
+        self.rebuild_index();
         if idx < self.entries.len() {
             self.text = self.entries[idx].content.clone();
         } else {
@@ -27,6 +32,21 @@ impl NotesDialog {
         }
         self.edit_idx = Some(idx);
         self.open = true;
+    }
+
+    fn rebuild_index(&mut self) {
+        self.index = self
+            .entries
+            .iter()
+            .map(|n| {
+                let mut txt = n.content.to_lowercase();
+                if let Some(a) = &n.alias {
+                    txt.push('\n');
+                    txt.push_str(&a.to_lowercase());
+                }
+                txt
+            })
+            .collect();
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
@@ -44,6 +64,7 @@ impl NotesDialog {
         }
         let mut close = false;
         let mut save_now = false;
+        let mut rebuild_idx = false;
         egui::Window::new("Quick Notes")
             .open(&mut self.open)
             .resizable(true)
@@ -88,6 +109,7 @@ impl NotesDialog {
                                     e.title =
                                         self.text.lines().next().unwrap_or(&e.title).to_string();
                                 }
+                                rebuild_idx = true;
                                 self.edit_idx = None;
                                 self.text.clear();
                                 save_now = true;
@@ -98,12 +120,21 @@ impl NotesDialog {
                         }
                     });
                 } else {
+                    ui.label("Search");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.search)
+                            .desired_width(f32::INFINITY),
+                    );
+                    let filter = self.search.to_lowercase();
                     let mut remove: Option<usize> = None;
                     let area_height = ui.available_height();
                     egui::ScrollArea::both()
                         .max_height(area_height)
                         .show(ui, |ui| {
                             for idx in 0..self.entries.len() {
+                                if !filter.is_empty() && !self.index[idx].contains(&filter) {
+                                    continue;
+                                }
                                 let entry = self.entries[idx].clone();
                                 ui.horizontal(|ui| {
                                     let resp = ui.label(entry.content.replace('\n', " "));
@@ -131,6 +162,7 @@ impl NotesDialog {
                         });
                     if let Some(idx) = remove {
                         self.entries.remove(idx);
+                        rebuild_idx = true;
                         save_now = true;
                     }
                     if ui.button("Add Note").clicked() {
@@ -142,6 +174,9 @@ impl NotesDialog {
                     }
                 }
             });
+        if rebuild_idx {
+            self.rebuild_index();
+        }
         if save_now {
             self.save(app);
         }
