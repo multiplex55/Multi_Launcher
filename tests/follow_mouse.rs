@@ -1,15 +1,18 @@
 use eframe::egui;
 use multi_launcher::visibility::apply_visibility;
-use multi_launcher::window_manager::{clear_mock_mouse_position, set_mock_mouse_position};
-use serial_test::serial;
+use multi_launcher::window_manager::{
+    clear_mock_mouse_position,
+    set_mock_mouse_position,
+    MOCK_MOUSE_LOCK,
+};
 
 #[path = "mock_ctx.rs"]
 mod mock_ctx;
 use mock_ctx::MockCtx;
 
 #[test]
-#[serial]
 fn cursor_failure_does_not_move_window() {
+    let _lock = MOCK_MOUSE_LOCK.lock().unwrap();
     let ctx = MockCtx::default();
     set_mock_mouse_position(None);
 

@@ -3,12 +3,12 @@ use multi_launcher::window_manager::{
     clear_mock_mouse_position,
     current_mouse_position,
     virtual_key_from_string,
+    MOCK_MOUSE_LOCK,
 };
-use serial_test::serial;
 
 #[test]
-#[serial]
 fn mock_mouse_position_override_and_clear() {
+    let _lock = MOCK_MOUSE_LOCK.lock().unwrap();
     // Set a custom mouse position and confirm it is returned
     set_mock_mouse_position(Some((10.0, 20.0)));
     assert_eq!(current_mouse_position(), Some((10.0, 20.0)));
