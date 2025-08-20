@@ -3,8 +3,10 @@ use std::fs;
 use httpmock::prelude::*;
 use multi_launcher::actions::rss;
 use multi_launcher::plugins::rss::storage::{ensure_config_dir, FeedConfig, FeedsFile, StateFile};
+use serial_test::serial;
 
 #[test]
+#[serial]
 fn refresh_polls_even_when_not_due() {
     // Ensure a clean config directory
     let _ = fs::remove_dir_all(ensure_config_dir());
