@@ -172,11 +172,11 @@ impl NotePanel {
                     });
                 }
                 ui.separator();
-                let scroll_height = ui.available_height();
+                let remaining = ui.available_height();
                 let resp = egui::ScrollArea::vertical()
                     .id_source(content_id)
+                    .max_height(remaining)
                     .show(ui, |ui| {
-                        ui.set_min_height(scroll_height);
                         if self.preview_mode {
                             let mut last = 0usize;
                             let content_clone = self.note.content.clone();
