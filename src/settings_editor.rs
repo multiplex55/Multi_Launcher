@@ -30,6 +30,7 @@ pub struct SettingsEditor {
     note_panel_w: f32,
     note_panel_h: f32,
     note_save_on_close: bool,
+    note_always_overwrite: bool,
     note_images_as_links: bool,
     note_external_editor: String,
     query_scale: f32,
@@ -115,6 +116,7 @@ impl SettingsEditor {
             note_panel_w: settings.note_panel_default_size.0,
             note_panel_h: settings.note_panel_default_size.1,
             note_save_on_close: settings.note_save_on_close,
+            note_always_overwrite: settings.note_always_overwrite,
             note_images_as_links: settings.note_images_as_links,
             note_external_editor: settings.note_external_editor.clone().unwrap_or_default(),
             query_scale: settings.query_scale.unwrap_or(1.0),
@@ -206,6 +208,7 @@ impl SettingsEditor {
             window_size: Some((self.window_w, self.window_h)),
             note_panel_default_size: (self.note_panel_w, self.note_panel_h),
             note_save_on_close: self.note_save_on_close,
+            note_always_overwrite: self.note_always_overwrite,
             note_images_as_links: self.note_images_as_links,
             note_external_editor: if self.note_external_editor.trim().is_empty() {
                 None
@@ -496,6 +499,10 @@ impl SettingsEditor {
                                     "Save note on close (Esc)",
                                 );
                                 ui.checkbox(
+                                    &mut self.note_always_overwrite,
+                                    "Always overwrite existing notes",
+                                );
+                                ui.checkbox(
                                     &mut self.note_images_as_links,
                                     "Display images as links",
                                 );
@@ -595,6 +602,7 @@ impl SettingsEditor {
                                                 Some(new_settings.page_jump),
                                                 Some(new_settings.note_panel_default_size),
                                                 Some(new_settings.note_save_on_close),
+                                                Some(new_settings.note_always_overwrite),
                                                 Some(new_settings.note_images_as_links),
                                                 new_settings.note_external_editor.clone(),
                                             );

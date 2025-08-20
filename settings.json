@@ -18,6 +18,7 @@
     320.0
   ],
   "note_save_on_close": false,
+  "note_always_overwrite": false,
   "note_images_as_links": false,
   "enable_toasts": true,
   "toast_duration": 3.0,
