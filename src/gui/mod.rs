@@ -352,6 +352,7 @@ pub struct LauncherApp {
     pub note_save_on_close: bool,
     pub note_images_as_links: bool,
     pub note_external_editor: Option<String>,
+    pub note_font_size: f32,
     pub follow_mouse: bool,
     pub static_location_enabled: bool,
     pub static_pos: Option<(i32, i32)>,
@@ -373,6 +374,7 @@ pub struct LauncherApp {
     last_timer_query: bool,
     last_stopwatch_query: bool,
     pending_query: Option<String>,
+    pub vim_mode: bool,
 }
 
 impl LauncherApp {
@@ -770,6 +772,7 @@ impl LauncherApp {
             note_save_on_close: settings.note_save_on_close,
             note_images_as_links: settings.note_images_as_links,
             note_external_editor: settings.note_external_editor.clone(),
+            note_font_size: 16.0,
             follow_mouse,
             static_location_enabled: static_enabled,
             static_pos,
@@ -793,6 +796,7 @@ impl LauncherApp {
             pending_query: None,
             action_cache: Vec::new(),
             command_cache: Vec::new(),
+            vim_mode: false,
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
