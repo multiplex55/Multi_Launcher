@@ -2,7 +2,7 @@ use std::fs;
 
 use httpmock::prelude::*;
 use multi_launcher::actions::rss;
-use multi_launcher::plugins::rss::storage::{FeedCache, FeedsFile, StateFile};
+use multi_launcher::plugins::rss::storage::{ensure_config_dir, FeedCache, FeedsFile, StateFile};
 use serial_test::serial;
 
 /// Ensure a generic RSS feed can be added, listed and refreshed.
@@ -13,7 +13,7 @@ use serial_test::serial;
 #[serial]
 fn add_list_and_refresh_feed() {
     // Clear any existing rss configuration to make the test repeatable.
-    let _ = fs::remove_dir_all("config/rss");
+    let _ = fs::remove_dir_all(ensure_config_dir());
 
     let server = MockServer::start();
     let feed_body = r#"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
@@ -61,7 +61,7 @@ fn add_list_and_refresh_feed() {
 #[serial]
 fn add_youtube_channel_feed() {
     // Remove existing config to isolate the test.
-    let _ = fs::remove_dir_all("config/rss");
+    let _ = fs::remove_dir_all(ensure_config_dir());
 
     let url = "https://www.youtube.com/feeds/videos.xml?channel_id=abc123";
     rss::run(&format!("add {url}")).unwrap();
@@ -69,4 +69,3 @@ fn add_youtube_channel_feed() {
     assert_eq!(feeds.feeds.len(), 1);
     assert_eq!(feeds.feeds[0].url, url);
 }
-

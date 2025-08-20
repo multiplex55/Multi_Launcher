@@ -1,7 +1,7 @@
 use std::fs;
 
 use multi_launcher::actions::rss;
-use multi_launcher::plugins::rss::storage;
+use multi_launcher::plugins::rss::storage::{self, ensure_config_dir};
 use serial_test::serial;
 use tempfile::NamedTempFile;
 
@@ -9,7 +9,7 @@ use tempfile::NamedTempFile;
 #[serial]
 fn import_export_opml() {
     // clean RSS config directory
-    let _ = fs::remove_dir_all("config/rss");
+    let _ = fs::remove_dir_all(ensure_config_dir());
 
     let opml = r#"<?xml version="1.0"?>
 <opml version="1.0">

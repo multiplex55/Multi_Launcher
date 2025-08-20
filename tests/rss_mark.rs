@@ -2,12 +2,12 @@ use std::fs;
 
 use multi_launcher::actions::rss;
 use multi_launcher::plugins::rss::storage::{
-    self, CachedItem, FeedCache, FeedConfig, FeedsFile, StateFile,
+    self, ensure_config_dir, CachedItem, FeedCache, FeedConfig, FeedsFile, StateFile,
 };
 use serial_test::serial;
 
 fn setup_feed_with_cache(items: Vec<CachedItem>) {
-    let _ = fs::remove_dir_all("config/rss");
+    let _ = fs::remove_dir_all(ensure_config_dir());
     let mut feeds = FeedsFile::default();
     feeds.feeds.push(FeedConfig {
         id: "f".into(),

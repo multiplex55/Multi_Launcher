@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tempfile::NamedTempFile;
 
 /// Return the configuration directory for the RSS plugin.
@@ -15,18 +16,26 @@ use tempfile::NamedTempFile;
 /// the directory was missing. By eagerly creating the directories on each call
 /// we avoid those failures while keeping the API simple.
 ///
-/// When running inside Cargo integration tests, the `CARGO_TARGET_TMPDIR`
-/// environment variable points at a unique temporary directory for each test
-/// binary. To avoid race conditions between concurrently executing tests within
-/// the same binary, the thread id is also incorporated so every test thread
-/// uses its own configuration directory.
+/// When running inside Cargo tests, the `CARGO_TARGET_TMPDIR` environment
+/// variable points at a unique temporary directory for each test binary. To
+/// isolate individual tests within the same process, the current process ID is
+/// appended to the path. The resolved directory is cached so asynchronous
+/// tasks spawned by a test use the same location regardless of which thread
+/// they run on.
 pub fn ensure_config_dir() -> PathBuf {
-    let base = if let Ok(tmp) = std::env::var("CARGO_TARGET_TMPDIR") {
-        let tid = format!("{:?}", std::thread::current().id());
-        PathBuf::from(tmp).join("config").join("rss").join(tid)
-    } else {
-        PathBuf::from("config").join("rss")
-    };
+    static BASE: OnceLock<PathBuf> = OnceLock::new();
+    let base = BASE
+        .get_or_init(|| {
+            if let Ok(tmp) = std::env::var("CARGO_TARGET_TMPDIR") {
+                PathBuf::from(tmp)
+                    .join("config")
+                    .join("rss")
+                    .join(std::process::id().to_string())
+            } else {
+                PathBuf::from("config").join("rss")
+            }
+        })
+        .clone();
     // Ignore errors – the following operations will fail with a more useful
     // error if the directory can't be created.
     let _ = fs::create_dir_all(&base);

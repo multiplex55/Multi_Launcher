@@ -2,12 +2,12 @@ use std::fs;
 
 use httpmock::prelude::*;
 use multi_launcher::actions::rss;
-use multi_launcher::plugins::rss::storage::{FeedConfig, FeedsFile, StateFile};
+use multi_launcher::plugins::rss::storage::{ensure_config_dir, FeedConfig, FeedsFile, StateFile};
 
 #[test]
 fn refresh_polls_even_when_not_due() {
     // Ensure a clean config directory
-    let _ = fs::remove_dir_all("config/rss");
+    let _ = fs::remove_dir_all(ensure_config_dir());
 
     let server = MockServer::start();
     let feed_body = r#"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
