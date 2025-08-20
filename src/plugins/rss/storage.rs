@@ -65,6 +65,11 @@ fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
     tmp.write_all(data)?;
     tmp.flush()?;
     tmp.as_file().sync_all()?;
+    // On Windows, `persist` fails if the destination already exists, so remove it
+    // first. Ignore errors in case the file is missing.
+    if path.exists() {
+        let _ = fs::remove_file(path);
+    }
     tmp.persist(path)?;
     Ok(())
 }

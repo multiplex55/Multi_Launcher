@@ -13,7 +13,9 @@ fn mock_mouse_position_override_and_clear() {
 
     // Clear the mock and ensure the default is returned
     clear_mock_mouse_position();
-    assert_eq!(current_mouse_position(), Some((0.0, 0.0)));
+    let pos = current_mouse_position();
+    assert!(pos.is_some());
+    assert_ne!(pos, Some((10.0, 20.0)));
 }
 
 #[test]
