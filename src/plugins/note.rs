@@ -307,7 +307,13 @@ pub fn available_tags() -> Vec<String> {
     CACHE.lock().map(|c| c.tags.clone()).unwrap_or_default()
 }
 
-pub fn save_note(note: &mut Note) -> anyhow::Result<()> {
+/// Persist a single note to disk.
+///
+/// Returns `Ok(true)` when the note was written successfully. If `overwrite`
+/// is `false` and a different note already exists at the target path, the
+/// function returns `Ok(false)` without modifying the file system or the note
+/// itself.
+pub fn save_note(note: &mut Note, overwrite: bool) -> anyhow::Result<bool> {
     let dir = notes_dir();
     std::fs::create_dir_all(&dir)?;
     // Ensure slug lookup is aware of existing notes
@@ -318,6 +324,9 @@ pub fn save_note(note: &mut Note) -> anyhow::Result<()> {
         note.slug.clone()
     };
     let path = dir.join(format!("{slug}.md"));
+    if path.exists() && note.path != path && !overwrite {
+        return Ok(false);
+    }
     let mut content = if note.content.starts_with("# ") {
         note.content.clone()
     } else {
@@ -333,9 +342,14 @@ pub fn save_note(note: &mut Note) -> anyhow::Result<()> {
     }
     note.alias = extract_alias(&content);
     note.tags = extract_tags(&content);
-    std::fs::write(path, content)?;
+    std::fs::write(&path, content)?;
+    if !note.path.as_os_str().is_empty() && note.path != path {
+        let _ = std::fs::remove_file(&note.path);
+    }
+    note.path = path;
+    note.slug = slug;
     refresh_cache()?;
-    Ok(())
+    Ok(true)
 }
 
 pub fn save_notes(notes: &[Note]) -> anyhow::Result<()> {
@@ -391,7 +405,7 @@ pub fn append_note(title: &str, content: &str) -> anyhow::Result<()> {
         slug: String::new(),
         alias: None,
     };
-    save_note(&mut note)
+    save_note(&mut note, true).map(|_| ())
 }
 
 pub fn remove_note(index: usize) -> anyhow::Result<()> {

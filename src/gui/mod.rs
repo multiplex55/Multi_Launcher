@@ -355,6 +355,7 @@ pub struct LauncherApp {
     pub page_jump: usize,
     pub note_panel_default_size: (f32, f32),
     pub note_save_on_close: bool,
+    pub note_always_overwrite: bool,
     pub note_images_as_links: bool,
     pub note_external_editor: Option<String>,
     pub note_font_size: f32,
@@ -446,6 +447,7 @@ impl LauncherApp {
         page_jump: Option<usize>,
         note_panel_default_size: Option<(f32, f32)>,
         note_save_on_close: Option<bool>,
+        note_always_overwrite: Option<bool>,
         note_images_as_links: Option<bool>,
         note_external_editor: Option<String>,
     ) {
@@ -518,6 +520,9 @@ impl LauncherApp {
         }
         if let Some(v) = note_save_on_close {
             self.note_save_on_close = v;
+        }
+        if let Some(v) = note_always_overwrite {
+            self.note_always_overwrite = v;
         }
         if let Some(v) = note_images_as_links {
             self.note_images_as_links = v;
@@ -776,6 +781,7 @@ impl LauncherApp {
             page_jump: settings.page_jump,
             note_panel_default_size: settings.note_panel_default_size,
             note_save_on_close: settings.note_save_on_close,
+            note_always_overwrite: settings.note_always_overwrite,
             note_images_as_links: settings.note_images_as_links,
             note_external_editor: settings.note_external_editor.clone(),
             note_font_size: 16.0,

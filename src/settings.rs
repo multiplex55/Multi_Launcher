@@ -77,6 +77,9 @@ pub struct Settings {
     /// the settings file.
     #[serde(default = "default_note_save_on_close")]
     pub note_save_on_close: bool,
+    /// When true, saving a note overwrites existing files without prompting.
+    #[serde(default)]
+    pub note_always_overwrite: bool,
     /// When true, images in notes are rendered as links to avoid loading large
     /// textures directly in the preview.
     #[serde(default)]
@@ -246,6 +249,7 @@ impl Default for Settings {
             window_size: Some((400, 220)),
             note_panel_default_size: default_note_panel_size(),
             note_save_on_close: default_note_save_on_close(),
+            note_always_overwrite: false,
             note_images_as_links: false,
             note_external_editor: None,
             enable_toasts: true,

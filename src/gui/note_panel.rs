@@ -70,6 +70,7 @@ pub struct NotePanel {
     preview_mode: bool,
     markdown_cache: CommonMarkCache,
     image_cache: HashMap<std::path::PathBuf, egui::TextureHandle>,
+    overwrite_prompt: bool,
 }
 
 impl NotePanel {
@@ -83,6 +84,7 @@ impl NotePanel {
             preview_mode: true,
             markdown_cache: CommonMarkCache::default(),
             image_cache: HashMap::new(),
+            overwrite_prompt: false,
         }
     }
 
@@ -387,8 +389,40 @@ impl NotePanel {
             });
         if save_now || (!open && app.note_save_on_close) {
             self.save(app);
+            if self.overwrite_prompt {
+                open = true;
+            }
         }
         self.open = open;
+        if self.overwrite_prompt {
+            egui::Window::new("Note exists")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("A note with this name already exists.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Overwrite").clicked() {
+                            if let Err(e) = save_note(&mut self.note, true) {
+                                app.set_error(format!("Failed to save note: {e}"));
+                            } else {
+                                self.finish_save(app);
+                                self.overwrite_prompt = false;
+                            }
+                        }
+                        if ui.button("Save as New").clicked() {
+                            self.note.slug.clear();
+                            self.note.path = std::path::PathBuf::new();
+                            if let Err(e) = save_note(&mut self.note, true) {
+                                app.set_error(format!("Failed to save note: {e}"));
+                            } else {
+                                self.finish_save(app);
+                                self.overwrite_prompt = false;
+                            }
+                        }
+                    });
+                });
+        }
     }
 
     /// Persist the current note to disk and update UI state.
@@ -409,18 +443,29 @@ impl NotePanel {
                 self.note.title = t.to_string();
             }
         }
-        if let Err(e) = save_note(&mut self.note) {
-            app.set_error(format!("Failed to save note: {e}"));
-        } else {
-            app.search();
-            app.focus_input();
-            if app.enable_toasts {
-                app.add_toast(Toast {
-                    text: format!("Saved note {}", self.note.title).into(),
-                    kind: ToastKind::Success,
-                    options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
-                });
+        match save_note(&mut self.note, app.note_always_overwrite) {
+            Ok(true) => {
+                self.finish_save(app);
             }
+            Ok(false) => {
+                self.overwrite_prompt = true;
+            }
+            Err(e) => {
+                app.set_error(format!("Failed to save note: {e}"));
+            }
+        }
+    }
+
+    fn finish_save(&self, app: &mut LauncherApp) {
+        app.search();
+        app.focus_input();
+        if app.enable_toasts {
+            app.add_toast(Toast {
+                text: format!("Saved note {}", self.note.title).into(),
+                kind: ToastKind::Success,
+                options: ToastOptions::default()
+                    .duration_in_seconds(app.toast_duration as f64),
+            });
         }
     }
 
