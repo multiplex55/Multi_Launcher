@@ -91,8 +91,7 @@ static TEMPLATE_CACHE: Lazy<Arc<Mutex<HashMap<String, String>>>> =
 static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"#([A-Za-z0-9_]+)").unwrap());
 static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
 // Matches markdown image syntax `![alt](path)` capturing the path portion.
-static IMAGE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"!\[[^\]]*\]\(([^)]+)\)").unwrap());
+static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[[^\]]*\]\(([^)]+)\)").unwrap());
 
 fn extract_tags(content: &str) -> Vec<String> {
     let mut tags: Vec<String> = Vec::new();
@@ -305,10 +304,7 @@ pub fn refresh_cache() -> anyhow::Result<()> {
 
 /// Return a list of all unique tags from the cached notes.
 pub fn available_tags() -> Vec<String> {
-    CACHE
-        .lock()
-        .map(|c| c.tags.clone())
-        .unwrap_or_default()
+    CACHE.lock().map(|c| c.tags.clone()).unwrap_or_default()
 }
 
 pub fn save_note(note: &mut Note) -> anyhow::Result<()> {
@@ -434,7 +430,9 @@ impl Default for NotePlugin {
 impl Plugin for NotePlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "note") {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "notes")
+            .or_else(|| crate::common::strip_prefix_ci(trimmed, "note"))
+        {
             let rest = rest.trim();
             if rest.is_empty() {
                 let mut actions = vec![Action {
@@ -508,6 +506,12 @@ impl Plugin for NotePlugin {
                         label: "note reload".into(),
                         desc: "Note".into(),
                         action: "note:reload".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "notes unused".into(),
+                        desc: "Note".into(),
+                        action: "note:unused_assets".into(),
                         args: None,
                     },
                 ]);
@@ -600,11 +604,8 @@ impl Plugin for NotePlugin {
                             let tag_ok = if tags.is_empty() {
                                 true
                             } else {
-                                tags.iter().all(|tag| {
-                                    n.tags
-                                        .iter()
-                                        .any(|t| t.eq_ignore_ascii_case(tag))
-                                })
+                                tags.iter()
+                                    .all(|tag| n.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
                             };
                             let text_ok = if text_filter.is_empty() {
                                 true
@@ -612,9 +613,7 @@ impl Plugin for NotePlugin {
                                 self.matcher.fuzzy_match(&n.title, &text_filter).is_some()
                                     || n.alias
                                         .as_ref()
-                                        .and_then(|a| {
-                                            self.matcher.fuzzy_match(a, &text_filter)
-                                        })
+                                        .and_then(|a| self.matcher.fuzzy_match(a, &text_filter))
                                         .is_some()
                             };
                             tag_ok && text_ok
@@ -734,6 +733,16 @@ impl Plugin for NotePlugin {
                         })
                         .collect();
                 }
+                "unused" => {
+                    if args.is_empty() {
+                        return vec![Action {
+                            label: "notes unused".into(),
+                            desc: "Note".into(),
+                            action: "note:unused_assets".into(),
+                            args: None,
+                        }];
+                    }
+                }
                 "templates" => {
                     let filter = args;
                     if let Ok(tpl) = self.templates.lock() {
@@ -852,6 +861,12 @@ impl Plugin for NotePlugin {
                 label: "note reload".into(),
                 desc: "Note".into(),
                 action: "note:reload".into(),
+                args: None,
+            },
+            Action {
+                label: "notes unused".into(),
+                desc: "Note".into(),
+                action: "note:unused_assets".into(),
                 args: None,
             },
         ]

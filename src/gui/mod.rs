@@ -7,11 +7,10 @@ mod clipboard_dialog;
 mod convert_panel;
 mod cpu_list_dialog;
 mod fav_dialog;
+mod image_panel;
 mod macro_dialog;
 mod note_panel;
-mod image_panel;
 mod notes_dialog;
-mod unused_assets_dialog;
 mod shell_cmd_dialog;
 mod snippet_dialog;
 mod tempfile_alias_dialog;
@@ -20,6 +19,7 @@ mod timer_dialog;
 mod toast_log_dialog;
 mod todo_dialog;
 mod todo_view_dialog;
+mod unused_assets_dialog;
 mod volume_dialog;
 
 pub use add_action_dialog::AddActionDialog;
@@ -32,11 +32,10 @@ pub use clipboard_dialog::ClipboardDialog;
 pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
+pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
 pub use note_panel::{extract_links, show_wiki_link, NotePanel};
-pub use image_panel::ImagePanel;
 pub use notes_dialog::NotesDialog;
-pub use unused_assets_dialog::UnusedAssetsDialog;
 pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;
 pub use tempfile_alias_dialog::TempfileAliasDialog;
@@ -45,6 +44,7 @@ pub use timer_dialog::{TimerCompletionDialog, TimerDialog};
 pub use toast_log_dialog::ToastLogDialog;
 pub use todo_dialog::TodoDialog;
 pub use todo_view_dialog::TodoViewDialog;
+pub use unused_assets_dialog::UnusedAssetsDialog;
 pub use volume_dialog::VolumeDialog;
 
 use crate::actions::folders;
@@ -445,7 +445,7 @@ impl LauncherApp {
         always_on_top: Option<bool>,
         page_jump: Option<usize>,
         note_panel_default_size: Option<(f32, f32)>,
-       note_save_on_close: Option<bool>,
+        note_save_on_close: Option<bool>,
         note_images_as_links: Option<bool>,
         note_external_editor: Option<String>,
     ) {
@@ -1645,7 +1645,11 @@ impl LauncherApp {
             Panel::UnusedAssetsDialog
         );
         check!(!self.note_panels.is_empty(), note_panel, Panel::NotePanel);
-        check!(!self.image_panels.is_empty(), image_panel, Panel::ImagePanel);
+        check!(
+            !self.image_panels.is_empty(),
+            image_panel,
+            Panel::ImagePanel
+        );
         check!(self.todo_dialog.open, todo_dialog, Panel::TodoDialog);
         check!(
             self.todo_view_dialog.open,
@@ -2050,6 +2054,8 @@ impl eframe::App for LauncherApp {
                             self.shell_cmd_dialog.open();
                         } else if a.action == "note:dialog" {
                             self.notes_dialog.open();
+                        } else if a.action == "note:unused_assets" {
+                            self.unused_assets_dialog.open();
                         } else if a.action == "bookmark:dialog" {
                             self.add_bookmark_dialog.open();
                         } else if a.action == "snippet:dialog" {
@@ -2790,9 +2796,11 @@ impl eframe::App for LauncherApp {
                                     self.shell_cmd_dialog.open();
                                 } else if a.action == "note:dialog" {
                                     self.notes_dialog.open();
+                                } else if a.action == "note:unused_assets" {
+                                    self.unused_assets_dialog.open();
                                 } else if a.action == "bookmark:dialog" {
                                     self.add_bookmark_dialog.open();
-                        } else if a.action == "snippet:dialog" {
+                                } else if a.action == "snippet:dialog" {
                             self.snippet_dialog.open();
                         } else if let Some(alias) = a.action.strip_prefix("snippet:edit:") {
                             self.snippet_dialog.open_edit(alias);
@@ -3452,13 +3460,13 @@ mod tests {
         toast_log::TOAST_LOG_FILE,
     };
     use eframe::egui;
+    use image::RgbaImage;
     use once_cell::sync::Lazy;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     };
     use tempfile::tempdir;
-    use image::RgbaImage;
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
