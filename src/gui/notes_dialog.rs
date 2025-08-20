@@ -120,10 +120,21 @@ impl NotesDialog {
                         }
                     });
                 } else {
+                    ui.horizontal(|ui| {
+                        if ui.button("Add Note").clicked() {
+                            self.edit_idx = Some(self.entries.len());
+                            self.text.clear();
+                        }
+                        if ui.button("Unused Assets").clicked() {
+                            app.unused_assets_dialog.open();
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
                     ui.label("Search");
                     ui.add(
-                        egui::TextEdit::singleline(&mut self.search)
-                            .desired_width(f32::INFINITY),
+                        egui::TextEdit::singleline(&mut self.search).desired_width(f32::INFINITY),
                     );
                     let filter = self.search.to_lowercase();
                     let mut remove: Option<usize> = None;
@@ -164,13 +175,6 @@ impl NotesDialog {
                         self.entries.remove(idx);
                         rebuild_idx = true;
                         save_now = true;
-                    }
-                    if ui.button("Add Note").clicked() {
-                        self.edit_idx = Some(self.entries.len());
-                        self.text.clear();
-                    }
-                    if ui.button("Close").clicked() {
-                        close = true;
                     }
                 }
             });

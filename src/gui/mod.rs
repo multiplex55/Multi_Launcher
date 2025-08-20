@@ -7,9 +7,9 @@ mod clipboard_dialog;
 mod convert_panel;
 mod cpu_list_dialog;
 mod fav_dialog;
+mod image_panel;
 mod macro_dialog;
 mod note_panel;
-mod image_panel;
 mod notes_dialog;
 mod shell_cmd_dialog;
 mod snippet_dialog;
@@ -19,6 +19,7 @@ mod timer_dialog;
 mod toast_log_dialog;
 mod todo_dialog;
 mod todo_view_dialog;
+mod unused_assets_dialog;
 mod volume_dialog;
 
 pub use add_action_dialog::AddActionDialog;
@@ -31,9 +32,9 @@ pub use clipboard_dialog::ClipboardDialog;
 pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
+pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
 pub use note_panel::{extract_links, show_wiki_link, NotePanel};
-pub use image_panel::ImagePanel;
 pub use notes_dialog::NotesDialog;
 pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;
@@ -43,6 +44,7 @@ pub use timer_dialog::{TimerCompletionDialog, TimerDialog};
 pub use toast_log_dialog::ToastLogDialog;
 pub use todo_dialog::TodoDialog;
 pub use todo_view_dialog::TodoViewDialog;
+pub use unused_assets_dialog::UnusedAssetsDialog;
 pub use volume_dialog::VolumeDialog;
 
 use crate::actions::folders;
@@ -207,6 +209,7 @@ pub enum Panel {
     MacroDialog,
     FavDialog,
     NotesDialog,
+    UnusedAssetsDialog,
     NotePanel,
     ImagePanel,
     TodoDialog,
@@ -238,6 +241,7 @@ struct PanelStates {
     macro_dialog: bool,
     fav_dialog: bool,
     notes_dialog: bool,
+    unused_assets_dialog: bool,
     note_panel: bool,
     image_panel: bool,
     todo_dialog: bool,
@@ -322,6 +326,7 @@ pub struct LauncherApp {
     macro_dialog: MacroDialog,
     fav_dialog: FavDialog,
     notes_dialog: NotesDialog,
+    unused_assets_dialog: UnusedAssetsDialog,
     note_panels: Vec<NotePanel>,
     image_panels: Vec<ImagePanel>,
     todo_dialog: TodoDialog,
@@ -440,7 +445,7 @@ impl LauncherApp {
         always_on_top: Option<bool>,
         page_jump: Option<usize>,
         note_panel_default_size: Option<(f32, f32)>,
-       note_save_on_close: Option<bool>,
+        note_save_on_close: Option<bool>,
         note_images_as_links: Option<bool>,
         note_external_editor: Option<String>,
     ) {
@@ -743,6 +748,7 @@ impl LauncherApp {
             macro_dialog: MacroDialog::default(),
             fav_dialog: FavDialog::default(),
             notes_dialog: NotesDialog::default(),
+            unused_assets_dialog: UnusedAssetsDialog::default(),
             note_panels: Vec::new(),
             image_panels: Vec::new(),
             todo_dialog: TodoDialog::default(),
@@ -1204,6 +1210,7 @@ impl LauncherApp {
             || self.macro_dialog.open
             || self.fav_dialog.open
             || self.notes_dialog.open
+            || self.unused_assets_dialog.open
             || !self.note_panels.is_empty()
             || !self.image_panels.is_empty()
             || self.todo_dialog.open
@@ -1316,6 +1323,10 @@ impl LauncherApp {
             Panel::NotesDialog => {
                 self.notes_dialog.open = false;
                 self.panel_states.notes_dialog = false;
+            }
+            Panel::UnusedAssetsDialog => {
+                self.unused_assets_dialog.open = false;
+                self.panel_states.unused_assets_dialog = false;
             }
             Panel::NotePanel => {
                 if let Some(mut panel) = self.note_panels.pop() {
@@ -1435,6 +1446,10 @@ impl LauncherApp {
                 self.notes_dialog.open = false;
                 self.panel_states.notes_dialog = false;
             }
+            Panel::UnusedAssetsDialog => {
+                self.unused_assets_dialog.open = false;
+                self.panel_states.unused_assets_dialog = false;
+            }
             Panel::NotePanel => {
                 if let Some(mut panel) = self.note_panels.pop() {
                     if self.note_save_on_close {
@@ -1511,6 +1526,7 @@ impl LauncherApp {
             Panel::MacroDialog => self.macro_dialog.open = true,
             Panel::FavDialog => self.fav_dialog.open = true,
             Panel::NotesDialog => self.notes_dialog.open = true,
+            Panel::UnusedAssetsDialog => self.unused_assets_dialog.open = true,
             Panel::NotePanel => {}
             Panel::ImagePanel => {}
             Panel::TodoDialog => self.todo_dialog.open = true,
@@ -1623,8 +1639,17 @@ impl LauncherApp {
         check!(self.macro_dialog.open, macro_dialog, Panel::MacroDialog);
         check!(self.fav_dialog.open, fav_dialog, Panel::FavDialog);
         check!(self.notes_dialog.open, notes_dialog, Panel::NotesDialog);
+        check!(
+            self.unused_assets_dialog.open,
+            unused_assets_dialog,
+            Panel::UnusedAssetsDialog
+        );
         check!(!self.note_panels.is_empty(), note_panel, Panel::NotePanel);
-        check!(!self.image_panels.is_empty(), image_panel, Panel::ImagePanel);
+        check!(
+            !self.image_panels.is_empty(),
+            image_panel,
+            Panel::ImagePanel
+        );
         check!(self.todo_dialog.open, todo_dialog, Panel::TodoDialog);
         check!(
             self.todo_view_dialog.open,
@@ -2029,6 +2054,8 @@ impl eframe::App for LauncherApp {
                             self.shell_cmd_dialog.open();
                         } else if a.action == "note:dialog" {
                             self.notes_dialog.open();
+                        } else if a.action == "note:unused_assets" {
+                            self.unused_assets_dialog.open();
                         } else if a.action == "bookmark:dialog" {
                             self.add_bookmark_dialog.open();
                         } else if a.action == "snippet:dialog" {
@@ -2769,9 +2796,11 @@ impl eframe::App for LauncherApp {
                                     self.shell_cmd_dialog.open();
                                 } else if a.action == "note:dialog" {
                                     self.notes_dialog.open();
+                                } else if a.action == "note:unused_assets" {
+                                    self.unused_assets_dialog.open();
                                 } else if a.action == "bookmark:dialog" {
                                     self.add_bookmark_dialog.open();
-                        } else if a.action == "snippet:dialog" {
+                                } else if a.action == "snippet:dialog" {
                             self.snippet_dialog.open();
                         } else if let Some(alias) = a.action.strip_prefix("snippet:edit:") {
                             self.snippet_dialog.open_edit(alias);
@@ -3099,6 +3128,9 @@ impl eframe::App for LauncherApp {
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
         notes_dlg.ui(ctx, self);
         self.notes_dialog = notes_dlg;
+        let mut assets_dlg = std::mem::take(&mut self.unused_assets_dialog);
+        assets_dlg.ui(ctx, self);
+        self.unused_assets_dialog = assets_dlg;
         let mut i = 0;
         while i < self.note_panels.len() {
             let mut panel = self.note_panels.remove(i);
@@ -3366,6 +3398,7 @@ impl LauncherApp {
                             note.alias.as_ref().unwrap_or(&note.title),
                             word_count
                         );
+                        append_toast_log(&msg);
                         if self.enable_toasts {
                             push_toast(
                                 &mut self.toasts,
@@ -3376,8 +3409,6 @@ impl LauncherApp {
                                         .duration_in_seconds(self.toast_duration as f64),
                                 },
                             );
-                        } else {
-                            append_toast_log(&msg);
                         }
                         if self.query.trim_start().starts_with("note list") {
                             self.pending_query = Some(self.query.clone());
@@ -3429,13 +3460,13 @@ mod tests {
         toast_log::TOAST_LOG_FILE,
     };
     use eframe::egui;
+    use image::RgbaImage;
     use once_cell::sync::Lazy;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     };
     use tempfile::tempdir;
-    use image::RgbaImage;
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
