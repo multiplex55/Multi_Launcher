@@ -351,6 +351,7 @@ pub struct LauncherApp {
     pub note_panel_default_size: (f32, f32),
     pub note_save_on_close: bool,
     pub note_images_as_links: bool,
+    pub note_external_editor: Option<String>,
     pub follow_mouse: bool,
     pub static_location_enabled: bool,
     pub static_pos: Option<(i32, i32)>,
@@ -437,8 +438,9 @@ impl LauncherApp {
         always_on_top: Option<bool>,
         page_jump: Option<usize>,
         note_panel_default_size: Option<(f32, f32)>,
-        note_save_on_close: Option<bool>,
+       note_save_on_close: Option<bool>,
         note_images_as_links: Option<bool>,
+        note_external_editor: Option<String>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -512,6 +514,9 @@ impl LauncherApp {
         }
         if let Some(v) = note_images_as_links {
             self.note_images_as_links = v;
+        }
+        if note_external_editor.is_some() {
+            self.note_external_editor = note_external_editor;
         }
     }
 
@@ -764,6 +769,7 @@ impl LauncherApp {
             note_panel_default_size: settings.note_panel_default_size,
             note_save_on_close: settings.note_save_on_close,
             note_images_as_links: settings.note_images_as_links,
+            note_external_editor: settings.note_external_editor.clone(),
             follow_mouse,
             static_location_enabled: static_enabled,
             static_pos,
@@ -3405,6 +3411,7 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
 mod tests {
     use super::*;
     use crate::{
+        common::slug::reset_slug_lookup,
         plugin::PluginManager,
         plugins::note::{append_note, load_notes, save_notes, NotePlugin},
         settings::Settings,
@@ -3593,6 +3600,7 @@ mod tests {
         let orig_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
         save_notes(&[]).unwrap();
+        reset_slug_lookup();
         append_note("alpha", "# alpha\nAlias: special-name\n\ncontent").unwrap();
 
         let ctx = egui::Context::default();

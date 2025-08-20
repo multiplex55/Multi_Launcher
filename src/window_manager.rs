@@ -5,6 +5,9 @@ static MOCK_MOUSE_POSITION: Lazy<Mutex<Option<Option<(f32, f32)>>>> =
     Lazy::new(|| Mutex::new(None));
 
 #[cfg_attr(not(test), allow(dead_code))]
+pub static MOCK_MOUSE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn set_mock_mouse_position(pos: Option<(f32, f32)>) {
     if let Ok(mut guard) = MOCK_MOUSE_POSITION.lock() {
         *guard = Some(pos);
