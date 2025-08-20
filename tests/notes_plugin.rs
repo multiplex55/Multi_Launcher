@@ -244,6 +244,28 @@ fn launcher_app_delete_note_accepts_alias() {
 }
 
 #[test]
+fn extract_tags_skips_code_fences() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _tmp = setup();
+    append_note("alpha", "```\n#foo\n```\n#bar").unwrap();
+    let notes = load_notes().unwrap();
+    let note = notes.iter().find(|n| n.title == "alpha").unwrap();
+    assert_eq!(note.tags, vec!["bar".to_string()]);
+}
+
+#[test]
+fn note_list_filters_by_multiple_tags() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _tmp = setup();
+    append_note("one", "#foo #bar").unwrap();
+    append_note("two", "#foo").unwrap();
+    let plugin = NotePlugin::default();
+    let results = plugin.search("note list #foo #bar");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "note:open:one");
+}
+
+#[test]
 fn missing_link_colored_red() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let _tmp = setup();

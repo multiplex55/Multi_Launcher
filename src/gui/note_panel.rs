@@ -1,7 +1,9 @@
 use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::plugin::Plugin;
-use crate::plugins::note::{assets_dir, image_files, load_notes, save_note, Note, NotePlugin};
+use crate::plugins::note::{
+    assets_dir, available_tags, image_files, load_notes, save_note, Note, NotePlugin,
+};
 use eframe::egui::{self, Color32};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
@@ -63,6 +65,7 @@ pub struct NotePanel {
     note: Note,
     link_search: String,
     image_search: String,
+    tag_search: String,
     preview_mode: bool,
     markdown_cache: CommonMarkCache,
     image_cache: HashMap<std::path::PathBuf, egui::TextureHandle>,
@@ -75,6 +78,7 @@ impl NotePanel {
             note,
             link_search: String::new(),
             image_search: String::new(),
+            tag_search: String::new(),
             preview_mode: true,
             markdown_cache: CommonMarkCache::default(),
             image_cache: HashMap::new(),
@@ -338,7 +342,7 @@ impl NotePanel {
                                             }
                                         }
                                     });
-                                if ui.button("Upload...").clicked() {
+                            if ui.button("Upload...").clicked() {
                                     if let Some(path) = FileDialog::new()
                                         .add_filter(
                                             "Image",
@@ -385,6 +389,14 @@ impl NotePanel {
                                     }
                                 }
                             });
+                            ui.menu_button("Insert tag", |ui| {
+                                insert_tag_menu(
+                                    ui,
+                                    &resp,
+                                    &mut self.note.content,
+                                    &mut self.tag_search,
+                                );
+                            });
                         });
                         if resp.clicked() {
                             resp.request_focus();
@@ -418,7 +430,9 @@ impl NotePanel {
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Tags:");
                         for t in tags {
-                            ui.monospace(format!("#{t}"));
+                            if ui.link(format!("#{t}")).clicked() {
+                                app.filter_notes_by_tag(&t);
+                            }
                         }
                     });
                 }
@@ -535,12 +549,66 @@ pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui
     resp
 }
 
+fn insert_tag_menu(
+    ui: &mut egui::Ui,
+    resp: &egui::Response,
+    content: &mut String,
+    search: &mut String,
+) {
+    ui.set_min_width(200.0);
+    ui.label("Insert tag:");
+    ui.text_edit_singleline(search);
+    let matcher = SkimMatcherV2::default();
+    let filter = search.to_lowercase();
+    let tags = available_tags();
+    egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+        for tag in tags.into_iter().filter(|t| {
+            filter.is_empty()
+                || matcher
+                    .fuzzy_match(&t.to_lowercase(), &filter)
+                    .is_some()
+        }) {
+            if ui.button(format!("#{tag}")).clicked() {
+                let insert = format!("#{tag}");
+                let mut state = egui::widgets::text_edit::TextEditState::load(
+                    ui.ctx(),
+                    resp.id,
+                )
+                .unwrap_or_default();
+                let idx = state
+                    .cursor
+                    .char_range()
+                    .map(|r| r.primary.index)
+                    .unwrap_or_else(|| content.chars().count());
+                content.insert_str(idx, &insert);
+                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(idx + insert.chars().count()),
+                )));
+                state.store(ui.ctx(), resp.id);
+                search.clear();
+                ui.close_menu();
+            }
+        }
+    });
+}
+
 fn extract_tags(content: &str) -> Vec<String> {
     static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"#([A-Za-z0-9_]+)").unwrap());
-    let mut tags: Vec<String> = TAG_RE
-        .captures_iter(content)
-        .map(|c| c[1].to_lowercase())
-        .collect();
+    let mut tags: Vec<String> = Vec::new();
+    let mut in_code = false;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            continue;
+        }
+        for cap in TAG_RE.captures_iter(line) {
+            tags.push(cap[1].to_lowercase());
+        }
+    }
     tags.sort();
     tags.dedup();
     tags

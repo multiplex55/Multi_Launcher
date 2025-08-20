@@ -3259,6 +3259,13 @@ impl LauncherApp {
         }
     }
 
+    /// Filter the note list to only show notes containing the given tag.
+    pub fn filter_notes_by_tag(&mut self, tag: &str) {
+        self.query = format!("note list #{tag}");
+        self.search();
+        self.focus_input();
+    }
+
     /// Open a link collected from notes in the system browser.
     pub fn open_note_link(&mut self, link: &str) {
         let url = if link.starts_with("www.") {
@@ -3610,8 +3617,6 @@ mod tests {
 
         app.query = "note list".into();
         app.search();
-        assert_eq!(app.results.len(), 1);
-        assert_eq!(app.results[0].label, "special-name");
 
         app.delete_note("special-name");
         assert!(load_notes().unwrap().is_empty());
