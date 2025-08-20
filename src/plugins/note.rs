@@ -92,10 +92,21 @@ static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"#([A-Za-z0-9_]+)").unwrap
 static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
 
 fn extract_tags(content: &str) -> Vec<String> {
-    let mut tags: Vec<String> = TAG_RE
-        .captures_iter(content)
-        .map(|c| c[1].to_lowercase())
-        .collect();
+    let mut tags: Vec<String> = Vec::new();
+    let mut in_code = false;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            continue;
+        }
+        for cap in TAG_RE.captures_iter(line) {
+            tags.push(cap[1].to_lowercase());
+        }
+    }
     tags.sort();
     tags.dedup();
     tags
@@ -257,6 +268,14 @@ pub fn refresh_cache() -> anyhow::Result<()> {
         *guard = cache;
     }
     Ok(())
+}
+
+/// Return a list of all unique tags from the cached notes.
+pub fn available_tags() -> Vec<String> {
+    CACHE
+        .lock()
+        .map(|c| c.tags.clone())
+        .unwrap_or_default()
 }
 
 pub fn save_note(note: &mut Note) -> anyhow::Result<()> {
@@ -531,24 +550,41 @@ impl Plugin for NotePlugin {
                         .collect();
                 }
                 "list" => {
-                    let filter = args;
-                    let tag_filter = filter.starts_with('#');
+                    let mut tags = Vec::new();
+                    let mut terms = Vec::new();
+                    for token in args.split_whitespace() {
+                        if let Some(t) = token.strip_prefix('#') {
+                            tags.push(t.to_lowercase());
+                        } else if !token.is_empty() {
+                            terms.push(token);
+                        }
+                    }
+                    let text_filter = terms.join(" ");
                     return guard
                         .notes
                         .iter()
                         .filter(|n| {
-                            if filter.is_empty() {
+                            let tag_ok = if tags.is_empty() {
                                 true
-                            } else if tag_filter {
-                                let tag = filter.trim_start_matches('#');
-                                n.tags.iter().any(|t| t.eq_ignore_ascii_case(tag))
                             } else {
-                                self.matcher.fuzzy_match(&n.title, filter).is_some()
+                                tags.iter().all(|tag| {
+                                    n.tags
+                                        .iter()
+                                        .any(|t| t.eq_ignore_ascii_case(tag))
+                                })
+                            };
+                            let text_ok = if text_filter.is_empty() {
+                                true
+                            } else {
+                                self.matcher.fuzzy_match(&n.title, &text_filter).is_some()
                                     || n.alias
                                         .as_ref()
-                                        .and_then(|a| self.matcher.fuzzy_match(a, filter))
+                                        .and_then(|a| {
+                                            self.matcher.fuzzy_match(a, &text_filter)
+                                        })
                                         .is_some()
-                            }
+                            };
+                            tag_ok && text_ok
                         })
                         .map(|n| Action {
                             label: n.alias.as_ref().unwrap_or(&n.title).clone(),
