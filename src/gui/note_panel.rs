@@ -12,9 +12,20 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use rfd::FileDialog;
 use std::collections::HashMap;
+use std::process::Command;
 use url::Url;
 
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
+
+#[cfg(target_os = "windows")]
+fn default_editors() -> Vec<String> {
+    vec!["notepad.exe".into()]
+}
+
+#[cfg(not(target_os = "windows"))]
+fn default_editors() -> Vec<String> {
+    vec!["nvim".into(), "vim".into()]
+}
 
 fn preprocess_note_links(content: &str, current_slug: &str) -> String {
     static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
@@ -388,6 +399,10 @@ impl NotePanel {
                     if ui.button("Save").clicked() {
                         save_now = true;
                     }
+                    if ui.button("Open Externally").clicked() {
+                        self.save(app);
+                        self.open_external(app);
+                    }
                     if self.preview_mode {
                         if ui.button("Edit").clicked() {
                             self.preview_mode = false;
@@ -460,6 +475,39 @@ impl NotePanel {
                     options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
                 });
             }
+        }
+    }
+
+    fn open_external(&self, app: &mut LauncherApp) {
+        let path = self.note.path.clone();
+        let editors: Vec<String> = if let Some(ed) = app
+            .note_external_editor
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+        {
+            vec![ed]
+        } else {
+            default_editors()
+        };
+        let mut last_err = None;
+        for editor in editors {
+            let res = if cfg!(target_os = "windows") && editor.to_lowercase().contains("nvim") {
+                Command::new("powershell")
+                    .arg("-NoLogo")
+                    .arg("-NoExit")
+                    .arg("-Command")
+                    .arg(format!("nvim {}", path.display()))
+                    .spawn()
+            } else {
+                Command::new(&editor).arg(&path).spawn()
+            };
+            match res {
+                Ok(_) => return,
+                Err(e) => last_err = Some(format!("{editor}: {e}")),
+            }
+        }
+        if let Some(err) = last_err {
+            app.set_error(format!("Failed to open note externally: {err}"));
         }
     }
 }

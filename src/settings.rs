@@ -81,6 +81,10 @@ pub struct Settings {
     /// textures directly in the preview.
     #[serde(default)]
     pub note_images_as_links: bool,
+    /// External editor command used to open notes. If `None`, a platform
+    /// specific fallback is used.
+    #[serde(default)]
+    pub note_external_editor: Option<String>,
     /// Enable toast notifications in the UI.
     #[serde(default = "default_toasts")]
     pub enable_toasts: bool,
@@ -243,6 +247,7 @@ impl Default for Settings {
             note_panel_default_size: default_note_panel_size(),
             note_save_on_close: default_note_save_on_close(),
             note_images_as_links: false,
+            note_external_editor: None,
             enable_toasts: true,
             toast_duration: default_toast_duration(),
             query_scale: Some(1.0),
