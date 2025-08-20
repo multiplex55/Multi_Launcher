@@ -63,6 +63,7 @@ fn note_root_query_returns_actions_in_order() {
             "query:note link ",
             "query:note rm ",
             "note:reload",
+            "note:unused_assets",
         ]
     );
 }
