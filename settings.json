@@ -28,6 +28,7 @@
   "list_scale": 1.0,
   "fuzzy_weight": 1.0,
   "usage_weight": 1.0,
+  "query_autocomplete": true,
   "page_jump": 5,
   "history_limit": 100,
   "clipboard_limit": 20,

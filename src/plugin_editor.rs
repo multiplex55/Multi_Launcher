@@ -119,6 +119,7 @@ impl PluginEditor {
                         Some(s.timer_refresh),
                         Some(s.disable_timer_updates),
                         Some(s.preserve_command),
+                        Some(s.query_autocomplete),
                         Some(s.net_refresh),
                         Some(s.net_unit),
                         s.screenshot_dir.clone(),

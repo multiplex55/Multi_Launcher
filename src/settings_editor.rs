@@ -1,7 +1,7 @@
 use crate::gui::LauncherApp;
 use crate::hotkey::parse_hotkey;
+use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
 use crate::settings::Settings;
-use crate::plugins::note::{NotePluginSettings, NoteExternalOpen};
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 #[cfg(target_os = "windows")]
@@ -53,6 +53,7 @@ pub struct SettingsEditor {
     timer_refresh: f32,
     disable_timer_updates: bool,
     preserve_command: bool,
+    query_autocomplete: bool,
     net_refresh: f32,
     net_unit: crate::settings::NetUnit,
     screenshot_dir: String,
@@ -140,6 +141,7 @@ impl SettingsEditor {
             timer_refresh: settings.timer_refresh,
             disable_timer_updates: settings.disable_timer_updates,
             preserve_command: settings.preserve_command,
+            query_autocomplete: settings.query_autocomplete,
             net_refresh: settings.net_refresh,
             net_unit: settings.net_unit,
             screenshot_dir: settings.screenshot_dir.clone().unwrap_or_default(),
@@ -235,6 +237,7 @@ impl SettingsEditor {
             timer_refresh: self.timer_refresh,
             disable_timer_updates: self.disable_timer_updates,
             preserve_command: self.preserve_command,
+            query_autocomplete: self.query_autocomplete,
             net_refresh: self.net_refresh,
             net_unit: self.net_unit,
             screenshot_dir: if self.screenshot_dir.trim().is_empty() {
@@ -340,6 +343,7 @@ impl SettingsEditor {
                         ui.checkbox(&mut self.hide_after_run, "Hide window after running action");
                         ui.checkbox(&mut self.always_on_top, "Always on top");
                         ui.checkbox(&mut self.preserve_command, "Preserve command after run");
+                        ui.checkbox(&mut self.query_autocomplete, "Enable query autocomplete");
                         ui.checkbox(
                             &mut self.disable_timer_updates,
                             "Disable timer auto refresh",
@@ -488,11 +492,12 @@ impl SettingsEditor {
                                 });
                         }
                         let id = ui.make_persistent_id("plugin_notes");
-                        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
-                            ui.ctx(),
-                            id,
-                            false,
-                        );
+                        let mut state =
+                            egui::collapsing_header::CollapsingState::load_with_default_open(
+                                ui.ctx(),
+                                id,
+                                false,
+                            );
                         if let Some(open) = self.expand_request {
                             state.set_open(open);
                         }
@@ -515,7 +520,10 @@ impl SettingsEditor {
                                 );
                                 ui.horizontal(|ui| {
                                     ui.label("Tag/link preview limit");
-                                    ui.add(egui::DragValue::new(&mut self.note_more_limit).clamp_range(1..=usize::MAX));
+                                    ui.add(
+                                        egui::DragValue::new(&mut self.note_more_limit)
+                                            .clamp_range(1..=usize::MAX),
+                                    );
                                 });
                                 ui.horizontal(|ui| {
                                     ui.label("External editor");
@@ -530,7 +538,9 @@ impl SettingsEditor {
                                 let mut cfg = self
                                     .plugin_settings
                                     .get("note")
-                                    .and_then(|v| serde_json::from_value::<NotePluginSettings>(v.clone()).ok())
+                                    .and_then(|v| {
+                                        serde_json::from_value::<NotePluginSettings>(v.clone()).ok()
+                                    })
                                     .unwrap_or_default();
                                 egui::ComboBox::from_label("Open externally")
                                     .selected_text(match cfg.external_open {
@@ -539,9 +549,21 @@ impl SettingsEditor {
                                         NoteExternalOpen::Notepad => "Notepad",
                                     })
                                     .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut cfg.external_open, NoteExternalOpen::Neither, "Neither");
-                                        ui.selectable_value(&mut cfg.external_open, NoteExternalOpen::Powershell, "Powershell");
-                                        ui.selectable_value(&mut cfg.external_open, NoteExternalOpen::Notepad, "Notepad");
+                                        ui.selectable_value(
+                                            &mut cfg.external_open,
+                                            NoteExternalOpen::Neither,
+                                            "Neither",
+                                        );
+                                        ui.selectable_value(
+                                            &mut cfg.external_open,
+                                            NoteExternalOpen::Powershell,
+                                            "Powershell",
+                                        );
+                                        ui.selectable_value(
+                                            &mut cfg.external_open,
+                                            NoteExternalOpen::Notepad,
+                                            "Notepad",
+                                        );
                                     });
                                 self.plugin_settings.insert(
                                     "note".into(),
@@ -625,6 +647,7 @@ impl SettingsEditor {
                                                 Some(new_settings.timer_refresh),
                                                 Some(new_settings.disable_timer_updates),
                                                 Some(new_settings.preserve_command),
+                                                Some(new_settings.query_autocomplete),
                                                 Some(new_settings.net_refresh),
                                                 Some(new_settings.net_unit),
                                                 new_settings.screenshot_dir.clone(),
@@ -658,6 +681,8 @@ impl SettingsEditor {
                                             app.clipboard_limit = new_settings.clipboard_limit;
                                             app.page_jump = new_settings.page_jump;
                                             app.preserve_command = new_settings.preserve_command;
+                                            app.query_autocomplete =
+                                                new_settings.query_autocomplete;
                                             app.net_refresh = new_settings.net_refresh;
                                             app.net_unit = new_settings.net_unit;
                                             app.screenshot_dir =
@@ -682,9 +707,10 @@ impl SettingsEditor {
                                             if let Some(val) =
                                                 new_settings.plugin_settings.get("note")
                                             {
-                                                if let Ok(cfg) = serde_json::from_value::<
-                                                    NotePluginSettings,
-                                                >(val.clone())
+                                                if let Ok(cfg) =
+                                                    serde_json::from_value::<NotePluginSettings>(
+                                                        val.clone(),
+                                                    )
                                                 {
                                                     app.note_external_open = cfg.external_open;
                                                 }

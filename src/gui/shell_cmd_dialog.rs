@@ -9,7 +9,6 @@ pub struct ShellCmdDialog {
     edit_idx: Option<usize>,
     name: String,
     args: String,
-    autocomplete: bool,
 }
 
 impl ShellCmdDialog {
@@ -19,7 +18,6 @@ impl ShellCmdDialog {
         self.edit_idx = None;
         self.name.clear();
         self.args.clear();
-        self.autocomplete = true;
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
@@ -32,7 +30,9 @@ impl ShellCmdDialog {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
-        if !self.open { return; }
+        if !self.open {
+            return;
+        }
         let mut close = false;
         let mut save_now = false;
         egui::Window::new("Shell Commands")
@@ -46,8 +46,7 @@ impl ShellCmdDialog {
                     ui.horizontal(|ui| {
                         ui.label("Command");
                         ui.add(
-                            egui::TextEdit::multiline(&mut self.args)
-                                .id_source("shell_cmd_args"),
+                            egui::TextEdit::multiline(&mut self.args).id_source("shell_cmd_args"),
                         );
                         if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             self.args.push('\n');
@@ -55,7 +54,6 @@ impl ShellCmdDialog {
                             ui.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
                         }
                     });
-                    ui.checkbox(&mut self.autocomplete, "Autocomplete");
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.name.trim().is_empty() || self.args.trim().is_empty() {
@@ -65,17 +63,15 @@ impl ShellCmdDialog {
                                     self.entries.push(ShellCmdEntry {
                                         name: self.name.clone(),
                                         args: self.args.clone(),
-                                        autocomplete: self.autocomplete,
+                                        autocomplete: true,
                                     });
                                 } else if let Some(e) = self.entries.get_mut(idx) {
                                     e.name = self.name.clone();
                                     e.args = self.args.clone();
-                                    e.autocomplete = self.autocomplete;
                                 }
                                 self.edit_idx = None;
                                 self.name.clear();
                                 self.args.clear();
-                                self.autocomplete = true;
                                 save_now = true;
                             }
                         }
@@ -85,25 +81,26 @@ impl ShellCmdDialog {
                     });
                 } else {
                     let mut remove: Option<usize> = None;
-                    egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                        for idx in 0..self.entries.len() {
-                            let name = self.entries[idx].name.clone();
-                            let args = self.entries[idx].args.clone();
-                            ui.horizontal(|ui| {
-                                ui.label(&name);
-                                ui.label(&args);
-                                if ui.button("Edit").clicked() {
-                                    self.edit_idx = Some(idx);
-                                    self.name = name.clone();
-                                    self.args = args.clone();
-                                    self.autocomplete = self.entries[idx].autocomplete;
-                                }
-                                if ui.button("Remove").clicked() {
-                                    remove = Some(idx);
-                                }
-                            });
-                        }
-                    });
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            for idx in 0..self.entries.len() {
+                                let name = self.entries[idx].name.clone();
+                                let args = self.entries[idx].args.clone();
+                                ui.horizontal(|ui| {
+                                    ui.label(&name);
+                                    ui.label(&args);
+                                    if ui.button("Edit").clicked() {
+                                        self.edit_idx = Some(idx);
+                                        self.name = name.clone();
+                                        self.args = args.clone();
+                                    }
+                                    if ui.button("Remove").clicked() {
+                                        remove = Some(idx);
+                                    }
+                                });
+                            }
+                        });
                     if let Some(idx) = remove {
                         self.entries.remove(idx);
                         save_now = true;
@@ -112,15 +109,18 @@ impl ShellCmdDialog {
                         self.edit_idx = Some(self.entries.len());
                         self.name.clear();
                         self.args.clear();
-                        self.autocomplete = true;
                     }
-                    if ui.button("Close").clicked() { close = true; }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
                 }
             });
         if save_now {
             self.save(app);
         }
-        if close { self.open = false; }
+        if close {
+            self.open = false;
+        }
     }
 }
 
@@ -130,7 +130,7 @@ mod tests {
     use crate::plugin::PluginManager;
     use crate::settings::Settings;
     use eframe::egui;
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::{atomic::AtomicBool, Arc};
     use tempfile::tempdir;
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
@@ -192,7 +192,10 @@ mod tests {
 
     #[test]
     fn shift_enter_inserts_newline() {
-        let args = run_enter_test(egui::Modifiers { shift: true, ..Default::default() });
+        let args = run_enter_test(egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        });
         assert_eq!(args, "echo hi\n");
     }
 }

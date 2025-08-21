@@ -113,6 +113,9 @@ pub struct Settings {
     /// Weight of the usage count when ranking results.
     #[serde(default = "default_usage_weight")]
     pub usage_weight: f32,
+    /// Enable autocomplete suggestions while typing a query.
+    #[serde(default = "default_query_autocomplete")]
+    pub query_autocomplete: bool,
     /// Number of results to move when paging through the action list.
     #[serde(default = "default_page_jump")]
     pub page_jump: usize,
@@ -194,6 +197,10 @@ fn default_usage_weight() -> f32 {
     1.0
 }
 
+fn default_query_autocomplete() -> bool {
+    true
+}
+
 fn default_page_jump() -> usize {
     5
 }
@@ -267,6 +274,7 @@ impl Default for Settings {
             list_scale: Some(1.0),
             fuzzy_weight: default_fuzzy_weight(),
             usage_weight: default_usage_weight(),
+            query_autocomplete: default_query_autocomplete(),
             page_jump: default_page_jump(),
             history_limit: default_history_limit(),
             clipboard_limit: default_clipboard_limit(),

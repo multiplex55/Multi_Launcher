@@ -59,8 +59,8 @@ use crate::indexer;
 use crate::launcher::launch_action;
 use crate::plugin::PluginManager;
 use crate::plugin_editor::PluginEditor;
+use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
-use crate::plugins::note::{NotePluginSettings, NoteExternalOpen};
 use crate::settings::Settings;
 use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{append_toast_log, TOAST_LOG_FILE};
@@ -68,12 +68,12 @@ use crate::usage::{self, USAGE_FILE};
 use crate::visibility::apply_visibility;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
+use fst::{IntoStreamer, Map, MapBuilder, Streamer};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use fst::{Map, MapBuilder, IntoStreamer, Streamer};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 #[cfg(test)]
@@ -377,6 +377,7 @@ pub struct LauncherApp {
     pub timer_refresh: f32,
     pub disable_timer_updates: bool,
     pub preserve_command: bool,
+    pub query_autocomplete: bool,
     pub net_refresh: f32,
     pub net_unit: crate::settings::NetUnit,
     pub screenshot_dir: Option<String>,
@@ -432,7 +433,7 @@ impl LauncherApp {
 
     fn update_suggestions(&mut self) {
         self.suggestions.clear();
-        if self.query.is_empty() {
+        if !self.query_autocomplete || self.query.is_empty() {
             return;
         }
         if let Some(ref index) = self.completion_index {
@@ -492,6 +493,7 @@ impl LauncherApp {
         timer_refresh: Option<f32>,
         disable_timer_updates: Option<bool>,
         preserve_command: Option<bool>,
+        query_autocomplete: Option<bool>,
         net_refresh: Option<f32>,
         net_unit: Option<crate::settings::NetUnit>,
         screenshot_dir: Option<String>,
@@ -550,6 +552,14 @@ impl LauncherApp {
         }
         if let Some(v) = preserve_command {
             self.preserve_command = v;
+        }
+        if let Some(v) = query_autocomplete {
+            self.query_autocomplete = v;
+            if !v {
+                self.suggestions.clear();
+            } else {
+                self.update_suggestions();
+            }
         }
         if let Some(v) = net_refresh {
             self.net_refresh = v;
@@ -860,6 +870,7 @@ impl LauncherApp {
             timer_refresh: settings.timer_refresh,
             disable_timer_updates: settings.disable_timer_updates,
             preserve_command: settings.preserve_command,
+            query_autocomplete: settings.query_autocomplete,
             net_refresh: settings.net_refresh,
             net_unit: settings.net_unit,
             screenshot_dir: settings.screenshot_dir.clone(),
@@ -2055,7 +2066,7 @@ impl eframe::App for LauncherApp {
                     self.search();
                 }
 
-                if !self.suggestions.is_empty() {
+                if self.query_autocomplete && !self.suggestions.is_empty() {
                     ui.vertical(|ui| {
                         for s in &self.suggestions {
                             ui.colored_label(Color32::GRAY, s);
@@ -2100,7 +2111,10 @@ impl eframe::App for LauncherApp {
                 let tab = ctx.input(|i| i.key_pressed(egui::Key::Tab));
                 let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
                 let mut accepted_suggestion = false;
-                if !self.suggestions.is_empty() && (tab || enter && self.selected.is_none()) {
+                if self.query_autocomplete
+                    && !self.suggestions.is_empty()
+                    && (tab || enter && self.selected.is_none())
+                {
                     if let Some(s) = self.suggestions.first().cloned() {
                         if s != self.query.to_lowercase() {
                             self.query = s;
