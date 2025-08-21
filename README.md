@@ -452,6 +452,7 @@ RUST_LOG=info cargo run
 - Press the help hotkey (F1 by default) to display a quick list of available commands.
 - Right click a folder result to set a custom alias for easier access.
 - Right click a note entry to edit, remove, or open it in Neovim.
+- On Windows, Neovim launches via PowerShell 7 when available, then `powershell.exe`, falling back to `cmd.exe`.
 - Use the *Snapshot* button in Settings when adjusting static window placement.
 - Searches are case-insensitive and also match on command aliases.
 - Tweak `fuzzy_weight` and `usage_weight` if you want results to favour name matches or past usage differently.

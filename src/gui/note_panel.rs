@@ -16,6 +16,8 @@ use regex::Regex;
 use rfd::FileDialog;
 use std::collections::HashMap;
 use std::process::Command;
+#[cfg(target_os = "windows")]
+use std::{env, path::{Path, PathBuf}};
 use url::Url;
 
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
@@ -765,19 +767,27 @@ impl NotePanel {
         };
         let mut last_err = None;
         for editor in editors {
-            let res = if cfg!(target_os = "windows") && editor.to_lowercase().contains("nvim") {
-                Command::new("powershell")
-                    .arg("-NoLogo")
-                    .arg("-NoExit")
-                    .arg("-Command")
-                    .arg(format!("nvim {}", path.display()))
-                    .spawn()
+            #[allow(unused_mut)]
+            let (mut cmd, cmd_str) = if cfg!(target_os = "windows")
+                && editor.to_lowercase().contains("nvim")
+            {
+                #[cfg(target_os = "windows")]
+                {
+                    build_nvim_command(&path)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    unreachable!()
+                }
             } else {
-                Command::new(&editor).arg(&path).spawn()
+                let mut c = Command::new(&editor);
+                c.arg(&path);
+                let s = format!("{:?}", c);
+                (c, s)
             };
-            match res {
+            match cmd.spawn() {
                 Ok(_) => return,
-                Err(e) => last_err = Some(format!("{editor}: {e}")),
+                Err(e) => last_err = Some(format!("{cmd_str}: {e}")),
             }
         }
         if let Some(err) = last_err {
@@ -849,6 +859,45 @@ fn insert_tag_menu(
                 }
             }
         });
+}
+
+#[cfg(target_os = "windows")]
+fn detect_shell() -> PathBuf {
+    let ps7_path = env::var("ML_PWSH7_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe"));
+    if ps7_path.exists() {
+        return ps7_path;
+    }
+    let has_powershell = env::var_os("PATH")
+        .map(|paths| env::split_paths(&paths).any(|p| p.join("powershell.exe").exists()))
+        .unwrap_or(false);
+    if has_powershell {
+        PathBuf::from("powershell.exe")
+    } else {
+        PathBuf::from("cmd.exe")
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn build_nvim_command(note_path: &Path) -> (Command, String) {
+    let shell = detect_shell();
+    let mut cmd = Command::new(&shell);
+    if shell
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("cmd.exe"))
+        .unwrap_or(false)
+    {
+        cmd.arg("/C").arg("nvim").arg(note_path);
+    } else {
+        cmd.arg("-NoLogo")
+            .arg("-NoExit")
+            .arg("-Command")
+            .arg(format!("nvim {}", note_path.display()));
+    }
+    let cmd_str = format!("{:?}", cmd);
+    (cmd, cmd_str)
 }
 
 fn extract_tags(content: &str) -> Vec<String> {

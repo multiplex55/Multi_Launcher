@@ -34,6 +34,9 @@ pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
 pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
+#[cfg(target_os = "windows")]
+pub use note_panel::{build_nvim_command, extract_links, show_wiki_link, NotePanel};
+#[cfg(not(target_os = "windows"))]
 pub use note_panel::{extract_links, show_wiki_link, NotePanel};
 pub use notes_dialog::NotesDialog;
 pub use shell_cmd_dialog::ShellCmdDialog;
