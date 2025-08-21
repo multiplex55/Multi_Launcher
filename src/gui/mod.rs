@@ -60,6 +60,7 @@ use crate::launcher::launch_action;
 use crate::plugin::PluginManager;
 use crate::plugin_editor::PluginEditor;
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
+use crate::plugins::note::{NotePluginSettings, NoteExternalOpen};
 use crate::settings::Settings;
 use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{append_toast_log, TOAST_LOG_FILE};
@@ -361,6 +362,7 @@ pub struct LauncherApp {
     pub note_always_overwrite: bool,
     pub note_images_as_links: bool,
     pub note_external_editor: Option<String>,
+    pub note_external_open: NoteExternalOpen,
     pub note_font_size: f32,
     pub follow_mouse: bool,
     pub static_location_enabled: bool,
@@ -699,6 +701,13 @@ impl LauncherApp {
         let follow_mouse = settings.follow_mouse;
         let static_enabled = settings.static_location_enabled;
 
+        let note_external_open = settings
+            .plugin_settings
+            .get("note")
+            .and_then(|v| serde_json::from_value::<NotePluginSettings>(v.clone()).ok())
+            .map(|s| s.external_open)
+            .unwrap_or(NoteExternalOpen::Neither);
+
         let settings_editor = SettingsEditor::new_with_plugins(&settings);
         let plugin_editor = PluginEditor::new(&settings);
         let mut app = Self {
@@ -787,6 +796,7 @@ impl LauncherApp {
             note_always_overwrite: settings.note_always_overwrite,
             note_images_as_links: settings.note_images_as_links,
             note_external_editor: settings.note_external_editor.clone(),
+            note_external_open,
             note_font_size: 16.0,
             follow_mouse,
             static_location_enabled: static_enabled,

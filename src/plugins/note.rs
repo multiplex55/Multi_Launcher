@@ -1,6 +1,8 @@
 use crate::actions::Action;
 use crate::common::slug::{register_slug, reset_slug_lookup, slugify, unique_slug};
 use crate::plugin::Plugin;
+use eframe::egui;
+use serde::{Deserialize, Serialize};
 use chrono::Local;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -9,6 +11,26 @@ use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoteExternalOpen {
+    Neither,
+    Powershell,
+    Notepad,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotePluginSettings {
+    pub external_open: NoteExternalOpen,
+}
+
+impl Default for NotePluginSettings {
+    fn default() -> Self {
+        Self {
+            external_open: NoteExternalOpen::Neither,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Note {
@@ -421,6 +443,7 @@ pub struct NotePlugin {
     matcher: SkimMatcherV2,
     data: Arc<Mutex<NoteCache>>,
     templates: Arc<Mutex<HashMap<String, String>>>,
+    external_open: NoteExternalOpen,
 }
 
 impl NotePlugin {
@@ -431,6 +454,7 @@ impl NotePlugin {
             matcher: SkimMatcherV2::default(),
             data: CACHE.clone(),
             templates: TEMPLATE_CACHE.clone(),
+            external_open: NoteExternalOpen::Neither,
         }
     }
 }
@@ -884,5 +908,40 @@ impl Plugin for NotePlugin {
                 args: None,
             },
         ]
+    }
+
+    fn default_settings(&self) -> Option<serde_json::Value> {
+        serde_json::to_value(NotePluginSettings::default()).ok()
+    }
+
+    fn apply_settings(&mut self, value: &serde_json::Value) {
+        if let Ok(cfg) = serde_json::from_value::<NotePluginSettings>(value.clone()) {
+            self.external_open = cfg.external_open;
+        }
+    }
+
+    fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
+        let mut cfg: NotePluginSettings =
+            serde_json::from_value(value.clone()).unwrap_or_default();
+        egui::ComboBox::from_label("Open externally")
+            .selected_text(match cfg.external_open {
+                NoteExternalOpen::Neither => "Neither",
+                NoteExternalOpen::Powershell => "Powershell",
+                NoteExternalOpen::Notepad => "Notepad",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut cfg.external_open, NoteExternalOpen::Neither, "Neither");
+                ui.selectable_value(
+                    &mut cfg.external_open,
+                    NoteExternalOpen::Powershell,
+                    "Powershell",
+                );
+                ui.selectable_value(&mut cfg.external_open, NoteExternalOpen::Notepad, "Notepad");
+            });
+        match serde_json::to_value(&cfg) {
+            Ok(v) => *value = v,
+            Err(e) => tracing::error!("failed to serialize note settings: {e}"),
+        }
+        self.external_open = cfg.external_open;
     }
 }
