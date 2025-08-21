@@ -76,7 +76,14 @@ pub fn toggle_process_mute(pid: u32) {
 pub fn recycle_clean() {
     #[cfg(target_os = "windows")]
     {
-        std::thread::spawn(|| {
+        // Emptying the recycle bin can take a noticeable amount of time on
+        // Windows.  Running it on the current thread would block the UI and
+        // cause `launch_action` to return slowly, which in turn makes the
+        // `recycle_plugin` test fail.  Spawn a background thread instead so
+        // the command returns immediately while the cleanup happens
+        // asynchronously.  The `send_event` call notifies the app once the
+        // operation has finished.
+        let _ = std::thread::spawn(move || {
             let res = super::super::launcher::clean_recycle_bin()
                 .map_err(|e| format!("{e:?}"));
             crate::gui::send_event(crate::gui::WatchEvent::Recycle(res));
