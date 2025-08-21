@@ -9,6 +9,7 @@ pub struct ShellCmdDialog {
     edit_idx: Option<usize>,
     name: String,
     args: String,
+    autocomplete: bool,
 }
 
 impl ShellCmdDialog {
@@ -18,6 +19,7 @@ impl ShellCmdDialog {
         self.edit_idx = None;
         self.name.clear();
         self.args.clear();
+        self.autocomplete = true;
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
@@ -53,21 +55,28 @@ impl ShellCmdDialog {
                             ui.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
                         }
                     });
+                    ui.checkbox(&mut self.autocomplete, "Autocomplete");
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.name.trim().is_empty() || self.args.trim().is_empty() {
                                 app.set_error("Both fields required".into());
                             } else {
                                 if idx == self.entries.len() {
-                                    self.entries.push(ShellCmdEntry { name: self.name.clone(), args: self.args.clone() });
+                                    self.entries.push(ShellCmdEntry {
+                                        name: self.name.clone(),
+                                        args: self.args.clone(),
+                                        autocomplete: self.autocomplete,
+                                    });
                                 } else if let Some(e) = self.entries.get_mut(idx) {
                                     e.name = self.name.clone();
                                     e.args = self.args.clone();
+                                    e.autocomplete = self.autocomplete;
                                 }
                                 self.edit_idx = None;
                                 self.name.clear();
                                 self.args.clear();
-                                    save_now = true;
+                                self.autocomplete = true;
+                                save_now = true;
                             }
                         }
                         if ui.button("Cancel").clicked() {
@@ -87,6 +96,7 @@ impl ShellCmdDialog {
                                     self.edit_idx = Some(idx);
                                     self.name = name.clone();
                                     self.args = args.clone();
+                                    self.autocomplete = self.entries[idx].autocomplete;
                                 }
                                 if ui.button("Remove").clicked() {
                                     remove = Some(idx);
@@ -102,6 +112,7 @@ impl ShellCmdDialog {
                         self.edit_idx = Some(self.entries.len());
                         self.name.clear();
                         self.args.clear();
+                        self.autocomplete = true;
                     }
                     if ui.button("Close").clicked() { close = true; }
                 }

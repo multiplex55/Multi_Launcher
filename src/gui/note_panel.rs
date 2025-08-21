@@ -870,7 +870,7 @@ impl NotePanel {
 }
 
 pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui::Response {
-    // Display wiki style links with brackets and allow Ctrl+click to
+    // Display wiki style links with brackets and allow clicking to
     // navigate to the referenced note. Missing targets are colored red.
     let slug = slugify(l);
     let exists = load_notes()
@@ -886,7 +886,7 @@ pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui
                 .sense(egui::Sense::click()),
         )
     };
-    if resp.clicked() && ui.ctx().input(|i| i.modifiers.ctrl) {
+    if resp.clicked() {
         app.open_note_panel(&slug, None);
     }
     resp
@@ -1056,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_click_opens_linked_note() {
+    fn click_opens_linked_note() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         let mut rect = egui::Rect::NOTHING;
@@ -1069,19 +1069,18 @@ mod tests {
 
         let pos = rect.center();
         let mut input = egui::RawInput::default();
-        input.modifiers.ctrl = true;
         input.events.push(egui::Event::PointerMoved(pos));
         input.events.push(egui::Event::PointerButton {
             pos,
             button: egui::PointerButton::Primary,
             pressed: true,
-            modifiers: egui::Modifiers::CTRL,
+            modifiers: egui::Modifiers::default(),
         });
         input.events.push(egui::Event::PointerButton {
             pos,
             button: egui::PointerButton::Primary,
             pressed: false,
-            modifiers: egui::Modifiers::CTRL,
+            modifiers: egui::Modifiers::default(),
         });
 
         let _ = ctx.run(input, |ctx| {
@@ -1092,42 +1091,6 @@ mod tests {
 
         assert_eq!(app.note_panels.len(), 1);
         assert_eq!(slugify(&app.note_panels[0].note.title), "second-note");
-    }
-
-    #[test]
-    fn regular_click_does_not_navigate() {
-        let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
-        let mut rect = egui::Rect::NOTHING;
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                rect = show_wiki_link(ui, &mut app, "Another Note").rect;
-            });
-        });
-
-        let pos = rect.center();
-        let mut input = egui::RawInput::default();
-        input.events.push(egui::Event::PointerMoved(pos));
-        input.events.push(egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: true,
-            modifiers: egui::Modifiers::default(),
-        });
-        input.events.push(egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: egui::Modifiers::default(),
-        });
-
-        let _ = ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                show_wiki_link(ui, &mut app, "Another Note");
-            });
-        });
-
-        assert!(app.note_panels.is_empty());
     }
 
     #[test]

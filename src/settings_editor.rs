@@ -1,7 +1,7 @@
 use crate::gui::LauncherApp;
 use crate::hotkey::parse_hotkey;
 use crate::settings::Settings;
-use crate::plugins::note::NotePluginSettings;
+use crate::plugins::note::{NotePluginSettings, NoteExternalOpen};
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 #[cfg(target_os = "windows")]
@@ -445,6 +445,9 @@ impl SettingsEditor {
                         let enabled_list = app.enabled_plugins_list();
                         for plugin in app.plugins.iter_mut() {
                             let name = plugin.name().to_string();
+                            if name == "notes" {
+                                continue;
+                            }
                             let enabled = match &enabled_list {
                                 Some(list) => list.contains(&name),
                                 None => true,
@@ -517,6 +520,26 @@ impl SettingsEditor {
                                         }
                                     }
                                 });
+                                let mut cfg = self
+                                    .plugin_settings
+                                    .get("note")
+                                    .and_then(|v| serde_json::from_value::<NotePluginSettings>(v.clone()).ok())
+                                    .unwrap_or_default();
+                                egui::ComboBox::from_label("Open externally")
+                                    .selected_text(match cfg.external_open {
+                                        NoteExternalOpen::Neither => "Neither",
+                                        NoteExternalOpen::Powershell => "Powershell",
+                                        NoteExternalOpen::Notepad => "Notepad",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut cfg.external_open, NoteExternalOpen::Neither, "Neither");
+                                        ui.selectable_value(&mut cfg.external_open, NoteExternalOpen::Powershell, "Powershell");
+                                        ui.selectable_value(&mut cfg.external_open, NoteExternalOpen::Notepad, "Notepad");
+                                    });
+                                self.plugin_settings.insert(
+                                    "note".into(),
+                                    serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null),
+                                );
                             });
 
                         self.expand_request = None;
