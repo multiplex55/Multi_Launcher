@@ -1,6 +1,7 @@
 use crate::gui::LauncherApp;
 use crate::hotkey::parse_hotkey;
 use crate::settings::Settings;
+use crate::plugins::note::NotePluginSettings;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 #[cfg(target_os = "windows")]
@@ -646,6 +647,16 @@ impl SettingsEditor {
                                                 &new_settings.plugin_settings,
                                                 actions_arc,
                                             );
+                                            if let Some(val) =
+                                                new_settings.plugin_settings.get("note")
+                                            {
+                                                if let Ok(cfg) = serde_json::from_value::<
+                                                    NotePluginSettings,
+                                                >(val.clone())
+                                                {
+                                                    app.note_external_open = cfg.external_open;
+                                                }
+                                            }
                                             crate::request_hotkey_restart(new_settings);
                                             if app.enable_toasts {
                                                 app.add_toast(Toast {
