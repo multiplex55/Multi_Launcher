@@ -844,17 +844,12 @@ impl NotePanel {
             NoteExternalOpen::Powershell => {
                 #[cfg(target_os = "windows")]
                 {
-                    Command::new(detect_shell())
-                        .args(["-NoProfile", "-Command", "Start-Process"])
-                        .arg(&path)
-                        .spawn()
+                    let (mut cmd, _cmd_str) = build_nvim_command(&path);
+                    cmd.spawn()
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
-                    Command::new("pwsh")
-                        .args(["-NoProfile", "-Command", "Start-Process"])
-                        .arg(&path)
-                        .spawn()
+                    Command::new("nvim").arg(&path).spawn()
                 }
             }
             NoteExternalOpen::Notepad => {
