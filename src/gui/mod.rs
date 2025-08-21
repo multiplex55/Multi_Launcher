@@ -73,6 +73,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use fst::{Map, MapBuilder, IntoStreamer, Streamer};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 #[cfg(test)]
@@ -278,6 +279,8 @@ pub struct LauncherApp {
     pub actions: Arc<Vec<Action>>,
     action_cache: Vec<(String, String)>,
     command_cache: Vec<Action>,
+    completion_index: Option<Map<Vec<u8>>>,
+    suggestions: Vec<String>,
     pub query: String,
     pub results: Vec<Action>,
     pub matcher: SkimMatcherV2,
@@ -395,6 +398,7 @@ impl LauncherApp {
             .iter()
             .map(|a| (a.label.to_lowercase(), a.desc.to_lowercase()))
             .collect();
+        self.update_completion_index();
     }
 
     pub fn update_command_cache(&mut self) {
@@ -403,6 +407,49 @@ impl LauncherApp {
             .commands_filtered(self.enabled_plugins.as_ref());
         cmds.sort_by_cached_key(|a| a.label.to_lowercase());
         self.command_cache = cmds;
+        self.update_completion_index();
+    }
+
+    fn update_completion_index(&mut self) {
+        let mut entries: Vec<String> = Vec::new();
+        entries.extend(self.command_cache.iter().map(|a| a.label.to_lowercase()));
+        for a in self.actions.iter() {
+            entries.push(format!("app {}", a.label.to_lowercase()));
+        }
+        entries.sort();
+        entries.dedup();
+        let mut builder = MapBuilder::memory();
+        for (i, k) in entries.iter().enumerate() {
+            if let Err(e) = builder.insert(k, i as u64) {
+                tracing::warn!(key = %k, ?e, "failed to insert key into completion index");
+            }
+        }
+        let map = Map::new(builder.into_inner().unwrap()).unwrap();
+        self.completion_index = Some(map);
+        self.update_suggestions();
+    }
+
+    fn update_suggestions(&mut self) {
+        self.suggestions.clear();
+        if self.query.is_empty() {
+            return;
+        }
+        if let Some(ref index) = self.completion_index {
+            let q = self.query.to_lowercase();
+            let mut stream = index.range().ge(q.as_str()).into_stream();
+            while let Some((k, _)) = stream.next() {
+                let key = std::str::from_utf8(k).unwrap();
+                if !key.starts_with(&q) {
+                    break;
+                }
+                if key != q {
+                    self.suggestions.push(key.to_string());
+                }
+                if self.suggestions.len() >= 5 {
+                    break;
+                }
+            }
+        }
     }
 
     pub fn plugin_enabled(&self, name: &str) -> bool {
@@ -821,6 +868,8 @@ impl LauncherApp {
             pending_query: None,
             action_cache: Vec::new(),
             command_cache: Vec::new(),
+            completion_index: None,
+            suggestions: Vec::new(),
             vim_mode: false,
         };
 
@@ -918,6 +967,7 @@ impl LauncherApp {
         self.selected = None;
         self.last_search_query = self.query.clone();
         self.last_results_valid = true;
+        self.update_suggestions();
     }
 
     fn search_actions(&self, query: &str, query_lc: &str) -> Vec<(Action, f32)> {
@@ -1999,6 +2049,14 @@ impl eframe::App for LauncherApp {
                     self.search();
                 }
 
+                if !self.suggestions.is_empty() {
+                    ui.vertical(|ui| {
+                        for s in &self.suggestions {
+                            ui.colored_label(Color32::GRAY, s);
+                        }
+                    });
+                }
+
                 if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                     if self.any_panel_open() {
                         if self.close_front_dialog() {
@@ -2033,8 +2091,33 @@ impl eframe::App for LauncherApp {
                     self.handle_key(egui::Key::PageUp);
                 }
 
+                let tab = ctx.input(|i| i.key_pressed(egui::Key::Tab));
+                let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+                let mut accepted_suggestion = false;
+                if !self.suggestions.is_empty() && (tab || enter && self.selected.is_none()) {
+                    if let Some(s) = self.suggestions.first().cloned() {
+                        if s != self.query.to_lowercase() {
+                            self.query = s;
+                            self.move_cursor_end = true;
+                            self.search();
+                            accepted_suggestion = true;
+                        }
+                    }
+                }
+                if accepted_suggestion {
+                    ctx.input_mut(|i| {
+                        if tab {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                        }
+                        if enter {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                        }
+                    });
+                }
+
                 let mut launch_idx: Option<usize> = None;
-                if ctx.input(|i| i.key_pressed(egui::Key::Enter))
+                if !accepted_suggestion
+                    && enter
                     && !self.bookmark_alias_dialog.open
                     && !self.tempfile_alias_dialog.open
                     && !self.tempfile_dialog.open
@@ -3658,7 +3741,7 @@ mod tests {
         std::fs::create_dir_all(&notes_dir).unwrap();
         std::env::set_var("ML_NOTES_DIR", &notes_dir);
         std::env::set_var("HOME", dir.path());
-        let orig_dir = std::env::current_dir().unwrap();
+        let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         std::env::set_current_dir(dir.path()).unwrap();
         save_notes(&[]).unwrap();
         reset_slug_lookup();
