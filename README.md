@@ -346,6 +346,9 @@ rand pw 8
 ### IP Plugin
 Display local network interface addresses with the `ip` prefix. Append `public` to also retrieve the public IP via `api.ipify.org`.
 
+### Notes Plugin
+Manage quick Markdown notes with the `note` prefix. The editor window includes an **Open externally** button to open the current note in another program. A setting under the Note plugin labelled *Open externally* chooses the default opener: **Powershell**, **Notepad** or **Neither** to be asked each time. The **Powershell** option uses PowerShell 7 when available (listed as "Powershell" in the menu) and falls back to `powershell.exe`.
+
 When the search box is empty the launcher shows these shortcuts along with `app <alias>` entries for saved actions.
 
 Selecting a clipboard entry copies it back to the clipboard. Type `help` and press <kbd>Enter</kbd> to open the command list. The help window groups commands by plugin name and can optionally display example queries. Additional plugins can be added by building
@@ -451,8 +454,8 @@ RUST_LOG=info cargo run
 
 - Press the help hotkey (F1 by default) to display a quick list of available commands.
 - Right click a folder result to set a custom alias for easier access.
-- Right click a note entry to edit, remove, or open it in Neovim.
-- On Windows, Neovim launches via PowerShell 7 when available, then `powershell.exe`, falling back to `cmd.exe`.
+- Right click a note entry to edit, remove, or open it in Neovim. The note editor's **Open externally** button uses the configured default opener.
+- On Windows, Neovim launches via `Powershell` (PowerShell 7 when available), then `powershell.exe`, falling back to `cmd.exe`.
 - Use the *Snapshot* button in Settings when adjusting static window placement.
 - Searches are case-insensitive and also match on command aliases.
 - Tweak `fuzzy_weight` and `usage_weight` if you want results to favour name matches or past usage differently.
