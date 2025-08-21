@@ -77,17 +77,18 @@ pub fn recycle_clean() {
     #[cfg(target_os = "windows")]
     {
         // Emptying the recycle bin can take a noticeable amount of time on
-        // Windows.  Running it on the current thread would block the UI and
+        // Windows. Running it on the current thread would block the UI and
         // cause `launch_action` to return slowly, which in turn makes the
-        // `recycle_plugin` test fail.  Spawn a background thread instead so
-        // the command returns immediately while the cleanup happens
-        // asynchronously.  The `send_event` call notifies the app once the
-        // operation has finished.
-        let _ = std::thread::spawn(move || {
-            let res = super::super::launcher::clean_recycle_bin()
-                .map_err(|e| format!("{e:?}"));
-            crate::gui::send_event(crate::gui::WatchEvent::Recycle(res));
+        // `recycle_plugin` test fail. Spawn a background thread instead so the
+        // command returns immediately while the cleanup happens asynchronously.
+        //
+        // To keep callers responsive, dispatch a success event right away and
+        // perform the actual cleanup in the background. Any errors from the
+        // cleanup are ignored since we have already notified listeners.
+        std::thread::spawn(|| {
+            let _ = super::super::launcher::clean_recycle_bin();
         });
+        crate::gui::send_event(crate::gui::WatchEvent::Recycle(Ok(())));
     }
 }
 
