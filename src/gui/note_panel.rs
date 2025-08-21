@@ -189,15 +189,15 @@ impl NotePanel {
                     let tag_count = tags.len();
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Tags:");
-                        const THRESHOLD: usize = 5;
-                        let show_all = self.tags_expanded || tag_count <= THRESHOLD;
-                        let limit = if show_all { tag_count } else { THRESHOLD };
+                        let threshold = app.note_more_limit;
+                        let show_all = self.tags_expanded || tag_count <= threshold;
+                        let limit = if show_all { tag_count } else { threshold };
                         for t in tags.iter().take(limit) {
                             if ui.link(format!("#{t}")).clicked() {
                                 app.filter_notes_by_tag(t);
                             }
                         }
-                        if tag_count > THRESHOLD {
+                        if tag_count > threshold {
                             let label = if self.tags_expanded {
                                 "collapse"
                             } else {
@@ -228,10 +228,10 @@ impl NotePanel {
                     let was_focused = ui.ctx().memory(|m| m.has_focus(content_id));
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Links:");
-                        const THRESHOLD: usize = 5;
+                        let threshold = app.note_more_limit;
                         let total = all_links.len();
-                        let show_all = self.links_expanded || total <= THRESHOLD;
-                        let limit = if show_all { total } else { THRESHOLD };
+                        let show_all = self.links_expanded || total <= threshold;
+                        let limit = if show_all { total } else { threshold };
                         for l in all_links.iter().take(limit) {
                             match l {
                                 LinkKind::Wiki(s) => {
@@ -242,7 +242,7 @@ impl NotePanel {
                                 }
                             }
                         }
-                        if total > THRESHOLD {
+                        if total > threshold {
                             let label = if self.links_expanded {
                                 "collapse"
                             } else {
@@ -844,11 +844,17 @@ impl NotePanel {
             NoteExternalOpen::Powershell => {
                 #[cfg(target_os = "windows")]
                 {
-                    Command::new(detect_shell()).arg(&path).spawn()
+                    Command::new(detect_shell())
+                        .args(["-NoProfile", "-Command", "Start-Process"])
+                        .arg(&path)
+                        .spawn()
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
-                    Command::new("pwsh").arg(&path).spawn()
+                    Command::new("pwsh")
+                        .args(["-NoProfile", "-Command", "Start-Process"])
+                        .arg(&path)
+                        .spawn()
                 }
             }
             NoteExternalOpen::Notepad => {

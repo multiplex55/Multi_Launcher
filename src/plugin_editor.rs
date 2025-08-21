@@ -123,13 +123,14 @@ impl PluginEditor {
                         Some(s.net_unit),
                         s.screenshot_dir.clone(),
                         Some(s.screenshot_save_file),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
+                        Some(s.always_on_top),
+                        Some(s.page_jump),
+                        Some(s.note_panel_default_size),
+                        Some(s.note_save_on_close),
+                        Some(s.note_always_overwrite),
+                        Some(s.note_images_as_links),
+                        Some(s.note_more_limit),
+                        s.note_external_editor.clone(),
                     );
                     let dirs = s.plugin_dirs.clone().unwrap_or_default();
                     let actions_arc = Arc::clone(&app.actions);

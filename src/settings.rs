@@ -88,6 +88,10 @@ pub struct Settings {
     /// specific fallback is used.
     #[serde(default)]
     pub note_external_editor: Option<String>,
+    /// Number of tags or links shown before an expandable "... (more)" control
+    /// appears in the note panel.
+    #[serde(default = "default_note_more_limit")]
+    pub note_more_limit: usize,
     /// Enable toast notifications in the UI.
     #[serde(default = "default_toasts")]
     pub enable_toasts: bool,
@@ -218,6 +222,10 @@ fn default_note_save_on_close() -> bool {
     false
 }
 
+fn default_note_more_limit() -> usize {
+    5
+}
+
 fn default_log_path() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -252,6 +260,7 @@ impl Default for Settings {
             note_always_overwrite: false,
             note_images_as_links: false,
             note_external_editor: None,
+            note_more_limit: default_note_more_limit(),
             enable_toasts: true,
             toast_duration: default_toast_duration(),
             query_scale: Some(1.0),
