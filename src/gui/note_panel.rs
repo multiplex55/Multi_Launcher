@@ -18,7 +18,10 @@ use rfd::FileDialog;
 use std::collections::HashMap;
 use std::process::Command;
 #[cfg(target_os = "windows")]
-use std::{env, path::{Path, PathBuf}};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 use url::Url;
 
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
@@ -65,6 +68,8 @@ pub struct NotePanel {
     image_cache: HashMap<std::path::PathBuf, egui::TextureHandle>,
     overwrite_prompt: bool,
     show_open_with_menu: bool,
+    tags_expanded: bool,
+    links_expanded: bool,
 }
 
 impl NotePanel {
@@ -80,6 +85,8 @@ impl NotePanel {
             image_cache: HashMap::new(),
             overwrite_prompt: false,
             show_open_with_menu: false,
+            tags_expanded: false,
+            links_expanded: false,
         }
     }
 
@@ -150,7 +157,9 @@ impl NotePanel {
                                 self.open_external(app, NoteExternalOpen::Notepad);
                                 close = true;
                             }
-                        }).is_none() {
+                        })
+                        .is_none()
+                        {
                             close = true;
                         }
                         if close {
@@ -176,11 +185,29 @@ impl NotePanel {
                 });
                 let tags = extract_tags(&self.note.content);
                 if !tags.is_empty() {
+                    let was_focused = ui.ctx().memory(|m| m.has_focus(content_id));
+                    let tag_count = tags.len();
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Tags:");
-                        for t in tags {
+                        let threshold = app.note_more_limit;
+                        let show_all = self.tags_expanded || tag_count <= threshold;
+                        let limit = if show_all { tag_count } else { threshold };
+                        for t in tags.iter().take(limit) {
                             if ui.link(format!("#{t}")).clicked() {
-                                app.filter_notes_by_tag(&t);
+                                app.filter_notes_by_tag(t);
+                            }
+                        }
+                        if tag_count > threshold {
+                            let label = if self.tags_expanded {
+                                "collapse"
+                            } else {
+                                "... (more)"
+                            };
+                            if ui.button(label).clicked() {
+                                self.tags_expanded = !self.tags_expanded;
+                                if was_focused {
+                                    ui.ctx().memory_mut(|m| m.request_focus(content_id));
+                                }
                             }
                         }
                     });
@@ -190,14 +217,43 @@ impl NotePanel {
                     .filter(|l| slugify(l) != self.note.slug)
                     .collect::<Vec<_>>();
                 let links = extract_links(&self.note.content);
-                if !wiki.is_empty() || !links.is_empty() {
+                enum LinkKind {
+                    Wiki(String),
+                    Url(String),
+                }
+                let mut all_links: Vec<LinkKind> = Vec::new();
+                all_links.extend(wiki.into_iter().map(LinkKind::Wiki));
+                all_links.extend(links.into_iter().map(LinkKind::Url));
+                if !all_links.is_empty() {
+                    let was_focused = ui.ctx().memory(|m| m.has_focus(content_id));
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Links:");
-                        for l in wiki {
-                            show_wiki_link(ui, app, &l);
+                        let threshold = app.note_more_limit;
+                        let total = all_links.len();
+                        let show_all = self.links_expanded || total <= threshold;
+                        let limit = if show_all { total } else { threshold };
+                        for l in all_links.iter().take(limit) {
+                            match l {
+                                LinkKind::Wiki(s) => {
+                                    let _ = show_wiki_link(ui, app, s);
+                                }
+                                LinkKind::Url(s) => {
+                                    let _ = ui.hyperlink(s);
+                                }
+                            }
                         }
-                        for l in links {
-                            ui.hyperlink(l);
+                        if total > threshold {
+                            let label = if self.links_expanded {
+                                "collapse"
+                            } else {
+                                "... (more)"
+                            };
+                            if ui.button(label).clicked() {
+                                self.links_expanded = !self.links_expanded;
+                                if was_focused {
+                                    ui.ctx().memory_mut(|m| m.request_focus(content_id));
+                                }
+                            }
                         }
                     });
                 }
@@ -788,11 +844,12 @@ impl NotePanel {
             NoteExternalOpen::Powershell => {
                 #[cfg(target_os = "windows")]
                 {
-                    Command::new(detect_shell()).arg(&path).spawn()
+                    let (mut cmd, _cmd_str) = build_nvim_command(&path);
+                    cmd.spawn()
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
-                    Command::new("pwsh").arg(&path).spawn()
+                    Command::new("nvim").arg(&path).spawn()
                 }
             }
             NoteExternalOpen::Notepad => {
@@ -814,7 +871,7 @@ impl NotePanel {
 }
 
 pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui::Response {
-    // Display wiki style links with brackets and allow Ctrl+click to
+    // Display wiki style links with brackets and allow clicking to
     // navigate to the referenced note. Missing targets are colored red.
     let slug = slugify(l);
     let exists = load_notes()
@@ -830,7 +887,7 @@ pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui
                 .sense(egui::Sense::click()),
         )
     };
-    if resp.clicked() && ui.ctx().input(|i| i.modifiers.ctrl) {
+    if resp.clicked() {
         app.open_note_panel(&slug, None);
     }
     resp
@@ -1000,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_click_opens_linked_note() {
+    fn click_opens_linked_note() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         let mut rect = egui::Rect::NOTHING;
@@ -1013,19 +1070,18 @@ mod tests {
 
         let pos = rect.center();
         let mut input = egui::RawInput::default();
-        input.modifiers.ctrl = true;
         input.events.push(egui::Event::PointerMoved(pos));
         input.events.push(egui::Event::PointerButton {
             pos,
             button: egui::PointerButton::Primary,
             pressed: true,
-            modifiers: egui::Modifiers::CTRL,
+            modifiers: egui::Modifiers::default(),
         });
         input.events.push(egui::Event::PointerButton {
             pos,
             button: egui::PointerButton::Primary,
             pressed: false,
-            modifiers: egui::Modifiers::CTRL,
+            modifiers: egui::Modifiers::default(),
         });
 
         let _ = ctx.run(input, |ctx| {
@@ -1036,42 +1092,6 @@ mod tests {
 
         assert_eq!(app.note_panels.len(), 1);
         assert_eq!(slugify(&app.note_panels[0].note.title), "second-note");
-    }
-
-    #[test]
-    fn regular_click_does_not_navigate() {
-        let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
-        let mut rect = egui::Rect::NOTHING;
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                rect = show_wiki_link(ui, &mut app, "Another Note").rect;
-            });
-        });
-
-        let pos = rect.center();
-        let mut input = egui::RawInput::default();
-        input.events.push(egui::Event::PointerMoved(pos));
-        input.events.push(egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: true,
-            modifiers: egui::Modifiers::default(),
-        });
-        input.events.push(egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: egui::Modifiers::default(),
-        });
-
-        let _ = ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                show_wiki_link(ui, &mut app, "Another Note");
-            });
-        });
-
-        assert!(app.note_panels.is_empty());
     }
 
     #[test]

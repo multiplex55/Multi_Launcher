@@ -10,6 +10,13 @@ pub const SHELL_CMDS_FILE: &str = "shell_cmds.json";
 pub struct ShellCmdEntry {
     pub name: String,
     pub args: String,
+    /// When false this command will not be suggested when typing `sh <query>`.
+    #[serde(default = "default_autocomplete")]
+    pub autocomplete: bool,
+}
+
+fn default_autocomplete() -> bool {
+    true
 }
 
 /// Load saved shell commands from `path`.
@@ -36,6 +43,7 @@ pub fn append_shell_cmd(path: &str, name: &str, args: &str) -> anyhow::Result<()
         list.push(ShellCmdEntry {
             name: name.to_string(),
             args: args.to_string(),
+            autocomplete: true,
         });
         save_shell_cmds(path, &list)?;
     }
@@ -135,7 +143,7 @@ impl Plugin for ShellPlugin {
             if let Ok(list) = load_shell_cmds(SHELL_CMDS_FILE) {
                 let matcher = SkimMatcherV2::default();
                 let mut best: Option<(ShellCmdEntry, i64)> = None;
-                for entry in list {
+                for entry in list.into_iter().filter(|e| e.autocomplete) {
                     if let Some(score) = matcher.fuzzy_match(&entry.name, arg) {
                         if best.as_ref().map(|(_, s)| score > *s).unwrap_or(true) {
                             best = Some((entry, score));

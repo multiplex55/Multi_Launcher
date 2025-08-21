@@ -18,12 +18,14 @@ fn load_shell_cmds_roundtrip() {
     let entries = vec![ShellCmdEntry {
         name: "test".into(),
         args: "echo hi".into(),
+        autocomplete: true,
     }];
     save_shell_cmds(SHELL_CMDS_FILE, &entries).unwrap();
     let loaded = load_shell_cmds(SHELL_CMDS_FILE).unwrap();
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].name, "test");
     assert_eq!(loaded[0].args, "echo hi");
+    assert!(loaded[0].autocomplete);
 }
 
 #[test]
@@ -35,6 +37,7 @@ fn search_named_command_returns_action() {
     let entries = vec![ShellCmdEntry {
         name: "demo".into(),
         args: "dir".into(),
+        autocomplete: true,
     }];
     save_shell_cmds(SHELL_CMDS_FILE, &entries).unwrap();
 
@@ -42,6 +45,25 @@ fn search_named_command_returns_action() {
     let results = plugin.search("sh demo");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "shell:dir");
+}
+
+#[test]
+fn search_respects_autocomplete_flag() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let entries = vec![ShellCmdEntry {
+        name: "demo".into(),
+        args: "dir".into(),
+        autocomplete: false,
+    }];
+    save_shell_cmds(SHELL_CMDS_FILE, &entries).unwrap();
+
+    let plugin = ShellPlugin;
+    let results = plugin.search("sh demo");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "shell:demo");
 }
 
 #[test]
@@ -75,10 +97,12 @@ fn rm_lists_matching_commands() {
         ShellCmdEntry {
             name: "a".into(),
             args: "cmd_a".into(),
+            autocomplete: true,
         },
         ShellCmdEntry {
             name: "b".into(),
             args: "cmd_b".into(),
+            autocomplete: true,
         },
     ];
     save_shell_cmds(SHELL_CMDS_FILE, &entries).unwrap();
@@ -98,6 +122,7 @@ fn list_returns_saved_commands() {
     let entries = vec![ShellCmdEntry {
         name: "x".into(),
         args: "dir".into(),
+        autocomplete: true,
     }];
     save_shell_cmds(SHELL_CMDS_FILE, &entries).unwrap();
 

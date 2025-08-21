@@ -88,6 +88,10 @@ pub struct Settings {
     /// specific fallback is used.
     #[serde(default)]
     pub note_external_editor: Option<String>,
+    /// Number of tags or links shown before an expandable "... (more)" control
+    /// appears in the note panel.
+    #[serde(default = "default_note_more_limit")]
+    pub note_more_limit: usize,
     /// Enable toast notifications in the UI.
     #[serde(default = "default_toasts")]
     pub enable_toasts: bool,
@@ -109,6 +113,9 @@ pub struct Settings {
     /// Weight of the usage count when ranking results.
     #[serde(default = "default_usage_weight")]
     pub usage_weight: f32,
+    /// Enable autocomplete suggestions while typing a query.
+    #[serde(default = "default_query_autocomplete")]
+    pub query_autocomplete: bool,
     /// Number of results to move when paging through the action list.
     #[serde(default = "default_page_jump")]
     pub page_jump: usize,
@@ -190,6 +197,10 @@ fn default_usage_weight() -> f32 {
     1.0
 }
 
+fn default_query_autocomplete() -> bool {
+    true
+}
+
 fn default_page_jump() -> usize {
     5
 }
@@ -216,6 +227,10 @@ fn default_note_panel_size() -> (f32, f32) {
 
 fn default_note_save_on_close() -> bool {
     false
+}
+
+fn default_note_more_limit() -> usize {
+    5
 }
 
 fn default_log_path() -> PathBuf {
@@ -252,12 +267,14 @@ impl Default for Settings {
             note_always_overwrite: false,
             note_images_as_links: false,
             note_external_editor: None,
+            note_more_limit: default_note_more_limit(),
             enable_toasts: true,
             toast_duration: default_toast_duration(),
             query_scale: Some(1.0),
             list_scale: Some(1.0),
             fuzzy_weight: default_fuzzy_weight(),
             usage_weight: default_usage_weight(),
+            query_autocomplete: default_query_autocomplete(),
             page_jump: default_page_jump(),
             history_limit: default_history_limit(),
             clipboard_limit: default_clipboard_limit(),
