@@ -18,7 +18,10 @@ use rfd::FileDialog;
 use std::collections::HashMap;
 use std::process::Command;
 #[cfg(target_os = "windows")]
-use std::{env, path::{Path, PathBuf}};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 use url::Url;
 
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
@@ -65,6 +68,8 @@ pub struct NotePanel {
     image_cache: HashMap<std::path::PathBuf, egui::TextureHandle>,
     overwrite_prompt: bool,
     show_open_with_menu: bool,
+    tags_expanded: bool,
+    links_expanded: bool,
 }
 
 impl NotePanel {
@@ -80,6 +85,8 @@ impl NotePanel {
             image_cache: HashMap::new(),
             overwrite_prompt: false,
             show_open_with_menu: false,
+            tags_expanded: false,
+            links_expanded: false,
         }
     }
 
@@ -150,7 +157,9 @@ impl NotePanel {
                                 self.open_external(app, NoteExternalOpen::Notepad);
                                 close = true;
                             }
-                        }).is_none() {
+                        })
+                        .is_none()
+                        {
                             close = true;
                         }
                         if close {
@@ -176,11 +185,29 @@ impl NotePanel {
                 });
                 let tags = extract_tags(&self.note.content);
                 if !tags.is_empty() {
+                    let was_focused = ui.ctx().memory(|m| m.has_focus(content_id));
+                    let tag_count = tags.len();
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Tags:");
-                        for t in tags {
+                        const THRESHOLD: usize = 5;
+                        let show_all = self.tags_expanded || tag_count <= THRESHOLD;
+                        let limit = if show_all { tag_count } else { THRESHOLD };
+                        for t in tags.iter().take(limit) {
                             if ui.link(format!("#{t}")).clicked() {
-                                app.filter_notes_by_tag(&t);
+                                app.filter_notes_by_tag(t);
+                            }
+                        }
+                        if tag_count > THRESHOLD {
+                            let label = if self.tags_expanded {
+                                "collapse"
+                            } else {
+                                "... (more)"
+                            };
+                            if ui.button(label).clicked() {
+                                self.tags_expanded = !self.tags_expanded;
+                                if was_focused {
+                                    ui.ctx().memory_mut(|m| m.request_focus(content_id));
+                                }
                             }
                         }
                     });
@@ -190,14 +217,43 @@ impl NotePanel {
                     .filter(|l| slugify(l) != self.note.slug)
                     .collect::<Vec<_>>();
                 let links = extract_links(&self.note.content);
-                if !wiki.is_empty() || !links.is_empty() {
+                enum LinkKind {
+                    Wiki(String),
+                    Url(String),
+                }
+                let mut all_links: Vec<LinkKind> = Vec::new();
+                all_links.extend(wiki.into_iter().map(LinkKind::Wiki));
+                all_links.extend(links.into_iter().map(LinkKind::Url));
+                if !all_links.is_empty() {
+                    let was_focused = ui.ctx().memory(|m| m.has_focus(content_id));
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Links:");
-                        for l in wiki {
-                            show_wiki_link(ui, app, &l);
+                        const THRESHOLD: usize = 5;
+                        let total = all_links.len();
+                        let show_all = self.links_expanded || total <= THRESHOLD;
+                        let limit = if show_all { total } else { THRESHOLD };
+                        for l in all_links.iter().take(limit) {
+                            match l {
+                                LinkKind::Wiki(s) => {
+                                    let _ = show_wiki_link(ui, app, s);
+                                }
+                                LinkKind::Url(s) => {
+                                    let _ = ui.hyperlink(s);
+                                }
+                            }
                         }
-                        for l in links {
-                            ui.hyperlink(l);
+                        if total > THRESHOLD {
+                            let label = if self.links_expanded {
+                                "collapse"
+                            } else {
+                                "... (more)"
+                            };
+                            if ui.button(label).clicked() {
+                                self.links_expanded = !self.links_expanded;
+                                if was_focused {
+                                    ui.ctx().memory_mut(|m| m.request_focus(content_id));
+                                }
+                            }
                         }
                     });
                 }
