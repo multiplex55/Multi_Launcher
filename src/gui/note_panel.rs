@@ -3,7 +3,8 @@ use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::plugin::Plugin;
 use crate::plugins::note::{
-    assets_dir, available_tags, image_files, load_notes, save_note, Note, NotePlugin,
+    assets_dir, available_tags, image_files, load_notes, save_note, Note, NoteExternalOpen,
+    NotePlugin,
 };
 use eframe::egui::{self, popup, Color32, FontId, Key};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
@@ -21,16 +22,6 @@ use std::{env, path::{Path, PathBuf}};
 use url::Url;
 
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
-
-#[cfg(target_os = "windows")]
-fn default_editors() -> Vec<String> {
-    vec!["notepad.exe".into()]
-}
-
-#[cfg(not(target_os = "windows"))]
-fn default_editors() -> Vec<String> {
-    vec!["nvim".into(), "vim".into()]
-}
 
 fn preprocess_note_links(content: &str, current_slug: &str) -> String {
     static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
@@ -73,6 +64,7 @@ pub struct NotePanel {
     markdown_cache: CommonMarkCache,
     image_cache: HashMap<std::path::PathBuf, egui::TextureHandle>,
     overwrite_prompt: bool,
+    show_open_with_menu: bool,
 }
 
 impl NotePanel {
@@ -87,6 +79,7 @@ impl NotePanel {
             markdown_cache: CommonMarkCache::default(),
             image_cache: HashMap::new(),
             overwrite_prompt: false,
+            show_open_with_menu: false,
         }
     }
 
@@ -126,9 +119,44 @@ impl NotePanel {
                     if ui.button("Save").clicked() {
                         save_now = true;
                     }
-                    if ui.button("Open Externally").clicked() {
-                        self.save(app);
-                        self.open_external(app);
+                    let open_resp = ui.button("Open Externally");
+                    let popup_id = open_resp.id.with("open_with_menu");
+                    if open_resp.clicked() {
+                        match app.note_external_open {
+                            NoteExternalOpen::Powershell => {
+                                self.save(app);
+                                self.open_external(app, NoteExternalOpen::Powershell);
+                            }
+                            NoteExternalOpen::Notepad => {
+                                self.save(app);
+                                self.open_external(app, NoteExternalOpen::Notepad);
+                            }
+                            NoteExternalOpen::Neither => {
+                                self.show_open_with_menu = true;
+                                ui.memory_mut(|m| m.open_popup(popup_id));
+                            }
+                        }
+                    }
+                    if self.show_open_with_menu {
+                        let mut close = false;
+                        if popup::popup_below_widget(ui, popup_id, &open_resp, |ui| {
+                            if ui.button("Powershell").clicked() {
+                                self.save(app);
+                                self.open_external(app, NoteExternalOpen::Powershell);
+                                close = true;
+                            }
+                            if ui.button("Notepad").clicked() {
+                                self.save(app);
+                                self.open_external(app, NoteExternalOpen::Notepad);
+                                close = true;
+                            }
+                        }).is_none() {
+                            close = true;
+                        }
+                        if close {
+                            ui.memory_mut(|m| m.close_popup());
+                            self.show_open_with_menu = false;
+                        }
                     }
                     if self.preview_mode {
                         if ui.button("Edit").clicked() {
@@ -754,44 +782,33 @@ impl NotePanel {
         });
     }
 
-    fn open_external(&self, app: &mut LauncherApp) {
+    fn open_external(&self, app: &mut LauncherApp, choice: NoteExternalOpen) {
         let path = self.note.path.clone();
-        let editors: Vec<String> = if let Some(ed) = app
-            .note_external_editor
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-        {
-            vec![ed]
-        } else {
-            default_editors()
-        };
-        let mut last_err = None;
-        for editor in editors {
-            #[allow(unused_mut)]
-            let (mut cmd, cmd_str) = if cfg!(target_os = "windows")
-                && editor.to_lowercase().contains("nvim")
-            {
+        let result = match choice {
+            NoteExternalOpen::Powershell => {
                 #[cfg(target_os = "windows")]
                 {
-                    build_nvim_command(&path)
+                    Command::new(detect_shell()).arg(&path).spawn()
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
-                    unreachable!()
+                    Command::new("pwsh").arg(&path).spawn()
                 }
-            } else {
-                let mut c = Command::new(&editor);
-                c.arg(&path);
-                let s = format!("{:?}", c);
-                (c, s)
-            };
-            match cmd.spawn() {
-                Ok(_) => return,
-                Err(e) => last_err = Some(format!("{cmd_str}: {e}")),
             }
-        }
-        if let Some(err) = last_err {
-            app.set_error(format!("Failed to open note externally: {err}"));
+            NoteExternalOpen::Notepad => {
+                #[cfg(target_os = "windows")]
+                {
+                    Command::new("notepad.exe").arg(&path).spawn()
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    Command::new("notepad").arg(&path).spawn()
+                }
+            }
+            NoteExternalOpen::Neither => return,
+        };
+        if let Err(e) = result {
+            app.set_error(format!("Failed to open note externally: {e}"));
         }
     }
 }
