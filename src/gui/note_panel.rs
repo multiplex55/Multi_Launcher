@@ -422,7 +422,10 @@ impl NotePanel {
                                 self.pending_selection = None;
                             }
                         }
-                        resp.context_menu(|ui| self.build_textedit_menu(ui, &resp, app));
+                        resp.context_menu(|ui| {
+                            let ctx2 = ui.ctx().clone();
+                            self.build_textedit_menu(ui, &ctx2, resp.id, app);
+                        });
                         if resp.has_focus()
                             && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Period))
                         {
@@ -433,7 +436,7 @@ impl NotePanel {
                                 Some(pos),
                                 |ui| {
                                     egui::Frame::popup(ui.style()).show(ui, |ui| {
-                                        self.build_textedit_menu(ui, &resp, app);
+                                        self.build_textedit_menu(ui, ctx, resp.id, app);
                                     });
                                 },
                             );
@@ -671,13 +674,24 @@ impl NotePanel {
     fn build_textedit_menu(
         &mut self,
         ui: &mut egui::Ui,
-        resp: &egui::Response,
+        ctx: &egui::Context,
+        id: egui::Id,
         app: &mut LauncherApp,
     ) {
+        if self.pending_selection.is_none() {
+            let state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+            if let Some(range) = state.cursor.char_range() {
+                let [min, max] = range.sorted();
+                if min.index != max.index {
+                    self.pending_selection = Some((min.index, max.index));
+                }
+            }
+        }
+
         ui.menu_button("Markdown", |ui| {
             if ui.button("Add Checkbox").clicked() {
-                let mut state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), resp.id)
-                    .unwrap_or_default();
+                let mut state =
+                    egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
                 let idx = state
                     .cursor
                     .char_range()
@@ -689,15 +703,7 @@ impl NotePanel {
                     .set_char_range(Some(egui::text::CCursorRange::one(
                         egui::text::CCursor::new(idx + 6),
                     )));
-                state.store(ui.ctx(), resp.id);
-                ui.close_menu();
-            }
-            if ui.button("Bold Selection").clicked() {
-                self.wrap_selection(ui.ctx(), resp.id, "**", "**");
-                ui.close_menu();
-            }
-            if ui.button("Italic Selection").clicked() {
-                self.wrap_selection(ui.ctx(), resp.id, "*", "*");
+                state.store(ctx, id);
                 ui.close_menu();
             }
             if ui.button("Insert Link...").clicked() {
@@ -707,6 +713,14 @@ impl NotePanel {
                     self.link_text.clear();
                 }
                 self.link_dialog_open = true;
+                ui.close_menu();
+            }
+            if ui.button("Bold Selection").clicked() {
+                self.wrap_selection(ctx, id, "**", "**");
+                ui.close_menu();
+            }
+            if ui.button("Italic Selection").clicked() {
+                self.wrap_selection(ctx, id, "*", "*");
                 ui.close_menu();
             }
         });
@@ -727,9 +741,8 @@ impl NotePanel {
                         }
                         if ui.button(&title).clicked() {
                             let insert = format!("[[{title}]]");
-                            let mut state =
-                                egui::widgets::text_edit::TextEditState::load(ui.ctx(), resp.id)
-                                    .unwrap_or_default();
+                            let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id)
+                                .unwrap_or_default();
                             let idx = state
                                 .cursor
                                 .char_range()
@@ -741,7 +754,7 @@ impl NotePanel {
                                 .set_char_range(Some(egui::text::CCursorRange::one(
                                     egui::text::CCursor::new(idx + insert.chars().count()),
                                 )));
-                            state.store(ui.ctx(), resp.id);
+                            state.store(ctx, id);
                             self.link_search.clear();
                             ui.close_menu();
                         }
@@ -765,9 +778,8 @@ impl NotePanel {
                     }) {
                         if ui.button(&img).clicked() {
                             let insert = format!("![{0}](assets/{0})", img);
-                            let mut state =
-                                egui::widgets::text_edit::TextEditState::load(ui.ctx(), resp.id)
-                                    .unwrap_or_default();
+                            let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id)
+                                .unwrap_or_default();
                             let idx = state
                                 .cursor
                                 .char_range()
@@ -779,7 +791,7 @@ impl NotePanel {
                                 .set_char_range(Some(egui::text::CCursorRange::one(
                                     egui::text::CCursor::new(idx + insert.chars().count()),
                                 )));
-                            state.store(ui.ctx(), resp.id);
+                            state.store(ctx, id);
                             self.image_search.clear();
                             ui.close_menu();
                         }
@@ -796,9 +808,8 @@ impl NotePanel {
                             app.set_error(format!("Failed to copy image: {e}"));
                         } else {
                             let insert = format!("![{0}](assets/{0})", fname);
-                            let mut state =
-                                egui::widgets::text_edit::TextEditState::load(ui.ctx(), resp.id)
-                                    .unwrap_or_default();
+                            let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id)
+                                .unwrap_or_default();
                             let idx = state
                                 .cursor
                                 .char_range()
@@ -810,7 +821,7 @@ impl NotePanel {
                                 .set_char_range(Some(egui::text::CCursorRange::one(
                                     egui::text::CCursor::new(idx + insert.chars().count()),
                                 )));
-                            state.store(ui.ctx(), resp.id);
+                            state.store(ctx, id);
                             self.image_search.clear();
                             ui.close_menu();
                         }
@@ -830,11 +841,9 @@ impl NotePanel {
                                 app.set_error(format!("Failed to save screenshot: {e}"));
                             } else {
                                 let insert = format!("![{0}](assets/{0})", fname);
-                                let mut state = egui::widgets::text_edit::TextEditState::load(
-                                    ui.ctx(),
-                                    resp.id,
-                                )
-                                .unwrap_or_default();
+                                let mut state =
+                                    egui::widgets::text_edit::TextEditState::load(ctx, id)
+                                        .unwrap_or_default();
                                 let idx = state
                                     .cursor
                                     .char_range()
@@ -846,7 +855,7 @@ impl NotePanel {
                                     .set_char_range(Some(egui::text::CCursorRange::one(
                                         egui::text::CCursor::new(idx + insert.chars().count()),
                                     )));
-                                state.store(ui.ctx(), resp.id);
+                                state.store(ctx, id);
                                 self.image_search.clear();
                                 ui.close_menu();
                             }
@@ -858,7 +867,7 @@ impl NotePanel {
         });
 
         ui.menu_button("Insert tag", |ui| {
-            insert_tag_menu(ui, resp, &mut self.note.content, &mut self.tag_search);
+            insert_tag_menu(ui, ctx, id, &mut self.note.content, &mut self.tag_search);
         });
     }
 
@@ -869,11 +878,25 @@ impl NotePanel {
         start_marker: &str,
         end_marker: &str,
     ) {
-        if let Some((start, end)) = self.pending_selection.take() {
+        let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+        let mut range = state.cursor.char_range().and_then(|r| {
+            let [min, max] = r.sorted();
+            if min.index != max.index {
+                Some((min.index, max.index))
+            } else {
+                None
+            }
+        });
+
+        if range.is_none() {
+            range = self.pending_selection.take();
+        } else {
+            self.pending_selection = None;
+        }
+
+        if let Some((start, end)) = range {
             self.note.content.insert_str(end, end_marker);
             self.note.content.insert_str(start, start_marker);
-            let mut state =
-                egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
             let new_start = start + start_marker.chars().count();
             let new_end = end + start_marker.chars().count();
             state
@@ -987,7 +1010,8 @@ pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui
 
 fn insert_tag_menu(
     ui: &mut egui::Ui,
-    resp: &egui::Response,
+    ctx: &egui::Context,
+    id: egui::Id,
     content: &mut String,
     search: &mut String,
 ) {
@@ -1006,8 +1030,7 @@ fn insert_tag_menu(
                 if ui.button(format!("#{tag}")).clicked() {
                     let insert = format!("#{tag}");
                     let mut state =
-                        egui::widgets::text_edit::TextEditState::load(ui.ctx(), resp.id)
-                            .unwrap_or_default();
+                        egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
                     let idx = state
                         .cursor
                         .char_range()
@@ -1019,7 +1042,7 @@ fn insert_tag_menu(
                         .set_char_range(Some(egui::text::CCursorRange::one(
                             egui::text::CCursor::new(idx + insert.chars().count()),
                         )));
-                    state.store(ui.ctx(), resp.id);
+                    state.store(ctx, id);
                     search.clear();
                     ui.close_menu();
                 }
@@ -1165,7 +1188,14 @@ mod tests {
         let ctx = egui::Context::default();
         let mut panel = NotePanel::from_note(empty_note("hello world"));
         let id = egui::Id::new("note_content");
-        panel.pending_selection = Some((0, 5));
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(5),
+            )));
+        state.store(&ctx, id);
         panel.wrap_selection(&ctx, id, "**", "**");
         assert_eq!(panel.note.content, "**hello** world");
         let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
@@ -1185,6 +1215,38 @@ mod tests {
         panel.insert_link(&ctx, id);
         assert_eq!(panel.note.content, "hello [world](http://example.com)");
         assert!(panel.pending_selection.is_none());
+    }
+
+    #[test]
+    fn formatting_wraps_current_selection() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("note_content");
+        let mut panel = NotePanel::from_note(empty_note("hello world"));
+
+        // Bold selection
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(6),
+                egui::text::CCursor::new(11),
+            )));
+        state.store(&ctx, id);
+        panel.wrap_selection(&ctx, id, "**", "**");
+        assert_eq!(panel.note.content, "hello **world**");
+
+        // Italic selection
+        panel.note.content = "hello world".to_string();
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(5),
+            )));
+        state.store(&ctx, id);
+        panel.wrap_selection(&ctx, id, "*", "*");
+        assert_eq!(panel.note.content, "*hello* world");
     }
 
     #[test]
