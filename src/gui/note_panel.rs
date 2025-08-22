@@ -751,40 +751,6 @@ impl NotePanel {
 
         ui.menu_button("Insert image", |ui| {
             ui.set_min_width(200.0);
-            ui.label("Insert image:");
-            ui.text_edit_singleline(&mut self.image_search);
-            let matcher = SkimMatcherV2::default();
-            let filter = self.image_search.to_lowercase();
-            let images = image_files();
-            egui::ScrollArea::vertical()
-                .max_height(200.0)
-                .show(ui, |ui| {
-                    for img in images.into_iter().filter(|name| {
-                        filter.is_empty()
-                            || matcher.fuzzy_match(&name.to_lowercase(), &filter).is_some()
-                    }) {
-                        if ui.button(&img).clicked() {
-                            let insert = format!("![{0}](assets/{0})", img);
-                            let mut state =
-                                egui::widgets::text_edit::TextEditState::load(ui.ctx(), resp.id)
-                                    .unwrap_or_default();
-                            let idx = state
-                                .cursor
-                                .char_range()
-                                .map(|r| r.primary.index)
-                                .unwrap_or_else(|| self.note.content.chars().count());
-                            self.note.content.insert_str(idx, &insert);
-                            state
-                                .cursor
-                                .set_char_range(Some(egui::text::CCursorRange::one(
-                                    egui::text::CCursor::new(idx + insert.chars().count()),
-                                )));
-                            state.store(ui.ctx(), resp.id);
-                            self.image_search.clear();
-                            ui.close_menu();
-                        }
-                    }
-                });
             if ui.button("Upload...").clicked() {
                 if let Some(path) = FileDialog::new()
                     .add_filter("Image", &["png", "jpg", "jpeg", "gif", "bmp", "webp"])
@@ -855,6 +821,40 @@ impl NotePanel {
                     Err(e) => app.set_error(format!("Screenshot failed: {e}")),
                 }
             }
+            ui.label("Insert image:");
+            ui.text_edit_singleline(&mut self.image_search);
+            let matcher = SkimMatcherV2::default();
+            let filter = self.image_search.to_lowercase();
+            let images = image_files();
+            egui::ScrollArea::vertical()
+                .max_height(200.0)
+                .show(ui, |ui| {
+                    for img in images.into_iter().filter(|name| {
+                        filter.is_empty()
+                            || matcher.fuzzy_match(&name.to_lowercase(), &filter).is_some()
+                    }) {
+                        if ui.button(&img).clicked() {
+                            let insert = format!("![{0}](assets/{0})", img);
+                            let mut state =
+                                egui::widgets::text_edit::TextEditState::load(ui.ctx(), resp.id)
+                                    .unwrap_or_default();
+                            let idx = state
+                                .cursor
+                                .char_range()
+                                .map(|r| r.primary.index)
+                                .unwrap_or_else(|| self.note.content.chars().count());
+                            self.note.content.insert_str(idx, &insert);
+                            state
+                                .cursor
+                                .set_char_range(Some(egui::text::CCursorRange::one(
+                                    egui::text::CCursor::new(idx + insert.chars().count()),
+                                )));
+                            state.store(ui.ctx(), resp.id);
+                            self.image_search.clear();
+                            ui.close_menu();
+                        }
+                    }
+                });
         });
 
         ui.menu_button("Insert tag", |ui| {
