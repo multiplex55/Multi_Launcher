@@ -281,6 +281,7 @@ pub struct LauncherApp {
     command_cache: Vec<Action>,
     completion_index: Option<Map<Vec<u8>>>,
     suggestions: Vec<String>,
+    autocomplete_index: usize,
     pub query: String,
     pub results: Vec<Action>,
     pub matcher: SkimMatcherV2,
@@ -433,6 +434,7 @@ impl LauncherApp {
 
     fn update_suggestions(&mut self) {
         self.suggestions.clear();
+        self.autocomplete_index = 0;
         if !self.query_autocomplete || self.query.is_empty() {
             return;
         }
@@ -887,6 +889,7 @@ impl LauncherApp {
             command_cache: Vec::new(),
             completion_index: None,
             suggestions: Vec::new(),
+            autocomplete_index: 0,
             vim_mode: false,
         };
 
@@ -2063,6 +2066,7 @@ impl eframe::App for LauncherApp {
                 }
 
                 if input.changed() {
+                    self.autocomplete_index = 0;
                     self.search();
                 }
 
@@ -2115,12 +2119,21 @@ impl eframe::App for LauncherApp {
                     && !self.suggestions.is_empty()
                     && (tab || enter && self.selected.is_none())
                 {
-                    if let Some(s) = self.suggestions.first().cloned() {
+                    let idx = if tab { self.autocomplete_index } else { 0 };
+                    let next = if tab {
+                        (self.autocomplete_index + 1) % self.suggestions.len()
+                    } else {
+                        0
+                    };
+                    if let Some(s) = self.suggestions.get(idx).cloned() {
                         if s != self.query.to_lowercase() {
                             self.query = s;
                             self.move_cursor_end = true;
                             self.search();
                             accepted_suggestion = true;
+                            if tab {
+                                self.autocomplete_index = next;
+                            }
                         }
                     }
                 }
@@ -3609,6 +3622,27 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn tab_cycles_through_suggestions() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query_autocomplete = true;
+        app.suggestions = vec!["one".into(), "two".into(), "three".into()];
+
+        let expected = ["one", "two", "three", "one"];
+        for exp in expected {
+            let idx = app.autocomplete_index;
+            let next = (app.autocomplete_index + 1) % app.suggestions.len();
+            let s = app.suggestions[idx].clone();
+            if s != app.query.to_lowercase() {
+                app.query = s;
+            }
+            app.autocomplete_index = next;
+            assert_eq!(app.query, exp);
+        }
     }
 
     #[test]
