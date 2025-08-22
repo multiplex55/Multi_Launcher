@@ -70,6 +70,10 @@ pub struct NotePanel {
     show_open_with_menu: bool,
     tags_expanded: bool,
     links_expanded: bool,
+    pending_selection: Option<(usize, usize)>,
+    link_dialog_open: bool,
+    link_text: String,
+    link_url: String,
 }
 
 impl NotePanel {
@@ -87,6 +91,10 @@ impl NotePanel {
             show_open_with_menu: false,
             tags_expanded: false,
             links_expanded: false,
+            pending_selection: None,
+            link_dialog_open: false,
+            link_text: String::new(),
+            link_url: String::new(),
         }
     }
 
@@ -99,6 +107,7 @@ impl NotePanel {
         let screen_rect = ctx.available_rect();
         let max_width = screen_rect.width().min(800.0);
         let max_height = screen_rect.height().min(600.0);
+        let content_id = egui::Id::new("note_content");
         egui::Window::new(self.note.title.clone())
             .open(&mut open)
             .resizable(true)
@@ -109,7 +118,6 @@ impl NotePanel {
             .max_height(max_height)
             .movable(true)
             .show(ctx, |ui| {
-                let content_id = egui::Id::new("note_content");
                 if ui
                     .ctx()
                     .input(|i| i.modifiers.ctrl && i.key_pressed(Key::Equals))
@@ -400,6 +408,20 @@ impl NotePanel {
                     });
                 if !self.preview_mode {
                     if let Some(resp) = resp.inner {
+                        if !resp.secondary_clicked() {
+                            let state = egui::widgets::text_edit::TextEditState::load(ctx, resp.id)
+                                .unwrap_or_default();
+                            if let Some(range) = state.cursor.char_range() {
+                                let [min, max] = range.sorted();
+                                if min.index != max.index {
+                                    self.pending_selection = Some((min.index, max.index));
+                                } else {
+                                    self.pending_selection = None;
+                                }
+                            } else {
+                                self.pending_selection = None;
+                            }
+                        }
                         resp.context_menu(|ui| self.build_textedit_menu(ui, &resp, app));
                         if resp.has_focus()
                             && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Period))
@@ -487,6 +509,30 @@ impl NotePanel {
                     }
                 }
             });
+        if self.link_dialog_open {
+            let mut open_link = true;
+            egui::Window::new("Insert Link")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open_link)
+                .show(ctx, |ui| {
+                    ui.label("Text:");
+                    ui.text_edit_singleline(&mut self.link_text);
+                    ui.label("URL:");
+                    ui.text_edit_singleline(&mut self.link_url);
+                    ui.horizontal(|ui| {
+                        if ui.button("Insert").clicked() {
+                            self.insert_link(ctx, content_id);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.link_text.clear();
+                            self.link_url.clear();
+                            self.link_dialog_open = false;
+                        }
+                    });
+                });
+            self.link_dialog_open &= open_link;
+        }
         if save_now || (!open && app.note_save_on_close) {
             self.save(app);
             if self.overwrite_prompt {
@@ -577,6 +623,8 @@ impl NotePanel {
     ) -> bool {
         let mut modified = false;
         let mut offset = start;
+        let old_spacing = ui.spacing().item_spacing;
+        ui.spacing_mut().item_spacing.y = 0.0;
         for line in segment.split_inclusive('\n') {
             if line.starts_with("- [ ]") || line.starts_with("- [x]") || line.starts_with("- [X]") {
                 let checked = line.as_bytes()[3] == b'x' || line.as_bytes()[3] == b'X';
@@ -616,6 +664,7 @@ impl NotePanel {
             }
             offset += line.len();
         }
+        ui.spacing_mut().item_spacing = old_spacing;
         modified
     }
 
@@ -644,45 +693,20 @@ impl NotePanel {
                 ui.close_menu();
             }
             if ui.button("Bold Selection").clicked() {
-                let mut state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), resp.id)
-                    .unwrap_or_default();
-                if let Some(range) = state.cursor.char_range() {
-                    let [min, max] = range.sorted();
-                    let mut start = min.index;
-                    let mut end = max.index;
-                    self.note.content.insert_str(end, "**");
-                    self.note.content.insert_str(start, "**");
-                    start += 2;
-                    end += 2;
-                    state
-                        .cursor
-                        .set_char_range(Some(egui::text::CCursorRange::two(
-                            egui::text::CCursor::new(start),
-                            egui::text::CCursor::new(end),
-                        )));
-                    state.store(ui.ctx(), resp.id);
-                }
+                self.wrap_selection(ui.ctx(), resp.id, "**", "**");
                 ui.close_menu();
             }
-            if ui.button("Underline Selection").clicked() {
-                let mut state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), resp.id)
-                    .unwrap_or_default();
-                if let Some(range) = state.cursor.char_range() {
-                    let [min, max] = range.sorted();
-                    let mut start = min.index;
-                    let mut end = max.index;
-                    self.note.content.insert_str(end, "__");
-                    self.note.content.insert_str(start, "__");
-                    start += 2;
-                    end += 2;
-                    state
-                        .cursor
-                        .set_char_range(Some(egui::text::CCursorRange::two(
-                            egui::text::CCursor::new(start),
-                            egui::text::CCursor::new(end),
-                        )));
-                    state.store(ui.ctx(), resp.id);
+            if ui.button("Italic Selection").clicked() {
+                self.wrap_selection(ui.ctx(), resp.id, "*", "*");
+                ui.close_menu();
+            }
+            if ui.button("Insert Link...").clicked() {
+                if let Some((start, end)) = self.pending_selection {
+                    self.link_text = self.note.content[start..end].to_string();
+                } else {
+                    self.link_text.clear();
                 }
+                self.link_dialog_open = true;
                 ui.close_menu();
             }
         });
@@ -836,6 +860,74 @@ impl NotePanel {
         ui.menu_button("Insert tag", |ui| {
             insert_tag_menu(ui, resp, &mut self.note.content, &mut self.tag_search);
         });
+    }
+
+    pub fn wrap_selection(
+        &mut self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        start_marker: &str,
+        end_marker: &str,
+    ) {
+        if let Some((start, end)) = self.pending_selection.take() {
+            self.note.content.insert_str(end, end_marker);
+            self.note.content.insert_str(start, start_marker);
+            let mut state =
+                egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+            let new_start = start + start_marker.chars().count();
+            let new_end = end + start_marker.chars().count();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(new_start),
+                    egui::text::CCursor::new(new_end),
+                )));
+            state.store(ctx, id);
+        }
+    }
+
+    pub fn insert_link(&mut self, ctx: &egui::Context, id: egui::Id) {
+        let text = if self.link_text.is_empty() {
+            if let Some((start, end)) = self.pending_selection {
+                self.note.content[start..end].to_string()
+            } else {
+                String::new()
+            }
+        } else {
+            self.link_text.clone()
+        };
+        let insert = format!("[{text}]({})", self.link_url);
+        if let Some((start, end)) = self.pending_selection.take() {
+            self.note.content.replace_range(start..end, &insert);
+            let mut state =
+                egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+            let cursor = start + insert.chars().count();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(cursor),
+                )));
+            state.store(ctx, id);
+        } else {
+            let mut state =
+                egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+            let idx = state
+                .cursor
+                .char_range()
+                .map(|r| r.primary.index)
+                .unwrap_or_else(|| self.note.content.chars().count());
+            self.note.content.insert_str(idx, &insert);
+            let cursor = idx + insert.chars().count();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(cursor),
+                )));
+            state.store(ctx, id);
+        }
+        self.link_dialog_open = false;
+        self.link_text.clear();
+        self.link_url.clear();
     }
 
     fn open_external(&self, app: &mut LauncherApp, choice: NoteExternalOpen) {
@@ -1054,6 +1146,45 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    fn empty_note(content: &str) -> Note {
+        Note {
+            title: String::new(),
+            path: std::path::PathBuf::new(),
+            content: content.to_string(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: String::new(),
+            alias: None,
+        }
+    }
+
+    #[test]
+    fn wrap_selection_preserves_range() {
+        let ctx = egui::Context::default();
+        let mut panel = NotePanel::from_note(empty_note("hello world"));
+        let id = egui::Id::new("note_content");
+        panel.pending_selection = Some((0, 5));
+        panel.wrap_selection(&ctx, id, "**", "**");
+        assert_eq!(panel.note.content, "**hello** world");
+        let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
+        let range = state.cursor.char_range().unwrap();
+        let [min, max] = range.sorted();
+        assert_eq!((min.index, max.index), (2, 7));
+        assert!(panel.pending_selection.is_none());
+    }
+
+    #[test]
+    fn insert_link_replaces_selection() {
+        let ctx = egui::Context::default();
+        let mut panel = NotePanel::from_note(empty_note("hello world"));
+        let id = egui::Id::new("note_content");
+        panel.pending_selection = Some((6, 11));
+        panel.link_url = "http://example.com".to_string();
+        panel.insert_link(&ctx, id);
+        assert_eq!(panel.note.content, "hello [world](http://example.com)");
+        assert!(panel.pending_selection.is_none());
     }
 
     #[test]
