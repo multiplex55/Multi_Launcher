@@ -267,6 +267,12 @@ impl NotePanel {
                 }
                 ui.separator();
                 let remaining = ui.available_height();
+                let prev_state = egui::widgets::text_edit::TextEditState::load(ctx, content_id)
+                    .unwrap_or_default();
+                let prev_selection = prev_state.cursor.char_range().map(|r| {
+                    let [min, max] = r.sorted();
+                    (min.index, max.index)
+                });
                 let resp = egui::ScrollArea::vertical()
                     .id_source(content_id)
                     .max_height(remaining)
@@ -409,14 +415,7 @@ impl NotePanel {
                 if !self.preview_mode {
                     if let Some(resp) = resp.inner {
                         if resp.secondary_clicked() {
-                            let state = egui::widgets::text_edit::TextEditState::load(ctx, resp.id)
-                                .unwrap_or_default();
-                            if let Some(range) = state.cursor.char_range() {
-                                let [min, max] = range.sorted();
-                                self.pending_selection = Some((min.index, max.index));
-                            } else {
-                                self.pending_selection = None;
-                            }
+                            self.pending_selection = prev_selection;
                         }
                         resp.context_menu(|ui| self.build_textedit_menu(ui, &resp, app));
                         if resp.has_focus()
@@ -507,6 +506,7 @@ impl NotePanel {
             });
         if self.link_dialog_open {
             let mut open_link = self.link_dialog_open;
+            let mut close = false;
             egui::Window::new("Insert Link")
                 .collapsible(false)
                 .resizable(false)
@@ -519,14 +519,20 @@ impl NotePanel {
                     ui.horizontal(|ui| {
                         if ui.button("Insert").clicked() {
                             self.insert_link(ctx, content_id);
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.link_dialog_open = false;
                             self.link_text.clear();
                             self.link_url.clear();
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.link_text.clear();
+                            self.link_url.clear();
+                            close = true;
                         }
                     });
                 });
+            if close {
+                open_link = false;
+            }
             self.link_dialog_open = open_link;
         }
         if save_now || (!open && app.note_save_on_close) {
@@ -617,6 +623,7 @@ impl NotePanel {
         segment: &str,
         start: usize,
     ) -> bool {
+        ui.spacing_mut().item_spacing.y = 0.0;
         let mut modified = false;
         let mut offset = start;
         for line in segment.split_inclusive('\n') {
