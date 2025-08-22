@@ -281,6 +281,7 @@ pub struct LauncherApp {
     command_cache: Vec<Action>,
     completion_index: Option<Map<Vec<u8>>>,
     suggestions: Vec<String>,
+    autocomplete_index: usize,
     pub query: String,
     pub results: Vec<Action>,
     pub matcher: SkimMatcherV2,
@@ -432,6 +433,7 @@ impl LauncherApp {
     }
 
     fn update_suggestions(&mut self) {
+        self.autocomplete_index = 0;
         self.suggestions.clear();
         if !self.query_autocomplete || self.query.is_empty() {
             return;
@@ -887,6 +889,7 @@ impl LauncherApp {
             command_cache: Vec::new(),
             completion_index: None,
             suggestions: Vec::new(),
+            autocomplete_index: 0,
             vim_mode: false,
         };
 
@@ -2063,6 +2066,7 @@ impl eframe::App for LauncherApp {
                 }
 
                 if input.changed() {
+                    self.autocomplete_index = 0;
                     self.search();
                 }
 
@@ -2115,11 +2119,20 @@ impl eframe::App for LauncherApp {
                     && !self.suggestions.is_empty()
                     && (tab || enter && self.selected.is_none())
                 {
-                    if let Some(s) = self.suggestions.first().cloned() {
+                    let suggestion = if tab {
+                        self.suggestions.get(self.autocomplete_index).cloned()
+                    } else {
+                        self.suggestions.first().cloned()
+                    };
+                    if let Some(s) = suggestion {
                         if s != self.query.to_lowercase() {
                             self.query = s;
                             self.move_cursor_end = true;
                             self.search();
+                            if tab && !self.suggestions.is_empty() {
+                                self.autocomplete_index =
+                                    (self.autocomplete_index + 1) % self.suggestions.len();
+                            }
                             accepted_suggestion = true;
                         }
                     }
@@ -3635,6 +3648,22 @@ mod tests {
         app.open_note_link("internal-note");
         assert_eq!(super::OPEN_LINK_COUNT.load(Ordering::SeqCst), 0);
         assert_eq!(app.note_panels.len(), 1);
+    }
+
+    #[test]
+    fn tab_cycles_through_suggestions() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query_autocomplete = true;
+        app.suggestions = vec!["alpha".into(), "beta".into(), "gamma".into()];
+
+        for expected in ["alpha", "beta", "gamma", "alpha"] {
+            let s = app.suggestions[app.autocomplete_index].clone();
+            app.query = s.clone();
+            assert_eq!(app.query, expected);
+            app.autocomplete_index = (app.autocomplete_index + 1) % app.suggestions.len();
+        }
     }
 
     #[test]
