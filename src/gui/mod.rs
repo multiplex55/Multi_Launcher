@@ -1191,6 +1191,32 @@ impl LauncherApp {
         }
     }
 
+    pub(crate) fn accept_suggestion(&mut self, tab: bool) -> bool {
+        if !self.query_autocomplete || self.suggestions.is_empty() {
+            return false;
+        }
+        let suggestion = if tab {
+            self.suggestions.get(self.autocomplete_index).cloned()
+        } else {
+            self.suggestions.first().cloned()
+        };
+        if let Some(s) = suggestion {
+            if s != self.query.to_lowercase() {
+                let old_suggestions = self.suggestions.clone();
+                let old_index = self.autocomplete_index;
+                self.query = s;
+                self.move_cursor_end = true;
+                self.search();
+                if tab && !old_suggestions.is_empty() {
+                    self.suggestions = old_suggestions;
+                    self.autocomplete_index = (old_index + 1) % self.suggestions.len();
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     /// Handle a keyboard navigation key. Returns the index of a selected
     /// action when `Enter` is pressed and a selection is available.
     pub fn handle_key(&mut self, key: egui::Key) -> Option<usize> {
@@ -2115,27 +2141,8 @@ impl eframe::App for LauncherApp {
                 let tab = ctx.input(|i| i.key_pressed(egui::Key::Tab));
                 let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
                 let mut accepted_suggestion = false;
-                if self.query_autocomplete
-                    && !self.suggestions.is_empty()
-                    && (tab || enter && self.selected.is_none())
-                {
-                    let suggestion = if tab {
-                        self.suggestions.get(self.autocomplete_index).cloned()
-                    } else {
-                        self.suggestions.first().cloned()
-                    };
-                    if let Some(s) = suggestion {
-                        if s != self.query.to_lowercase() {
-                            self.query = s;
-                            self.move_cursor_end = true;
-                            self.search();
-                            if tab && !self.suggestions.is_empty() {
-                                self.autocomplete_index =
-                                    (self.autocomplete_index + 1) % self.suggestions.len();
-                            }
-                            accepted_suggestion = true;
-                        }
-                    }
+                if tab || (enter && self.selected.is_none()) {
+                    accepted_suggestion = self.accept_suggestion(tab);
                 }
                 if accepted_suggestion {
                     ctx.input_mut(|i| {
@@ -3656,13 +3663,15 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         app.query_autocomplete = true;
-        app.suggestions = vec!["alpha".into(), "beta".into(), "gamma".into()];
+        app.suggestions = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
 
         for expected in ["alpha", "beta", "gamma", "alpha"] {
-            let s = app.suggestions[app.autocomplete_index].clone();
-            app.query = s.clone();
+            assert!(app.accept_suggestion(true));
             assert_eq!(app.query, expected);
-            app.autocomplete_index = (app.autocomplete_index + 1) % app.suggestions.len();
+            assert_eq!(
+                app.suggestions,
+                vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string(),]
+            );
         }
     }
 
