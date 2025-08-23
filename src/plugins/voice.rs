@@ -1,7 +1,7 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
 use std::sync::{Arc, Mutex};
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use reqwest::blocking::Client;
 
 #[derive(Default)]
 pub struct VoiceEngine {
@@ -24,14 +24,17 @@ impl VoiceEngine {
             return;
         }
         self.listening = true;
-        // Example use of the Whisper API. A real implementation would capture
-        // audio from the microphone and feed it to the recognizer.
-        if let Ok(_ctx) =
-            WhisperContext::new_with_params("model.bin", WhisperContextParameters::default())
-        {
-            let _params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-            self.last_result = Some(String::new());
-        }
+        // Example request to a local Vosk/Whisper server. In a real
+        // implementation microphone audio would be streamed to the server
+        // for transcription and the returned text stored as the query.
+        let client = Client::new();
+        let _ = client
+            .post("http://localhost:2700")
+            .body(Vec::new())
+            .send()
+            .ok()
+            .and_then(|resp| resp.text().ok())
+            .map(|text| self.last_result = Some(text));
     }
 
     pub fn stop_listening(&mut self) {
