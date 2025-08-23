@@ -445,7 +445,7 @@ impl Plugin for TodoPlugin {
         let trimmed = query.trim();
         let key = trimmed.to_string();
         if let Ok(mut cache) = self.cache.write() {
-            if let Some(res) = cache.get(&key) {
+            if let Some(res) = cache.get(&key).cloned() {
                 return res;
             }
         }
@@ -453,7 +453,7 @@ impl Plugin for TodoPlugin {
         let result = self.search_internal(trimmed);
 
         if let Ok(mut cache) = self.cache.write() {
-            cache.put(key, result.clone());
+            cache.insert(key, result.clone());
         }
 
         result
