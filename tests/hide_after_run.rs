@@ -31,7 +31,7 @@ fn new_app_with_settings(
             None,
             visible.clone(),
             Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)),
+            visible.clone(),
         ),
         visible,
     )
@@ -47,36 +47,9 @@ fn run_action(action: &str) -> bool {
     }];
     let (mut app, flag) = new_app_with_settings(&ctx, actions, Settings::default());
     app.update_paths(
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(true),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        None, None, None, None, None, None, None, None, None, None, None, None,
+        None, Some(true), None, None, None, None, None, None, None, None, None,
+        None, None, None, None, None, None, None, None,
     );
     flag.store(true, Ordering::SeqCst);
     let a = app.results[0].clone();

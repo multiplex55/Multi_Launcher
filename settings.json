@@ -45,6 +45,7 @@
   "net_unit": "auto",
   "screenshot_dir": null,
   "screenshot_save_file": false,
+  "screenshot_auto_save": true,
   "plugin_settings": {},
   "pinned_panels": []
 }

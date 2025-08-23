@@ -58,6 +58,7 @@ pub struct SettingsEditor {
     net_unit: crate::settings::NetUnit,
     screenshot_dir: String,
     screenshot_save_file: bool,
+    screenshot_auto_save: bool,
     plugin_settings: std::collections::HashMap<String, serde_json::Value>,
     plugins_expanded: bool,
     expand_request: Option<bool>,
@@ -146,6 +147,7 @@ impl SettingsEditor {
             net_unit: settings.net_unit,
             screenshot_dir: settings.screenshot_dir.clone().unwrap_or_default(),
             screenshot_save_file: settings.screenshot_save_file,
+            screenshot_auto_save: settings.screenshot_auto_save,
             plugin_settings: settings.plugin_settings.clone(),
             plugins_expanded: false,
             expand_request: None,
@@ -246,6 +248,7 @@ impl SettingsEditor {
                 Some(self.screenshot_dir.clone())
             },
             screenshot_save_file: self.screenshot_save_file,
+            screenshot_auto_save: self.screenshot_auto_save,
             plugin_settings: self.plugin_settings.clone(),
             show_examples: current.show_examples,
             pinned_panels: current.pinned_panels.clone(),
@@ -436,6 +439,10 @@ impl SettingsEditor {
                         ui.checkbox(
                             &mut self.screenshot_save_file,
                             "Save file when copying screenshot",
+                        );
+                        ui.checkbox(
+                            &mut self.screenshot_auto_save,
+                            "Auto-save after editing",
                         );
                         ui.separator();
                         if ui
@@ -652,6 +659,7 @@ impl SettingsEditor {
                                                 Some(new_settings.net_unit),
                                                 new_settings.screenshot_dir.clone(),
                                                 Some(new_settings.screenshot_save_file),
+                                                Some(new_settings.screenshot_auto_save),
                                                 Some(new_settings.always_on_top),
                                                 Some(new_settings.page_jump),
                                                 Some(new_settings.note_panel_default_size),
@@ -689,6 +697,8 @@ impl SettingsEditor {
                                                 new_settings.screenshot_dir.clone();
                                             app.screenshot_save_file =
                                                 new_settings.screenshot_save_file;
+                                            app.screenshot_auto_save =
+                                                new_settings.screenshot_auto_save;
                                             app.toast_duration = new_settings.toast_duration;
                                             app.note_more_limit = new_settings.note_more_limit;
                                             let dirs = new_settings

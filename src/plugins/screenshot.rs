@@ -19,6 +19,26 @@ pub fn screenshot_dir() -> PathBuf {
         .join("MultiLauncher_Screenshots")
 }
 
+#[cfg(target_os = "windows")]
+pub fn launch_editor(
+    app: &mut crate::gui::LauncherApp,
+    mode: crate::actions::screenshot::Mode,
+    clip: bool,
+) -> anyhow::Result<()> {
+    let img = crate::actions::screenshot::capture_raw(mode)?;
+    app.open_screenshot_editor(img, clip);
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn launch_editor(
+    _app: &mut crate::gui::LauncherApp,
+    _mode: crate::actions::screenshot::Mode,
+    _clip: bool,
+) -> anyhow::Result<()> {
+    anyhow::bail!("screenshot not supported on this platform")
+}
+
 pub struct ScreenshotPlugin;
 
 impl Plugin for ScreenshotPlugin {
