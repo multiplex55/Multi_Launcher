@@ -2845,10 +2845,18 @@ impl eframe::App for LauncherApp {
                                             &slug,
                                             crate::plugins::note::load_notes,
                                             |path| {
-                                                std::process::Command::new("nvim")
-                                                    .arg(path)
-                                                    .spawn()
-                                                    .map(|_| ())
+                                                #[cfg(target_os = "windows")]
+                                                {
+                                                    let (mut cmd, _cmd_str) = build_nvim_command(path);
+                                                    cmd.spawn().map(|_| ())
+                                                }
+                                                #[cfg(not(target_os = "windows"))]
+                                                {
+                                                    std::process::Command::new("nvim")
+                                                        .arg(path)
+                                                        .spawn()
+                                                        .map(|_| ())
+                                                }
                                             },
                                         ) {
                                             ui.close_menu();
