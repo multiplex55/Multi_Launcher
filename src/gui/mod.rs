@@ -61,6 +61,7 @@ use crate::plugin::PluginManager;
 use crate::plugin_editor::PluginEditor;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
+use crate::plugins::voice::{VoiceEngine, VoicePlugin};
 use crate::settings::Settings;
 use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{append_toast_log, TOAST_LOG_FILE};
@@ -383,6 +384,10 @@ pub struct LauncherApp {
     pub net_unit: crate::settings::NetUnit,
     pub screenshot_dir: Option<String>,
     pub screenshot_save_file: bool,
+    pub voice_enabled: bool,
+    pub voice_sensitivity: f32,
+    voice_active: bool,
+    voice_engine: Option<Arc<Mutex<VoiceEngine>>>,
     last_timer_update: Instant,
     last_net_update: Instant,
     last_stopwatch_update: Instant,
@@ -605,7 +610,7 @@ impl LauncherApp {
         ctx: &egui::Context,
         actions: Arc<Vec<Action>>,
         custom_len: usize,
-        plugins: PluginManager,
+        mut plugins: PluginManager,
         actions_path: String,
         settings_path: String,
         settings: Settings,
@@ -624,6 +629,14 @@ impl LauncherApp {
         let enable_toasts = settings.enable_toasts;
         let toast_duration = settings.toast_duration;
         use std::path::Path;
+
+        let voice_engine = if settings.voice_enabled {
+            let engine = Arc::new(Mutex::new(VoiceEngine::new(settings.voice_sensitivity)));
+            plugins.register(Box::new(VoicePlugin::new(engine.clone())));
+            Some(engine)
+        } else {
+            None
+        };
 
         let folder_aliases =
             crate::plugins::folders::load_folders(crate::plugins::folders::FOLDERS_FILE)
@@ -877,6 +890,10 @@ impl LauncherApp {
             net_unit: settings.net_unit,
             screenshot_dir: settings.screenshot_dir.clone(),
             screenshot_save_file: settings.screenshot_save_file,
+            voice_enabled: settings.voice_enabled,
+            voice_sensitivity: settings.voice_sensitivity,
+            voice_active: false,
+            voice_engine: voice_engine.clone(),
             last_timer_update: Instant::now(),
             last_net_update: Instant::now(),
             last_stopwatch_update: Instant::now(),
@@ -1859,6 +1876,19 @@ impl eframe::App for LauncherApp {
             tracing::debug!("{err}");
         }
 
+        if self.voice_active {
+            if let Some(engine) = &self.voice_engine {
+                let res = engine
+                    .lock()
+                    .ok()
+                    .and_then(|mut eng| eng.take_result());
+                if let Some(res) = res {
+                    self.query = res;
+                    self.search();
+                }
+            }
+        }
+
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         self.handle_dropped_files(dropped);
         if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
@@ -2081,17 +2111,37 @@ impl eframe::App for LauncherApp {
                     }
                 }
 
-                let input = ui.add(
-                    egui::TextEdit::singleline(&mut self.query)
-                        .id_source(input_id)
-                        .desired_width(f32::INFINITY),
-                );
+                let response = ui
+                    .horizontal(|ui| {
+                        let input = ui.add(
+                            egui::TextEdit::singleline(&mut self.query)
+                                .id_source(input_id)
+                                .desired_width(f32::INFINITY),
+                        );
+                        if self.voice_enabled {
+                            let icon = if self.voice_active { "🎤" } else { "🔇" };
+                            if ui.button(icon).clicked() {
+                                if let Some(engine) = &self.voice_engine {
+                                    if let Ok(mut eng) = engine.lock() {
+                                        if self.voice_active {
+                                            eng.stop_listening();
+                                        } else {
+                                            eng.start_listening();
+                                        }
+                                        self.voice_active = !self.voice_active;
+                                    }
+                                }
+                            }
+                        }
+                        input
+                    })
+                    .inner;
                 if just_became_visible || self.focus_query {
-                    input.request_focus();
+                    response.request_focus();
                     self.focus_query = false;
                 }
 
-                if input.changed() {
+                if response.changed() {
                     self.autocomplete_index = 0;
                     self.search();
                 }

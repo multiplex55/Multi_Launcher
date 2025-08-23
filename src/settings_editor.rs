@@ -238,6 +238,8 @@ impl SettingsEditor {
             disable_timer_updates: self.disable_timer_updates,
             preserve_command: self.preserve_command,
             query_autocomplete: self.query_autocomplete,
+            voice_enabled: current.voice_enabled,
+            voice_sensitivity: current.voice_sensitivity,
             net_refresh: self.net_refresh,
             net_unit: self.net_unit,
             screenshot_dir: if self.screenshot_dir.trim().is_empty() {

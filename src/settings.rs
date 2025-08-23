@@ -116,6 +116,12 @@ pub struct Settings {
     /// Enable autocomplete suggestions while typing a query.
     #[serde(default = "default_query_autocomplete")]
     pub query_autocomplete: bool,
+    /// Enable voice input in the launcher.
+    #[serde(default)]
+    pub voice_enabled: bool,
+    /// Microphone sensitivity used for voice input.
+    #[serde(default = "default_voice_sensitivity")]
+    pub voice_sensitivity: f32,
     /// Number of results to move when paging through the action list.
     #[serde(default = "default_page_jump")]
     pub page_jump: usize,
@@ -201,6 +207,10 @@ fn default_query_autocomplete() -> bool {
     true
 }
 
+fn default_voice_sensitivity() -> f32 {
+    0.5
+}
+
 fn default_page_jump() -> usize {
     5
 }
@@ -275,6 +285,8 @@ impl Default for Settings {
             fuzzy_weight: default_fuzzy_weight(),
             usage_weight: default_usage_weight(),
             query_autocomplete: default_query_autocomplete(),
+            voice_enabled: false,
+            voice_sensitivity: default_voice_sensitivity(),
             page_jump: default_page_jump(),
             history_limit: default_history_limit(),
             clipboard_limit: default_clipboard_limit(),

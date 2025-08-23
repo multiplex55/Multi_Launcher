@@ -29,6 +29,8 @@
   "fuzzy_weight": 1.0,
   "usage_weight": 1.0,
   "query_autocomplete": true,
+  "voice_enabled": false,
+  "voice_sensitivity": 0.5,
   "page_jump": 5,
   "history_limit": 100,
   "clipboard_limit": 20,
