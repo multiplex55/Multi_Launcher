@@ -26,6 +26,7 @@ quickly open applications or files.
 - Generate random numbers, dice rolls or passwords.
 - Create lorem ipsum filler text or search for emoji.
 - Convert text between cases like `snake_case` or `camelCase`.
+- Pick colors and copy them as hex, RGB or HSL values.
 - Track time with a built-in stopwatch or open the Windows Task Manager.
 
 
@@ -229,6 +230,7 @@ Built-in commands:
 | `ascii` | `ascii text` | ASCII art |
 | `emoji` | `emoji smile` | Emoji search |
 | `case` | `case hello world` | Text and encoding conversions |
+| `color` | `color #ff0000` | Color picker and formats |
 | `ts` | `ts 0` | Timestamp conversion |
 | `tsm` | `tsm 3600000` | Midnight timestamp |
 | `rand` | `rand number 10` | Random numbers, dice and passwords |
@@ -345,6 +347,9 @@ rand pw 8
 
 ### IP Plugin
 Display local network interface addresses with the `ip` prefix. Append `public` to also retrieve the public IP via `api.ipify.org`.
+
+### Color Picker Plugin
+Type `color` to open an interactive picker or specify a hex value such as `color #ff0000`. The plugin outputs the selected color in multiple formats: `#RRGGBB`, `rgb(r, g, b)` and `hsl(h, s%, l%)`. Use the arrow keys to highlight a format and press <kbd>Enter</kbd> to copy it to the clipboard.
 
 ### Notes Plugin
 Manage quick Markdown notes with the `note` prefix. The editor window includes an **Open externally** button to open the current note in another program. A setting under the Note plugin labelled *Open externally* chooses the default opener: **Powershell**, **Notepad** or **Neither** to be asked each time. The **Powershell** option uses PowerShell 7 when available (listed as "Powershell" in the menu) and falls back to `powershell.exe`.
