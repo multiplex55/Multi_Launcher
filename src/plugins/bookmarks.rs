@@ -299,7 +299,7 @@ impl Plugin for BookmarksPlugin {
         let trimmed = query.trim();
         let key = trimmed.to_string();
         if let Ok(mut cache) = self.cache.lock() {
-            if let Some(res) = cache.get(&key) {
+            if let Some(res) = cache.get(&key).cloned() {
                 return res;
             }
         }
@@ -307,7 +307,7 @@ impl Plugin for BookmarksPlugin {
         let result = self.search_internal(trimmed);
 
         if let Ok(mut cache) = self.cache.lock() {
-            cache.put(key, result.clone());
+            cache.insert(key, result.clone());
         }
 
         result
