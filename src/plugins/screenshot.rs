@@ -1,7 +1,11 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
 use crate::settings::Settings;
+use eframe::egui;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+#[cfg(target_os = "windows")]
+use rfd::FileDialog;
 
 /// Return the directory used to store screenshots.
 ///
@@ -17,6 +21,43 @@ pub fn screenshot_dir() -> PathBuf {
     std::env::current_dir()
         .unwrap_or_else(|_| std::env::temp_dir())
         .join("MultiLauncher_Screenshots")
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ScreenshotPluginSettings {
+    pub screenshot_dir: String,
+    pub screenshot_save_file: bool,
+    pub screenshot_auto_save: bool,
+}
+
+impl Default for ScreenshotPluginSettings {
+    fn default() -> Self {
+        Self {
+            screenshot_dir: screenshot_dir().to_string_lossy().to_string(),
+            screenshot_save_file: true,
+            screenshot_auto_save: true,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn launch_editor(
+    app: &mut crate::gui::LauncherApp,
+    mode: crate::actions::screenshot::Mode,
+    clip: bool,
+) -> anyhow::Result<()> {
+    let img = crate::actions::screenshot::capture_raw(mode)?;
+    app.open_screenshot_editor(img, clip);
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn launch_editor(
+    _app: &mut crate::gui::LauncherApp,
+    _mode: crate::actions::screenshot::Mode,
+    _clip: bool,
+) -> anyhow::Result<()> {
+    anyhow::bail!("screenshot not supported on this platform")
 }
 
 pub struct ScreenshotPlugin;
@@ -99,5 +140,35 @@ impl Plugin for ScreenshotPlugin {
                 args: None,
             },
         ]
+    }
+
+    fn default_settings(&self) -> Option<serde_json::Value> {
+        serde_json::to_value(ScreenshotPluginSettings::default()).ok()
+    }
+
+    fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
+        let mut cfg: ScreenshotPluginSettings =
+            serde_json::from_value(value.clone()).unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.label("Screenshot directory");
+            ui.text_edit_singleline(&mut cfg.screenshot_dir);
+            #[cfg(target_os = "windows")]
+            if ui.button("Browse").clicked() {
+                if let Some(dir) = FileDialog::new().pick_folder() {
+                    cfg.screenshot_dir = dir.display().to_string();
+                }
+            }
+        });
+        ui.checkbox(
+            &mut cfg.screenshot_save_file,
+            "Save file when copying screenshot",
+        );
+        ui.checkbox(
+            &mut cfg.screenshot_auto_save,
+            "Auto-save after editing",
+        );
+        if let Ok(v) = serde_json::to_value(&cfg) {
+            *value = v;
+        }
     }
 }
