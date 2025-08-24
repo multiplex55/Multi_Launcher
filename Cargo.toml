@@ -62,6 +62,8 @@ lipsum = "0.9"
 egui_commonmark = "0.15.0"
 rfd = { version = "0.15.3", features = ["xdg-portal", "common-controls-v6"] }
 slab = "0.4.11"
+
+[target.'cfg(unix)'.dependencies]
 xcb = "1.6.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -78,6 +80,8 @@ notify = ["notify-rust"]
 tempfile = "3"
 criterion = "0.5"
 serial_test = "2"
+
+[target.'cfg(unix)'.dev-dependencies]
 xcb = "1.6.0"
 
 [build-dependencies]
