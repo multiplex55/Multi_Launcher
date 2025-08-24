@@ -20,6 +20,7 @@
   "note_save_on_close": false,
   "note_always_overwrite": false,
   "note_images_as_links": false,
+  "note_external_editor": null,
   "note_more_limit": 5,
   "enable_toasts": true,
   "toast_duration": 3.0,
@@ -45,8 +46,8 @@
   "net_unit": "auto",
   "screenshot_dir": null,
   "screenshot_save_file": false,
-  "screenshot_use_editor": true,
   "screenshot_auto_save": true,
+  "screenshot_use_editor": true,
   "plugin_settings": {},
   "pinned_panels": []
 }
