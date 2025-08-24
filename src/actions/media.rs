@@ -22,11 +22,6 @@ fn send_key(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn playerctl(cmd: &str) {
-    let _ = std::process::Command::new("playerctl").arg(cmd).spawn();
-}
-
 #[cfg(target_os = "windows")]
 pub fn play() -> anyhow::Result<()> {
     use windows::Win32::UI::Input::KeyboardAndMouse::VK_MEDIA_PLAY_PAUSE;
@@ -34,13 +29,7 @@ pub fn play() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-pub fn play() -> anyhow::Result<()> {
-    playerctl("play");
-    Ok(())
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(target_os = "windows"))]
 pub fn play() -> anyhow::Result<()> {
     Ok(())
 }
@@ -52,13 +41,7 @@ pub fn pause() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-pub fn pause() -> anyhow::Result<()> {
-    playerctl("pause");
-    Ok(())
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(target_os = "windows"))]
 pub fn pause() -> anyhow::Result<()> {
     Ok(())
 }
@@ -70,13 +53,7 @@ pub fn next() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-pub fn next() -> anyhow::Result<()> {
-    playerctl("next");
-    Ok(())
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(target_os = "windows"))]
 pub fn next() -> anyhow::Result<()> {
     Ok(())
 }
@@ -88,13 +65,7 @@ pub fn prev() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-pub fn prev() -> anyhow::Result<()> {
-    playerctl("previous");
-    Ok(())
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(target_os = "windows"))]
 pub fn prev() -> anyhow::Result<()> {
     Ok(())
 }

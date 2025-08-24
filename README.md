@@ -1,9 +1,10 @@
 # Multi Launcher
 <img width="480" height="480" alt="Green_MultiLauncher" src="https://github.com/user-attachments/assets/8a68f544-536c-4eb5-8c0a-c5ef43e21c2d" />
 
-Multi Launcher is a lightweight application launcher built with Rust and `eframe`.
-It supports configurable hotkeys, basic plugin architecture and file indexing to
-quickly open applications or files.
+Multi Launcher is a lightweight application launcher for Windows built with Rust
+and `eframe`. The project targets Windows exclusively. It supports configurable
+hotkeys, basic plugin architecture and file indexing to quickly open
+applications or files.
 
 
 ## Use Cases
@@ -50,19 +51,12 @@ cargo build --release --features unstable_grab
 This feature is defined in `Cargo.toml` and enables the underlying `rdev`
 capability used to grab keyboard events.
 
-To show a system notification when a timer or alarm fires, build with the
-`notify` feature. This pulls in the optional `notify-rust` dependency:
-
-```
-cargo build --release --features notify
-```
-
 For debugging, enable **Debug logging** in the settings window. When this
 option is active, you can further adjust the verbosity by setting the
 `RUST_LOG` environment variable before running the program:
 
-```bash
-RUST_LOG=info cargo run --release --features unstable_grab
+```powershell
+$env:RUST_LOG="info"; cargo run --release --features unstable_grab
 ```
 
 Enable persistent log files by adding a `log_file` entry to `settings.json`.
@@ -452,8 +446,8 @@ When compiled this way the executable is built with `windows_subsystem = "window
 
 When diagnosing hotkey issues it can be helpful to enable info level logging:
 
-```bash
-RUST_LOG=info cargo run
+```powershell
+$env:RUST_LOG="info"; cargo run
 ```
 ## Tips
 
