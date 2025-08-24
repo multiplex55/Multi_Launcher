@@ -262,6 +262,21 @@ impl Default for MacrosPlugin {
 
 impl Plugin for MacrosPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
+        // Reload macros if the source file has changed since the last check.
+        if let Ok(meta) = std::fs::metadata(MACROS_FILE) {
+            if let Ok(modified) = meta.modified() {
+                let mut last = self.last_modified.lock().unwrap();
+                if *last != modified {
+                    if let Ok(list) = load_macros(MACROS_FILE) {
+                        if let Ok(mut data) = self.data.lock() {
+                            *data = list;
+                        }
+                    }
+                    *last = modified;
+                }
+            }
+        }
+
         let trimmed = query.trim();
         if trimmed.eq_ignore_ascii_case("macro") {
             return vec![Action {
@@ -282,20 +297,6 @@ impl Plugin for MacrosPlugin {
             Some(r) => r,
             None => return Vec::new(),
         };
-        // Reload macros if the source file has changed since the last check.
-        if let Ok(meta) = std::fs::metadata(MACROS_FILE) {
-            if let Ok(modified) = meta.modified() {
-                let mut last = self.last_modified.lock().unwrap();
-                if *last != modified {
-                    if let Ok(list) = load_macros(MACROS_FILE) {
-                        if let Ok(mut data) = self.data.lock() {
-                            *data = list;
-                        }
-                    }
-                    *last = modified;
-                }
-            }
-        }
         self.list(rest.trim())
     }
 
