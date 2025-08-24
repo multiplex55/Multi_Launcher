@@ -100,10 +100,18 @@ fn spawn_gui(
         if settings.always_on_top {
             viewport = viewport.with_always_on_top();
         }
-        let native_options = eframe::NativeOptions {
+        let mut native_options = eframe::NativeOptions {
             viewport,
             ..Default::default()
         };
+
+        #[cfg(target_os = "windows")]
+        {
+            use winit::platform::windows::EventLoopBuilderExtWindows;
+            native_options.event_loop_builder = Some(Box::new(|builder| {
+                builder.with_any_thread(true);
+            }));
+        }
 
         let _ = eframe::run_native(
             "Multi Lnchr",
