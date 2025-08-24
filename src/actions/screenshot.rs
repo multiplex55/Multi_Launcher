@@ -21,36 +21,28 @@ pub enum Mode {
 }
 
 #[cfg(target_os = "windows")]
-pub fn capture(mode: Mode, clipboard: bool) -> anyhow::Result<PathBuf> {
-    let dir = screenshot_dir();
-    std::fs::create_dir_all(&dir)?;
-    let filename = format!(
-        "multi_launcher_{}.png",
-        Local::now().format("%Y%m%d_%H%M%S")
-    );
-    let path = dir.join(filename);
+pub fn capture_raw(mode: Mode) -> anyhow::Result<image::RgbaImage> {
     match mode {
         Mode::Desktop => {
             let screen = Screen::from_point(0, 0)?;
-            let image = screen.capture()?;
-            image.save(&path)?;
+            Ok(screen.capture()?)
         }
         Mode::Window => {
             let hwnd = unsafe { GetForegroundWindow() };
-            if !hwnd.is_invalid() {
-                let mut rect = RECT::default();
-                unsafe { GetWindowRect(hwnd, &mut rect) }?;
-                let width = (rect.right - rect.left) as u32;
-                let height = (rect.bottom - rect.top) as u32;
-                let screen = Screen::from_point(rect.left + 1, rect.top + 1)?;
-                let image = screen.capture_area(
-                    rect.left - screen.display_info.x,
-                    rect.top - screen.display_info.y,
-                    width,
-                    height,
-                )?;
-                image.save(&path)?;
+            if hwnd.is_invalid() {
+                anyhow::bail!("invalid window");
             }
+            let mut rect = RECT::default();
+            unsafe { GetWindowRect(hwnd, &mut rect) }?;
+            let width = (rect.right - rect.left) as u32;
+            let height = (rect.bottom - rect.top) as u32;
+            let screen = Screen::from_point(rect.left + 1, rect.top + 1)?;
+            Ok(screen.capture_area(
+                rect.left - screen.display_info.x,
+                rect.top - screen.display_info.y,
+                width,
+                height,
+            )?)
         }
         Mode::Region => {
             use std::process::Command;
@@ -88,11 +80,23 @@ pub fn capture(mode: Mode, clipboard: bool) -> anyhow::Result<PathBuf> {
                 img.bytes.into_owned(),
             )
             .ok_or_else(|| anyhow::anyhow!("invalid clipboard image"))?;
-            buf.save(&path)?;
+            Ok(buf)
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+pub fn capture(mode: Mode, clipboard: bool) -> anyhow::Result<PathBuf> {
+    let dir = screenshot_dir();
+    std::fs::create_dir_all(&dir)?;
+    let filename = format!(
+        "multi_launcher_{}.png",
+        Local::now().format("%Y%m%d_%H%M%S")
+    );
+    let path = dir.join(filename);
+    let img = capture_raw(mode)?;
+    img.save(&path)?;
     if clipboard {
-        let img = image::load_from_memory(&std::fs::read(&path)?)?.to_rgba8();
         let (w, h) = img.dimensions();
         let mut cb = arboard::Clipboard::new()?;
         cb.set_image(arboard::ImageData {

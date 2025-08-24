@@ -3112,6 +3112,7 @@ dependencies = [
  "eframe",
  "egui-toast",
  "egui_commonmark",
+ "egui_extras",
  "embed-resource",
  "exmex",
  "figlet-rs",

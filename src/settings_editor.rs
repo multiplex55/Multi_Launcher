@@ -1,6 +1,7 @@
 use crate::gui::LauncherApp;
 use crate::hotkey::parse_hotkey;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
+use crate::plugins::screenshot::ScreenshotPluginSettings;
 use crate::settings::Settings;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
@@ -58,6 +59,8 @@ pub struct SettingsEditor {
     net_unit: crate::settings::NetUnit,
     screenshot_dir: String,
     screenshot_save_file: bool,
+    screenshot_auto_save: bool,
+    screenshot_use_editor: bool,
     plugin_settings: std::collections::HashMap<String, serde_json::Value>,
     plugins_expanded: bool,
     expand_request: Option<bool>,
@@ -97,7 +100,7 @@ impl SettingsEditor {
         } else {
             String::new()
         };
-        Self {
+        let mut s = Self {
             hotkey,
             hotkey_valid,
             last_valid_hotkey,
@@ -146,10 +149,21 @@ impl SettingsEditor {
             net_unit: settings.net_unit,
             screenshot_dir: settings.screenshot_dir.clone().unwrap_or_default(),
             screenshot_save_file: settings.screenshot_save_file,
+            screenshot_auto_save: settings.screenshot_auto_save,
+            screenshot_use_editor: settings.screenshot_use_editor,
             plugin_settings: settings.plugin_settings.clone(),
             plugins_expanded: false,
             expand_request: None,
-        }
+        };
+        s.plugin_settings.entry("screenshot".into()).or_insert_with(|| {
+            serde_json::json!({
+                "screenshot_dir": s.screenshot_dir.clone(),
+                "screenshot_save_file": s.screenshot_save_file,
+                "screenshot_auto_save": s.screenshot_auto_save,
+                "screenshot_use_editor": s.screenshot_use_editor,
+            })
+        });
+        s
     }
 
     pub fn new_with_plugins(settings: &Settings) -> Self {
@@ -180,6 +194,14 @@ impl SettingsEditor {
                 val.clone(),
             ) {
                 self.history_limit = cfg.max_entries;
+            }
+        }
+        if let Some(val) = self.plugin_settings.get("screenshot") {
+            if let Ok(cfg) = serde_json::from_value::<ScreenshotPluginSettings>(val.clone()) {
+                self.screenshot_dir = cfg.screenshot_dir;
+                self.screenshot_save_file = cfg.screenshot_save_file;
+                self.screenshot_auto_save = cfg.screenshot_auto_save;
+                self.screenshot_use_editor = cfg.screenshot_use_editor;
             }
         }
     }
@@ -246,6 +268,8 @@ impl SettingsEditor {
                 Some(self.screenshot_dir.clone())
             },
             screenshot_save_file: self.screenshot_save_file,
+            screenshot_auto_save: self.screenshot_auto_save,
+            screenshot_use_editor: self.screenshot_use_editor,
             plugin_settings: self.plugin_settings.clone(),
             show_examples: current.show_examples,
             pinned_panels: current.pinned_panels.clone(),
@@ -422,21 +446,6 @@ impl SettingsEditor {
                             });
                         }
 
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.label("Screenshot dir");
-                            ui.text_edit_singleline(&mut self.screenshot_dir);
-                            if ui.button("Browse").clicked() {
-                                #[cfg(target_os = "windows")]
-                                if let Some(dir) = FileDialog::new().pick_folder() {
-                                    self.screenshot_dir = dir.display().to_string();
-                                }
-                            }
-                        });
-                        ui.checkbox(
-                            &mut self.screenshot_save_file,
-                            "Save file when copying screenshot",
-                        );
                         ui.separator();
                         if ui
                             .button(if self.plugins_expanded {
@@ -652,6 +661,8 @@ impl SettingsEditor {
                                                 Some(new_settings.net_unit),
                                                 new_settings.screenshot_dir.clone(),
                                                 Some(new_settings.screenshot_save_file),
+                                                Some(new_settings.screenshot_use_editor),
+                                                Some(new_settings.screenshot_auto_save),
                                                 Some(new_settings.always_on_top),
                                                 Some(new_settings.page_jump),
                                                 Some(new_settings.note_panel_default_size),
@@ -689,6 +700,10 @@ impl SettingsEditor {
                                                 new_settings.screenshot_dir.clone();
                                             app.screenshot_save_file =
                                                 new_settings.screenshot_save_file;
+                                            app.screenshot_auto_save =
+                                                new_settings.screenshot_auto_save;
+                                            app.screenshot_use_editor =
+                                                new_settings.screenshot_use_editor;
                                             app.toast_duration = new_settings.toast_duration;
                                             app.note_more_limit = new_settings.note_more_limit;
                                             let dirs = new_settings

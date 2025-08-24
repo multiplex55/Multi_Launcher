@@ -8,6 +8,7 @@ mod convert_panel;
 mod cpu_list_dialog;
 mod fav_dialog;
 mod image_panel;
+mod screenshot_editor;
 mod macro_dialog;
 mod note_panel;
 mod notes_dialog;
@@ -33,6 +34,7 @@ pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
 pub use image_panel::ImagePanel;
+pub use screenshot_editor::ScreenshotEditor;
 pub use macro_dialog::MacroDialog;
 #[cfg(target_os = "windows")]
 pub use note_panel::{build_nvim_command, extract_links, show_wiki_link, NotePanel};
@@ -217,6 +219,7 @@ pub enum Panel {
     UnusedAssetsDialog,
     NotePanel,
     ImagePanel,
+    ScreenshotEditor,
     TodoDialog,
     TodoViewDialog,
     ClipboardDialog,
@@ -249,6 +252,7 @@ struct PanelStates {
     unused_assets_dialog: bool,
     note_panel: bool,
     image_panel: bool,
+    screenshot_editor: bool,
     todo_dialog: bool,
     todo_view_dialog: bool,
     clipboard_dialog: bool,
@@ -337,6 +341,7 @@ pub struct LauncherApp {
     unused_assets_dialog: UnusedAssetsDialog,
     note_panels: Vec<NotePanel>,
     image_panels: Vec<ImagePanel>,
+    screenshot_editors: Vec<ScreenshotEditor>,
     todo_dialog: TodoDialog,
     todo_view_dialog: TodoViewDialog,
     clipboard_dialog: ClipboardDialog,
@@ -383,6 +388,8 @@ pub struct LauncherApp {
     pub net_unit: crate::settings::NetUnit,
     pub screenshot_dir: Option<String>,
     pub screenshot_save_file: bool,
+    pub screenshot_auto_save: bool,
+    pub screenshot_use_editor: bool,
     last_timer_update: Instant,
     last_net_update: Instant,
     last_stopwatch_update: Instant,
@@ -500,6 +507,8 @@ impl LauncherApp {
         net_unit: Option<crate::settings::NetUnit>,
         screenshot_dir: Option<String>,
         screenshot_save_file: Option<bool>,
+        screenshot_use_editor: Option<bool>,
+        screenshot_auto_save: Option<bool>,
         always_on_top: Option<bool>,
         page_jump: Option<usize>,
         note_panel_default_size: Option<(f32, f32)>,
@@ -574,6 +583,12 @@ impl LauncherApp {
         }
         if let Some(v) = screenshot_save_file {
             self.screenshot_save_file = v;
+        }
+        if let Some(v) = screenshot_use_editor {
+            self.screenshot_use_editor = v;
+        }
+        if let Some(v) = screenshot_auto_save {
+            self.screenshot_auto_save = v;
         }
         if let Some(v) = always_on_top {
             self.always_on_top = v;
@@ -832,6 +847,7 @@ impl LauncherApp {
             unused_assets_dialog: UnusedAssetsDialog::default(),
             note_panels: Vec::new(),
             image_panels: Vec::new(),
+            screenshot_editors: Vec::new(),
             todo_dialog: TodoDialog::default(),
             todo_view_dialog: TodoViewDialog::default(),
             clipboard_dialog: ClipboardDialog::default(),
@@ -877,6 +893,8 @@ impl LauncherApp {
             net_unit: settings.net_unit,
             screenshot_dir: settings.screenshot_dir.clone(),
             screenshot_save_file: settings.screenshot_save_file,
+            screenshot_auto_save: settings.screenshot_auto_save,
+            screenshot_use_editor: settings.screenshot_use_editor,
             last_timer_update: Instant::now(),
             last_net_update: Instant::now(),
             last_stopwatch_update: Instant::now(),
@@ -1371,6 +1389,15 @@ impl LauncherApp {
         self.screenshot_save_file
     }
 
+    /// Whether screenshots are saved automatically after editing.
+    pub fn get_screenshot_auto_save(&self) -> bool {
+        self.screenshot_auto_save
+    }
+
+    pub fn get_screenshot_use_editor(&self) -> bool {
+        self.screenshot_use_editor
+    }
+
     /// Close the top-most open dialog if any is visible.
     /// Returns `true` when a dialog was closed.
     pub fn close_front_dialog(&mut self) -> bool {
@@ -1454,6 +1481,10 @@ impl LauncherApp {
             Panel::ImagePanel => {
                 let _ = self.image_panels.pop();
                 self.panel_states.image_panel = false;
+            }
+            Panel::ScreenshotEditor => {
+                let _ = self.screenshot_editors.pop();
+                self.panel_states.screenshot_editor = false;
             }
             Panel::TodoDialog => {
                 self.todo_dialog.open = false;
@@ -1577,6 +1608,10 @@ impl LauncherApp {
                 let _ = self.image_panels.pop();
                 self.panel_states.image_panel = false;
             }
+            Panel::ScreenshotEditor => {
+                let _ = self.screenshot_editors.pop();
+                self.panel_states.screenshot_editor = false;
+            }
             Panel::TodoDialog => {
                 self.todo_dialog.open = false;
                 self.panel_states.todo_dialog = false;
@@ -1644,6 +1679,7 @@ impl LauncherApp {
             Panel::UnusedAssetsDialog => self.unused_assets_dialog.open = true,
             Panel::NotePanel => {}
             Panel::ImagePanel => {}
+            Panel::ScreenshotEditor => {}
             Panel::TodoDialog => self.todo_dialog.open = true,
             Panel::TodoViewDialog => self.todo_view_dialog.open = true,
             Panel::ClipboardDialog => self.clipboard_dialog.open = true,
@@ -1764,6 +1800,11 @@ impl LauncherApp {
             !self.image_panels.is_empty(),
             image_panel,
             Panel::ImagePanel
+        );
+        check!(
+            !self.screenshot_editors.is_empty(),
+            screenshot_editor,
+            Panel::ScreenshotEditor
         );
         check!(self.todo_dialog.open, todo_dialog, Panel::TodoDialog);
         check!(
@@ -2281,6 +2322,32 @@ impl eframe::App for LauncherApp {
                                 let count = self.usage.entry(a.action.clone()).or_insert(0);
                                 *count += 1;
                             }
+                        } else if let Some(mode) = a.action.strip_prefix("screenshot:") {
+                            use crate::actions::screenshot::Mode as ScreenshotMode;
+                            let (mode, clip) = match mode {
+                                "window" => (ScreenshotMode::Window, false),
+                                "region" => (ScreenshotMode::Region, false),
+                                "desktop" => (ScreenshotMode::Desktop, false),
+                                "window_clip" => (ScreenshotMode::Window, true),
+                                "region_clip" => (ScreenshotMode::Region, true),
+                                "desktop_clip" => (ScreenshotMode::Desktop, true),
+                                _ => (ScreenshotMode::Desktop, false),
+                            };
+                            if let Err(e) = crate::plugins::screenshot::launch_editor(self, mode, clip)
+                            {
+                                self.set_error(format!("Failed: {e}"));
+                            } else if a.action != "help:show" {
+                                let _ = history::append_history(
+                                    HistoryEntry {
+                                        query: current.clone(),
+                                        query_lc: String::new(),
+                                        action: a.clone(),
+                                    },
+                                    self.history_limit,
+                                );
+                                let count = self.usage.entry(a.action.clone()).or_insert(0);
+                                *count += 1;
+                            }
                         } else if let Err(e) = launch_action(&a) {
                             if a.desc == "Fav" && !a.action.starts_with("fav:") {
                                 tracing::error!(?e, fav=%a.label, "failed to run favorite");
@@ -2504,6 +2571,7 @@ impl eframe::App for LauncherApp {
                                 && !a.action.starts_with("snippet:remove:")
                                 && !a.action.starts_with("fav:add:")
                                 && !a.action.starts_with("fav:remove:")
+                                && !a.action.starts_with("screenshot:")
                                 && !a.action.starts_with("calc:")
                                 && !a.action.starts_with("todo:done:")
                             {
@@ -2984,28 +3052,54 @@ impl eframe::App for LauncherApp {
                             self.open_note_tags();
                             set_focus = true;
                         } else if let Some(link) = a.action.strip_prefix("note:link:") {
-                            self.open_note_link(link);
-                        } else if let Some(slug) = a.action.strip_prefix("note:remove:") {
-                            self.delete_note(slug);
-                        } else if a.action == "convert:panel" {
-                            self.convert_panel.open();
-                        } else if a.action == "tempfile:dialog" {
-                            self.tempfile_dialog.open();
-                        } else if a.action == "settings:dialog" {
-                            self.show_settings = true;
-                        } else if a.action == "volume:dialog" {
-                            self.volume_dialog.open();
-                        } else if a.action == "brightness:dialog" {
-                            self.brightness_dialog.open();
-                        } else if let Some(n) = a.action.strip_prefix("sysinfo:cpu_list:") {
-                            if let Ok(count) = n.parse::<usize>() {
-                                self.cpu_list_dialog.open(count);
-                            }
-                        } else if let Err(e) = launch_action(&a) {
-                                    if a.desc == "Fav" && !a.action.starts_with("fav:") {
-                                        tracing::error!(?e, fav=%a.label, "failed to run favorite");
-                                    }
-                                    self.error = Some(format!("Failed: {e}"));
+                                self.open_note_link(link);
+                            } else if let Some(slug) = a.action.strip_prefix("note:remove:") {
+                                self.delete_note(slug);
+                            } else if a.action == "convert:panel" {
+                                self.convert_panel.open();
+                            } else if a.action == "tempfile:dialog" {
+                                self.tempfile_dialog.open();
+                            } else if a.action == "settings:dialog" {
+                                self.show_settings = true;
+                            } else if a.action == "volume:dialog" {
+                                self.volume_dialog.open();
+                            } else if a.action == "brightness:dialog" {
+                                self.brightness_dialog.open();
+                            } else if let Some(n) = a.action.strip_prefix("sysinfo:cpu_list:") {
+                                if let Ok(count) = n.parse::<usize>() {
+                                    self.cpu_list_dialog.open(count);
+                                }
+                            } else if let Some(mode) = a.action.strip_prefix("screenshot:") {
+                                use crate::actions::screenshot::Mode as ScreenshotMode;
+                                let (mode, clip) = match mode {
+                                    "window" => (ScreenshotMode::Window, false),
+                                    "region" => (ScreenshotMode::Region, false),
+                                    "desktop" => (ScreenshotMode::Desktop, false),
+                                    "window_clip" => (ScreenshotMode::Window, true),
+                                    "region_clip" => (ScreenshotMode::Region, true),
+                                    "desktop_clip" => (ScreenshotMode::Desktop, true),
+                                    _ => (ScreenshotMode::Desktop, false),
+                                };
+                                if let Err(e) = crate::plugins::screenshot::launch_editor(self, mode, clip)
+                                {
+                                    self.set_error(format!("Failed: {e}"));
+                                } else if a.action != "help:show" {
+                                    let _ = history::append_history(
+                                        HistoryEntry {
+                                            query: current.clone(),
+                                            query_lc: String::new(),
+                                            action: a.clone(),
+                                        },
+                                        self.history_limit,
+                                    );
+                                    let count = self.usage.entry(a.action.clone()).or_insert(0);
+                                    *count += 1;
+                                }
+                            } else if let Err(e) = launch_action(&a) {
+                                if a.desc == "Fav" && !a.action.starts_with("fav:") {
+                                    tracing::error!(?e, fav=%a.label, "failed to run favorite");
+                                }
+                                self.error = Some(format!("Failed: {e}"));
                                     self.error_time = Some(Instant::now());
                                     if self.enable_toasts {
                                         push_toast(&mut self.toasts, Toast {
@@ -3299,6 +3393,15 @@ impl eframe::App for LauncherApp {
                 i += 1;
             }
         }
+        let mut i = 0;
+        while i < self.screenshot_editors.len() {
+            let mut editor = self.screenshot_editors.remove(i);
+            editor.ui(ctx, self);
+            if editor.open {
+                self.screenshot_editors.insert(i, editor);
+                i += 1;
+            }
+        }
         let mut todo_dlg = std::mem::take(&mut self.todo_dialog);
         todo_dlg.ui(ctx, self);
         self.todo_dialog = todo_dlg;
@@ -3424,6 +3527,21 @@ impl LauncherApp {
             return;
         }
         self.image_panels.push(ImagePanel::new(path.to_path_buf()));
+        self.update_panel_stack();
+    }
+
+    /// Open the screenshot editor for a captured image.
+    pub fn open_screenshot_editor(&mut self, img: image::RgbaImage, clip: bool) {
+        use chrono::Local;
+        let dir = crate::plugins::screenshot::screenshot_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let filename = format!(
+            "multi_launcher_{}.png",
+            Local::now().format("%Y%m%d_%H%M%S")
+        );
+        let path = dir.join(filename);
+        self.screenshot_editors
+            .push(ScreenshotEditor::new(img, path, clip, self.screenshot_auto_save));
         self.update_panel_stack();
     }
 
