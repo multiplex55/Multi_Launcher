@@ -1,4 +1,4 @@
-#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+#![windows_subsystem = "windows"]
 
 use multi_launcher::actions::{load_actions, Action};
 use multi_launcher::gui::LauncherApp;
@@ -103,11 +103,8 @@ fn spawn_gui(
         let native_options = eframe::NativeOptions {
             viewport,
             event_loop_builder: Some(Box::new(|_builder| {
-                #[cfg(target_os = "windows")]
-                {
-                    use winit::platform::windows::EventLoopBuilderExtWindows;
-                    _builder.with_any_thread(true);
-                }
+                use winit::platform::windows::EventLoopBuilderExtWindows;
+                _builder.with_any_thread(true);
             })),
             ..Default::default()
         };

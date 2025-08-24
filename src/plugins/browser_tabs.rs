@@ -33,7 +33,6 @@ impl Default for BrowserTabsPlugin {
     }
 }
 
-#[cfg(target_os = "windows")]
 mod imp {
     use super::*;
     use once_cell::sync::Lazy;
@@ -398,7 +397,6 @@ mod imp {
 }
 
 impl Plugin for BrowserTabsPlugin {
-    #[cfg(target_os = "windows")]
     fn search(&self, query: &str) -> Vec<Action> {
         const PREFIX: &str = "tab";
         let trimmed = query.trim();
@@ -427,11 +425,6 @@ impl Plugin for BrowserTabsPlugin {
         let filter = rest.to_lowercase();
 
         imp::cached_actions(&filter, self.recalc_each_query)
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn search(&self, _query: &str) -> Vec<Action> {
-        Vec::new()
     }
 
     fn name(&self) -> &str {
@@ -501,17 +494,6 @@ impl Plugin for BrowserTabsPlugin {
     }
 }
 
-#[cfg(all(test, not(target_os = "windows")))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn search_is_empty_on_non_windows() {
-        let plugin = BrowserTabsPlugin::default();
-        assert!(plugin.search("tab ").is_empty());
-    }
-}
-
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BrowserTabsPluginSettings {
     #[serde(default)]
@@ -526,25 +508,14 @@ impl Default for BrowserTabsPluginSettings {
     }
 }
 
-#[cfg(target_os = "windows")]
 pub fn take_cache_messages() -> Vec<String> {
     imp::take_messages()
 }
-#[cfg(not(target_os = "windows"))]
-pub fn take_cache_messages() -> Vec<String> {
-    Vec::new()
-}
 
-#[cfg(target_os = "windows")]
 pub fn rebuild_cache() {
     imp::force_refresh();
 }
-#[cfg(not(target_os = "windows"))]
-pub fn rebuild_cache() {}
 
-#[cfg(target_os = "windows")]
 pub fn clear_cache() {
     imp::clear_cache();
 }
-#[cfg(not(target_os = "windows"))]
-pub fn clear_cache() {}

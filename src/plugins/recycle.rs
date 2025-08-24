@@ -4,7 +4,6 @@ use crate::plugin::Plugin;
 pub struct RecyclePlugin;
 
 impl Plugin for RecyclePlugin {
-    #[cfg(target_os = "windows")]
     fn search(&self, query: &str) -> Vec<Action> {
         const PREFIX: &str = "rec";
         let trimmed = query.trim_start();
@@ -16,11 +15,6 @@ impl Plugin for RecyclePlugin {
                 args: None,
             }];
         }
-        Vec::new()
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn search(&self, _query: &str) -> Vec<Action> {
         Vec::new()
     }
 

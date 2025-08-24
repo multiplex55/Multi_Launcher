@@ -1,93 +1,4 @@
-#[cfg(target_os = "windows")]
 pub use rdev::Key;
-
-#[cfg(not(target_os = "windows"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Key {
-    Space,
-    Tab,
-    Return,
-    Escape,
-    Delete,
-    Backspace,
-    CapsLock,
-    Home,
-    End,
-    PageUp,
-    PageDown,
-    LeftArrow,
-    RightArrow,
-    UpArrow,
-    DownArrow,
-    F1,
-    F2,
-    F3,
-    F4,
-    F5,
-    F6,
-    F7,
-    F8,
-    F9,
-    F10,
-    F11,
-    F12,
-    F13,
-    F14,
-    F15,
-    F16,
-    F17,
-    F18,
-    F19,
-    F20,
-    F21,
-    F22,
-    F23,
-    F24,
-    Num0,
-    Num1,
-    Num2,
-    Num3,
-    Num4,
-    Num5,
-    Num6,
-    Num7,
-    Num8,
-    Num9,
-    KeyA,
-    KeyB,
-    KeyC,
-    KeyD,
-    KeyE,
-    KeyF,
-    KeyG,
-    KeyH,
-    KeyI,
-    KeyJ,
-    KeyK,
-    KeyL,
-    KeyM,
-    KeyN,
-    KeyO,
-    KeyP,
-    KeyQ,
-    KeyR,
-    KeyS,
-    KeyT,
-    KeyU,
-    KeyV,
-    KeyW,
-    KeyX,
-    KeyY,
-    KeyZ,
-    ControlLeft,
-    ControlRight,
-    ShiftLeft,
-    ShiftRight,
-    MetaLeft,
-    MetaRight,
-    Alt,
-    AltGr,
-}
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,9 +11,7 @@ use std::sync::{
     mpsc::Sender,
     Arc, Mutex,
 };
-#[cfg(target_os = "windows")]
 use std::thread;
-#[cfg(target_os = "windows")]
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy)]
@@ -287,7 +196,6 @@ impl HotkeyTrigger {
         }
     }
 
-    #[cfg(target_os = "windows")]
     pub fn start_listener(
         triggers: Vec<Arc<HotkeyTrigger>>,
         _label: &'static str,
@@ -434,17 +342,6 @@ impl HotkeyTrigger {
         });
 
         HotkeyListener { stop: stop_flag }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    pub fn start_listener(
-        _triggers: Vec<Arc<HotkeyTrigger>>,
-        _label: &'static str,
-        _event_tx: Sender<()>,
-    ) -> HotkeyListener {
-        HotkeyListener {
-            stop: Arc::new(AtomicBool::new(false)),
-        }
     }
 
     pub fn take(&self) -> bool {

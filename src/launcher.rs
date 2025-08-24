@@ -1,7 +1,6 @@
 use crate::actions::Action;
 use crate::plugins::calc_history::{self, CalcHistoryEntry, CALC_HISTORY_FILE, MAX_ENTRIES};
 
-#[cfg(target_os = "windows")]
 pub(crate) fn set_system_volume(percent: u32) {
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::Media::Audio::{
@@ -46,7 +45,6 @@ mod tests {
     }
 }
 
-#[cfg(target_os = "windows")]
 pub(crate) fn mute_active_window() {
     use windows::core::Interface;
     use windows::Win32::Media::Audio::{
@@ -92,7 +90,6 @@ pub(crate) fn mute_active_window() {
     }
 }
 
-#[cfg(target_os = "windows")]
 pub(crate) fn set_process_volume(pid: u32, level: u32) {
     use windows::core::Interface;
     use windows::Win32::Media::Audio::{
@@ -138,7 +135,6 @@ pub(crate) fn set_process_volume(pid: u32, level: u32) {
     }
 }
 
-#[cfg(target_os = "windows")]
 pub(crate) fn toggle_process_mute(pid: u32) {
     use windows::core::Interface;
     use windows::Win32::Media::Audio::{
@@ -182,7 +178,6 @@ pub(crate) fn toggle_process_mute(pid: u32) {
     }
 }
 
-#[cfg(target_os = "windows")]
 pub(crate) fn set_display_brightness(percent: u32) {
     use windows::Win32::Devices::Display::{
         DestroyPhysicalMonitors, GetNumberOfPhysicalMonitorsFromHMONITOR,
@@ -221,7 +216,6 @@ pub(crate) fn set_display_brightness(percent: u32) {
     }
 }
 
-#[cfg(target_os = "windows")]
 pub(crate) fn clean_recycle_bin() -> windows::core::Result<()> {
     use windows::Win32::UI::Shell::{
         SHEmptyRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND,
@@ -236,37 +230,29 @@ pub(crate) fn clean_recycle_bin() -> windows::core::Result<()> {
 }
 
 pub(crate) fn system_command(action: &str) -> Option<std::process::Command> {
-    #[cfg(target_os = "windows")]
-    {
-        use std::process::Command;
-        return match action {
-            "shutdown" => {
-                let mut c = Command::new("shutdown");
-                c.args(["/s", "/t", "0"]);
-                Some(c)
-            }
-            "reboot" => {
-                let mut c = Command::new("shutdown");
-                c.args(["/r", "/t", "0"]);
-                Some(c)
-            }
-            "lock" => {
-                let mut c = Command::new("rundll32.exe");
-                c.args(["user32.dll,LockWorkStation"]);
-                Some(c)
-            }
-            "logoff" => {
-                let mut c = Command::new("shutdown");
-                c.arg("/l");
-                Some(c)
-            }
-            _ => None,
-        };
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = action;
-        None
+    use std::process::Command;
+    match action {
+        "shutdown" => {
+            let mut c = Command::new("shutdown");
+            c.args(["/s", "/t", "0"]);
+            Some(c)
+        }
+        "reboot" => {
+            let mut c = Command::new("shutdown");
+            c.args(["/r", "/t", "0"]);
+            Some(c)
+        }
+        "lock" => {
+            let mut c = Command::new("rundll32.exe");
+            c.args(["user32.dll,LockWorkStation"]);
+            Some(c)
+        }
+        "logoff" => {
+            let mut c = Command::new("shutdown");
+            c.arg("/l");
+            Some(c)
+        }
+        _ => None,
     }
 }
 

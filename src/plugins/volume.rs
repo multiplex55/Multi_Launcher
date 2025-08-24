@@ -1,18 +1,13 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
-#[cfg(target_os = "windows")]
 use once_cell::sync::Lazy;
-#[cfg(target_os = "windows")]
 use std::sync::Mutex;
-#[cfg(target_os = "windows")]
 use std::time::{Duration, Instant};
-#[cfg(target_os = "windows")]
 use sysinfo::{ProcessesToUpdate, System};
 
 pub struct VolumePlugin;
 
 impl Plugin for VolumePlugin {
-    #[cfg(target_os = "windows")]
     fn search(&self, query: &str) -> Vec<Action> {
         static SYSTEM_CACHE: Lazy<Mutex<(System, Instant)>> =
             Lazy::new(|| Mutex::new((System::new_all(), Instant::now())));
@@ -94,11 +89,6 @@ impl Plugin for VolumePlugin {
                 _ => {}
             }
         }
-        Vec::new()
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn search(&self, _query: &str) -> Vec<Action> {
         Vec::new()
     }
 

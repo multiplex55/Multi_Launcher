@@ -36,10 +36,7 @@ pub use fav_dialog::FavDialog;
 pub use image_panel::ImagePanel;
 pub use screenshot_editor::ScreenshotEditor;
 pub use macro_dialog::MacroDialog;
-#[cfg(target_os = "windows")]
 pub use note_panel::{build_nvim_command, extract_links, show_wiki_link, NotePanel};
-#[cfg(not(target_os = "windows"))]
-pub use note_panel::{extract_links, show_wiki_link, NotePanel};
 pub use notes_dialog::NotesDialog;
 pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;
@@ -294,7 +291,6 @@ pub struct LauncherApp {
     pub plugins: PluginManager,
     pub selected: Option<usize>,
     pub usage: HashMap<String, u32>,
-    #[cfg(target_os = "windows")]
     pub registered_hotkeys: Mutex<HashMap<String, usize>>,
     pub show_editor: bool,
     pub show_settings: bool,
@@ -799,7 +795,6 @@ impl LauncherApp {
             plugins,
             selected: None,
             usage: usage::load_usage(USAGE_FILE).unwrap_or_default(),
-            #[cfg(target_os = "windows")]
             registered_hotkeys: Mutex::new(HashMap::new()),
             show_editor: false,
             show_settings: false,
@@ -926,7 +921,6 @@ impl LauncherApp {
         app.enforce_pinned();
         app.update_panel_stack();
 
-        #[cfg(target_os = "windows")]
         {
             use crate::global_hotkey::Hotkey as WinHotkey;
             if let Some(ref seq) = settings.hotkey {
@@ -1361,7 +1355,6 @@ impl LauncherApp {
             || self.show_plugins
     }
 
-    #[cfg(target_os = "windows")]
     pub fn unregister_all_hotkeys(&self) {
         use windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
         if let Ok(mut registered_hotkeys) = self.registered_hotkeys.lock() {
@@ -1375,9 +1368,6 @@ impl LauncherApp {
             tracing::error!("failed to lock registered_hotkeys");
         }
     }
-
-    #[cfg(not(target_os = "windows"))]
-    pub fn unregister_all_hotkeys(&self) {}
 
     /// Return the currently configured screenshot directory, if any.
     pub fn get_screenshot_dir(&self) -> Option<&str> {
@@ -1928,7 +1918,6 @@ impl eframe::App for LauncherApp {
                 self.static_size.map(|(w, h)| (w as f32, h as f32)),
                 (self.window_size.0 as f32, self.window_size.1 as f32),
             );
-            #[cfg(target_os = "windows")]
             if let Some(hwnd) = crate::window_manager::get_hwnd(_frame) {
                 crate::window_manager::force_restore_and_foreground(hwnd);
             }
@@ -2113,7 +2102,6 @@ impl eframe::App for LauncherApp {
                                 egui::text::CCursor::new(len),
                             )));
                         });
-                        #[cfg(target_os = "windows")]
                         crate::window_manager::send_end_key();
                         self.move_cursor_end = false;
                         tracing::debug!("move_cursor_end cleared after moving");
@@ -2882,7 +2870,6 @@ impl eframe::App for LauncherApp {
                                         self.open_note_panel(&slug, None);
                                         ui.close_menu();
                                     }
-                                    #[cfg(target_os = "windows")]
                                     if ui.button("Open in Notepad").clicked() {
                                         match crate::plugins::note::load_notes() {
                                             Ok(notes) => {
@@ -2913,18 +2900,8 @@ impl eframe::App for LauncherApp {
                                             &slug,
                                             crate::plugins::note::load_notes,
                                             |path| {
-                                                #[cfg(target_os = "windows")]
-                                                {
-                                                    let (mut cmd, _cmd_str) = build_nvim_command(path);
-                                                    cmd.spawn().map(|_| ())
-                                                }
-                                                #[cfg(not(target_os = "windows"))]
-                                                {
-                                                    std::process::Command::new("nvim")
-                                                        .arg(path)
-                                                        .spawn()
-                                                        .map(|_| ())
-                                                }
+                                                let (mut cmd, _cmd_str) = build_nvim_command(path);
+                                                cmd.spawn().map(|_| ())
                                             },
                                         ) {
                                             ui.close_menu();

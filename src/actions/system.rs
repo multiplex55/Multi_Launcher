@@ -15,88 +15,61 @@ pub fn process_kill(pid: u32) {
     }
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
 pub fn process_switch(pid: u32) {
-    #[cfg(target_os = "windows")]
-    {
-        super::super::window_manager::activate_process(pid);
-    }
+    super::super::window_manager::activate_process(pid);
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
 pub fn window_switch(hwnd: isize) {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::Foundation::HWND;
-        super::super::window_manager::force_restore_and_foreground(HWND(hwnd as _));
-    }
+    use windows::Win32::Foundation::HWND;
+    super::super::window_manager::force_restore_and_foreground(HWND(hwnd as _));
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
 pub fn window_close(hwnd: isize) {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-        use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
-        unsafe {
-            let _ = PostMessageW(HWND(hwnd as _), WM_CLOSE, WPARAM(0), LPARAM(0));
-        }
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+    unsafe {
+        let _ = PostMessageW(HWND(hwnd as _), WM_CLOSE, WPARAM(0), LPARAM(0));
     }
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
 pub fn set_brightness(v: u32) {
-    #[cfg(target_os = "windows")]
     super::super::launcher::set_display_brightness(v);
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
 pub fn set_volume(v: u32) {
-    #[cfg(target_os = "windows")]
     super::super::launcher::set_system_volume(v);
 }
 
 pub fn mute_active_window() {
-    #[cfg(target_os = "windows")]
     super::super::launcher::mute_active_window();
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
 pub fn set_process_volume(pid: u32, level: u32) {
-    #[cfg(target_os = "windows")]
     super::super::launcher::set_process_volume(pid, level);
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
 pub fn toggle_process_mute(pid: u32) {
-    #[cfg(target_os = "windows")]
     super::super::launcher::toggle_process_mute(pid);
 }
 
 pub fn recycle_clean() {
-    #[cfg(target_os = "windows")]
-    {
-        // Emptying the recycle bin can take a noticeable amount of time on
-        // Windows. Running it on the current thread would block the UI and
-        // cause `launch_action` to return slowly, which in turn makes the
-        // `recycle_plugin` test fail. Spawn a background thread instead so the
-        // command returns immediately while the cleanup happens asynchronously.
-        //
-        // To keep callers responsive, dispatch a success event right away and
-        // perform the actual cleanup in the background. Any errors from the
-        // cleanup are ignored since we have already notified listeners.
-        std::thread::spawn(|| {
-            let _ = super::super::launcher::clean_recycle_bin();
-        });
-        crate::gui::send_event(crate::gui::WatchEvent::Recycle(Ok(())));
-    }
+    // Emptying the recycle bin can take a noticeable amount of time on
+    // Windows. Running it on the current thread would block the UI and
+    // cause `launch_action` to return slowly, which in turn makes the
+    // `recycle_plugin` test fail. Spawn a background thread instead so the
+    // command returns immediately while the cleanup happens asynchronously.
+    //
+    // To keep callers responsive, dispatch a success event right away and
+    // perform the actual cleanup in the background. Any errors from the
+    // cleanup are ignored since we have already notified listeners.
+    std::thread::spawn(|| {
+        let _ = super::super::launcher::clean_recycle_bin();
+    });
+    crate::gui::send_event(crate::gui::WatchEvent::Recycle(Ok(())));
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
 pub fn browser_tab_switch(runtime_id: &[i32]) {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::core::VARIANT;
+    use windows::core::VARIANT;
         use windows::Win32::System::Com::{
             CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
             COINIT_APARTMENTTHREADED,
@@ -298,5 +271,4 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
             }
             CoUninitialize();
         }
-    }
 }

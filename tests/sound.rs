@@ -6,7 +6,6 @@ fn sound_names_contains_expected() {
     assert!(SOUND_NAMES.contains(&"Alarm.wav"));
 }
 
-#[cfg(not(target_os = "windows"))]
 #[test]
 fn play_sound_returns_quickly_and_no_panic() {
     use std::time::{Duration, Instant};
