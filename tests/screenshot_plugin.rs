@@ -5,20 +5,16 @@ use multi_launcher::plugins::screenshot::ScreenshotPlugin;
 fn search_lists_screenshot_actions() {
     let plugin = ScreenshotPlugin;
     let results = plugin.search("ss");
-    if cfg!(target_os = "windows") {
-        assert!(!results.is_empty());
-        let prefixes = [
-            "screenshot:window",
-            "screenshot:region",
-            "screenshot:desktop",
-            "screenshot:window_clip",
-            "screenshot:region_clip",
-            "screenshot:desktop_clip",
-        ];
-        for prefix in prefixes.iter() {
-            assert!(results.iter().any(|a| a.action == *prefix), "missing action {}", prefix);
-        }
-    } else {
-        assert!(results.is_empty());
+    assert!(!results.is_empty());
+    let prefixes = [
+        "screenshot:window",
+        "screenshot:region",
+        "screenshot:desktop",
+        "screenshot:window_clip",
+        "screenshot:region_clip",
+        "screenshot:desktop_clip",
+    ];
+    for prefix in prefixes.iter() {
+        assert!(results.iter().any(|a| a.action == *prefix), "missing action {}", prefix);
     }
 }

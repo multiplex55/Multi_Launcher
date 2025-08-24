@@ -1,6 +1,4 @@
-#[cfg(target_os = "windows")]
 use once_cell::sync::Lazy;
-#[cfg(target_os = "windows")]
 use std::io::Cursor;
 
 pub static SOUND_NAMES: &[&str] = &[
@@ -21,7 +19,6 @@ pub static SOUND_NAMES: &[&str] = &[
     "StartUp.wav",
 ];
 
-#[cfg(target_os = "windows")]
 static SOUNDS: Lazy<Vec<(&'static str, &'static [u8])>> = Lazy::new(|| {
     vec![
         ("Alarm.wav", include_bytes!("../Resources/sounds/Alarm.wav")),
@@ -80,7 +77,6 @@ static SOUNDS: Lazy<Vec<(&'static str, &'static [u8])>> = Lazy::new(|| {
     ]
 });
 
-#[cfg(target_os = "windows")]
 pub fn play_sound(name: &str) {
     if name == "None" {
         return;
@@ -101,5 +97,3 @@ pub fn play_sound(name: &str) {
     });
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn play_sound(_name: &str) {}

@@ -166,25 +166,15 @@ pub fn current_mouse_position() -> Option<(f32, f32)> {
         tracing::error!("failed to lock MOCK_MOUSE_POSITION");
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::Foundation::POINT;
-        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
-        let mut pt = POINT::default();
-        if unsafe { GetCursorPos(&mut pt).is_ok() } {
-            Some((pt.x as f32, pt.y as f32))
-        } else {
-            None
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Some((0.0, 0.0))
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut pt = POINT::default();
+    if unsafe { GetCursorPos(&mut pt).is_ok() } {
+        Some((pt.x as f32, pt.y as f32))
+    } else {
+        None
     }
 }
-
-#[cfg(target_os = "windows")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 /// Ensure the given window resides on the active virtual desktop.
@@ -192,7 +182,6 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 /// This uses the `IVirtualDesktopManager` COM interface to check if `hwnd`
 /// already belongs to the current desktop. If not, it is moved to the desktop
 /// of the foreground window.
-#[cfg(target_os = "windows")]
 pub fn move_to_current_desktop(hwnd: windows::Win32::Foundation::HWND) {
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
@@ -218,7 +207,6 @@ pub fn move_to_current_desktop(hwnd: windows::Win32::Foundation::HWND) {
 }
 
 /// On Windows, restore the window and bring it to the foreground.
-#[cfg(target_os = "windows")]
 pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -243,7 +231,6 @@ pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
 }
 
 /// Extract the HWND from an eframe [`Frame`].
-#[cfg(target_os = "windows")]
 pub fn get_hwnd(frame: &eframe::Frame) -> Option<windows::Win32::Foundation::HWND> {
     if let Ok(handle) = frame.window_handle() {
         match handle.as_raw() {
@@ -257,7 +244,6 @@ pub fn get_hwnd(frame: &eframe::Frame) -> Option<windows::Win32::Foundation::HWN
     }
 }
 
-#[cfg(target_os = "windows")]
 pub fn activate_process(pid: u32) {
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -282,13 +268,11 @@ pub fn activate_process(pid: u32) {
     }
 }
 
-#[cfg(target_os = "windows")]
 pub fn activate_window(hwnd: usize) {
     use windows::Win32::Foundation::HWND;
     crate::window_manager::force_restore_and_foreground(HWND(hwnd as *mut _));
 }
 
-#[cfg(target_os = "windows")]
 pub fn close_window(hwnd: usize) {
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
@@ -297,7 +281,6 @@ pub fn close_window(hwnd: usize) {
     }
 }
 
-#[cfg(target_os = "windows")]
 pub fn send_end_key() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,

@@ -4,7 +4,6 @@ use crate::plugin::Plugin;
 pub struct WindowsPlugin;
 
 impl Plugin for WindowsPlugin {
-    #[cfg(target_os = "windows")]
     fn search(&self, query: &str) -> Vec<Action> {
         const PREFIX: &str = "win";
         let trimmed = query.trim();
@@ -56,11 +55,6 @@ impl Plugin for WindowsPlugin {
             let _ = EnumWindows(Some(enum_cb), LPARAM(ctx_ptr as isize));
         }
         ctx.out
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn search(&self, _query: &str) -> Vec<Action> {
-        Vec::new()
     }
 
     fn name(&self) -> &str {

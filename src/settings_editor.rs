@@ -5,7 +5,6 @@ use crate::plugins::screenshot::ScreenshotPluginSettings;
 use crate::settings::Settings;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
-#[cfg(target_os = "windows")]
 use rfd::FileDialog;
 use std::sync::Arc;
 
@@ -537,7 +536,6 @@ impl SettingsEditor {
                                 ui.horizontal(|ui| {
                                     ui.label("External editor");
                                     ui.text_edit_singleline(&mut self.note_external_editor);
-                                    #[cfg(target_os = "windows")]
                                     if ui.button("Browse").clicked() {
                                         if let Some(file) = FileDialog::new().pick_file() {
                                             self.note_external_editor = file.display().to_string();

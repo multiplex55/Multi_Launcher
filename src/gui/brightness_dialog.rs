@@ -51,7 +51,6 @@ impl BrightnessDialog {
     }
 }
 
-#[cfg(target_os = "windows")]
 fn get_main_display_brightness() -> Option<u8> {
     use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
@@ -102,8 +101,3 @@ fn get_main_display_brightness() -> Option<u8> {
     Some(percent as u8)
 }
 
-#[cfg(not(target_os = "windows"))]
-fn get_main_display_brightness() -> Option<u8> {
-    BRIGHTNESS_QUERIES.fetch_add(1, Ordering::Relaxed);
-    None
-}
