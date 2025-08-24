@@ -8,10 +8,13 @@
   "enabled_capabilities": null,
   "debug_logging": false,
   "log_file": null,
-  "offscreen_pos": null,
+  "offscreen_pos": [
+    2000,
+    2000
+  ],
   "window_size": [
-    718,
-    777
+    940,
+    898
   ],
   "note_panel_default_size": [
     420.0,
@@ -20,6 +23,7 @@
   "note_save_on_close": false,
   "note_always_overwrite": false,
   "note_images_as_links": false,
+  "note_external_editor": null,
   "note_more_limit": 5,
   "enable_toasts": true,
   "toast_duration": 3.0,
@@ -34,8 +38,14 @@
   "clipboard_limit": 20,
   "follow_mouse": true,
   "static_location_enabled": false,
-  "static_pos": null,
-  "static_size": null,
+  "static_pos": [
+    0,
+    0
+  ],
+  "static_size": [
+    400,
+    220
+  ],
   "hide_after_run": false,
   "always_on_top": true,
   "timer_refresh": 1.0,
@@ -44,8 +54,37 @@
   "net_refresh": 1.0,
   "net_unit": "auto",
   "screenshot_dir": null,
-  "screenshot_save_file": false,
+  "screenshot_save_file": true,
   "screenshot_auto_save": true,
-  "plugin_settings": {},
+  "plugin_settings": {
+    "network": {
+      "refresh_rate": 1.0,
+      "unit": "auto"
+    },
+    "color_picker": {
+      "color": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    "stopwatch": {
+      "precision": 2,
+      "refresh_rate": 1.0
+    },
+    "clipboard": {
+      "max_entries": 20
+    },
+    "history": {
+      "max_entries": 100
+    },
+    "browser_tabs": {
+      "recalc_each_query": false
+    },
+    "calculator": {
+      "save_on_enter": false
+    }
+  },
   "pinned_panels": []
 }
