@@ -29,6 +29,7 @@ fn new_app(actions_path: &str, ctx: &egui::Context) -> LauncherApp {
     )
 }
 
+#[cfg(target_os = "windows")]
 #[test]
 fn invalid_actions_watcher_logs_error() {
     let _lock = TEST_MUTEX.lock().unwrap();

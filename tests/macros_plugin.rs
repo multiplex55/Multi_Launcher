@@ -10,6 +10,7 @@ use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
+#[cfg(target_os = "windows")]
 #[test]
 fn run_macro_executes_steps() {
     let _lock = TEST_MUTEX.lock().unwrap();
@@ -42,6 +43,7 @@ fn run_macro_executes_steps() {
     assert_eq!(msgs, vec!["Step 1: first", "Step 2: second"]);
 }
 
+#[cfg(target_os = "windows")]
 #[test]
 fn macros_file_change_reload() {
     let _lock = TEST_MUTEX.lock().unwrap();

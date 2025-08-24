@@ -3,7 +3,7 @@ use crate::plugin::Plugin;
 use crate::common::lru::LruCache;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use crate::common::json_watch::{watch_json, JsonWatcher};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use once_cell::sync::Lazy;
@@ -31,7 +31,7 @@ pub struct BookmarksPlugin {
     data: Arc<Mutex<Vec<BookmarkEntry>>>,
     cache: Arc<Mutex<LruCache<String, Vec<Action>>>>,
     #[allow(dead_code)]
-    watcher: Option<RecommendedWatcher>,
+    watcher: Option<JsonWatcher>,
 }
 
 impl BookmarksPlugin {
@@ -43,38 +43,20 @@ impl BookmarksPlugin {
         let cache = BOOKMARK_CACHE.clone();
         let data_clone = data.clone();
         let path = BOOKMARKS_FILE.to_string();
-        let mut watcher = RecommendedWatcher::new(
-            {
-                let path = path.clone();
-                let cache_clone = cache.clone();
-                move |res: notify::Result<notify::Event>| {
-                    if let Ok(event) = res {
-                        if matches!(
-                            event.kind,
-                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                        ) {
-                            if let Ok(list) = load_bookmarks(&path) {
-                                if let Ok(mut lock) = data_clone.lock() {
-                                    *lock = list;
-                                }
-                                if let Ok(mut c) = cache_clone.lock() {
-                                    c.clear();
-                                }
-                            }
-                        }
+        let watcher = watch_json(&path, {
+            let cache_clone = cache.clone();
+            let path = path.clone();
+            move || {
+                if let Ok(list) = load_bookmarks(&path) {
+                    if let Ok(mut lock) = data_clone.lock() {
+                        *lock = list;
+                    }
+                    if let Ok(mut c) = cache_clone.lock() {
+                        c.clear();
                     }
                 }
-            },
-            Config::default(),
-        )
-        .ok();
-        if let Some(w) = watcher.as_mut() {
-            let p = std::path::Path::new(&path);
-            if w.watch(p, RecursiveMode::NonRecursive).is_err() {
-                let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
-                let _ = w.watch(parent, RecursiveMode::NonRecursive);
             }
-        }
+        }).ok();
         Self {
             matcher: SkimMatcherV2::default(),
             data,
