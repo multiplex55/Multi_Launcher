@@ -124,6 +124,8 @@ impl PluginEditor {
                         Some(s.net_unit),
                         s.screenshot_dir.clone(),
                         Some(s.screenshot_save_file),
+                        Some(s.screenshot_use_editor),
+                        Some(s.screenshot_auto_save),
                         Some(s.always_on_top),
                         Some(s.page_jump),
                         Some(s.note_panel_default_size),

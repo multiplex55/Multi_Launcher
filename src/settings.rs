@@ -163,6 +163,12 @@ pub struct Settings {
     /// When capturing screenshots to the clipboard, also save them to disk.
     #[serde(default)]
     pub screenshot_save_file: bool,
+    /// Automatically save screenshots after editing without prompting.
+    #[serde(default = "default_true")]
+    pub screenshot_auto_save: bool,
+    /// Enable the in-app screenshot editor after capture.
+    #[serde(default = "default_true")]
+    pub screenshot_use_editor: bool,
     #[serde(default)]
     pub plugin_settings: std::collections::HashMap<String, serde_json::Value>,
     #[serde(default)]
@@ -203,6 +209,10 @@ fn default_query_autocomplete() -> bool {
 
 fn default_page_jump() -> usize {
     5
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_follow_mouse() -> bool {
@@ -298,6 +308,8 @@ impl Default for Settings {
                     .to_string(),
             ),
             screenshot_save_file: true,
+            screenshot_auto_save: true,
+            screenshot_use_editor: true,
             plugin_settings: std::collections::HashMap::new(),
             pinned_panels: Vec::new(),
         }
