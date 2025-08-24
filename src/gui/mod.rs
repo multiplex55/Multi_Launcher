@@ -286,9 +286,9 @@ pub struct LauncherApp {
     pub settings_editor: SettingsEditor,
     pub plugin_editor: PluginEditor,
     pub settings_path: String,
-    /// Hold watchers so the `RecommendedWatcher` instances remain active.
+    /// Hold file watchers so the `JsonWatcher` instances remain active.
     #[allow(dead_code)] // required to keep watchers alive
-    watchers: Vec<RecommendedWatcher>,
+    watchers: Vec<JsonWatcher>,
     rx: Receiver<WatchEvent>,
     folder_aliases: HashMap<String, Option<String>>,
     bookmark_aliases: HashMap<String, Option<String>>,
@@ -3412,7 +3412,7 @@ impl eframe::App for LauncherApp {
         self.update_panel_stack();
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         self.unregister_all_hotkeys();
         self.visible_flag.store(false, Ordering::SeqCst);
         self.last_visible = false;

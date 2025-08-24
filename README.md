@@ -50,13 +50,6 @@ cargo build --release --features unstable_grab
 This feature is defined in `Cargo.toml` and enables the underlying `rdev`
 capability used to grab keyboard events.
 
-To show a system notification when a timer or alarm fires, build with the
-`notify` feature. This pulls in the optional `notify-rust` dependency:
-
-```
-cargo build --release --features notify
-```
-
 For debugging, enable **Debug logging** in the settings window. When this
 option is active, you can further adjust the verbosity by setting the
 `RUST_LOG` environment variable before running the program:
