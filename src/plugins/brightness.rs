@@ -4,7 +4,6 @@ use crate::plugin::Plugin;
 pub struct BrightnessPlugin;
 
 impl Plugin for BrightnessPlugin {
-    #[cfg(target_os = "windows")]
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "bright") {
@@ -28,11 +27,6 @@ impl Plugin for BrightnessPlugin {
                 }
             }
         }
-        Vec::new()
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn search(&self, _query: &str) -> Vec<Action> {
         Vec::new()
     }
 

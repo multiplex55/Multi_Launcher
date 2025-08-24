@@ -4,7 +4,6 @@ use crate::settings::Settings;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-#[cfg(target_os = "windows")]
 use rfd::FileDialog;
 
 /// Return the directory used to store screenshots.
@@ -42,7 +41,6 @@ impl Default for ScreenshotPluginSettings {
     }
 }
 
-#[cfg(target_os = "windows")]
 pub fn launch_editor(
     app: &mut crate::gui::LauncherApp,
     mode: crate::actions::screenshot::Mode,
@@ -87,19 +85,10 @@ pub fn launch_editor(
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn launch_editor(
-    _app: &mut crate::gui::LauncherApp,
-    _mode: crate::actions::screenshot::Mode,
-    _clip: bool,
-) -> anyhow::Result<()> {
-    anyhow::bail!("screenshot not supported on this platform")
-}
 
 pub struct ScreenshotPlugin;
 
 impl Plugin for ScreenshotPlugin {
-    #[cfg(target_os = "windows")]
     fn search(&self, query: &str) -> Vec<Action> {
         if crate::common::strip_prefix_ci(query.trim(), "ss").is_none() {
             return Vec::new();
@@ -144,11 +133,6 @@ impl Plugin for ScreenshotPlugin {
         ]
     }
 
-    #[cfg(not(target_os = "windows"))]
-    fn search(&self, _query: &str) -> Vec<Action> {
-        Vec::new()
-    }
-
     fn name(&self) -> &str {
         "screenshot"
     }
@@ -188,7 +172,6 @@ impl Plugin for ScreenshotPlugin {
         ui.horizontal(|ui| {
             ui.label("Screenshot directory");
             ui.text_edit_singleline(&mut cfg.screenshot_dir);
-            #[cfg(target_os = "windows")]
             if ui.button("Browse").clicked() {
                 if let Some(dir) = FileDialog::new().pick_folder() {
                     cfg.screenshot_dir = dir.display().to_string();

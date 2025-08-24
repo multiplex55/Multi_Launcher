@@ -1,18 +1,10 @@
 pub fn run(cmd: &str) -> anyhow::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        let mut command = {
-            let mut c = std::process::Command::new("cmd");
-            c.arg("/C").arg(cmd);
-            c
-        };
-        command.spawn().map(|_| ()).map_err(|e| e.into())
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = cmd;
-        Ok(())
-    }
+    let mut command = {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/C").arg(cmd);
+        c
+    };
+    command.spawn().map(|_| ()).map_err(|e| e.into())
 }
 
 pub fn add(name: &str, args: &str) -> anyhow::Result<()> {

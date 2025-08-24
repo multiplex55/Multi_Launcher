@@ -17,7 +17,6 @@ use regex::Regex;
 use rfd::FileDialog;
 use std::collections::HashMap;
 use std::process::Command;
-#[cfg(target_os = "windows")]
 use std::{
     env,
     path::{Path, PathBuf},
@@ -957,26 +956,10 @@ impl NotePanel {
         let path = self.note.path.clone();
         let result = match choice {
             NoteExternalOpen::Powershell => {
-                #[cfg(target_os = "windows")]
-                {
-                    let (mut cmd, _cmd_str) = build_nvim_command(&path);
-                    cmd.spawn()
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    Command::new("nvim").arg(&path).spawn()
-                }
+                let (mut cmd, _cmd_str) = build_nvim_command(&path);
+                cmd.spawn()
             }
-            NoteExternalOpen::Notepad => {
-                #[cfg(target_os = "windows")]
-                {
-                    Command::new("notepad.exe").arg(&path).spawn()
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    Command::new("notepad").arg(&path).spawn()
-                }
-            }
+            NoteExternalOpen::Notepad => Command::new("notepad.exe").arg(&path).spawn(),
             NoteExternalOpen::Neither => return,
         };
         if let Err(e) = result {
@@ -1050,7 +1033,6 @@ fn insert_tag_menu(
         });
 }
 
-#[cfg(target_os = "windows")]
 fn detect_shell() -> PathBuf {
     let ps7_path = env::var("ML_PWSH7_PATH")
         .map(PathBuf::from)
@@ -1068,7 +1050,6 @@ fn detect_shell() -> PathBuf {
     }
 }
 
-#[cfg(target_os = "windows")]
 pub fn build_nvim_command(note_path: &Path) -> (Command, String) {
     let shell = detect_shell();
     let mut cmd = Command::new(&shell);

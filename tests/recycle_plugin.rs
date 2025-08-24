@@ -45,47 +45,38 @@ fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
 fn search_returns_action() {
     let plugin = RecyclePlugin;
     let results = plugin.search("rec");
-    if cfg!(target_os = "windows") {
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].label, "Clean Recycle Bin");
-        assert_eq!(results[0].action, "recycle:clean");
-    } else {
-        assert!(results.is_empty());
-    }
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].label, "Clean Recycle Bin");
+    assert_eq!(results[0].action, "recycle:clean");
 }
 
 #[test]
 fn command_returns_immediately_and_cleans() {
-    if !cfg!(target_os = "windows") {
-        return;
-    }
     let ctx = egui::Context::default();
     let actions: Vec<Action> = Vec::new();
     let mut app = new_app(&ctx, actions);
     app.query = "rec".into();
     app.search();
-    if cfg!(target_os = "windows") {
-        assert_eq!(app.results.len(), 1);
-        let a = app.results[0].clone();
-        let rx = app.watch_receiver();
-        // Clear any events that may have fired during app initialization
-        while rx.try_recv().is_ok() {}
-        let start = std::time::Instant::now();
-        launch_action(&a).unwrap();
-        assert!(start.elapsed() < std::time::Duration::from_millis(100));
-        let start_wait = std::time::Instant::now();
-        loop {
-            let remaining = match std::time::Duration::from_secs(3)
-                .checked_sub(start_wait.elapsed())
-            {
-                Some(dur) => dur,
-                None => panic!("unexpected event"),
-            };
-            match rx.recv_timeout(remaining) {
-                Ok(WatchEvent::Recycle(_)) => break,
-                Ok(_) => continue,
-                Err(_) => panic!("unexpected event"),
-            }
+    assert_eq!(app.results.len(), 1);
+    let a = app.results[0].clone();
+    let rx = app.watch_receiver();
+    // Clear any events that may have fired during app initialization
+    while rx.try_recv().is_ok() {}
+    let start = std::time::Instant::now();
+    launch_action(&a).unwrap();
+    assert!(start.elapsed() < std::time::Duration::from_millis(100));
+    let start_wait = std::time::Instant::now();
+    loop {
+        let remaining = match std::time::Duration::from_secs(3)
+            .checked_sub(start_wait.elapsed())
+        {
+            Some(dur) => dur,
+            None => panic!("unexpected event"),
+        };
+        match rx.recv_timeout(remaining) {
+            Ok(WatchEvent::Recycle(_)) => break,
+            Ok(_) => continue,
+            Err(_) => panic!("unexpected event"),
         }
     }
 }

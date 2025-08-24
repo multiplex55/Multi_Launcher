@@ -4,7 +4,6 @@ use crate::plugins::emoji::EmojiPlugin;
 use crate::plugins::screenshot::ScreenshotPlugin;
 use crate::plugins::text_case::TextCasePlugin;
 use crate::plugins::bookmarks::BookmarksPlugin;
-#[cfg(target_os = "windows")]
 use crate::plugins::brightness::BrightnessPlugin;
 use crate::plugins::clipboard::ClipboardPlugin;
 use crate::plugins::dropcalc::DropCalcPlugin;
@@ -27,7 +26,6 @@ use crate::plugins::sysinfo::SysInfoPlugin;
 use crate::plugins::system::SystemPlugin;
 use crate::plugins::settings::SettingsPlugin;
 use crate::plugins::missing::MissingPlugin;
-#[cfg(target_os = "windows")]
 use crate::plugins::task_manager::TaskManagerPlugin;
 use crate::plugins::tempfile::TempfilePlugin;
 use crate::plugins::timer::TimerPlugin;
@@ -35,13 +33,10 @@ use crate::plugins::stopwatch::StopwatchPlugin;
 use crate::plugins::todo::TodoPlugin;
 use crate::plugins::unit_convert::UnitConvertPlugin;
 use crate::plugins::base_convert::BaseConvertPlugin;
-#[cfg(target_os = "windows")]
 use crate::plugins::volume::VolumePlugin;
 use crate::plugins::weather::WeatherPlugin;
 use crate::plugins::wikipedia::WikipediaPlugin;
-#[cfg(target_os = "windows")]
 use crate::plugins::windows::WindowsPlugin;
-#[cfg(target_os = "windows")]
 use crate::plugins::browser_tabs::BrowserTabsPlugin;
 use crate::plugins::youtube::YoutubePlugin;
 use crate::plugins::ip::IpPlugin;
@@ -162,14 +157,11 @@ impl PluginManager {
         self.register_with_settings(LoremPlugin, plugin_settings);
         self.register_with_settings(ConvertPanelPlugin, plugin_settings);
         self.register_with_settings(ColorPickerPlugin::default(), plugin_settings);
-        #[cfg(target_os = "windows")]
-        {
-            self.register_with_settings(VolumePlugin, plugin_settings);
-            self.register_with_settings(BrightnessPlugin, plugin_settings);
-            self.register_with_settings(TaskManagerPlugin, plugin_settings);
-            self.register_with_settings(WindowsPlugin, plugin_settings);
-            self.register_with_settings(BrowserTabsPlugin::default(), plugin_settings);
-        }
+        self.register_with_settings(VolumePlugin, plugin_settings);
+        self.register_with_settings(BrightnessPlugin, plugin_settings);
+        self.register_with_settings(TaskManagerPlugin, plugin_settings);
+        self.register_with_settings(WindowsPlugin, plugin_settings);
+        self.register_with_settings(BrowserTabsPlugin::default(), plugin_settings);
         self.register_with_settings(SettingsPlugin, plugin_settings);
         self.register_with_settings(HelpPlugin, plugin_settings);
         self.register_with_settings(TimerPlugin, plugin_settings);

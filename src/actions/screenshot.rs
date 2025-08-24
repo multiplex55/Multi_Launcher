@@ -1,16 +1,10 @@
-#[cfg(target_os = "windows")]
 use chrono::Local;
-#[cfg(target_os = "windows")]
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-#[cfg(target_os = "windows")]
 use crate::plugins::screenshot::screenshot_dir;
-#[cfg(target_os = "windows")]
 use screenshots::Screen;
-#[cfg(target_os = "windows")]
 use windows::Win32::Foundation::RECT;
-#[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -20,7 +14,6 @@ pub enum Mode {
     Desktop,
 }
 
-#[cfg(target_os = "windows")]
 pub fn capture_raw(mode: Mode) -> anyhow::Result<image::RgbaImage> {
     match mode {
         Mode::Desktop => {
@@ -85,7 +78,6 @@ pub fn capture_raw(mode: Mode) -> anyhow::Result<image::RgbaImage> {
     }
 }
 
-#[cfg(target_os = "windows")]
 pub fn capture(mode: Mode, clipboard: bool) -> anyhow::Result<PathBuf> {
     let dir = screenshot_dir();
     std::fs::create_dir_all(&dir)?;
@@ -110,7 +102,3 @@ pub fn capture(mode: Mode, clipboard: bool) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn capture(_mode: Mode, _clipboard: bool) -> anyhow::Result<PathBuf> {
-    anyhow::bail!("screenshot not supported on this platform")
-}
