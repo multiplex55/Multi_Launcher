@@ -37,12 +37,15 @@ pub struct BookmarksPlugin {
 impl BookmarksPlugin {
     /// Construct a new `BookmarksPlugin` with a fuzzy matcher.
     pub fn new() -> Self {
+        let path = BOOKMARKS_FILE.to_string();
+        if !std::path::Path::new(&path).exists() {
+            let _ = std::fs::write(&path, "[]");
+        }
         let data = Arc::new(Mutex::new(
-            load_bookmarks(BOOKMARKS_FILE).unwrap_or_default(),
+            load_bookmarks(&path).unwrap_or_default(),
         ));
         let cache = BOOKMARK_CACHE.clone();
         let data_clone = data.clone();
-        let path = BOOKMARKS_FILE.to_string();
         let watcher = watch_json(&path, {
             let cache_clone = cache.clone();
             let path = path.clone();

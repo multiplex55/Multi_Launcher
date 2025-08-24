@@ -125,11 +125,15 @@ pub struct FoldersPlugin {
 impl FoldersPlugin {
     /// Create a new folders plugin.
     pub fn new() -> Self {
+        let path = FOLDERS_FILE.to_string();
+        if !std::path::Path::new(&path).exists() {
+            let defaults = default_folders();
+            let _ = save_folders(&path, &defaults);
+        }
         let data = Arc::new(Mutex::new(
-            load_folders(FOLDERS_FILE).unwrap_or_else(|_| default_folders()),
+            load_folders(&path).unwrap_or_else(|_| default_folders()),
         ));
         let data_clone = data.clone();
-        let path = FOLDERS_FILE.to_string();
         let watcher = watch_json(&path, {
             let path = path.clone();
             move || {
