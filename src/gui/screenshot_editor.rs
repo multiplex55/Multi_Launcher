@@ -108,14 +108,23 @@ impl ScreenshotEditor {
                     if ui.button("Save").clicked() {
                         let res = if self.auto_save {
                             self.save_image(&self.path)
-                        } else if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("PNG", &["png"])
-                            .save_file()
-                        {
-                            self.path = path.clone();
-                            self.save_image(&path)
                         } else {
-                            Ok(())
+                            #[cfg(target_os = "windows")]
+                            {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("PNG", &["png"])
+                                    .save_file()
+                                {
+                                    self.path = path.clone();
+                                    self.save_image(&path)
+                                } else {
+                                    Ok(())
+                                }
+                            }
+                            #[cfg(not(target_os = "windows"))]
+                            {
+                                Ok(())
+                            }
                         };
                         if let Err(e) = res {
                             app.set_error(format!("Failed to save screenshot: {e}"));
@@ -127,14 +136,23 @@ impl ScreenshotEditor {
                         } else if app.get_screenshot_save_file() {
                             let _ = if self.auto_save {
                                 self.save_image(&self.path)
-                            } else if let Some(path) = rfd::FileDialog::new()
-                                .add_filter("PNG", &["png"])
-                                .save_file()
-                            {
-                                self.path = path.clone();
-                                self.save_image(&path)
                             } else {
-                                Ok(())
+                                #[cfg(target_os = "windows")]
+                                {
+                                    if let Some(path) = rfd::FileDialog::new()
+                                        .add_filter("PNG", &["png"])
+                                        .save_file()
+                                    {
+                                        self.path = path.clone();
+                                        self.save_image(&path)
+                                    } else {
+                                        Ok(())
+                                    }
+                                }
+                                #[cfg(not(target_os = "windows"))]
+                                {
+                                    Ok(())
+                                }
                             };
                         }
                     }

@@ -2,7 +2,7 @@ use crate::actions::Action;
 use crate::plugin::Plugin;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use crate::common::json_watch::{watch_json, JsonWatcher};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -119,44 +119,30 @@ pub struct FoldersPlugin {
     matcher: SkimMatcherV2,
     data: Arc<Mutex<Vec<FolderEntry>>>,
     #[allow(dead_code)]
-    watcher: Option<RecommendedWatcher>,
+    watcher: Option<JsonWatcher>,
 }
 
 impl FoldersPlugin {
     /// Create a new folders plugin.
     pub fn new() -> Self {
+        let path = FOLDERS_FILE.to_string();
+        if !std::path::Path::new(&path).exists() {
+            let defaults = default_folders();
+            let _ = save_folders(&path, &defaults);
+        }
         let data = Arc::new(Mutex::new(
-            load_folders(FOLDERS_FILE).unwrap_or_else(|_| default_folders()),
+            load_folders(&path).unwrap_or_else(|_| default_folders()),
         ));
         let data_clone = data.clone();
-        let path = FOLDERS_FILE.to_string();
-        let mut watcher = RecommendedWatcher::new(
-            {
-                let path = path.clone();
-                move |res: notify::Result<notify::Event>| {
-                    if let Ok(event) = res {
-                        if matches!(
-                            event.kind,
-                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                        ) {
-                            let list = load_folders(&path).unwrap_or_else(|_| default_folders());
-                            if let Ok(mut lock) = data_clone.lock() {
-                                *lock = list;
-                            }
-                        }
-                    }
+        let watcher = watch_json(&path, {
+            let path = path.clone();
+            move || {
+                let list = load_folders(&path).unwrap_or_else(|_| default_folders());
+                if let Ok(mut lock) = data_clone.lock() {
+                    *lock = list;
                 }
-            },
-            Config::default(),
-        )
-        .ok();
-        if let Some(w) = watcher.as_mut() {
-            let p = std::path::Path::new(&path);
-            if w.watch(p, RecursiveMode::NonRecursive).is_err() {
-                let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
-                let _ = w.watch(parent, RecursiveMode::NonRecursive);
             }
-        }
+        }).ok();
         Self {
             matcher: SkimMatcherV2::default(),
             data,

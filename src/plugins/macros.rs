@@ -1,5 +1,4 @@
 use crate::actions::{load_actions, Action};
-use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::launcher::launch_action;
 use crate::plugin::{Plugin, PluginManager};
 use crate::settings::Settings;
@@ -8,6 +7,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use once_cell::sync::{Lazy, OnceCell};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 pub const MACROS_FILE: &str = "macros.json";
 pub static STEP_MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
@@ -215,31 +215,20 @@ pub fn run_macro(name: &str) -> anyhow::Result<()> {
 pub struct MacrosPlugin {
     matcher: SkimMatcherV2,
     data: Arc<Mutex<Vec<MacroEntry>>>,
-    #[allow(dead_code)]
-    watcher: Option<JsonWatcher>,
+    /// Last known modification time of the macros file.
+    last_modified: Mutex<SystemTime>,
 }
 
 impl MacrosPlugin {
     pub fn new() -> Self {
         let data = Arc::new(Mutex::new(load_macros(MACROS_FILE).unwrap_or_default()));
-        let data_clone = data.clone();
-        let path = MACROS_FILE.to_string();
-        let watch_path = path.clone();
-        let watcher = watch_json(&watch_path, {
-            let watch_path = watch_path.clone();
-            move || {
-                if let Ok(list) = load_macros(&watch_path) {
-                    if let Ok(mut lock) = data_clone.lock() {
-                        *lock = list;
-                    }
-                }
-            }
-        })
-        .ok();
+        let modified = std::fs::metadata(MACROS_FILE)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
         Self {
             matcher: SkimMatcherV2::default(),
             data,
-            watcher,
+            last_modified: Mutex::new(modified),
         }
     }
 
@@ -273,6 +262,21 @@ impl Default for MacrosPlugin {
 
 impl Plugin for MacrosPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
+        // Reload macros if the source file has changed since the last check.
+        if let Ok(meta) = std::fs::metadata(MACROS_FILE) {
+            if let Ok(modified) = meta.modified() {
+                let mut last = self.last_modified.lock().unwrap();
+                if *last != modified {
+                    if let Ok(list) = load_macros(MACROS_FILE) {
+                        if let Ok(mut data) = self.data.lock() {
+                            *data = list;
+                        }
+                    }
+                    *last = modified;
+                }
+            }
+        }
+
         let trimmed = query.trim();
         if trimmed.eq_ignore_ascii_case("macro") {
             return vec![Action {

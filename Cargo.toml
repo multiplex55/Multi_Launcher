@@ -5,7 +5,7 @@ edition = "2021"
 build = "build.rs"
 
 [dependencies]
-eframe = "0.27"               # egui-based GUI
+eframe = { version = "0.27", default-features = false, features = ["default_fonts", "glow"] }               # egui-based GUI
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 fuzzy-matcher = "0.3"
@@ -18,8 +18,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 exmex = "0.20"
 libloading = "0.8"
-notify = "6"
-winit = "0.29"
 once_cell = "1"
 regex = "1"
 slug = "0.1"
@@ -42,6 +40,7 @@ windows = { version = "0.58", features = [
 ] }
 log = "0.4"
 raw-window-handle = "0.6"
+winit = { version = "0.29", default-features = false, features = ["rwh_06"] }
 arboard = "3"
 egui-toast = "0.13"
 egui_extras = "0.27"
@@ -52,7 +51,6 @@ sysinfo = "0.35"
 chrono = "0.4"
 screenshots = "0.8.10"
 image = { version = "0.24", default-features = false, features = ["png"] }
-notify-rust = { version = "4", optional = true }
 ipconfig = "0.3"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"] }
 base64 = "0.21"
@@ -60,32 +58,29 @@ hex = "0.4"
 rand = "0.8"
 lipsum = "0.9"
 egui_commonmark = "0.15.0"
-rfd = { version = "0.15.3", features = ["xdg-portal", "common-controls-v6"] }
 slab = "0.4.11"
-
-[target.'cfg(unix)'.dependencies]
-xcb = "1.6.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 rdev = { git = "https://github.com/Narsil/rdev", rev = "c14f2dc5c8100a96c5d7e3013de59d6aa0b9eae2" }
 rodio = { version = "0.17", default-features = false, features = ["wav"] }
+rfd = { version = "0.15.3", default-features = false, features = ["common-controls-v6"] }
 
 
 
 [features]
 unstable_grab = []
-notify = ["notify-rust"]
 
 [dev-dependencies]
 tempfile = "3"
 criterion = "0.5"
 serial_test = "2"
 
-[target.'cfg(unix)'.dev-dependencies]
-xcb = "1.6.0"
-
 [build-dependencies]
 embed-resource = "2"
+
+[[bin]]
+name = "multi_launcher"
+path = "src/main.rs"
 
 [[bench]]
 name = "search"

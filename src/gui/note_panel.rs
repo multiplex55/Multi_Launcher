@@ -14,6 +14,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use image::imageops::FilterType;
 use once_cell::sync::Lazy;
 use regex::Regex;
+#[cfg(target_os = "windows")]
 use rfd::FileDialog;
 use std::collections::HashMap;
 use std::process::Command;
@@ -762,6 +763,7 @@ impl NotePanel {
                 });
         });
 
+        #[cfg(target_os = "windows")]
         ui.menu_button("Insert image", |ui| {
             ui.set_min_width(200.0);
             if ui.button("Upload...").clicked() {
