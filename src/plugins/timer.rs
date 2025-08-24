@@ -532,15 +532,6 @@ pub fn resume_timer(id: u64) {
     }
 }
 
-#[cfg(feature = "notify")]
-fn notify(msg: &str) {
-    let _ = notify_rust::Notification::new()
-        .summary("Multi Launcher")
-        .body(msg)
-        .show();
-}
-
-#[cfg(not(feature = "notify"))]
 fn notify(_msg: &str) {}
 
 fn format_duration(dur: Duration) -> String {

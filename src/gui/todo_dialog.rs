@@ -1,6 +1,10 @@
 use crate::gui::LauncherApp;
 use crate::plugins::todo::{load_todos, save_todos, TodoEntry, TODO_FILE};
 use eframe::egui;
+#[cfg(test)]
+use once_cell::sync::Lazy;
+#[cfg(test)]
+use std::sync::Mutex;
 
 #[derive(Default)]
 pub struct TodoDialog {
@@ -269,6 +273,8 @@ mod tests {
     use std::sync::{atomic::AtomicBool, Arc};
     use tempfile::tempdir;
 
+    static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
             ctx,
@@ -290,6 +296,7 @@ mod tests {
 
     #[test]
     fn enter_adds_todo_with_filter_focus() {
+        let _lock = TEST_MUTEX.lock().unwrap();
         let dir = tempdir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
         let ctx = egui::Context::default();
@@ -318,6 +325,7 @@ mod tests {
 
     #[test]
     fn enter_adds_todo_with_tags() {
+        let _lock = TEST_MUTEX.lock().unwrap();
         let dir = tempdir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
         let ctx = egui::Context::default();

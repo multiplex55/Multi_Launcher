@@ -3,6 +3,7 @@ use std::{fs, thread::sleep, time::Duration};
 use serial_test::serial;
 use tempfile::tempdir;
 
+#[cfg(target_os = "windows")]
 #[test]
 #[serial]
 fn writes_log_file() {
