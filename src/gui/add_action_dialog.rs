@@ -1,9 +1,8 @@
 use crate::actions::{save_actions, Action};
 use crate::gui::LauncherApp;
+use crate::common::file_dialog::FileDialog;
 use eframe::egui;
 use std::sync::Arc;
-#[cfg(target_os = "windows")]
-use rfd::FileDialog;
 
 /// Dialog state used when adding a new user defined command.
 ///
@@ -111,7 +110,6 @@ impl AddActionDialog {
                         ui.label("Path");
                         ui.text_edit_singleline(&mut self.path);
                         if ui.button("Browse").clicked() {
-                            #[cfg(target_os = "windows")]
                             if let Some(file) = FileDialog::new().pick_file() {
                                 if let Some(p) = file.to_str() {
                                     self.path = p.to_owned();

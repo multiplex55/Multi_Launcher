@@ -1,11 +1,10 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
 use crate::settings::Settings;
+use crate::common::file_dialog::FileDialog;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-#[cfg(target_os = "windows")]
-use rfd::FileDialog;
 
 /// Return the directory used to store screenshots.
 ///
@@ -185,16 +184,15 @@ impl Plugin for ScreenshotPlugin {
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
         let mut cfg: ScreenshotPluginSettings =
             serde_json::from_value(value.clone()).unwrap_or_default();
-        ui.horizontal(|ui| {
-            ui.label("Screenshot directory");
-            ui.text_edit_singleline(&mut cfg.screenshot_dir);
-            #[cfg(target_os = "windows")]
-            if ui.button("Browse").clicked() {
-                if let Some(dir) = FileDialog::new().pick_folder() {
-                    cfg.screenshot_dir = dir.display().to_string();
+            ui.horizontal(|ui| {
+                ui.label("Screenshot directory");
+                ui.text_edit_singleline(&mut cfg.screenshot_dir);
+                if ui.button("Browse").clicked() {
+                    if let Some(dir) = FileDialog::new().pick_folder() {
+                        cfg.screenshot_dir = dir.display().to_string();
+                    }
                 }
-            }
-        });
+            });
         ui.checkbox(
             &mut cfg.screenshot_save_file,
             "Save file when copying screenshot",

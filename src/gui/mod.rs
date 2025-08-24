@@ -73,7 +73,7 @@ use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
 use fst::{IntoStreamer, Map, MapBuilder, Streamer};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use crate::common::json_watch::{watch_json, JsonWatcher};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -143,28 +143,10 @@ fn watch_file(
     path: &Path,
     tx: Sender<WatchEvent>,
     event: WatchEvent,
-) -> notify::Result<RecommendedWatcher> {
-    let mut watcher = RecommendedWatcher::new(
-        move |res: notify::Result<notify::Event>| match res {
-            Ok(ev) => {
-                if matches!(
-                    ev.kind,
-                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                ) {
-                    let _ = tx.send(event.clone());
-                }
-            }
-            Err(e) => tracing::error!("watch error: {:?}", e),
-        },
-        Config::default(),
-    )?;
-    watcher
-        .watch(path, RecursiveMode::NonRecursive)
-        .or_else(|_| {
-            let parent = path.parent().unwrap_or_else(|| Path::new("."));
-            watcher.watch(parent, RecursiveMode::NonRecursive)
-        })?;
-    Ok(watcher)
+) -> std::io::Result<JsonWatcher> {
+    watch_json(path, move || {
+        let _ = tx.send(event.clone());
+    })
 }
 
 fn push_toast(toasts: &mut Toasts, toast: Toast) {
@@ -304,9 +286,9 @@ pub struct LauncherApp {
     pub settings_editor: SettingsEditor,
     pub plugin_editor: PluginEditor,
     pub settings_path: String,
-    /// Hold watchers so the `RecommendedWatcher` instances remain active.
+    /// Hold watchers so the `JsonWatcher` instances remain active.
     #[allow(dead_code)] // required to keep watchers alive
-    watchers: Vec<RecommendedWatcher>,
+    watchers: Vec<JsonWatcher>,
     rx: Receiver<WatchEvent>,
     folder_aliases: HashMap<String, Option<String>>,
     bookmark_aliases: HashMap<String, Option<String>>,

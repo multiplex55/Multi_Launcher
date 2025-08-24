@@ -14,7 +14,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use image::imageops::FilterType;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use rfd::FileDialog;
+use crate::common::file_dialog::FileDialog;
 use std::collections::HashMap;
 use std::process::Command;
 #[cfg(target_os = "windows")]

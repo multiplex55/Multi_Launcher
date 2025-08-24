@@ -1,3 +1,4 @@
+use crate::common::file_dialog::FileDialog;
 use crate::gui::LauncherApp;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke};
 use egui_extras::RetainedImage;
@@ -108,7 +109,7 @@ impl ScreenshotEditor {
                     if ui.button("Save").clicked() {
                         let res = if self.auto_save {
                             self.save_image(&self.path)
-                        } else if let Some(path) = rfd::FileDialog::new()
+                        } else if let Some(path) = FileDialog::new()
                             .add_filter("PNG", &["png"])
                             .save_file()
                         {
@@ -127,7 +128,7 @@ impl ScreenshotEditor {
                         } else if app.get_screenshot_save_file() {
                             let _ = if self.auto_save {
                                 self.save_image(&self.path)
-                            } else if let Some(path) = rfd::FileDialog::new()
+                            } else if let Some(path) = FileDialog::new()
                                 .add_filter("PNG", &["png"])
                                 .save_file()
                             {

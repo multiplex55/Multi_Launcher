@@ -9,3 +9,4 @@ pub fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
 pub mod json_watch;
 pub mod slug;
 pub mod lru;
+pub mod file_dialog;
