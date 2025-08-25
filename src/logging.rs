@@ -1,8 +1,9 @@
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-static mut LOG_GUARD: Option<WorkerGuard> = None;
+static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
 /// Initialise logging. In debug builds the default level is `debug` while in
 /// release builds it falls back to `info`. The level can be overridden via the
@@ -24,9 +25,7 @@ pub fn init(debug: bool, log_file: Option<PathBuf>) {
         if let (Some(dir), Some(file)) = (path.parent(), path.file_name()) {
             let file_appender = tracing_appender::rolling::never(dir, file);
             let (nb, guard) = tracing_appender::non_blocking(file_appender);
-            unsafe {
-                LOG_GUARD = Some(guard);
-            }
+            let _ = LOG_GUARD.set(guard);
             let file_layer = fmt::layer().with_ansi(false).with_writer(nb);
             let _ = tracing_subscriber::registry()
                 .with(filter)
