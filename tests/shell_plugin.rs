@@ -19,6 +19,7 @@ fn load_shell_cmds_roundtrip() {
         name: "test".into(),
         args: "echo hi".into(),
         autocomplete: true,
+        keep_open: false,
     }];
     save_shell_cmds(SHELL_CMDS_FILE, &entries).unwrap();
     let loaded = load_shell_cmds(SHELL_CMDS_FILE).unwrap();
@@ -26,6 +27,7 @@ fn load_shell_cmds_roundtrip() {
     assert_eq!(loaded[0].name, "test");
     assert_eq!(loaded[0].args, "echo hi");
     assert!(loaded[0].autocomplete);
+    assert!(!loaded[0].keep_open);
 }
 
 #[test]
@@ -38,6 +40,7 @@ fn search_named_command_returns_action() {
         name: "demo".into(),
         args: "dir".into(),
         autocomplete: true,
+        keep_open: false,
     }];
     save_shell_cmds(SHELL_CMDS_FILE, &entries).unwrap();
 
@@ -57,6 +60,7 @@ fn search_respects_autocomplete_flag() {
         name: "demo".into(),
         args: "dir".into(),
         autocomplete: false,
+        keep_open: false,
     }];
     save_shell_cmds(SHELL_CMDS_FILE, &entries).unwrap();
 
@@ -64,6 +68,26 @@ fn search_respects_autocomplete_flag() {
     let results = plugin.search("sh demo");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "shell:demo");
+}
+
+#[test]
+fn search_keep_open_uses_shell_keep_prefix() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let entries = vec![ShellCmdEntry {
+        name: "demo".into(),
+        args: "dir".into(),
+        autocomplete: true,
+        keep_open: true,
+    }];
+    save_shell_cmds(SHELL_CMDS_FILE, &entries).unwrap();
+
+    let plugin = ShellPlugin;
+    let results = plugin.search("sh demo");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "shell_keep:dir");
 }
 
 #[test]
@@ -98,11 +122,13 @@ fn rm_lists_matching_commands() {
             name: "a".into(),
             args: "cmd_a".into(),
             autocomplete: true,
+            keep_open: false,
         },
         ShellCmdEntry {
             name: "b".into(),
             args: "cmd_b".into(),
             autocomplete: true,
+            keep_open: false,
         },
     ];
     save_shell_cmds(SHELL_CMDS_FILE, &entries).unwrap();
@@ -123,6 +149,7 @@ fn list_returns_saved_commands() {
         name: "x".into(),
         args: "dir".into(),
         autocomplete: true,
+        keep_open: false,
     }];
     save_shell_cmds(SHELL_CMDS_FILE, &entries).unwrap();
 

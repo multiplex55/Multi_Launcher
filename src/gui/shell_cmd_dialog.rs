@@ -64,6 +64,7 @@ impl ShellCmdDialog {
                                         name: self.name.clone(),
                                         args: self.args.clone(),
                                         autocomplete: true,
+                                        keep_open: false,
                                     });
                                 } else if let Some(e) = self.entries.get_mut(idx) {
                                     e.name = self.name.clone();

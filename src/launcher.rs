@@ -258,7 +258,10 @@ pub(crate) fn system_command(action: &str) -> Option<std::process::Command> {
 
 #[derive(Debug, Clone, PartialEq)]
 enum ActionKind<'a> {
-    Shell(&'a str),
+    Shell {
+        cmd: &'a str,
+        keep_open: bool,
+    },
     ShellAdd {
         name: &'a str,
         args: &'a str,
@@ -267,7 +270,10 @@ enum ActionKind<'a> {
     ClipboardClear,
     ClipboardCopy(usize),
     ClipboardText(&'a str),
-    Calc { result: &'a str, expr: Option<&'a str> },
+    Calc {
+        result: &'a str,
+        expr: Option<&'a str>,
+    },
     CalcHistory(usize),
     BookmarkAdd(&'a str),
     BookmarkRemove(&'a str),
@@ -375,8 +381,17 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if let Some(name) = s.strip_prefix("shell:remove:") {
         return ActionKind::ShellRemove(name);
     }
+    if let Some(cmd) = s.strip_prefix("shell_keep:") {
+        return ActionKind::Shell {
+            cmd,
+            keep_open: true,
+        };
+    }
     if let Some(cmd) = s.strip_prefix("shell:") {
-        return ActionKind::Shell(cmd);
+        return ActionKind::Shell {
+            cmd,
+            keep_open: false,
+        };
     }
     if let Some(rest) = s.strip_prefix("clipboard:") {
         if rest == "clear" {
@@ -703,7 +718,7 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
 pub fn launch_action(action: &Action) -> anyhow::Result<()> {
     use crate::actions::*;
     match parse_action_kind(action) {
-        ActionKind::Shell(cmd) => shell::run(cmd),
+        ActionKind::Shell { cmd, keep_open } => shell::run(cmd, keep_open),
         ActionKind::ShellAdd { name, args } => shell::add(name, args),
         ActionKind::ShellRemove(name) => shell::remove(name),
         ActionKind::ClipboardClear => clipboard::clear_history(),

@@ -13,6 +13,8 @@ pub struct ShellCmdEntry {
     /// When false this command will not be suggested when typing `sh <query>`.
     #[serde(default = "default_autocomplete")]
     pub autocomplete: bool,
+    #[serde(default)]
+    pub keep_open: bool,
 }
 
 fn default_autocomplete() -> bool {
@@ -44,6 +46,7 @@ pub fn append_shell_cmd(path: &str, name: &str, args: &str) -> anyhow::Result<()
             name: name.to_string(),
             args: args.to_string(),
             autocomplete: true,
+            keep_open: false,
         });
         save_shell_cmds(path, &list)?;
     }
@@ -67,12 +70,12 @@ impl Plugin for ShellPlugin {
         let trimmed = query.trim();
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "sh") {
             if rest.is_empty() {
-            return vec![Action {
-                label: "sh: edit saved commands".into(),
-                desc: "Shell".into(),
-                action: "shell:dialog".into(),
-                args: None,
-            }];
+                return vec![Action {
+                    label: "sh: edit saved commands".into(),
+                    desc: "Shell".into(),
+                    action: "shell:dialog".into(),
+                    args: None,
+                }];
             }
         }
 
@@ -124,11 +127,14 @@ impl Plugin for ShellPlugin {
                         matcher.fuzzy_match(&c.name, filter).is_some()
                             || matcher.fuzzy_match(&c.args, filter).is_some()
                     })
-                    .map(|c| Action {
-                        label: c.name,
-                        desc: "Shell".into(),
-                        action: format!("shell:{}", c.args),
-                        args: None,
+                    .map(|c| {
+                        let prefix = if c.keep_open { "shell_keep:" } else { "shell:" };
+                        Action {
+                            label: c.name,
+                            desc: "Shell".into(),
+                            action: format!("{}{}", prefix, c.args),
+                            args: None,
+                        }
                     })
                     .collect();
             }
@@ -151,10 +157,15 @@ impl Plugin for ShellPlugin {
                     }
                 }
                 if let Some((entry, _)) = best {
+                    let prefix = if entry.keep_open {
+                        "shell_keep:"
+                    } else {
+                        "shell:"
+                    };
                     return vec![Action {
                         label: format!("Run {}", entry.name),
                         desc: "Shell".into(),
-                        action: format!("shell:{}", entry.args),
+                        action: format!("{}{}", prefix, entry.args),
                         args: None,
                     }];
                 }
@@ -183,10 +194,30 @@ impl Plugin for ShellPlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![
-            Action { label: "sh".into(), desc: "Shell".into(), action: "query:sh".into(), args: None },
-            Action { label: "sh add".into(), desc: "Shell".into(), action: "query:sh add ".into(), args: None },
-            Action { label: "sh rm".into(), desc: "Shell".into(), action: "query:sh rm ".into(), args: None },
-            Action { label: "sh list".into(), desc: "Shell".into(), action: "query:sh list".into(), args: None },
+            Action {
+                label: "sh".into(),
+                desc: "Shell".into(),
+                action: "query:sh".into(),
+                args: None,
+            },
+            Action {
+                label: "sh add".into(),
+                desc: "Shell".into(),
+                action: "query:sh add ".into(),
+                args: None,
+            },
+            Action {
+                label: "sh rm".into(),
+                desc: "Shell".into(),
+                action: "query:sh rm ".into(),
+                args: None,
+            },
+            Action {
+                label: "sh list".into(),
+                desc: "Shell".into(),
+                action: "query:sh list".into(),
+                args: None,
+            },
         ]
     }
 }
