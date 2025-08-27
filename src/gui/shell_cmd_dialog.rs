@@ -9,6 +9,7 @@ pub struct ShellCmdDialog {
     edit_idx: Option<usize>,
     name: String,
     args: String,
+    keep_open: bool,
 }
 
 impl ShellCmdDialog {
@@ -18,6 +19,7 @@ impl ShellCmdDialog {
         self.edit_idx = None;
         self.name.clear();
         self.args.clear();
+        self.keep_open = false;
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
@@ -54,6 +56,7 @@ impl ShellCmdDialog {
                             ui.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
                         }
                     });
+                    ui.checkbox(&mut self.keep_open, "Keep command prompt open after run");
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.name.trim().is_empty() || self.args.trim().is_empty() {
@@ -64,15 +67,17 @@ impl ShellCmdDialog {
                                         name: self.name.clone(),
                                         args: self.args.clone(),
                                         autocomplete: true,
-                                        keep_open: false,
+                                        keep_open: self.keep_open,
                                     });
                                 } else if let Some(e) = self.entries.get_mut(idx) {
                                     e.name = self.name.clone();
                                     e.args = self.args.clone();
+                                    e.keep_open = self.keep_open;
                                 }
                                 self.edit_idx = None;
                                 self.name.clear();
                                 self.args.clear();
+                                self.keep_open = false;
                                 save_now = true;
                             }
                         }
@@ -95,6 +100,7 @@ impl ShellCmdDialog {
                                         self.edit_idx = Some(idx);
                                         self.name = name.clone();
                                         self.args = args.clone();
+                                        self.keep_open = self.entries[idx].keep_open;
                                     }
                                     if ui.button("Remove").clicked() {
                                         remove = Some(idx);
@@ -110,6 +116,7 @@ impl ShellCmdDialog {
                         self.edit_idx = Some(self.entries.len());
                         self.name.clear();
                         self.args.clear();
+                        self.keep_open = false;
                     }
                     if ui.button("Close").clicked() {
                         close = true;
@@ -198,5 +205,16 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(args, "echo hi\n");
+    }
+
+    #[test]
+    fn open_resets_keep_open() {
+        let ctx = egui::Context::default();
+        let mut dlg = ShellCmdDialog {
+            keep_open: true,
+            ..Default::default()
+        };
+        dlg.open();
+        assert!(!dlg.keep_open);
     }
 }
