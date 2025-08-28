@@ -346,7 +346,7 @@ Display local network interface addresses with the `ip` prefix. Append `public` 
 Type `color` to open an interactive picker or specify a hex value such as `color #ff0000`. The plugin outputs the selected color in multiple formats: `#RRGGBB`, `rgb(r, g, b)` and `hsl(h, s%, l%)`. Use the arrow keys to highlight a format and press <kbd>Enter</kbd> to copy it to the clipboard.
 
 ### Notes Plugin
-Manage quick Markdown notes with the `note` prefix. The editor window includes an **Open externally** button to open the current note in another program. A setting under the Note plugin labelled *Open externally* chooses the default opener: **Powershell**, **Notepad** or **Neither** to be asked each time. The **Powershell** option uses PowerShell 7 when available (listed as "Powershell" in the menu) and falls back to `powershell.exe`.
+Manage quick Markdown notes with the `note` prefix. The editor window includes an **Open externally** button to open the current note in another program. A setting under the Note plugin labelled *Open externally* chooses the default opener: **WezTerm**, **Powershell**, **Notepad** or **Neither** to be asked each time. **WezTerm** is supported and is the default external editor. The **Powershell** option uses PowerShell 7 when available (listed as "Powershell" in the menu) and falls back to `powershell.exe`.
 
 When the search box is empty the launcher shows these shortcuts along with `app <alias>` entries for saved actions.
 
