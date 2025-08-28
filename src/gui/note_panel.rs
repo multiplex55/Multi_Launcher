@@ -17,6 +17,8 @@ use regex::Regex;
 use rfd::FileDialog;
 use std::collections::HashMap;
 use std::process::Command;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::{
     env,
     path::{Path, PathBuf},
@@ -145,6 +147,10 @@ impl NotePanel {
                                 self.save(app);
                                 self.open_external(app, NoteExternalOpen::Notepad);
                             }
+                            NoteExternalOpen::Wezterm => {
+                                self.save(app);
+                                self.open_external(app, NoteExternalOpen::Wezterm);
+                            }
                             NoteExternalOpen::Neither => {
                                 self.show_open_with_menu = true;
                                 ui.memory_mut(|m| m.open_popup(popup_id));
@@ -157,6 +163,11 @@ impl NotePanel {
                             if ui.button("Powershell").clicked() {
                                 self.save(app);
                                 self.open_external(app, NoteExternalOpen::Powershell);
+                                close = true;
+                            }
+                            if ui.button("WezTerm").clicked() {
+                                self.save(app);
+                                self.open_external(app, NoteExternalOpen::Wezterm);
                                 close = true;
                             }
                             if ui.button("Notepad").clicked() {
@@ -959,6 +970,11 @@ impl NotePanel {
                 let (mut cmd, _cmd_str) = build_nvim_command(&path);
                 cmd.spawn()
             }
+            NoteExternalOpen::Wezterm => {
+                let editor = app.note_external_editor.as_deref().unwrap_or("nvim");
+                let (mut cmd, _cmd_str) = build_wezterm_command(&path, editor);
+                cmd.spawn()
+            }
             NoteExternalOpen::Notepad => Command::new("notepad.exe").arg(&path).spawn(),
             NoteExternalOpen::Neither => return,
         };
@@ -1065,6 +1081,17 @@ pub fn build_nvim_command(note_path: &Path) -> (Command, String) {
             .arg("-NoExit")
             .arg("-Command")
             .arg(format!("nvim {}", note_path.display()));
+    }
+    let cmd_str = format!("{:?}", cmd);
+    (cmd, cmd_str)
+}
+
+pub fn build_wezterm_command(note_path: &Path, editor: &str) -> (Command, String) {
+    let mut cmd = Command::new("wezterm");
+    cmd.arg("start").arg("--").arg(editor).arg(note_path);
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
     let cmd_str = format!("{:?}", cmd);
     (cmd, cmd_str)

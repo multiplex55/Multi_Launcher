@@ -154,14 +154,16 @@ impl SettingsEditor {
             plugins_expanded: false,
             expand_request: None,
         };
-        s.plugin_settings.entry("screenshot".into()).or_insert_with(|| {
-            serde_json::json!({
-                "screenshot_dir": s.screenshot_dir.clone(),
-                "screenshot_save_file": s.screenshot_save_file,
-                "screenshot_auto_save": s.screenshot_auto_save,
-                "screenshot_use_editor": s.screenshot_use_editor,
-            })
-        });
+        s.plugin_settings
+            .entry("screenshot".into())
+            .or_insert_with(|| {
+                serde_json::json!({
+                    "screenshot_dir": s.screenshot_dir.clone(),
+                    "screenshot_save_file": s.screenshot_save_file,
+                    "screenshot_auto_save": s.screenshot_auto_save,
+                    "screenshot_use_editor": s.screenshot_use_editor,
+                })
+            });
         s
     }
 
@@ -554,6 +556,7 @@ impl SettingsEditor {
                                         NoteExternalOpen::Neither => "Neither",
                                         NoteExternalOpen::Powershell => "Powershell",
                                         NoteExternalOpen::Notepad => "Notepad",
+                                        NoteExternalOpen::Wezterm => "WezTerm",
                                     })
                                     .show_ui(ui, |ui| {
                                         ui.selectable_value(
@@ -570,6 +573,11 @@ impl SettingsEditor {
                                             &mut cfg.external_open,
                                             NoteExternalOpen::Notepad,
                                             "Notepad",
+                                        );
+                                        ui.selectable_value(
+                                            &mut cfg.external_open,
+                                            NoteExternalOpen::Wezterm,
+                                            "WezTerm",
                                         );
                                     });
                                 self.plugin_settings.insert(

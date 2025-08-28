@@ -276,7 +276,7 @@ impl Default for Settings {
             note_save_on_close: default_note_save_on_close(),
             note_always_overwrite: false,
             note_images_as_links: false,
-            note_external_editor: None,
+            note_external_editor: Some("wezterm".to_string()),
             note_more_limit: default_note_more_limit(),
             enable_toasts: true,
             toast_duration: default_toast_duration(),
