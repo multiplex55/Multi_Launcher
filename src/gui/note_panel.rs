@@ -17,6 +17,8 @@ use regex::Regex;
 use rfd::FileDialog;
 use std::collections::HashMap;
 use std::process::Command;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::{
     env,
     path::{Path, PathBuf},
@@ -1087,6 +1089,10 @@ pub fn build_nvim_command(note_path: &Path) -> (Command, String) {
 pub fn build_wezterm_command(note_path: &Path, editor: &str) -> (Command, String) {
     let mut cmd = Command::new("wezterm");
     cmd.arg("start").arg("--").arg(editor).arg(note_path);
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
     let cmd_str = format!("{:?}", cmd);
     (cmd, cmd_str)
 }
