@@ -8,10 +8,10 @@ mod convert_panel;
 mod cpu_list_dialog;
 mod fav_dialog;
 mod image_panel;
-mod screenshot_editor;
 mod macro_dialog;
 mod note_panel;
 mod notes_dialog;
+mod screenshot_editor;
 mod shell_cmd_dialog;
 mod snippet_dialog;
 mod tempfile_alias_dialog;
@@ -34,10 +34,12 @@ pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
 pub use image_panel::ImagePanel;
-pub use screenshot_editor::ScreenshotEditor;
 pub use macro_dialog::MacroDialog;
-pub use note_panel::{build_nvim_command, extract_links, show_wiki_link, NotePanel};
+pub use note_panel::{
+    build_nvim_command, build_wezterm_command, extract_links, show_wiki_link, NotePanel,
+};
 pub use notes_dialog::NotesDialog;
+pub use screenshot_editor::ScreenshotEditor;
 pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;
 pub use tempfile_alias_dialog::TempfileAliasDialog;
@@ -781,7 +783,7 @@ impl LauncherApp {
             .get("note")
             .and_then(|v| serde_json::from_value::<NotePluginSettings>(v.clone()).ok())
             .map(|s| s.external_open)
-            .unwrap_or(NoteExternalOpen::Neither);
+            .unwrap_or(NoteExternalOpen::Wezterm);
 
         let settings_editor = SettingsEditor::new_with_plugins(&settings);
         let plugin_editor = PluginEditor::new(&settings);
@@ -3517,8 +3519,12 @@ impl LauncherApp {
             Local::now().format("%Y%m%d_%H%M%S")
         );
         let path = dir.join(filename);
-        self.screenshot_editors
-            .push(ScreenshotEditor::new(img, path, clip, self.screenshot_auto_save));
+        self.screenshot_editors.push(ScreenshotEditor::new(
+            img,
+            path,
+            clip,
+            self.screenshot_auto_save,
+        ));
         self.update_panel_stack();
     }
 

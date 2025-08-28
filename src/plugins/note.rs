@@ -1,13 +1,13 @@
 use crate::actions::Action;
 use crate::common::slug::{register_slug, reset_slug_lookup, slugify, unique_slug};
 use crate::plugin::Plugin;
-use eframe::egui;
-use serde::{Deserialize, Serialize};
 use chrono::Local;
+use eframe::egui;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use once_cell::sync::Lazy;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -17,6 +17,7 @@ pub enum NoteExternalOpen {
     Neither,
     Powershell,
     Notepad,
+    Wezterm,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,7 +28,7 @@ pub struct NotePluginSettings {
 impl Default for NotePluginSettings {
     fn default() -> Self {
         Self {
-            external_open: NoteExternalOpen::Neither,
+            external_open: NoteExternalOpen::Wezterm,
         }
     }
 }
@@ -454,7 +455,7 @@ impl NotePlugin {
             matcher: SkimMatcherV2::default(),
             data: CACHE.clone(),
             templates: TEMPLATE_CACHE.clone(),
-            external_open: NoteExternalOpen::Neither,
+            external_open: NoteExternalOpen::Wezterm,
         }
     }
 }
@@ -921,13 +922,13 @@ impl Plugin for NotePlugin {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
-        let mut cfg: NotePluginSettings =
-            serde_json::from_value(value.clone()).unwrap_or_default();
+        let mut cfg: NotePluginSettings = serde_json::from_value(value.clone()).unwrap_or_default();
         egui::ComboBox::from_label("Open externally")
             .selected_text(match cfg.external_open {
                 NoteExternalOpen::Neither => "Neither",
                 NoteExternalOpen::Powershell => "Powershell",
                 NoteExternalOpen::Notepad => "Notepad",
+                NoteExternalOpen::Wezterm => "WezTerm",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut cfg.external_open, NoteExternalOpen::Neither, "Neither");
@@ -937,6 +938,7 @@ impl Plugin for NotePlugin {
                     "Powershell",
                 );
                 ui.selectable_value(&mut cfg.external_open, NoteExternalOpen::Notepad, "Notepad");
+                ui.selectable_value(&mut cfg.external_open, NoteExternalOpen::Wezterm, "WezTerm");
             });
         match serde_json::to_value(&cfg) {
             Ok(v) => *value = v,
