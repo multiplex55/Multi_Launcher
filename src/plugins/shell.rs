@@ -1,8 +1,10 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
+use eframe::egui;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const SHELL_CMDS_FILE: &str = "shell_cmds.json";
 
@@ -15,6 +17,25 @@ pub struct ShellCmdEntry {
     pub autocomplete: bool,
     #[serde(default)]
     pub keep_open: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ShellPluginSettings {
+    pub open_in_wezterm: bool,
+}
+
+impl Default for ShellPluginSettings {
+    fn default() -> Self {
+        Self {
+            open_in_wezterm: false,
+        }
+    }
+}
+
+static USE_WEZTERM: AtomicBool = AtomicBool::new(false);
+
+pub fn use_wezterm() -> bool {
+    USE_WEZTERM.load(Ordering::Relaxed)
 }
 
 fn default_autocomplete() -> bool {
@@ -219,5 +240,26 @@ impl Plugin for ShellPlugin {
                 args: None,
             },
         ]
+    }
+
+    fn default_settings(&self) -> Option<serde_json::Value> {
+        serde_json::to_value(ShellPluginSettings::default()).ok()
+    }
+
+    fn apply_settings(&mut self, value: &serde_json::Value) {
+        if let Ok(cfg) = serde_json::from_value::<ShellPluginSettings>(value.clone()) {
+            USE_WEZTERM.store(cfg.open_in_wezterm, Ordering::Relaxed);
+        }
+    }
+
+    fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
+        let mut cfg: ShellPluginSettings =
+            serde_json::from_value(value.clone()).unwrap_or_default();
+        ui.checkbox(&mut cfg.open_in_wezterm, "Open commands in WezTerm");
+        USE_WEZTERM.store(cfg.open_in_wezterm, Ordering::Relaxed);
+        match serde_json::to_value(&cfg) {
+            Ok(v) => *value = v,
+            Err(e) => tracing::error!("failed to serialize shell settings: {e}"),
+        }
     }
 }
