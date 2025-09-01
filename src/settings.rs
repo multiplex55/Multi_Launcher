@@ -84,10 +84,6 @@ pub struct Settings {
     /// textures directly in the preview.
     #[serde(default)]
     pub note_images_as_links: bool,
-    /// External editor command used to open notes. If `None`, a platform
-    /// specific fallback is used.
-    #[serde(default)]
-    pub note_external_editor: Option<String>,
     /// Number of tags or links shown before an expandable "... (more)" control
     /// appears in the note panel.
     #[serde(default = "default_note_more_limit")]
@@ -276,7 +272,6 @@ impl Default for Settings {
             note_save_on_close: default_note_save_on_close(),
             note_always_overwrite: false,
             note_images_as_links: false,
-            note_external_editor: Some("wezterm".to_string()),
             note_more_limit: default_note_more_limit(),
             enable_toasts: true,
             toast_duration: default_toast_duration(),

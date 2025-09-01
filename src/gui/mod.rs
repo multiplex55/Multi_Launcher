@@ -368,7 +368,6 @@ pub struct LauncherApp {
     pub note_save_on_close: bool,
     pub note_always_overwrite: bool,
     pub note_images_as_links: bool,
-    pub note_external_editor: Option<String>,
     pub note_external_open: NoteExternalOpen,
     pub note_font_size: f32,
     pub note_more_limit: usize,
@@ -514,7 +513,6 @@ impl LauncherApp {
         note_always_overwrite: Option<bool>,
         note_images_as_links: Option<bool>,
         note_more_limit: Option<usize>,
-        note_external_editor: Option<String>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -608,9 +606,6 @@ impl LauncherApp {
         }
         if let Some(v) = note_more_limit {
             self.note_more_limit = v;
-        }
-        if note_external_editor.is_some() {
-            self.note_external_editor = note_external_editor;
         }
     }
 
@@ -872,7 +867,6 @@ impl LauncherApp {
             note_save_on_close: settings.note_save_on_close,
             note_always_overwrite: settings.note_always_overwrite,
             note_images_as_links: settings.note_images_as_links,
-            note_external_editor: settings.note_external_editor.clone(),
             note_external_open,
             note_font_size: 16.0,
             note_more_limit: settings.note_more_limit,

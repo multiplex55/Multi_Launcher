@@ -1,5 +1,5 @@
 #![cfg(windows)]
-use multi_launcher::gui::build_nvim_command;
+use multi_launcher::gui::{build_nvim_command, build_wezterm_command};
 use once_cell::sync::Lazy;
 use std::env;
 use std::fs;
@@ -25,10 +25,7 @@ fn prefers_powershell7_then_powershell_then_cmd() {
         env::set_var("PATH", "");
     }
     let (cmd, _) = build_nvim_command(note);
-    assert!(cmd
-        .get_program()
-        .to_string_lossy()
-        .ends_with("pwsh.exe"));
+    assert!(cmd.get_program().to_string_lossy().ends_with("pwsh.exe"));
     let args: Vec<_> = cmd
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
@@ -51,17 +48,50 @@ fn prefers_powershell7_then_powershell_then_cmd() {
         .ends_with("powershell.exe"));
 
     // Fallback to cmd.exe
-    unsafe { env::set_var("PATH", ""); }
+    unsafe {
+        env::set_var("PATH", "");
+    }
     let (cmd, _) = build_nvim_command(note);
-    assert!(cmd
-        .get_program()
-        .to_string_lossy()
-        .ends_with("cmd.exe"));
+    assert!(cmd.get_program().to_string_lossy().ends_with("cmd.exe"));
     let args: Vec<_> = cmd
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
     assert_eq!(args, ["/C", "nvim", "note.txt"]);
+
+    unsafe {
+        match orig_ps7 {
+            Some(v) => env::set_var("ML_PWSH7_PATH", v),
+            None => env::remove_var("ML_PWSH7_PATH"),
+        }
+        match orig_path {
+            Some(v) => env::set_var("PATH", v),
+            None => env::remove_var("PATH"),
+        }
+    }
+}
+
+#[test]
+fn wezterm_fallbacks_to_powershell_when_missing() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let note = Path::new("note.txt");
+    let orig_ps7 = env::var_os("ML_PWSH7_PATH");
+    let orig_path = env::var_os("PATH");
+
+    let dir = tempdir().unwrap();
+    let pwsh = dir.path().join("pwsh.exe");
+    fs::write(&pwsh, "").unwrap();
+    unsafe {
+        env::set_var("ML_PWSH7_PATH", &pwsh);
+        env::set_var("PATH", "");
+    }
+
+    let (mut cmd, _) = build_wezterm_command(note);
+    let res = cmd.spawn();
+    assert!(res.is_err());
+
+    let (cmd, _) = build_nvim_command(note);
+    assert!(cmd.get_program().to_string_lossy().ends_with("pwsh.exe"));
 
     unsafe {
         match orig_ps7 {

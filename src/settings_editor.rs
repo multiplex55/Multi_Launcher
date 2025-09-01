@@ -5,7 +5,6 @@ use crate::plugins::screenshot::ScreenshotPluginSettings;
 use crate::settings::Settings;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
-use rfd::FileDialog;
 use std::sync::Arc;
 
 #[derive(Default)]
@@ -34,7 +33,6 @@ pub struct SettingsEditor {
     note_always_overwrite: bool,
     note_images_as_links: bool,
     note_more_limit: usize,
-    note_external_editor: String,
     query_scale: f32,
     list_scale: f32,
     history_limit: usize,
@@ -124,7 +122,6 @@ impl SettingsEditor {
             note_always_overwrite: settings.note_always_overwrite,
             note_images_as_links: settings.note_images_as_links,
             note_more_limit: settings.note_more_limit,
-            note_external_editor: settings.note_external_editor.clone().unwrap_or_default(),
             query_scale: settings.query_scale.unwrap_or(1.0),
             list_scale: settings.list_scale.unwrap_or(1.0),
             history_limit: settings.history_limit,
@@ -239,11 +236,6 @@ impl SettingsEditor {
             note_always_overwrite: self.note_always_overwrite,
             note_images_as_links: self.note_images_as_links,
             note_more_limit: self.note_more_limit,
-            note_external_editor: if self.note_external_editor.trim().is_empty() {
-                None
-            } else {
-                Some(self.note_external_editor.clone())
-            },
             query_scale: Some(self.query_scale),
             list_scale: Some(self.list_scale),
             history_limit: self.history_limit,
@@ -535,15 +527,6 @@ impl SettingsEditor {
                                             .clamp_range(1..=usize::MAX),
                                     );
                                 });
-                                ui.horizontal(|ui| {
-                                    ui.label("External editor");
-                                    ui.text_edit_singleline(&mut self.note_external_editor);
-                                    if ui.button("Browse").clicked() {
-                                        if let Some(file) = FileDialog::new().pick_file() {
-                                            self.note_external_editor = file.display().to_string();
-                                        }
-                                    }
-                                });
                                 let mut cfg = self
                                     .plugin_settings
                                     .get("note")
@@ -676,7 +659,6 @@ impl SettingsEditor {
                                                 Some(new_settings.note_always_overwrite),
                                                 Some(new_settings.note_images_as_links),
                                                 Some(new_settings.note_more_limit),
-                                                new_settings.note_external_editor.clone(),
                                             );
                                             ctx.send_viewport_cmd(
                                                 egui::ViewportCommand::WindowLevel(
