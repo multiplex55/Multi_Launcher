@@ -965,27 +965,30 @@ impl NotePanel {
 
     fn open_external(&self, app: &mut LauncherApp, choice: NoteExternalOpen) {
         let path = self.note.path.clone();
-        let result = match choice {
-            NoteExternalOpen::Powershell => {
-                let (mut cmd, _cmd_str) = build_nvim_command(&path);
-                cmd.spawn()
-            }
-            NoteExternalOpen::Wezterm => {
-                let (mut cmd, _cmd_str) = build_wezterm_command(&path);
-                match cmd.spawn() {
-                    Ok(child) => Ok(child),
-                    Err(_) => {
-                        let (mut cmd, _cmd_str) = build_nvim_command(&path);
-                        cmd.spawn()
-                    }
-                }
-            }
-            NoteExternalOpen::Notepad => Command::new("notepad.exe").arg(&path).spawn(),
-            NoteExternalOpen::Neither => return,
-        };
-        if let Err(e) = result {
+        if let Err(e) = spawn_external(&path, choice) {
             app.set_error(format!("Failed to open note externally: {e}"));
         }
+    }
+}
+
+pub fn spawn_external(path: &Path, choice: NoteExternalOpen) -> std::io::Result<()> {
+    match choice {
+        NoteExternalOpen::Powershell => {
+            let (mut cmd, _cmd_str) = build_nvim_command(path);
+            cmd.spawn().map(|_| ())
+        }
+        NoteExternalOpen::Wezterm => {
+            let (mut cmd, _cmd_str) = build_wezterm_command(path);
+            match cmd.spawn() {
+                Ok(_) => Ok(()),
+                Err(_) => {
+                    let (mut cmd, _cmd_str) = build_nvim_command(path);
+                    cmd.spawn().map(|_| ())
+                }
+            }
+        }
+        NoteExternalOpen::Notepad => Command::new("notepad.exe").arg(path).spawn().map(|_| ()),
+        NoteExternalOpen::Neither => Ok(()),
     }
 }
 

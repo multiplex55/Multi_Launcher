@@ -36,7 +36,8 @@ pub use fav_dialog::FavDialog;
 pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
 pub use note_panel::{
-    build_nvim_command, build_wezterm_command, extract_links, show_wiki_link, NotePanel,
+    build_nvim_command, build_wezterm_command, extract_links, show_wiki_link, spawn_external,
+    NotePanel,
 };
 pub use notes_dialog::NotesDialog;
 pub use screenshot_editor::ScreenshotEditor;
@@ -2895,16 +2896,7 @@ impl eframe::App for LauncherApp {
                                         if self.open_note_in_neovim(
                                             &slug,
                                             crate::plugins::note::load_notes,
-                                            |path| {
-                                                let (mut cmd, _cmd_str) = build_wezterm_command(path);
-                                                match cmd.spawn() {
-                                                    Ok(_) => Ok(()),
-                                                    Err(_) => {
-                                                        let (mut cmd, _cmd_str) = build_nvim_command(path);
-                                                        cmd.spawn().map(|_| ())
-                                                    }
-                                                }
-                                            },
+                                            |path| spawn_external(path, NoteExternalOpen::Wezterm),
                                         ) {
                                             ui.close_menu();
                                         }
