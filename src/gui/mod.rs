@@ -2896,8 +2896,14 @@ impl eframe::App for LauncherApp {
                                             &slug,
                                             crate::plugins::note::load_notes,
                                             |path| {
-                                                let (mut cmd, _cmd_str) = build_nvim_command(path);
-                                                cmd.spawn().map(|_| ())
+                                                let (mut cmd, _cmd_str) = build_wezterm_command(path);
+                                                match cmd.spawn() {
+                                                    Ok(_) => Ok(()),
+                                                    Err(_) => {
+                                                        let (mut cmd, _cmd_str) = build_nvim_command(path);
+                                                        cmd.spawn().map(|_| ())
+                                                    }
+                                                }
                                             },
                                         ) {
                                             ui.close_menu();
