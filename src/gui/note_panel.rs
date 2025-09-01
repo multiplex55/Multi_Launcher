@@ -16,9 +16,9 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use rfd::FileDialog;
 use std::collections::HashMap;
-use std::process::Command;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+use std::process::Command;
 use std::{
     env,
     path::{Path, PathBuf},
@@ -965,22 +965,30 @@ impl NotePanel {
 
     fn open_external(&self, app: &mut LauncherApp, choice: NoteExternalOpen) {
         let path = self.note.path.clone();
-        let result = match choice {
-            NoteExternalOpen::Powershell => {
-                let (mut cmd, _cmd_str) = build_nvim_command(&path);
-                cmd.spawn()
-            }
-            NoteExternalOpen::Wezterm => {
-                let editor = app.note_external_editor.as_deref().unwrap_or("nvim");
-                let (mut cmd, _cmd_str) = build_wezterm_command(&path, editor);
-                cmd.spawn()
-            }
-            NoteExternalOpen::Notepad => Command::new("notepad.exe").arg(&path).spawn(),
-            NoteExternalOpen::Neither => return,
-        };
-        if let Err(e) = result {
+        if let Err(e) = spawn_external(&path, choice) {
             app.set_error(format!("Failed to open note externally: {e}"));
         }
+    }
+}
+
+pub fn spawn_external(path: &Path, choice: NoteExternalOpen) -> std::io::Result<()> {
+    match choice {
+        NoteExternalOpen::Powershell => {
+            let (mut cmd, _cmd_str) = build_nvim_command(path);
+            cmd.spawn().map(|_| ())
+        }
+        NoteExternalOpen::Wezterm => {
+            let (mut cmd, _cmd_str) = build_wezterm_command(path);
+            match cmd.spawn() {
+                Ok(_) => Ok(()),
+                Err(_) => {
+                    let (mut cmd, _cmd_str) = build_nvim_command(path);
+                    cmd.spawn().map(|_| ())
+                }
+            }
+        }
+        NoteExternalOpen::Notepad => Command::new("notepad.exe").arg(path).spawn().map(|_| ()),
+        NoteExternalOpen::Neither => Ok(()),
     }
 }
 
@@ -1086,9 +1094,9 @@ pub fn build_nvim_command(note_path: &Path) -> (Command, String) {
     (cmd, cmd_str)
 }
 
-pub fn build_wezterm_command(note_path: &Path, editor: &str) -> (Command, String) {
+pub fn build_wezterm_command(note_path: &Path) -> (Command, String) {
     let mut cmd = Command::new("wezterm");
-    cmd.arg("start").arg("--").arg(editor).arg(note_path);
+    cmd.arg("start").arg("--").arg("nvim").arg(note_path);
     #[cfg(windows)]
     {
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW

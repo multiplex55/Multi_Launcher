@@ -36,7 +36,8 @@ pub use fav_dialog::FavDialog;
 pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
 pub use note_panel::{
-    build_nvim_command, build_wezterm_command, extract_links, show_wiki_link, NotePanel,
+    build_nvim_command, build_wezterm_command, extract_links, show_wiki_link, spawn_external,
+    NotePanel,
 };
 pub use notes_dialog::NotesDialog;
 pub use screenshot_editor::ScreenshotEditor;
@@ -368,7 +369,6 @@ pub struct LauncherApp {
     pub note_save_on_close: bool,
     pub note_always_overwrite: bool,
     pub note_images_as_links: bool,
-    pub note_external_editor: Option<String>,
     pub note_external_open: NoteExternalOpen,
     pub note_font_size: f32,
     pub note_more_limit: usize,
@@ -514,7 +514,6 @@ impl LauncherApp {
         note_always_overwrite: Option<bool>,
         note_images_as_links: Option<bool>,
         note_more_limit: Option<usize>,
-        note_external_editor: Option<String>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -608,9 +607,6 @@ impl LauncherApp {
         }
         if let Some(v) = note_more_limit {
             self.note_more_limit = v;
-        }
-        if note_external_editor.is_some() {
-            self.note_external_editor = note_external_editor;
         }
     }
 
@@ -872,7 +868,6 @@ impl LauncherApp {
             note_save_on_close: settings.note_save_on_close,
             note_always_overwrite: settings.note_always_overwrite,
             note_images_as_links: settings.note_images_as_links,
-            note_external_editor: settings.note_external_editor.clone(),
             note_external_open,
             note_font_size: 16.0,
             note_more_limit: settings.note_more_limit,
@@ -2901,10 +2896,7 @@ impl eframe::App for LauncherApp {
                                         if self.open_note_in_neovim(
                                             &slug,
                                             crate::plugins::note::load_notes,
-                                            |path| {
-                                                let (mut cmd, _cmd_str) = build_nvim_command(path);
-                                                cmd.spawn().map(|_| ())
-                                            },
+                                            |path| spawn_external(path, NoteExternalOpen::Wezterm),
                                         ) {
                                             ui.close_menu();
                                         }

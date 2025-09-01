@@ -133,7 +133,6 @@ impl PluginEditor {
                         Some(s.note_always_overwrite),
                         Some(s.note_images_as_links),
                         Some(s.note_more_limit),
-                        s.note_external_editor.clone(),
                     );
                     let dirs = s.plugin_dirs.clone().unwrap_or_default();
                     let actions_arc = Arc::clone(&app.actions);
