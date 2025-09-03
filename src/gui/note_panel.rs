@@ -1175,7 +1175,7 @@ pub fn extract_links(content: &str) -> Vec<(String, String)> {
             .filter(|u| u.scheme() == "https")
             .is_some()
         {
-            links.push((label, raw));
+            links.push((label, url));
         }
     }
 
@@ -1190,7 +1190,7 @@ pub fn extract_links(content: &str) -> Vec<(String, String)> {
         Url::parse(&url)
             .ok()
             .filter(|u| u.scheme() == "https")
-            .map(|_| (raw.to_string(), raw.to_string()))
+            .map(|_| (raw.to_string(), url))
     }));
 
     links.sort();
@@ -1445,7 +1445,10 @@ mod tests {
                     "https://rust-lang.org".to_string(),
                     "https://rust-lang.org".to_string(),
                 ),
-                ("www.example.com".to_string(), "www.example.com".to_string()),
+                (
+                    "www.example.com".to_string(),
+                    "https://www.example.com".to_string(),
+                ),
             ]
         );
     }

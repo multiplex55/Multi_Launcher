@@ -302,7 +302,10 @@ fn link_validation_rejects_invalid_urls() {
                 "https://rust-lang.org".to_string(),
                 "https://rust-lang.org".to_string(),
             ),
-            ("www.example.com".to_string(), "www.example.com".to_string()),
+            (
+                "www.example.com".to_string(),
+                "https://www.example.com".to_string(),
+            ),
         ]
     );
 }
