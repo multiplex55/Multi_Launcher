@@ -638,7 +638,7 @@ impl NotePanel {
         let mut offset = start;
         let old_spacing = ui.spacing().item_spacing;
         ui.spacing_mut().item_spacing.y = 0.0;
-        for line in segment.split_inclusive('\n') {
+        for line in segment.lines() {
             if line.starts_with("- [ ]") || line.starts_with("- [x]") || line.starts_with("- [X]") {
                 let checked = line.as_bytes()[3] == b'x' || line.as_bytes()[3] == b'X';
                 let mut state = checked;
@@ -653,7 +653,8 @@ impl NotePanel {
                     ui.scope(|ui| {
                         ui.style_mut().override_font_id =
                             Some(FontId::proportional(app.note_font_size));
-                        let rest = preprocess_note_links(&line[6..], &self.note.slug);
+                        let rest =
+                            preprocess_note_links(line.get(6..).unwrap_or(""), &self.note.slug);
                         CommonMarkViewer::new(format!("note_seg_{}", offset)).show(
                             ui,
                             &mut self.markdown_cache,
@@ -675,7 +676,7 @@ impl NotePanel {
                     handle_markdown_links(ui, app);
                 });
             }
-            offset += line.len();
+            offset += line.len() + 1;
         }
         ui.spacing_mut().item_spacing = old_spacing;
         modified
