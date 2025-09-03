@@ -636,10 +636,26 @@ impl NotePanel {
     ) -> bool {
         let mut modified = false;
         let mut offset = start;
+        let mut buf_offset = offset;
+        let mut buffer = String::new();
         let old_spacing = ui.spacing().item_spacing;
         ui.spacing_mut().item_spacing.y = 0.0;
         for line in segment.lines() {
             if line.starts_with("- [ ]") || line.starts_with("- [x]") || line.starts_with("- [X]") {
+                if !buffer.is_empty() {
+                    ui.scope(|ui| {
+                        ui.style_mut().override_font_id =
+                            Some(FontId::proportional(app.note_font_size));
+                        let processed = preprocess_note_links(&buffer, &self.note.slug);
+                        CommonMarkViewer::new(format!("note_seg_{}", buf_offset)).show(
+                            ui,
+                            &mut self.markdown_cache,
+                            &processed,
+                        );
+                        handle_markdown_links(ui, app);
+                    });
+                    buffer.clear();
+                }
                 let checked = line.as_bytes()[3] == b'x' || line.as_bytes()[3] == b'X';
                 let mut state = checked;
                 ui.horizontal(|ui| {
@@ -663,20 +679,27 @@ impl NotePanel {
                         handle_markdown_links(ui, app);
                     });
                 });
+                offset += line.len() + 1;
+                buf_offset = offset;
             } else {
-                ui.scope(|ui| {
-                    ui.style_mut().override_font_id =
-                        Some(FontId::proportional(app.note_font_size));
-                    let processed = preprocess_note_links(line, &self.note.slug);
-                    CommonMarkViewer::new(format!("note_seg_{}", offset)).show(
-                        ui,
-                        &mut self.markdown_cache,
-                        &processed,
-                    );
-                    handle_markdown_links(ui, app);
-                });
+                if !buffer.is_empty() {
+                    buffer.push('\n');
+                }
+                buffer.push_str(line);
+                offset += line.len() + 1;
             }
-            offset += line.len() + 1;
+        }
+        if !buffer.is_empty() {
+            ui.scope(|ui| {
+                ui.style_mut().override_font_id = Some(FontId::proportional(app.note_font_size));
+                let processed = preprocess_note_links(&buffer, &self.note.slug);
+                CommonMarkViewer::new(format!("note_seg_{}", buf_offset)).show(
+                    ui,
+                    &mut self.markdown_cache,
+                    &processed,
+                );
+                handle_markdown_links(ui, app);
+            });
         }
         ui.spacing_mut().item_spacing = old_spacing;
         modified
