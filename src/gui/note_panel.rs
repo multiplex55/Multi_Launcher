@@ -237,11 +237,15 @@ impl NotePanel {
                 let links = extract_links(&self.note.content);
                 enum LinkKind {
                     Wiki(String),
-                    Url(String),
+                    Url(String, String),
                 }
                 let mut all_links: Vec<LinkKind> = Vec::new();
                 all_links.extend(wiki.into_iter().map(LinkKind::Wiki));
-                all_links.extend(links.into_iter().map(LinkKind::Url));
+                all_links.extend(
+                    links
+                        .into_iter()
+                        .map(|(label, url)| LinkKind::Url(label, url)),
+                );
                 if !all_links.is_empty() {
                     let was_focused = ui.ctx().memory(|m| m.has_focus(content_id));
                     ui.horizontal_wrapped(|ui| {
@@ -255,8 +259,12 @@ impl NotePanel {
                                 LinkKind::Wiki(s) => {
                                     let _ = show_wiki_link(ui, app, s);
                                 }
-                                LinkKind::Url(s) => {
-                                    let _ = ui.hyperlink(s);
+                                LinkKind::Url(label, url) => {
+                                    if url.starts_with("https://") {
+                                        let _ = ui.hyperlink_to(label, url);
+                                    } else {
+                                        let _ = show_wiki_link(ui, app, url);
+                                    }
                                 }
                             }
                         }
@@ -1151,24 +1159,46 @@ fn extract_tags(content: &str) -> Vec<String> {
     tags
 }
 
-pub fn extract_links(content: &str) -> Vec<String> {
+pub fn extract_links(content: &str) -> Vec<(String, String)> {
+    static MARKDOWN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap());
     static LINK_RE: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"([a-zA-Z][a-zA-Z0-9+.-]*://\S+|www\.\S+)").unwrap());
-    let mut links: Vec<String> = LINK_RE
-        .find_iter(content)
-        .filter_map(|m| {
-            let raw = m.as_str();
-            let url = if raw.starts_with("www.") {
-                format!("https://{raw}")
-            } else {
-                raw.to_string()
-            };
-            Url::parse(&url)
-                .ok()
-                .filter(|u| u.scheme() == "https")
-                .map(|_| raw.to_string())
-        })
-        .collect();
+
+    let mut links: Vec<(String, String)> = Vec::new();
+
+    for cap in MARKDOWN_RE.captures_iter(content) {
+        let label = cap[1].to_string();
+        let raw = cap[2].to_string();
+        let url = if raw.starts_with("www.") {
+            format!("https://{raw}")
+        } else {
+            raw.clone()
+        };
+        if Url::parse(&url)
+            .ok()
+            .filter(|u| u.scheme() == "https")
+            .is_some()
+        {
+            // store the fully-qualified URL so hyperlinks open externally
+            links.push((label, url));
+        }
+    }
+
+    let stripped = MARKDOWN_RE.replace_all(content, "");
+    links.extend(LINK_RE.find_iter(&stripped).filter_map(|m| {
+        let raw = m.as_str();
+        let url = if raw.starts_with("www.") {
+            format!("https://{raw}")
+        } else {
+            raw.to_string()
+        };
+        Url::parse(&url)
+            .ok()
+            .filter(|u| u.scheme() == "https")
+            // use the original text as the label but link to the canonical URL
+            .map(|_| (raw.to_string(), url))
+    }));
+
     links.sort();
     links.dedup();
     links
@@ -1411,13 +1441,21 @@ mod tests {
 
     #[test]
     fn extract_links_filters_invalid() {
-        let content = "visit http://example.com and http://exa%mple.com also https://rust-lang.org and https://rust-lang.org and www.example.com and www.example.com and www.exa%mple.com";
+        let content = "visit http://example.com and http://exa%mple.com also [Rust](https://rust-lang.org) and https://rust-lang.org and https://rust-lang.org and www.example.com and www.example.com and www.exa%mple.com and [Google](www.google.com)";
         let links = extract_links(content);
         assert_eq!(
             links,
             vec![
-                "https://rust-lang.org".to_string(),
-                "www.example.com".to_string(),
+                ("Google".to_string(), "https://www.google.com".to_string()),
+                ("Rust".to_string(), "https://rust-lang.org".to_string()),
+                (
+                    "https://rust-lang.org".to_string(),
+                    "https://rust-lang.org".to_string(),
+                ),
+                (
+                    "www.example.com".to_string(),
+                    "https://www.example.com".to_string(),
+                ),
             ]
         );
     }

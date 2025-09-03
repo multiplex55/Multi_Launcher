@@ -36,7 +36,11 @@ pub use fav_dialog::FavDialog;
 pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
 pub use note_panel::{
-    build_nvim_command, build_wezterm_command, extract_links, show_wiki_link, spawn_external,
+    build_nvim_command,
+    build_wezterm_command,
+    extract_links,
+    show_wiki_link,
+    spawn_external,
     NotePanel,
 };
 pub use notes_dialog::NotesDialog;
