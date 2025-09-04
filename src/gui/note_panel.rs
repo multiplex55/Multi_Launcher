@@ -43,7 +43,7 @@ fn preprocess_note_links(content: &str, current_slug: &str) -> String {
 }
 
 fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
-    if let Some(open_url) = ui.ctx().output_mut(|o| o.open_url.take()) {
+    if let Some(mut open_url) = ui.ctx().output_mut(|o| o.open_url.take()) {
         if let Ok(url) = Url::parse(&open_url.url) {
             if url.scheme() == "note" {
                 if let Some(slug) = url.host_str() {
@@ -53,6 +53,9 @@ fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
                 ui.ctx().open_url(open_url);
             }
         } else {
+            if open_url.url.starts_with("www.") {
+                open_url.url = format!("https://{}", open_url.url);
+            }
             ui.ctx().open_url(open_url);
         }
     }
@@ -1450,6 +1453,24 @@ mod tests {
                     "https://www.example.com".to_string(),
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn handle_markdown_links_promotes_www() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let output = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ctx.output_mut(|o| {
+                    o.open_url = Some(egui::OpenUrl::same_tab("www.example.com"));
+                });
+                handle_markdown_links(ui, &mut app);
+            });
+        });
+        assert_eq!(
+            output.open_url.unwrap().url,
+            "https://www.example.com"
         );
     }
 
