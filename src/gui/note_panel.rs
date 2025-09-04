@@ -43,7 +43,7 @@ fn preprocess_note_links(content: &str, current_slug: &str) -> String {
 }
 
 fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
-    if let Some(open_url) = ui.ctx().output_mut(|o| o.open_url.take()) {
+    if let Some(mut open_url) = ui.ctx().output_mut(|o| o.open_url.take()) {
         if let Ok(url) = Url::parse(&open_url.url) {
             if url.scheme() == "note" {
                 if let Some(slug) = url.host_str() {
@@ -53,6 +53,9 @@ fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
                 ui.ctx().open_url(open_url);
             }
         } else {
+            if open_url.url.starts_with("www.") {
+                open_url.url = format!("https://{}", open_url.url);
+            }
             ui.ctx().open_url(open_url);
         }
     }
@@ -237,11 +240,15 @@ impl NotePanel {
                 let links = extract_links(&self.note.content);
                 enum LinkKind {
                     Wiki(String),
-                    Url(String),
+                    Url(String, String),
                 }
                 let mut all_links: Vec<LinkKind> = Vec::new();
                 all_links.extend(wiki.into_iter().map(LinkKind::Wiki));
-                all_links.extend(links.into_iter().map(LinkKind::Url));
+                all_links.extend(
+                    links
+                        .into_iter()
+                        .map(|(label, url)| LinkKind::Url(label, url)),
+                );
                 if !all_links.is_empty() {
                     let was_focused = ui.ctx().memory(|m| m.has_focus(content_id));
                     ui.horizontal_wrapped(|ui| {
@@ -255,8 +262,8 @@ impl NotePanel {
                                 LinkKind::Wiki(s) => {
                                     let _ = show_wiki_link(ui, app, s);
                                 }
-                                LinkKind::Url(s) => {
-                                    let _ = ui.hyperlink(s);
+                                LinkKind::Url(label, url) => {
+                                    let _ = ui.hyperlink_to(label, url);
                                 }
                             }
                         }
@@ -1151,24 +1158,44 @@ fn extract_tags(content: &str) -> Vec<String> {
     tags
 }
 
-pub fn extract_links(content: &str) -> Vec<String> {
+pub fn extract_links(content: &str) -> Vec<(String, String)> {
+    static MARKDOWN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap());
     static LINK_RE: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"([a-zA-Z][a-zA-Z0-9+.-]*://\S+|www\.\S+)").unwrap());
-    let mut links: Vec<String> = LINK_RE
-        .find_iter(content)
-        .filter_map(|m| {
-            let raw = m.as_str();
-            let url = if raw.starts_with("www.") {
-                format!("https://{raw}")
-            } else {
-                raw.to_string()
-            };
-            Url::parse(&url)
-                .ok()
-                .filter(|u| u.scheme() == "https")
-                .map(|_| raw.to_string())
-        })
-        .collect();
+
+    let mut links: Vec<(String, String)> = Vec::new();
+
+    for cap in MARKDOWN_RE.captures_iter(content) {
+        let label = cap[1].to_string();
+        let raw = cap[2].to_string();
+        let url = if raw.starts_with("www.") {
+            format!("https://{raw}")
+        } else {
+            raw.clone()
+        };
+        if Url::parse(&url)
+            .ok()
+            .filter(|u| u.scheme() == "https")
+            .is_some()
+        {
+            links.push((label, url));
+        }
+    }
+
+    let stripped = MARKDOWN_RE.replace_all(content, "");
+    links.extend(LINK_RE.find_iter(&stripped).filter_map(|m| {
+        let raw = m.as_str();
+        let url = if raw.starts_with("www.") {
+            format!("https://{raw}")
+        } else {
+            raw.to_string()
+        };
+        Url::parse(&url)
+            .ok()
+            .filter(|u| u.scheme() == "https")
+            .map(|_| (raw.to_string(), url))
+    }));
+
     links.sort();
     links.dedup();
     links
@@ -1411,14 +1438,43 @@ mod tests {
 
     #[test]
     fn extract_links_filters_invalid() {
-        let content = "visit http://example.com and http://exa%mple.com also https://rust-lang.org and https://rust-lang.org and www.example.com and www.example.com and www.exa%mple.com";
+        let content = "visit http://example.com and http://exa%mple.com also [Rust](https://rust-lang.org) and https://rust-lang.org and https://rust-lang.org and www.example.com and www.example.com and www.exa%mple.com";
         let links = extract_links(content);
         assert_eq!(
             links,
             vec![
-                "https://rust-lang.org".to_string(),
-                "www.example.com".to_string(),
+                ("Rust".to_string(), "https://rust-lang.org".to_string()),
+                (
+                    "https://rust-lang.org".to_string(),
+                    "https://rust-lang.org".to_string(),
+                ),
+                (
+                    "www.example.com".to_string(),
+                    "https://www.example.com".to_string(),
+                ),
             ]
+        );
+    }
+
+    #[test]
+    fn handle_markdown_links_promotes_www() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let output = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ctx.output_mut(|o| {
+                    o.open_url = Some(egui::OpenUrl::same_tab("www.example.com"));
+                });
+                handle_markdown_links(ui, &mut app);
+            });
+        });
+        assert_eq!(
+            output
+                .platform_output
+                .open_url
+                .unwrap()
+                .url,
+            "https://www.example.com"
         );
     }
 
