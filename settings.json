@@ -41,6 +41,7 @@
   "timer_refresh": 1.0,
   "disable_timer_updates": false,
   "preserve_command": false,
+  "clear_query_after_run": false,
   "net_refresh": 1.0,
   "net_unit": "auto",
   "screenshot_dir": null,

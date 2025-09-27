@@ -110,6 +110,7 @@ value as shown below:
   "history_limit": 100,
   "clipboard_limit": 20,
   "preserve_command": false,
+  "clear_query_after_run": false,
   "follow_mouse": true,
   "static_location_enabled": false,
   "static_pos": [0, 0],
@@ -158,6 +159,7 @@ Example: typing `test` will only list entries containing `test`. If an alias mat
 `history_limit` defines how many entries the history plugin keeps.
 `clipboard_limit` sets how many clipboard entries are persisted for the clipboard plugin.
 `preserve_command` keeps the typed command prefix (like `bm add` or `f add`) in the search field after running an action.
+`clear_query_after_run` removes the search text after a successful action whenever you prefer starting with a blank box.
 `enabled_capabilities` maps plugin names to capability identifiers so features can be toggled individually. The folders plugin, for example, exposes `show_full_path`.
 `screenshot_dir` sets the directory used when saving screenshots. If omitted, screenshots are stored in a `MultiLauncher_Screenshots` folder in the current working directory.
 `screenshot_save_file` determines whether screenshots copied to the clipboard are also written to disk. The default is `true`.

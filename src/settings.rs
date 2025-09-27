@@ -149,6 +149,9 @@ pub struct Settings {
     /// Keep the command prefix in the query after running an action.
     #[serde(default)]
     pub preserve_command: bool,
+    /// Clear the search query after successfully running an action.
+    #[serde(default)]
+    pub clear_query_after_run: bool,
     #[serde(default = "default_net_refresh")]
     pub net_refresh: f32,
     #[serde(default)]
@@ -294,6 +297,7 @@ impl Default for Settings {
             net_unit: NetUnit::Auto,
             disable_timer_updates: false,
             preserve_command: false,
+            clear_query_after_run: false,
             show_examples: false,
             screenshot_dir: Some(
                 std::env::current_dir()
