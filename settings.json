@@ -8,7 +8,10 @@
   "enabled_capabilities": null,
   "debug_logging": false,
   "log_file": null,
-  "offscreen_pos": null,
+  "offscreen_pos": [
+    2000,
+    2000
+  ],
   "window_size": [
     718,
     777
@@ -34,20 +37,64 @@
   "clipboard_limit": 20,
   "follow_mouse": true,
   "static_location_enabled": false,
-  "static_pos": null,
-  "static_size": null,
-  "hide_after_run": false,
+  "static_pos": [
+    0,
+    0
+  ],
+  "static_size": [
+    400,
+    220
+  ],
+  "hide_after_run": true,
   "always_on_top": true,
   "timer_refresh": 1.0,
   "disable_timer_updates": false,
   "preserve_command": false,
-  "clear_query_after_run": false,
+  "clear_query_after_run": true,
   "net_refresh": 1.0,
   "net_unit": "auto",
   "screenshot_dir": null,
   "screenshot_save_file": false,
   "screenshot_auto_save": true,
   "screenshot_use_editor": true,
-  "plugin_settings": {},
+  "plugin_settings": {
+    "network": {
+      "refresh_rate": 1.0,
+      "unit": "auto"
+    },
+    "history": {
+      "max_entries": 100
+    },
+    "color_picker": {
+      "color": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    "browser_tabs": {
+      "recalc_each_query": false
+    },
+    "stopwatch": {
+      "precision": 2,
+      "refresh_rate": 1.0
+    },
+    "screenshot": {
+      "screenshot_auto_save": true,
+      "screenshot_dir": "",
+      "screenshot_save_file": false,
+      "screenshot_use_editor": true
+    },
+    "shell": {
+      "open_in_wezterm": false
+    },
+    "calculator": {
+      "save_on_enter": false
+    },
+    "clipboard": {
+      "max_entries": 20
+    }
+  },
   "pinned_panels": []
 }
