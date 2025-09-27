@@ -116,6 +116,7 @@ impl PluginEditor {
                         s.static_pos,
                         s.static_size,
                         Some(s.hide_after_run),
+                        Some(s.clear_query_after_run),
                         Some(s.timer_refresh),
                         Some(s.disable_timer_updates),
                         Some(s.preserve_command),

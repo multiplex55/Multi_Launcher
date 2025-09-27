@@ -36,11 +36,7 @@ pub use fav_dialog::FavDialog;
 pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
 pub use note_panel::{
-    build_nvim_command,
-    build_wezterm_command,
-    extract_links,
-    show_wiki_link,
-    spawn_external,
+    build_nvim_command, build_wezterm_command, extract_links, show_wiki_link, spawn_external,
     NotePanel,
 };
 pub use notes_dialog::NotesDialog;
@@ -385,6 +381,7 @@ pub struct LauncherApp {
     pub timer_refresh: f32,
     pub disable_timer_updates: bool,
     pub preserve_command: bool,
+    pub clear_query_after_run: bool,
     pub query_autocomplete: bool,
     pub net_refresh: f32,
     pub net_unit: crate::settings::NetUnit,
@@ -501,6 +498,7 @@ impl LauncherApp {
         static_pos: Option<(i32, i32)>,
         static_size: Option<(i32, i32)>,
         hide_after_run: Option<bool>,
+        clear_query_after_run: Option<bool>,
         timer_refresh: Option<f32>,
         disable_timer_updates: Option<bool>,
         preserve_command: Option<bool>,
@@ -555,6 +553,9 @@ impl LauncherApp {
         }
         if let Some(v) = hide_after_run {
             self.hide_after_run = v;
+        }
+        if let Some(v) = clear_query_after_run {
+            self.clear_query_after_run = v;
         }
         if let Some(v) = timer_refresh {
             self.timer_refresh = v;
@@ -884,6 +885,7 @@ impl LauncherApp {
             timer_refresh: settings.timer_refresh,
             disable_timer_updates: settings.disable_timer_updates,
             preserve_command: settings.preserve_command,
+            clear_query_after_run: settings.clear_query_after_run,
             query_autocomplete: settings.query_autocomplete,
             net_refresh: settings.net_refresh,
             net_unit: settings.net_unit,
@@ -2207,6 +2209,7 @@ impl eframe::App for LauncherApp {
                         let current = self.query.clone();
                         let mut refresh = false;
                         let mut set_focus = false;
+                        let mut command_changed_query = false;
                         if let Some(new_q) = a.action.strip_prefix("query:") {
                             tracing::debug!("query action via Enter: {new_q}");
                             self.query = new_q.to_string();
@@ -2397,6 +2400,7 @@ impl eframe::App for LauncherApp {
                                 } else {
                                     self.query.clear();
                                 }
+                                command_changed_query = true;
                                 refresh = true;
                                 set_focus = true;
                             } else if a.action.starts_with("bookmark:remove:") {
@@ -2408,6 +2412,7 @@ impl eframe::App for LauncherApp {
                                 } else {
                                     self.query.clear();
                                 }
+                                command_changed_query = true;
                                 refresh = true;
                                 set_focus = true;
                             } else if a.action.starts_with("folder:remove:") {
@@ -2425,6 +2430,7 @@ impl eframe::App for LauncherApp {
                                 } else {
                                     self.query.clear();
                                 }
+                                command_changed_query = true;
                                 refresh = true;
                                 set_focus = true;
                                 if self.enable_toasts {
@@ -2445,6 +2451,7 @@ impl eframe::App for LauncherApp {
                                 set_focus = true;
                                 if current.starts_with("note list") {
                                     self.pending_query = Some(current.clone());
+                                    command_changed_query = true;
                                 }
                                 if self.enable_toasts {
                                     let label =
@@ -2461,6 +2468,7 @@ impl eframe::App for LauncherApp {
                                 // Re-run the current query so the todo list reflects the
                                 // updated completion state immediately.
                                 self.pending_query = Some(current.clone());
+                                command_changed_query = true;
                                 if self.enable_toasts {
                                     let label = a
                                         .label
@@ -2526,6 +2534,7 @@ impl eframe::App for LauncherApp {
                                 } else {
                                     self.query.clear();
                                 }
+                                command_changed_query = true;
                                 set_focus = true;
                             } else if a.action.starts_with("timer:cancel:")
                                 && current.starts_with("timer rm")
@@ -2550,6 +2559,12 @@ impl eframe::App for LauncherApp {
                                 } else {
                                     self.query.clear();
                                 }
+                                command_changed_query = true;
+                                set_focus = true;
+                            }
+                            if self.clear_query_after_run && !command_changed_query {
+                                self.query.clear();
+                                refresh = true;
                                 set_focus = true;
                             }
                             if self.hide_after_run
@@ -2973,9 +2988,11 @@ impl eframe::App for LauncherApp {
                             }
                             if resp.clicked() {
                                 let current = self.query.clone();
+                                let mut command_changed_query = false;
                                 if let Some(new_q) = a.action.strip_prefix("query:") {
                                     tracing::debug!("query action via click: {new_q}");
                                     clicked_query = Some(new_q.to_string());
+                                    command_changed_query = true;
                                     set_focus = true;
                                     tracing::debug!("move_cursor_end set via mouse click");
                                     self.move_cursor_end = true;
@@ -3119,6 +3136,7 @@ impl eframe::App for LauncherApp {
                                         } else {
                                             self.query.clear();
                                         }
+                                        command_changed_query = true;
                                         refresh = true;
                                         set_focus = true;
                                     } else if a.action.starts_with("bookmark:remove:") {
@@ -3130,6 +3148,7 @@ impl eframe::App for LauncherApp {
                                         } else {
                                             self.query.clear();
                                         }
+                                        command_changed_query = true;
                                         refresh = true;
                                         set_focus = true;
                                     } else if a.action.starts_with("folder:remove:") {
@@ -3147,6 +3166,7 @@ impl eframe::App for LauncherApp {
                                         } else {
                                             self.query.clear();
                                         }
+                                        command_changed_query = true;
                                         refresh = true;
                                         set_focus = true;
                                         if self.enable_toasts {
@@ -3167,6 +3187,7 @@ impl eframe::App for LauncherApp {
                                         set_focus = true;
                                         if current.starts_with("note list") {
                                             clicked_query = Some(current.clone());
+                                            command_changed_query = true;
                                         }
                                         if self.enable_toasts {
                                             let label = a
@@ -3186,6 +3207,7 @@ impl eframe::App for LauncherApp {
                                         // Re-run the current query so the visible list refreshes
                                         // with the toggled completion state.
                                         clicked_query = Some(current.clone());
+                                        command_changed_query = true;
                                         if self.enable_toasts {
                                             let label = a
                                                 .label
@@ -3254,6 +3276,12 @@ impl eframe::App for LauncherApp {
                                         } else {
                                             self.query.clear();
                                         }
+                                        command_changed_query = true;
+                                        set_focus = true;
+                                    }
+                                    if self.clear_query_after_run && !command_changed_query {
+                                        self.query.clear();
+                                        refresh = true;
                                         set_focus = true;
                                     }
                                     if self.hide_after_run
