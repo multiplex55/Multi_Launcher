@@ -111,6 +111,7 @@ impl PluginEditor {
                         Some(s.toast_duration),
                         Some(s.fuzzy_weight),
                         Some(s.usage_weight),
+                        Some(s.developer_debug),
                         Some(s.follow_mouse),
                         Some(s.static_location_enabled),
                         s.static_pos,
