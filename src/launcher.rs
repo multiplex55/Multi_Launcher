@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::plugins::calc_history::{self, CalcHistoryEntry, CALC_HISTORY_FILE, MAX_ENTRIES};
+use crate::settings::Settings;
 
 pub(crate) fn set_system_volume(percent: u32) {
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
@@ -851,7 +852,24 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
             Ok(())
         }
         ActionKind::Screenshot { mode, clip } => {
-            crate::actions::screenshot::capture(mode, clip)?;
+            let developer_debug = Settings::load("settings.json")
+                .map(|s| s.developer_debug)
+                .unwrap_or(false);
+            let capture = crate::actions::screenshot::capture(mode, clip, developer_debug)?;
+            if developer_debug {
+                if let Some(info) = capture.active_window {
+                    tracing::info!(
+                        title = %info.title,
+                        x = info.x,
+                        y = info.y,
+                        width = info.width,
+                        height = info.height,
+                        "Captured screenshot with active window metadata",
+                    );
+                } else {
+                    tracing::info!("Captured screenshot without active window metadata");
+                }
+            }
             Ok(())
         }
         ActionKind::MediaPlay => {

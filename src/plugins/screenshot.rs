@@ -2,9 +2,9 @@ use crate::actions::Action;
 use crate::plugin::Plugin;
 use crate::settings::Settings;
 use eframe::egui;
+use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use rfd::FileDialog;
 
 /// Return the directory used to store screenshots.
 ///
@@ -48,7 +48,11 @@ pub fn launch_editor(
 ) -> anyhow::Result<()> {
     use chrono::Local;
     use std::borrow::Cow;
-    let img = crate::actions::screenshot::capture_raw(mode)?;
+    let capture = crate::actions::screenshot::capture_raw(mode, app.developer_debug_enabled())?;
+    if let Some(info) = &capture.active_window {
+        app.record_captured_window(info.clone());
+    }
+    let img = capture.image;
     if app.get_screenshot_use_editor() {
         app.open_screenshot_editor(img, clip);
     } else {
@@ -84,7 +88,6 @@ pub fn launch_editor(
     }
     Ok(())
 }
-
 
 pub struct ScreenshotPlugin;
 
@@ -183,10 +186,7 @@ impl Plugin for ScreenshotPlugin {
             "Save file when copying screenshot",
         );
         ui.checkbox(&mut cfg.screenshot_use_editor, "Enable screenshot editor");
-        ui.checkbox(
-            &mut cfg.screenshot_auto_save,
-            "Auto-save after editing",
-        );
+        ui.checkbox(&mut cfg.screenshot_auto_save, "Auto-save after editing");
         if let Ok(v) = serde_json::to_value(&cfg) {
             *value = v;
         }

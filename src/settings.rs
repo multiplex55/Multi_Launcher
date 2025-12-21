@@ -57,6 +57,9 @@ pub struct Settings {
     /// Defaults to `false` when the field is missing in the settings file.
     #[serde(default)]
     pub debug_logging: bool,
+    /// Enable developer-focused debug tools like window instrumentation.
+    #[serde(default)]
+    pub developer_debug: bool,
     /// Enable logging to a file. Use `true` for the default `launcher.log` next
     /// to the executable or provide a custom path.
     #[serde(default)]
@@ -268,6 +271,7 @@ impl Default for Settings {
             enabled_plugins: None,
             enabled_capabilities: None,
             debug_logging: false,
+            developer_debug: false,
             log_file: None,
             offscreen_pos: Some((2000, 2000)),
             window_size: Some((400, 220)),

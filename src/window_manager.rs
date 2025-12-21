@@ -177,6 +177,47 @@ pub fn current_mouse_position() -> Option<(f32, f32)> {
 }
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
+#[derive(Clone, Debug)]
+pub struct WindowDebugInfo {
+    pub title: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// Fetch the current foreground window title and geometry for debugging.
+pub fn foreground_window_info() -> Option<WindowDebugInfo> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    };
+
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_invalid() {
+            return None;
+        }
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect).is_err() {
+            return None;
+        }
+
+        let len = GetWindowTextLengthW(hwnd) as usize + 1;
+        let mut buf = vec![0u16; len];
+        let written = GetWindowTextW(hwnd, &mut buf);
+        let title = String::from_utf16_lossy(&buf[..written as usize]);
+
+        Some(WindowDebugInfo {
+            title,
+            x: rect.left,
+            y: rect.top,
+            width: rect.right - rect.left,
+            height: rect.bottom - rect.top,
+        })
+    }
+}
+
 /// Ensure the given window resides on the active virtual desktop.
 ///
 /// This uses the `IVirtualDesktopManager` COM interface to check if `hwnd`

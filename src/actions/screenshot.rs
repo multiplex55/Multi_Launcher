@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 
 use crate::plugins::screenshot::screenshot_dir;
+use crate::window_manager::{foreground_window_info, WindowDebugInfo};
 use screenshots::Screen;
 use windows::Win32::Foundation::RECT;
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect};
@@ -14,11 +15,27 @@ pub enum Mode {
     Desktop,
 }
 
-pub fn capture_raw(mode: Mode) -> anyhow::Result<image::RgbaImage> {
+#[derive(Clone, Debug)]
+pub struct RawCapture {
+    pub image: image::RgbaImage,
+    pub active_window: Option<WindowDebugInfo>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SavedCapture {
+    pub path: PathBuf,
+    pub active_window: Option<WindowDebugInfo>,
+}
+
+pub fn capture_raw(mode: Mode, developer_debug: bool) -> anyhow::Result<RawCapture> {
+    let active_window = developer_debug.then(foreground_window_info).flatten();
     match mode {
         Mode::Desktop => {
             let screen = Screen::from_point(0, 0)?;
-            Ok(screen.capture()?)
+            Ok(RawCapture {
+                image: screen.capture()?,
+                active_window,
+            })
         }
         Mode::Window => {
             let hwnd = unsafe { GetForegroundWindow() };
@@ -30,12 +47,15 @@ pub fn capture_raw(mode: Mode) -> anyhow::Result<image::RgbaImage> {
             let width = (rect.right - rect.left) as u32;
             let height = (rect.bottom - rect.top) as u32;
             let screen = Screen::from_point(rect.left + 1, rect.top + 1)?;
-            Ok(screen.capture_area(
-                rect.left - screen.display_info.x,
-                rect.top - screen.display_info.y,
-                width,
-                height,
-            )?)
+            Ok(RawCapture {
+                image: screen.capture_area(
+                    rect.left - screen.display_info.x,
+                    rect.top - screen.display_info.y,
+                    width,
+                    height,
+                )?,
+                active_window,
+            })
         }
         Mode::Region => {
             use std::process::Command;
@@ -44,9 +64,10 @@ pub fn capture_raw(mode: Mode) -> anyhow::Result<image::RgbaImage> {
 
             // Wait for the snipping tool to provide a new clipboard image
             let mut cb = arboard::Clipboard::new()?;
-            let old = cb.get_image().ok().map(|img| {
-                (img.width, img.height, img.bytes.into_owned())
-            });
+            let old = cb
+                .get_image()
+                .ok()
+                .map(|img| (img.width, img.height, img.bytes.into_owned()));
 
             let _ = Command::new("explorer").arg("ms-screenclip:").status();
 
@@ -73,12 +94,15 @@ pub fn capture_raw(mode: Mode) -> anyhow::Result<image::RgbaImage> {
                 img.bytes.into_owned(),
             )
             .ok_or_else(|| anyhow::anyhow!("invalid clipboard image"))?;
-            Ok(buf)
+            Ok(RawCapture {
+                image: buf,
+                active_window,
+            })
         }
     }
 }
 
-pub fn capture(mode: Mode, clipboard: bool) -> anyhow::Result<PathBuf> {
+pub fn capture(mode: Mode, clipboard: bool, developer_debug: bool) -> anyhow::Result<SavedCapture> {
     let dir = screenshot_dir();
     std::fs::create_dir_all(&dir)?;
     let filename = format!(
@@ -86,19 +110,21 @@ pub fn capture(mode: Mode, clipboard: bool) -> anyhow::Result<PathBuf> {
         Local::now().format("%Y%m%d_%H%M%S")
     );
     let path = dir.join(filename);
-    let img = capture_raw(mode)?;
-    img.save(&path)?;
+    let capture = capture_raw(mode, developer_debug)?;
+    capture.image.save(&path)?;
     if clipboard {
-        let (w, h) = img.dimensions();
+        let (w, h) = capture.image.dimensions();
         let mut cb = arboard::Clipboard::new()?;
         cb.set_image(arboard::ImageData {
             width: w as usize,
             height: h as usize,
-            bytes: Cow::Owned(img.into_raw()),
+            bytes: Cow::Owned(capture.image.into_raw()),
         })?;
     } else {
         open::that(&path)?;
     }
-    Ok(path)
+    Ok(SavedCapture {
+        path,
+        active_window: capture.active_window,
+    })
 }
-

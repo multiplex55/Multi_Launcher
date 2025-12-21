@@ -102,6 +102,7 @@ value as shown below:
   "fuzzy_weight": 1.0,
   "usage_weight": 1.0,
   "debug_logging": false,
+  "developer_debug": false,
   "log_file": true,
   "offscreen_pos": [2000, 2000],
   "window_size": [400, 220],

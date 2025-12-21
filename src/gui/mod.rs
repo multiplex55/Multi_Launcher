@@ -68,6 +68,7 @@ use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{append_toast_log, TOAST_LOG_FILE};
 use crate::usage::{self, USAGE_FILE};
 use crate::visibility::apply_visibility;
+use crate::window_manager::WindowDebugInfo;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
 use fst::{IntoStreamer, Map, MapBuilder, Streamer};
@@ -266,6 +267,12 @@ struct PanelStates {
     plugins: bool,
 }
 
+#[derive(Clone, Debug)]
+struct DebugWindowEntry {
+    label: String,
+    info: WindowDebugInfo,
+}
+
 /// Primary GUI state for Multi Launcher.
 ///
 /// The application may create multiple windows or helper threads. To keep the
@@ -324,6 +331,9 @@ pub struct LauncherApp {
     toasts: egui_toast::Toasts,
     pub enable_toasts: bool,
     pub toast_duration: f32,
+    pub developer_debug: bool,
+    tracked_windows: Vec<DebugWindowEntry>,
+    last_captured_window: Option<WindowDebugInfo>,
     alias_dialog: AliasDialog,
     bookmark_alias_dialog: BookmarkAliasDialog,
     tempfile_alias_dialog: TempfileAliasDialog,
@@ -462,6 +472,41 @@ impl LauncherApp {
         }
     }
 
+    fn refresh_tracked_windows(&mut self) {
+        if !self.developer_debug {
+            self.tracked_windows.clear();
+            return;
+        }
+
+        let mut tracked = Vec::new();
+        tracked.push(DebugWindowEntry {
+            label: "Launcher viewport".into(),
+            info: WindowDebugInfo {
+                title: "Multi Launcher".into(),
+                x: self.window_pos.0,
+                y: self.window_pos.1,
+                width: self.window_size.0,
+                height: self.window_size.1,
+            },
+        });
+
+        if let Some(info) = crate::window_manager::foreground_window_info() {
+            tracked.push(DebugWindowEntry {
+                label: "Foreground window".into(),
+                info,
+            });
+        }
+
+        if let Some(info) = self.last_captured_window.clone() {
+            tracked.push(DebugWindowEntry {
+                label: "Last captured window".into(),
+                info,
+            });
+        }
+
+        self.tracked_windows = tracked;
+    }
+
     pub fn plugin_enabled(&self, name: &str) -> bool {
         match &self.enabled_plugins {
             Some(set) => set.contains(name),
@@ -493,6 +538,7 @@ impl LauncherApp {
         toast_duration: Option<f32>,
         fuzzy_weight: Option<f32>,
         usage_weight: Option<f32>,
+        developer_debug: Option<bool>,
         follow_mouse: Option<bool>,
         static_enabled: Option<bool>,
         static_pos: Option<(i32, i32)>,
@@ -538,6 +584,9 @@ impl LauncherApp {
         }
         if let Some(v) = usage_weight {
             self.usage_weight = v;
+        }
+        if let Some(v) = developer_debug {
+            self.developer_debug = v;
         }
         if let Some(v) = follow_mouse {
             self.follow_mouse = v;
@@ -826,6 +875,9 @@ impl LauncherApp {
             toasts,
             enable_toasts,
             toast_duration,
+            developer_debug: settings.developer_debug,
+            tracked_windows: Vec::new(),
+            last_captured_window: None,
             alias_dialog: AliasDialog::default(),
             bookmark_alias_dialog: BookmarkAliasDialog::default(),
             tempfile_alias_dialog: TempfileAliasDialog::default(),
@@ -1391,6 +1443,16 @@ impl LauncherApp {
         self.screenshot_use_editor
     }
 
+    pub fn developer_debug_enabled(&self) -> bool {
+        self.developer_debug
+    }
+
+    pub fn record_captured_window(&mut self, info: WindowDebugInfo) {
+        if self.developer_debug {
+            self.last_captured_window = Some(info);
+        }
+    }
+
     /// Close the top-most open dialog if any is visible.
     /// Returns `true` when a dialog was closed.
     pub fn close_front_dialog(&mut self) -> bool {
@@ -1901,6 +1963,11 @@ impl eframe::App for LauncherApp {
         if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
             self.window_pos = (rect.min.x as i32, rect.min.y as i32);
         }
+        if self.developer_debug {
+            self.refresh_tracked_windows();
+        } else {
+            self.tracked_windows.clear();
+        }
         let do_restore = self.restore_flag.swap(false, Ordering::SeqCst);
         if self.visible_flag.load(Ordering::SeqCst) && self.help_flag.swap(false, Ordering::SeqCst)
         {
@@ -2081,6 +2148,27 @@ impl eframe::App for LauncherApp {
         {
             self.search();
             self.last_net_update = Instant::now();
+        }
+
+        if self.developer_debug {
+            egui::TopBottomPanel::bottom("developer_debug_panel").show(ctx, |ui| {
+                ui.heading("Developer debug: tracked windows");
+                if self.tracked_windows.is_empty() {
+                    ui.label("No windows tracked yet. Trigger a screenshot or open a window to populate.");
+                } else {
+                    for entry in &self.tracked_windows {
+                        ui.monospace(format!(
+                            "{}: \"{}\" @ ({}, {}) {}x{}",
+                            entry.label,
+                            entry.info.title,
+                            entry.info.x,
+                            entry.info.y,
+                            entry.info.width,
+                            entry.info.height
+                        ));
+                    }
+                }
+            });
         }
 
         CentralPanel::default().show(ctx, |ui| {

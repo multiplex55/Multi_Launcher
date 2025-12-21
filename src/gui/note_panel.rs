@@ -837,14 +837,21 @@ impl NotePanel {
                 }
             }
             if ui.button("Screenshot...").clicked() {
-                match capture(ScreenshotMode::Region, true) {
-                    Ok(path) => {
-                        if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
+                match capture(ScreenshotMode::Region, true, app.developer_debug_enabled()) {
+                    Ok(capture_result) => {
+                        if let Some(info) = capture_result.active_window {
+                            app.record_captured_window(info);
+                        }
+                        if let Some(fname) =
+                            capture_result.path.file_name().and_then(|s| s.to_str())
+                        {
                             let dest = assets_dir().join(fname);
-                            let result = std::fs::rename(&path, &dest).or_else(|_| {
-                                std::fs::copy(&path, &dest)
-                                    .map(|_| std::fs::remove_file(&path).unwrap_or(()))
-                            });
+                            let result =
+                                std::fs::rename(&capture_result.path, &dest).or_else(|_| {
+                                    std::fs::copy(&capture_result.path, &dest).map(|_| {
+                                        std::fs::remove_file(&capture_result.path).unwrap_or(())
+                                    })
+                                });
                             if let Err(e) = result {
                                 app.set_error(format!("Failed to save screenshot: {e}"));
                             } else {
@@ -1469,11 +1476,7 @@ mod tests {
             });
         });
         assert_eq!(
-            output
-                .platform_output
-                .open_url
-                .unwrap()
-                .url,
+            output.platform_output.open_url.unwrap().url,
             "https://www.example.com"
         );
     }

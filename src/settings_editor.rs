@@ -21,6 +21,7 @@ pub struct SettingsEditor {
     help_hotkey_valid: bool,
     last_valid_help_hotkey: String,
     debug_logging: bool,
+    developer_debug: bool,
     show_toasts: bool,
     toast_duration: f32,
     offscreen_x: i32,
@@ -111,6 +112,7 @@ impl SettingsEditor {
             help_hotkey_valid,
             last_valid_help_hotkey,
             debug_logging: settings.debug_logging,
+            developer_debug: settings.developer_debug,
             show_toasts: settings.enable_toasts,
             toast_duration: settings.toast_duration,
             offscreen_x: settings.offscreen_pos.unwrap_or((2000, 2000)).0,
@@ -228,6 +230,7 @@ impl SettingsEditor {
             enabled_plugins: current.enabled_plugins.clone(),
             enabled_capabilities: current.enabled_capabilities.clone(),
             debug_logging: self.debug_logging,
+            developer_debug: self.developer_debug,
             log_file: current.log_file.clone(),
             enable_toasts: self.show_toasts,
             toast_duration: self.toast_duration,
@@ -350,6 +353,11 @@ impl SettingsEditor {
                                     ui.selectable_value(&mut self.debug_logging, true, "Enabled");
                                 });
                         });
+
+                        ui.checkbox(&mut self.developer_debug, "Enable developer debug overlay")
+                            .on_hover_text(
+                                "Shows live window instrumentation and logs extra window details",
+                            );
 
                         ui.checkbox(&mut self.show_toasts, "Enable toast notifications");
                         if self.show_toasts {
@@ -646,6 +654,7 @@ impl SettingsEditor {
                                                 Some(new_settings.toast_duration),
                                                 Some(new_settings.fuzzy_weight),
                                                 Some(new_settings.usage_weight),
+                                                Some(new_settings.developer_debug),
                                                 Some(new_settings.follow_mouse),
                                                 Some(new_settings.static_location_enabled),
                                                 new_settings.static_pos,
