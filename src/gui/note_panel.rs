@@ -74,7 +74,7 @@ pub struct NotePanel {
     show_open_with_menu: bool,
     tags_expanded: bool,
     links_expanded: bool,
-    pending_selection: Option<(usize, usize)>,
+    pending_selection: Option<(usize, usize)>, // byte offsets
     link_dialog_open: bool,
     link_text: String,
     link_url: String,
@@ -431,7 +431,8 @@ impl NotePanel {
                             if let Some(range) = state.cursor.char_range() {
                                 let [min, max] = range.sorted();
                                 if min.index != max.index {
-                                    self.pending_selection = Some((min.index, max.index));
+                                    self.pending_selection =
+                                        char_range_to_byte_range(&self.note.content, range);
                                 } else {
                                     self.pending_selection = None;
                                 }
@@ -480,32 +481,44 @@ impl NotePanel {
                             }
                             if ctx.input(|i| i.key_pressed(Key::J)) {
                                 ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::J));
-                                if let Some(pos) = self.note.content[idx..].find('\n') {
-                                    idx += pos + 1;
-                                } else {
-                                    idx = self.note.content.chars().count();
-                                }
+                                let after =
+                                    self.note.content.chars().skip(idx).position(|c| c == '\n');
+                                idx = after
+                                    .map(|pos| idx + pos + 1)
+                                    .unwrap_or_else(|| self.note.content.chars().count());
                                 moved = true;
                             }
                             if ctx.input(|i| i.key_pressed(Key::K)) {
                                 ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::K));
-                                if let Some(pos) = self.note.content[..idx].rfind('\n') {
-                                    idx = pos;
-                                } else {
-                                    idx = 0;
-                                }
+                                idx = self
+                                    .note
+                                    .content
+                                    .chars()
+                                    .take(idx)
+                                    .rposition(|c| c == '\n')
+                                    .unwrap_or(0);
                                 moved = true;
                             }
                             if ctx.input(|i| i.key_pressed(Key::Y)) {
                                 ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Y));
-                                let start = self.note.content[..idx]
-                                    .rfind('\n')
+                                let start_char = self
+                                    .note
+                                    .content
+                                    .chars()
+                                    .take(idx)
+                                    .rposition(|c| c == '\n')
                                     .map(|p| p + 1)
                                     .unwrap_or(0);
-                                let end = self.note.content[idx..]
-                                    .find('\n')
+                                let end_char = self
+                                    .note
+                                    .content
+                                    .chars()
+                                    .skip(idx)
+                                    .position(|c| c == '\n')
                                     .map(|p| idx + p)
-                                    .unwrap_or_else(|| self.note.content.len());
+                                    .unwrap_or_else(|| self.note.content.chars().count());
+                                let start = char_to_byte_index(&self.note.content, start_char);
+                                let end = char_to_byte_index(&self.note.content, end_char);
                                 ctx.output_mut(|o| {
                                     o.copied_text = self.note.content[start..end].to_string();
                                 });
@@ -722,10 +735,8 @@ impl NotePanel {
         if self.pending_selection.is_none() {
             let state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
             if let Some(range) = state.cursor.char_range() {
-                let [min, max] = range.sorted();
-                if min.index != max.index {
-                    self.pending_selection = Some((min.index, max.index));
-                }
+                self.pending_selection =
+                    char_range_to_byte_range(&self.note.content, range).or(self.pending_selection);
             }
         }
 
@@ -733,16 +744,20 @@ impl NotePanel {
             if ui.button("Add Checkbox").clicked() {
                 let mut state =
                     egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
-                let idx = state
+                let idx_chars = state
                     .cursor
                     .char_range()
                     .map(|r| r.primary.index)
                     .unwrap_or_else(|| self.note.content.chars().count());
+                let idx = char_to_byte_index(&self.note.content, idx_chars);
                 self.note.content.insert_str(idx, "- [ ] ");
                 state
                     .cursor
                     .set_char_range(Some(egui::text::CCursorRange::one(
-                        egui::text::CCursor::new(idx + 6),
+                        egui::text::CCursor::new(byte_to_char_index(
+                            &self.note.content,
+                            idx + "- [ ] ".len(),
+                        )),
                     )));
                 state.store(ctx, id);
                 ui.close_menu();
@@ -784,16 +799,20 @@ impl NotePanel {
                             let insert = format!("[[{title}]]");
                             let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id)
                                 .unwrap_or_default();
-                            let idx = state
+                            let idx_chars = state
                                 .cursor
                                 .char_range()
                                 .map(|r| r.primary.index)
                                 .unwrap_or_else(|| self.note.content.chars().count());
+                            let idx = char_to_byte_index(&self.note.content, idx_chars);
                             self.note.content.insert_str(idx, &insert);
                             state
                                 .cursor
                                 .set_char_range(Some(egui::text::CCursorRange::one(
-                                    egui::text::CCursor::new(idx + insert.chars().count()),
+                                    egui::text::CCursor::new(byte_to_char_index(
+                                        &self.note.content,
+                                        idx + insert.len(),
+                                    )),
                                 )));
                             state.store(ctx, id);
                             self.link_search.clear();
@@ -818,16 +837,20 @@ impl NotePanel {
                             let insert = format!("![{0}](assets/{0})", fname);
                             let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id)
                                 .unwrap_or_default();
-                            let idx = state
+                            let idx_chars = state
                                 .cursor
                                 .char_range()
                                 .map(|r| r.primary.index)
                                 .unwrap_or_else(|| self.note.content.chars().count());
+                            let idx = char_to_byte_index(&self.note.content, idx_chars);
                             self.note.content.insert_str(idx, &insert);
                             state
                                 .cursor
                                 .set_char_range(Some(egui::text::CCursorRange::one(
-                                    egui::text::CCursor::new(idx + insert.chars().count()),
+                                    egui::text::CCursor::new(byte_to_char_index(
+                                        &self.note.content,
+                                        idx + insert.len(),
+                                    )),
                                 )));
                             state.store(ctx, id);
                             self.image_search.clear();
@@ -852,16 +875,20 @@ impl NotePanel {
                                 let mut state =
                                     egui::widgets::text_edit::TextEditState::load(ctx, id)
                                         .unwrap_or_default();
-                                let idx = state
+                                let idx_chars = state
                                     .cursor
                                     .char_range()
                                     .map(|r| r.primary.index)
                                     .unwrap_or_else(|| self.note.content.chars().count());
+                                let idx = char_to_byte_index(&self.note.content, idx_chars);
                                 self.note.content.insert_str(idx, &insert);
                                 state
                                     .cursor
                                     .set_char_range(Some(egui::text::CCursorRange::one(
-                                        egui::text::CCursor::new(idx + insert.chars().count()),
+                                        egui::text::CCursor::new(byte_to_char_index(
+                                            &self.note.content,
+                                            idx + insert.len(),
+                                        )),
                                     )));
                                 state.store(ctx, id);
                                 self.image_search.clear();
@@ -888,16 +915,20 @@ impl NotePanel {
                             let insert = format!("![{0}](assets/{0})", img);
                             let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id)
                                 .unwrap_or_default();
-                            let idx = state
+                            let idx_chars = state
                                 .cursor
                                 .char_range()
                                 .map(|r| r.primary.index)
                                 .unwrap_or_else(|| self.note.content.chars().count());
+                            let idx = char_to_byte_index(&self.note.content, idx_chars);
                             self.note.content.insert_str(idx, &insert);
                             state
                                 .cursor
                                 .set_char_range(Some(egui::text::CCursorRange::one(
-                                    egui::text::CCursor::new(idx + insert.chars().count()),
+                                    egui::text::CCursor::new(byte_to_char_index(
+                                        &self.note.content,
+                                        idx + insert.len(),
+                                    )),
                                 )));
                             state.store(ctx, id);
                             self.image_search.clear();
@@ -920,14 +951,10 @@ impl NotePanel {
         end_marker: &str,
     ) {
         let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
-        let mut range = state.cursor.char_range().and_then(|r| {
-            let [min, max] = r.sorted();
-            if min.index != max.index {
-                Some((min.index, max.index))
-            } else {
-                None
-            }
-        });
+        let mut range = state
+            .cursor
+            .char_range()
+            .and_then(|r| char_range_to_byte_range(&self.note.content, r));
 
         if range.is_none() {
             range = self.pending_selection.take();
@@ -938,13 +965,13 @@ impl NotePanel {
         if let Some((start, end)) = range {
             self.note.content.insert_str(end, end_marker);
             self.note.content.insert_str(start, start_marker);
-            let new_start = start + start_marker.chars().count();
-            let new_end = end + start_marker.chars().count();
+            let new_start = start + start_marker.len();
+            let new_end = end + start_marker.len();
             state
                 .cursor
                 .set_char_range(Some(egui::text::CCursorRange::two(
-                    egui::text::CCursor::new(new_start),
-                    egui::text::CCursor::new(new_end),
+                    egui::text::CCursor::new(byte_to_char_index(&self.note.content, new_start)),
+                    egui::text::CCursor::new(byte_to_char_index(&self.note.content, new_end)),
                 )));
             state.store(ctx, id);
         }
@@ -965,7 +992,7 @@ impl NotePanel {
             self.note.content.replace_range(start..end, &insert);
             let mut state =
                 egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
-            let cursor = start + insert.chars().count();
+            let cursor = byte_to_char_index(&self.note.content, start + insert.len());
             state
                 .cursor
                 .set_char_range(Some(egui::text::CCursorRange::one(
@@ -975,13 +1002,14 @@ impl NotePanel {
         } else {
             let mut state =
                 egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
-            let idx = state
+            let idx_chars = state
                 .cursor
                 .char_range()
                 .map(|r| r.primary.index)
                 .unwrap_or_else(|| self.note.content.chars().count());
+            let idx = char_to_byte_index(&self.note.content, idx_chars);
             self.note.content.insert_str(idx, &insert);
-            let cursor = idx + insert.chars().count();
+            let cursor = byte_to_char_index(&self.note.content, idx + insert.len());
             state
                 .cursor
                 .set_char_range(Some(egui::text::CCursorRange::one(
@@ -1069,16 +1097,20 @@ fn insert_tag_menu(
                     let insert = format!("#{tag}");
                     let mut state =
                         egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
-                    let idx = state
+                    let idx_chars = state
                         .cursor
                         .char_range()
                         .map(|r| r.primary.index)
                         .unwrap_or_else(|| content.chars().count());
+                    let idx = char_to_byte_index(content, idx_chars);
                     content.insert_str(idx, &insert);
                     state
                         .cursor
                         .set_char_range(Some(egui::text::CCursorRange::one(
-                            egui::text::CCursor::new(idx + insert.chars().count()),
+                            egui::text::CCursor::new(byte_to_char_index(
+                                content,
+                                idx + insert.len(),
+                            )),
                         )));
                     state.store(ctx, id);
                     search.clear();
@@ -1086,6 +1118,33 @@ fn insert_tag_menu(
                 }
             }
         });
+}
+
+fn char_to_byte_index(text: &str, char_idx: usize) -> usize {
+    if char_idx == 0 {
+        return 0;
+    }
+    match text.char_indices().nth(char_idx) {
+        Some((idx, _)) => idx,
+        None => text.len(),
+    }
+}
+
+fn byte_to_char_index(text: &str, byte_idx: usize) -> usize {
+    let clamped = byte_idx.min(text.len());
+    text[..clamped].chars().count()
+}
+
+fn char_range_to_byte_range(text: &str, range: egui::text::CCursorRange) -> Option<(usize, usize)> {
+    let [min, max] = range.sorted();
+    if min.index == max.index {
+        None
+    } else {
+        Some((
+            char_to_byte_index(text, min.index),
+            char_to_byte_index(text, max.index),
+        ))
+    }
 }
 
 fn detect_shell() -> PathBuf {
@@ -1269,6 +1328,26 @@ mod tests {
         let range = state.cursor.char_range().unwrap();
         let [min, max] = range.sorted();
         assert_eq!((min.index, max.index), (2, 7));
+        assert!(panel.pending_selection.is_none());
+    }
+
+    #[test]
+    fn wrap_selection_handles_multibyte_content() {
+        let ctx = egui::Context::default();
+        let mut panel = NotePanel::from_note(empty_note("café ☕ note"));
+        let id = egui::Id::new("note_content");
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap_or_default();
+        let selection =
+            egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(4));
+        state.cursor.set_char_range(Some(selection));
+        state.store(&ctx, id);
+        panel.pending_selection = char_range_to_byte_range(&panel.note.content, selection);
+
+        panel.wrap_selection(&ctx, id, "**", "**");
+        assert_eq!(panel.note.content, "**café** ☕ note");
+        let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
+        let range = state.cursor.char_range().unwrap().sorted();
+        assert_eq!((range[0].index, range[1].index), (2, 6));
         assert!(panel.pending_selection.is_none());
     }
 
@@ -1469,11 +1548,7 @@ mod tests {
             });
         });
         assert_eq!(
-            output
-                .platform_output
-                .open_url
-                .unwrap()
-                .url,
+            output.platform_output.open_url.unwrap().url,
             "https://www.example.com"
         );
     }
