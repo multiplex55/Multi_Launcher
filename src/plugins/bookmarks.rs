@@ -1,12 +1,12 @@
 use crate::actions::Action;
-use crate::plugin::Plugin;
 use crate::common::lru::LruCache;
+use crate::plugin::Plugin;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use once_cell::sync::Lazy;
 
 pub const BOOKMARKS_FILE: &str = "bookmarks.json";
 

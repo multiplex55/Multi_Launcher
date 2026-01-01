@@ -1,6 +1,6 @@
+use chrono::{Local, TimeZone};
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::timestamp::TimestampPlugin;
-use chrono::{Local, TimeZone};
 
 #[test]
 fn unix_to_date() {
@@ -21,9 +21,7 @@ fn unix_to_date() {
 fn date_to_unix() {
     let plugin = TimestampPlugin;
     let query = "ts 2024-05-01 12:00";
-    let dt = Local
-        .with_ymd_and_hms(2024, 5, 1, 12, 0, 0)
-        .unwrap();
+    let dt = Local.with_ymd_and_hms(2024, 5, 1, 12, 0, 0).unwrap();
     let ts = dt.timestamp().to_string();
     let results = plugin.search(query);
     assert_eq!(results.len(), 1);
@@ -61,9 +59,7 @@ fn time_with_ms_to_ms() {
 #[test]
 fn unix_ms_to_date() {
     let plugin = TimestampPlugin;
-    let dt = Local
-        .with_ymd_and_hms(2024, 5, 1, 12, 0, 0)
-        .unwrap();
+    let dt = Local.with_ymd_and_hms(2024, 5, 1, 12, 0, 0).unwrap();
     let ts_ms = dt.timestamp_millis();
     let query = format!("ts {ts_ms}");
     let results = plugin.search(&query);

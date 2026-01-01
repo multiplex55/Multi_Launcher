@@ -173,7 +173,8 @@ impl ScreenshotEditor {
                     }
                     if let Some(start) = self.ann_start {
                         if let Some(pos) = response.interact_pointer_pos() {
-                            self.annotations.push(Rect::from_two_pos(start, to_img(pos)));
+                            self.annotations
+                                .push(Rect::from_two_pos(start, to_img(pos)));
                             self.ann_start = None;
                         }
                     }

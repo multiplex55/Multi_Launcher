@@ -490,32 +490,15 @@ impl NotePanel {
                             }
                             if ctx.input(|i| i.key_pressed(Key::K)) {
                                 ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::K));
-                                idx = self
-                                    .note
-                                    .content
-                                    .chars()
-                                    .take(idx)
-                                    .rposition(|c| c == '\n')
-                                    .unwrap_or(0);
+                                idx = prev_newline_char_idx(&self.note.content, idx).unwrap_or(0);
                                 moved = true;
                             }
                             if ctx.input(|i| i.key_pressed(Key::Y)) {
                                 ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Y));
-                                let start_char = self
-                                    .note
-                                    .content
-                                    .chars()
-                                    .take(idx)
-                                    .rposition(|c| c == '\n')
+                                let start_char = prev_newline_char_idx(&self.note.content, idx)
                                     .map(|p| p + 1)
                                     .unwrap_or(0);
-                                let end_char = self
-                                    .note
-                                    .content
-                                    .chars()
-                                    .skip(idx)
-                                    .position(|c| c == '\n')
-                                    .map(|p| idx + p)
+                                let end_char = next_newline_char_idx(&self.note.content, idx)
                                     .unwrap_or_else(|| self.note.content.chars().count());
                                 let start = char_to_byte_index(&self.note.content, start_char);
                                 let end = char_to_byte_index(&self.note.content, end_char);
@@ -1133,6 +1116,23 @@ fn char_to_byte_index(text: &str, char_idx: usize) -> usize {
 fn byte_to_char_index(text: &str, byte_idx: usize) -> usize {
     let clamped = byte_idx.min(text.len());
     text[..clamped].chars().count()
+}
+
+fn prev_newline_char_idx(text: &str, before: usize) -> Option<usize> {
+    text.chars()
+        .take(before)
+        .enumerate()
+        .rev()
+        .find(|(_, c)| *c == '\n')
+        .map(|(i, _)| i)
+}
+
+fn next_newline_char_idx(text: &str, from: usize) -> Option<usize> {
+    text.chars()
+        .skip(from)
+        .enumerate()
+        .find(|(_, c)| *c == '\n')
+        .map(|(offset, _)| from + offset)
 }
 
 fn char_range_to_byte_range(text: &str, range: egui::text::CCursorRange) -> Option<(usize, usize)> {

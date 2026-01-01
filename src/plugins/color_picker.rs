@@ -24,7 +24,9 @@ impl Plugin for ColorPickerPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         const PREFIX: &str = "color";
         let trimmed = query.trim();
-        let Some(rest) = crate::common::strip_prefix_ci(trimmed, PREFIX) else { return Vec::new(); };
+        let Some(rest) = crate::common::strip_prefix_ci(trimmed, PREFIX) else {
+            return Vec::new();
+        };
         let arg = rest.trim();
 
         let mut color = self.color;
@@ -94,22 +96,39 @@ impl Plugin for ColorPickerPlugin {
 
     fn default_settings(&self) -> Option<serde_json::Value> {
         serde_json::to_value(ColorPickerSettings {
-            color: [self.color.r(), self.color.g(), self.color.b(), self.color.a()],
+            color: [
+                self.color.r(),
+                self.color.g(),
+                self.color.b(),
+                self.color.a(),
+            ],
         })
         .ok()
     }
 
     fn apply_settings(&mut self, value: &serde_json::Value) {
         if let Ok(cfg) = serde_json::from_value::<ColorPickerSettings>(value.clone()) {
-            self.color = Color32::from_rgba_unmultiplied(cfg.color[0], cfg.color[1], cfg.color[2], cfg.color[3]);
+            self.color = Color32::from_rgba_unmultiplied(
+                cfg.color[0],
+                cfg.color[1],
+                cfg.color[2],
+                cfg.color[3],
+            );
         }
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
-        let mut cfg: ColorPickerSettings = serde_json::from_value(value.clone()).unwrap_or(ColorPickerSettings {
-            color: [self.color.r(), self.color.g(), self.color.b(), self.color.a()],
-        });
-        let mut col = Color32::from_rgba_unmultiplied(cfg.color[0], cfg.color[1], cfg.color[2], cfg.color[3]);
+        let mut cfg: ColorPickerSettings =
+            serde_json::from_value(value.clone()).unwrap_or(ColorPickerSettings {
+                color: [
+                    self.color.r(),
+                    self.color.g(),
+                    self.color.b(),
+                    self.color.a(),
+                ],
+            });
+        let mut col =
+            Color32::from_rgba_unmultiplied(cfg.color[0], cfg.color[1], cfg.color[2], cfg.color[3]);
         if ui.color_edit_button_srgba(&mut col).changed() {
             cfg.color = [col.r(), col.g(), col.b(), col.a()];
             self.color = col;
@@ -164,4 +183,3 @@ fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
         (h / 6.0 * 360.0, s * 100.0, l * 100.0)
     }
 }
-

@@ -1,9 +1,7 @@
 use multi_launcher::launcher::launch_action;
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::bookmarks::{load_bookmarks, save_bookmarks, BOOKMARKS_FILE};
-use multi_launcher::plugins::fav::{
-    resolve_with_plugin, save_favs, FavEntry, FavPlugin, FAV_FILE,
-};
+use multi_launcher::plugins::fav::{resolve_with_plugin, save_favs, FavEntry, FavPlugin, FAV_FILE};
 use multi_launcher::plugins_builtin::WebSearchPlugin;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;

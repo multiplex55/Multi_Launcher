@@ -96,4 +96,3 @@ pub fn play_sound(name: &str) {
         }
     });
 }
-

@@ -1,7 +1,5 @@
 use crate::gui::LauncherApp;
-use crate::plugins::fav::{
-    load_favs, save_favs, resolve_with_plugin, FavEntry, FAV_FILE,
-};
+use crate::plugins::fav::{load_favs, resolve_with_plugin, save_favs, FavEntry, FAV_FILE};
 use eframe::egui;
 
 #[derive(Default)]

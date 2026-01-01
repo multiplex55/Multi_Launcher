@@ -1,7 +1,7 @@
 use multi_launcher::plugins::folders::{append_folder, load_folders, save_folders, FOLDERS_FILE};
-use tempfile::tempdir;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
+use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 

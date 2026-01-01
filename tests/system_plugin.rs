@@ -1,5 +1,5 @@
-use multi_launcher::plugins::system::SystemPlugin;
 use multi_launcher::plugin::Plugin;
+use multi_launcher::plugins::system::SystemPlugin;
 
 #[test]
 fn search_shutdown_returns_action() {

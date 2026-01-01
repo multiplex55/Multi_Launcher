@@ -1,6 +1,6 @@
+use multi_launcher::gui::BRIGHTNESS_QUERIES;
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::brightness::BrightnessPlugin;
-use multi_launcher::gui::BRIGHTNESS_QUERIES;
 use std::sync::atomic::Ordering;
 
 #[test]

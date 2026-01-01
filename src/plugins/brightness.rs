@@ -30,7 +30,9 @@ impl Plugin for BrightnessPlugin {
         Vec::new()
     }
 
-    fn name(&self) -> &str { "brightness" }
+    fn name(&self) -> &str {
+        "brightness"
+    }
 
     fn description(&self) -> &str {
         "Adjust display brightness (prefix: `bright`)"

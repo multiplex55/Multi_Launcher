@@ -1,9 +1,7 @@
 use eframe::egui;
 use multi_launcher::visibility::apply_visibility;
 use multi_launcher::window_manager::{
-    clear_mock_mouse_position,
-    set_mock_mouse_position,
-    MOCK_MOUSE_LOCK,
+    clear_mock_mouse_position, set_mock_mouse_position, MOCK_MOUSE_LOCK,
 };
 
 #[path = "mock_ctx.rs"]

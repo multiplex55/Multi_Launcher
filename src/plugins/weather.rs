@@ -15,10 +15,7 @@ impl Plugin for WeatherPlugin {
                 return vec![Action {
                     label: format!("Show weather for {q}"),
                     desc: "Web search".into(),
-                    action: format!(
-                        "https://www.weather.com/weather/today/l/{}",
-                        encode(q)
-                    ),
+                    action: format!("https://www.weather.com/weather/today/l/{}", encode(q)),
                     args: None,
                 }];
             }
@@ -39,7 +36,11 @@ impl Plugin for WeatherPlugin {
     }
 
     fn commands(&self) -> Vec<Action> {
-        vec![Action { label: "weather".into(), desc: "Weather".into(), action: "query:weather ".into(), args: None }]
+        vec![Action {
+            label: "weather".into(),
+            desc: "Weather".into(),
+            action: "query:weather ".into(),
+            args: None,
+        }]
     }
 }
-
