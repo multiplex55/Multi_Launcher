@@ -1119,12 +1119,16 @@ fn byte_to_char_index(text: &str, byte_idx: usize) -> usize {
 }
 
 fn prev_newline_char_idx(text: &str, before: usize) -> Option<usize> {
-    text.chars()
-        .take(before)
-        .enumerate()
-        .rev()
-        .find(|(_, c)| *c == '\n')
-        .map(|(i, _)| i)
+    let mut last_newline = None;
+    for (i, c) in text.chars().enumerate() {
+        if i >= before {
+            break;
+        }
+        if c == '\n' {
+            last_newline = Some(i);
+        }
+    }
+    last_newline
 }
 
 fn next_newline_char_idx(text: &str, from: usize) -> Option<usize> {
