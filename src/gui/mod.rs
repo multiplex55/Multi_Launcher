@@ -320,13 +320,13 @@ pub struct LauncherApp {
     /// Hold watchers so the `RecommendedWatcher` instances remain active.
     #[allow(dead_code)] // required to keep watchers alive
     watchers: Vec<RecommendedWatcher>,
-    dashboard: Dashboard,
-    dashboard_enabled: bool,
-    dashboard_show_when_empty: bool,
-    dashboard_path: String,
-    dashboard_default_location: Option<String>,
-    dashboard_editor: DashboardEditorDialog,
-    show_dashboard_editor: bool,
+    pub dashboard: Dashboard,
+    pub dashboard_enabled: bool,
+    pub dashboard_show_when_empty: bool,
+    pub dashboard_path: String,
+    pub dashboard_default_location: Option<String>,
+    pub dashboard_editor: DashboardEditorDialog,
+    pub show_dashboard_editor: bool,
     rx: Receiver<WatchEvent>,
     folder_aliases: HashMap<String, Option<String>>,
     bookmark_aliases: HashMap<String, Option<String>>,
@@ -668,10 +668,16 @@ impl LauncherApp {
                 .unwrap_or("dashboard.json"),
         );
         let dashboard_registry = WidgetRegistry::with_defaults();
+        let dashboard_event_cb = std::sync::Arc::new({
+            let tx = tx.clone();
+            move |ev: DashboardEvent| {
+                let _ = tx.send(WatchEvent::Dashboard(ev));
+            }
+        });
         let mut dashboard = Dashboard::new(
             &dashboard_path,
             dashboard_registry.clone(),
-            Some(tx.clone()),
+            Some(dashboard_event_cb),
         );
         dashboard.attach_watcher();
 

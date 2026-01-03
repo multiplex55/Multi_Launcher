@@ -32,14 +32,14 @@ pub struct Dashboard {
     registry: WidgetRegistry,
     watcher: Option<JsonWatcher>,
     pub warnings: Vec<String>,
-    event_tx: Option<std::sync::mpsc::Sender<DashboardEvent>>,
+    event_cb: Option<std::sync::Arc<dyn Fn(DashboardEvent) + Send + Sync>>,
 }
 
 impl Dashboard {
     pub fn new(
         config_path: impl AsRef<Path>,
         registry: WidgetRegistry,
-        event_tx: Option<std::sync::mpsc::Sender<DashboardEvent>>,
+        event_cb: Option<std::sync::Arc<dyn Fn(DashboardEvent) + Send + Sync>>,
     ) -> Self {
         let path = config_path.as_ref().to_path_buf();
         let (config, slots, warnings) = Self::load_internal(&path, &registry);
@@ -50,7 +50,7 @@ impl Dashboard {
             registry,
             watcher: None,
             warnings,
-            event_tx,
+            event_cb,
         }
     }
 
@@ -81,11 +81,11 @@ impl Dashboard {
 
     pub fn attach_watcher(&mut self) {
         let path = self.config_path.clone();
-        let tx = self.event_tx.clone();
+        let tx = self.event_cb.clone();
         self.watcher = crate::common::json_watch::watch_json(path.clone(), move || {
             tracing::info!("dashboard config changed");
             if let Some(tx) = &tx {
-                let _ = tx.send(DashboardEvent::Reloaded);
+                (tx)(DashboardEvent::Reloaded);
             }
         })
         .ok();

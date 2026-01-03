@@ -23,7 +23,7 @@ pub use todo_summary::TodoSummaryWidget;
 pub use weather_site::WeatherSiteWidget;
 
 /// Result of a widget activation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct WidgetAction {
     pub action: Action,
     pub query_override: Option<String>,
@@ -42,7 +42,7 @@ pub trait Widget: Send {
 /// Factory for building widgets from JSON settings.
 #[derive(Clone)]
 pub struct WidgetFactory {
-    ctor: fn(&Value) -> Box<dyn Widget>,
+    ctor: std::sync::Arc<dyn Fn(&Value) -> Box<dyn Widget> + Send + Sync>,
 }
 
 impl WidgetFactory {
@@ -50,10 +50,10 @@ impl WidgetFactory {
         build: fn(C) -> T,
     ) -> Self {
         Self {
-            ctor: move |v| {
+            ctor: std::sync::Arc::new(move |v| {
                 let cfg = serde_json::from_value::<C>(v.clone()).unwrap_or_default();
                 Box::new(build(cfg))
-            },
+            }),
         }
     }
 
