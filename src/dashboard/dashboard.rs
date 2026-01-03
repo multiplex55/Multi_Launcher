@@ -101,9 +101,13 @@ impl Dashboard {
         let grid_cols = self.config.grid.cols.max(1) as usize;
         let col_width = ui.available_width() / grid_cols.max(1) as f32;
 
+        let size = egui::vec2(ui.available_width(), ui.available_height());
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let mut child = ui.child_ui(rect, egui::Layout::top_down(egui::Align::LEFT));
+
         for slot in &self.slots {
             let rect = egui::Rect::from_min_size(
-                ui.min_rect().min
+                rect.min
                     + egui::vec2(
                         col_width * slot.col as f32,
                         (slot.row as f32) * 100.0, // coarse row height
@@ -113,8 +117,8 @@ impl Dashboard {
                     90.0 * slot.row_span as f32,
                 ),
             );
-            let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::TOP));
-            if let Some(action) = self.render_slot(slot, &mut child, ctx, activation) {
+            let mut slot_ui = child.child_ui(rect, egui::Layout::left_to_right(egui::Align::TOP));
+            if let Some(action) = self.render_slot(slot, &mut slot_ui, ctx, activation) {
                 clicked = Some(action);
             }
         }

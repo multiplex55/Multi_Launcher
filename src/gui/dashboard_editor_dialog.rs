@@ -97,36 +97,42 @@ impl DashboardEditorDialog {
                 while idx < self.config.slots.len() {
                     let slot = &mut self.config.slots[idx];
                     let mut removed = false;
-                    ui.group(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("Slot {idx}"));
-                            if ui.button("Remove").clicked() {
-                                removed = true;
-                            }
-                        });
-                        egui::ComboBox::from_label("Widget type")
-                            .selected_text(slot.widget.clone())
-                            .show_ui(ui, |ui| {
-                                for name in registry.names() {
-                                    ui.selectable_value(&mut slot.widget, name.clone(), name);
+                    ui.push_id(idx, |ui| {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("Slot {idx}"));
+                                if ui.button("Remove").clicked() {
+                                    removed = true;
                                 }
                             });
-                        ui.horizontal(|ui| {
-                            ui.label("Row");
-                            ui.add(egui::DragValue::new(&mut slot.row));
-                            ui.label("Col");
-                            ui.add(egui::DragValue::new(&mut slot.col));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Row span");
-                            ui.add(egui::DragValue::new(&mut slot.row_span).clamp_range(1..=12));
-                            ui.label("Col span");
-                            ui.add(egui::DragValue::new(&mut slot.col_span).clamp_range(1..=12));
-                        });
-                        ui.horizontal(|ui| {
-                            let id = slot.id.get_or_insert_with(|| format!("slot-{idx}"));
-                            ui.label("Label");
-                            ui.text_edit_singleline(id);
+                            egui::ComboBox::from_label("Widget type")
+                                .selected_text(slot.widget.clone())
+                                .show_ui(ui, |ui| {
+                                    for name in registry.names() {
+                                        ui.selectable_value(&mut slot.widget, name.clone(), name);
+                                    }
+                                });
+                            ui.horizontal(|ui| {
+                                ui.label("Row");
+                                ui.add(egui::DragValue::new(&mut slot.row));
+                                ui.label("Col");
+                                ui.add(egui::DragValue::new(&mut slot.col));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Row span");
+                                ui.add(
+                                    egui::DragValue::new(&mut slot.row_span).clamp_range(1..=12),
+                                );
+                                ui.label("Col span");
+                                ui.add(
+                                    egui::DragValue::new(&mut slot.col_span).clamp_range(1..=12),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                let id = slot.id.get_or_insert_with(|| format!("slot-{idx}"));
+                                ui.label("Label");
+                                ui.text_edit_singleline(id);
+                            });
                         });
                     });
                     if removed {
