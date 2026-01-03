@@ -41,6 +41,29 @@ pub enum LogFile {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DashboardSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub config_path: Option<String>,
+    #[serde(default)]
+    pub default_location: Option<String>,
+    #[serde(default = "default_show_dashboard_when_empty")]
+    pub show_when_query_empty: bool,
+}
+
+impl Default for DashboardSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            config_path: None,
+            default_location: None,
+            show_when_query_empty: true,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Settings {
     pub hotkey: Option<String>,
     pub quit_hotkey: Option<String>,
@@ -172,6 +195,8 @@ pub struct Settings {
     pub plugin_settings: std::collections::HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub pinned_panels: Vec<Panel>,
+    #[serde(default)]
+    pub dashboard: DashboardSettings,
 }
 
 fn default_toasts() -> bool {
@@ -228,6 +253,10 @@ fn default_timer_refresh() -> f32 {
 
 fn default_net_refresh() -> f32 {
     1.0
+}
+
+fn default_show_dashboard_when_empty() -> bool {
+    true
 }
 
 fn default_note_panel_size() -> (f32, f32) {
@@ -311,6 +340,7 @@ impl Default for Settings {
             screenshot_use_editor: true,
             plugin_settings: std::collections::HashMap::new(),
             pinned_panels: Vec::new(),
+            dashboard: DashboardSettings::default(),
         }
     }
 }

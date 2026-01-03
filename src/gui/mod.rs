@@ -6,6 +6,7 @@ mod brightness_dialog;
 mod clipboard_dialog;
 mod convert_panel;
 mod cpu_list_dialog;
+mod dashboard_editor_dialog;
 mod fav_dialog;
 mod image_panel;
 mod macro_dialog;
@@ -55,6 +56,9 @@ pub use volume_dialog::VolumeDialog;
 use crate::actions::folders;
 use crate::actions::{load_actions, Action};
 use crate::actions_editor::ActionsEditor;
+use crate::dashboard::config::DashboardConfig;
+use crate::dashboard::widgets::WidgetRegistry;
+use crate::dashboard::{Dashboard, DashboardContext, DashboardEvent, WidgetActivation};
 use crate::help_window::HelpWindow;
 use crate::history::{self, HistoryEntry};
 use crate::indexer;
@@ -68,6 +72,7 @@ use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{append_toast_log, TOAST_LOG_FILE};
 use crate::usage::{self, USAGE_FILE};
 use crate::visibility::apply_visibility;
+use dashboard_editor_dialog::DashboardEditorDialog;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
 use fst::{IntoStreamer, Map, MapBuilder, Streamer};
@@ -118,7 +123,15 @@ pub enum WatchEvent {
     Actions,
     Folders,
     Bookmarks,
+    Dashboard(DashboardEvent),
     Recycle(Result<(), String>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivationSource {
+    Enter,
+    Click,
+    Dashboard,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,6 +147,7 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::Actions => TestWatchEvent::Actions,
             WatchEvent::Folders => TestWatchEvent::Folders,
             WatchEvent::Bookmarks => TestWatchEvent::Bookmarks,
+            WatchEvent::Dashboard(_) => TestWatchEvent::Actions,
             WatchEvent::Recycle(_) => unreachable!(),
         }
     }
@@ -306,6 +320,13 @@ pub struct LauncherApp {
     /// Hold watchers so the `RecommendedWatcher` instances remain active.
     #[allow(dead_code)] // required to keep watchers alive
     watchers: Vec<RecommendedWatcher>,
+    dashboard: Dashboard,
+    dashboard_enabled: bool,
+    dashboard_show_when_empty: bool,
+    dashboard_path: String,
+    dashboard_default_location: Option<String>,
+    dashboard_editor: DashboardEditorDialog,
+    show_dashboard_editor: bool,
     rx: Receiver<WatchEvent>,
     folder_aliases: HashMap<String, Option<String>>,
     bookmark_aliases: HashMap<String, Option<String>>,
@@ -639,6 +660,21 @@ impl LauncherApp {
         let toast_duration = settings.toast_duration;
         use std::path::Path;
 
+        let dashboard_path = DashboardConfig::path_for(
+            settings
+                .dashboard
+                .config_path
+                .as_deref()
+                .unwrap_or("dashboard.json"),
+        );
+        let dashboard_registry = WidgetRegistry::with_defaults();
+        let mut dashboard = Dashboard::new(
+            &dashboard_path,
+            dashboard_registry.clone(),
+            Some(tx.clone()),
+        );
+        dashboard.attach_watcher();
+
         let folder_aliases =
             crate::plugins::folders::load_folders(crate::plugins::folders::FOLDERS_FILE)
                 .unwrap_or_else(|_| crate::plugins::folders::default_folders())
@@ -808,6 +844,13 @@ impl LauncherApp {
             plugin_editor,
             settings_path,
             watchers,
+            dashboard,
+            dashboard_enabled: settings.dashboard.enabled,
+            dashboard_show_when_empty: settings.dashboard.show_when_query_empty,
+            dashboard_path: dashboard_path.to_string_lossy().to_string(),
+            dashboard_default_location: settings.dashboard.default_location.clone(),
+            dashboard_editor: DashboardEditorDialog::default(),
+            show_dashboard_editor: false,
             rx,
             folder_aliases,
             bookmark_aliases,
@@ -1326,6 +1369,430 @@ impl LauncherApp {
 
     pub fn last_stopwatch_query_flag(&self) -> bool {
         self.last_stopwatch_query
+    }
+
+    pub fn should_show_dashboard(&self, trimmed: &str) -> bool {
+        self.dashboard_enabled && self.dashboard_show_when_empty && trimmed.trim().is_empty()
+    }
+
+    pub fn activate_action(
+        &mut self,
+        mut a: Action,
+        query_override: Option<String>,
+        _source: ActivationSource,
+    ) {
+        if let Some(new_query) = query_override {
+            self.query = new_query;
+            self.last_timer_query =
+                self.query.starts_with("timer list") || self.query.starts_with("alarm list");
+            self.search();
+        }
+        let current = self.query.clone();
+        let mut refresh = false;
+        let mut set_focus = false;
+        let mut command_changed_query = false;
+        if let Some(new_q) = a.action.strip_prefix("query:") {
+            tracing::debug!("query action via activation: {new_q}");
+            self.query = new_q.to_string();
+            self.last_timer_query =
+                new_q.starts_with("timer list") || new_q.starts_with("alarm list");
+            self.search();
+            set_focus = true;
+            self.move_cursor_end = true;
+        } else if a.action == "help:show" {
+            self.help_window.open = true;
+        } else if a.action == "timer:dialog:timer" {
+            self.timer_dialog.open_timer();
+        } else if a.action == "timer:dialog:alarm" {
+            self.timer_dialog.open_alarm();
+        } else if a.action == "shell:dialog" {
+            self.shell_cmd_dialog.open();
+        } else if a.action == "note:dialog" {
+            self.notes_dialog.open();
+        } else if a.action == "note:unused_assets" {
+            self.unused_assets_dialog.open();
+        } else if a.action == "bookmark:dialog" {
+            self.add_bookmark_dialog.open();
+        } else if a.action == "snippet:dialog" {
+            self.snippet_dialog.open();
+        } else if let Some(alias) = a.action.strip_prefix("snippet:edit:") {
+            self.snippet_dialog.open_edit(alias);
+        } else if a.action == "macro:dialog" {
+            self.macro_dialog.open();
+        } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
+            if label.is_empty() {
+                self.fav_dialog.open();
+            } else {
+                self.fav_dialog.open_edit(label);
+            }
+        } else if a.action == "todo:dialog" {
+            self.todo_dialog.open();
+        } else if a.action == "todo:view" {
+            self.todo_view_dialog.open();
+        } else if let Some(idx) = a.action.strip_prefix("todo:edit:") {
+            if let Ok(i) = idx.parse::<usize>() {
+                self.todo_view_dialog.open_edit(i);
+            }
+        } else if a.action == "clipboard:dialog" {
+            self.clipboard_dialog.open();
+        } else if let Some(slug) = a.action.strip_prefix("note:open:") {
+            let slug = slug.to_string();
+            self.open_note_panel(&slug, None);
+        } else if let Some(rest) = a.action.strip_prefix("note:new:") {
+            let mut parts = rest.splitn(2, ':');
+            let slug = parts.next().unwrap_or("").to_string();
+            let template = parts.next().map(|s| s.to_string());
+            self.open_note_panel(&slug, template.as_deref());
+        } else if a.action == "note:tags" {
+            self.open_note_tags();
+            set_focus = true;
+        } else if let Some(link) = a.action.strip_prefix("note:link:") {
+            self.open_note_link(link);
+        } else if let Some(slug) = a.action.strip_prefix("note:remove:") {
+            self.delete_note(slug);
+        } else if a.action == "convert:panel" {
+            self.convert_panel.open();
+        } else if a.action == "tempfile:dialog" {
+            self.tempfile_dialog.open();
+        } else if a.action == "settings:dialog" {
+            self.show_settings = true;
+        } else if a.action == "volume:dialog" {
+            self.volume_dialog.open();
+        } else if a.action == "brightness:dialog" {
+            self.brightness_dialog.open();
+        } else if let Some(n) = a.action.strip_prefix("sysinfo:cpu_list:") {
+            if let Ok(count) = n.parse::<usize>() {
+                self.cpu_list_dialog.open(count);
+            }
+        } else if a.action.starts_with("tab:switch:") {
+            if self.enable_toasts {
+                push_toast(
+                    &mut self.toasts,
+                    Toast {
+                        text: format!("Switching to {}", a.label).into(),
+                        kind: ToastKind::Info,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(self.toast_duration as f64),
+                    },
+                );
+            }
+            let act = a.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = launch_action(&act) {
+                    tracing::error!(?e, "failed to switch tab");
+                }
+            });
+            if a.action != "help:show" {
+                let _ = history::append_history(
+                    HistoryEntry {
+                        query: current.clone(),
+                        query_lc: String::new(),
+                        action: a.clone(),
+                    },
+                    self.history_limit,
+                );
+                let count = self.usage.entry(a.action.clone()).or_insert(0);
+                *count += 1;
+            }
+        } else if let Some(mode) = a.action.strip_prefix("screenshot:") {
+            use crate::actions::screenshot::Mode as ScreenshotMode;
+            let (mode, clip) = match mode {
+                "window" => (ScreenshotMode::Window, false),
+                "region" => (ScreenshotMode::Region, false),
+                "desktop" => (ScreenshotMode::Desktop, false),
+                "window_clip" => (ScreenshotMode::Window, true),
+                "region_clip" => (ScreenshotMode::Region, true),
+                "desktop_clip" => (ScreenshotMode::Desktop, true),
+                _ => (ScreenshotMode::Desktop, false),
+            };
+            if let Err(e) = crate::plugins::screenshot::launch_editor(self, mode, clip) {
+                self.set_error(format!("Failed: {e}"));
+            } else if a.action != "help:show" {
+                let _ = history::append_history(
+                    HistoryEntry {
+                        query: current.clone(),
+                        query_lc: String::new(),
+                        action: a.clone(),
+                    },
+                    self.history_limit,
+                );
+                let count = self.usage.entry(a.action.clone()).or_insert(0);
+                *count += 1;
+            }
+        } else if let Err(e) = launch_action(&a) {
+            if a.desc == "Fav" && !a.action.starts_with("fav:") {
+                tracing::error!(?e, fav=%a.label, "failed to run favorite");
+            }
+            self.set_error(format!("Failed: {e}"));
+            if self.enable_toasts {
+                push_toast(
+                    &mut self.toasts,
+                    Toast {
+                        text: format!("Failed: {e}").into(),
+                        kind: ToastKind::Error,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(self.toast_duration as f64),
+                    },
+                );
+            }
+        } else {
+            if a.desc == "Fav" && !a.action.starts_with("fav:") {
+                tracing::info!(fav=%a.label, command=%a.action, "ran favorite");
+            }
+            if self.enable_toasts && a.action != "recycle:clean" {
+                let msg = if a.action.starts_with("clipboard:") {
+                    format!("Copied {}", a.label)
+                } else {
+                    format!("Launched {}", a.label)
+                };
+                push_toast(
+                    &mut self.toasts,
+                    Toast {
+                        text: msg.into(),
+                        kind: ToastKind::Success,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(self.toast_duration as f64),
+                    },
+                );
+            }
+            if a.action != "help:show" {
+                let _ = history::append_history(
+                    HistoryEntry {
+                        query: current.clone(),
+                        query_lc: String::new(),
+                        action: a.clone(),
+                    },
+                    self.history_limit,
+                );
+                let count = self.usage.entry(a.action.clone()).or_insert(0);
+                *count += 1;
+            }
+            if a.action == "note:reload" {
+                refresh = true;
+                set_focus = true;
+                if self.enable_toasts {
+                    push_toast(
+                        &mut self.toasts,
+                        Toast {
+                            text: "Reloaded notes".into(),
+                            kind: ToastKind::Success,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(self.toast_duration as f64),
+                        },
+                    );
+                }
+            } else if a.action.starts_with("bookmark:add:") {
+                if self.preserve_command {
+                    self.query = "bm add ".into();
+                } else {
+                    self.query.clear();
+                }
+                command_changed_query = true;
+                refresh = true;
+                set_focus = true;
+            } else if a.action.starts_with("bookmark:remove:") {
+                refresh = true;
+                set_focus = true;
+            } else if a.action.starts_with("folder:add:") {
+                if self.preserve_command {
+                    self.query = "f add ".into();
+                } else {
+                    self.query.clear();
+                }
+                command_changed_query = true;
+                refresh = true;
+                set_focus = true;
+            } else if a.action.starts_with("folder:remove:") {
+                refresh = true;
+                set_focus = true;
+            } else if a.action.starts_with("fav:add:") {
+                refresh = true;
+                set_focus = true;
+            } else if a.action.starts_with("fav:remove:") {
+                refresh = true;
+                set_focus = true;
+            } else if a.action.starts_with("todo:add:") {
+                if self.preserve_command {
+                    self.query = "todo add ".into();
+                } else {
+                    self.query.clear();
+                }
+                command_changed_query = true;
+                refresh = true;
+                set_focus = true;
+                if self.enable_toasts {
+                    if let Some(text) = a
+                        .action
+                        .strip_prefix("todo:add:")
+                        .and_then(|r| r.split('|').next())
+                    {
+                        push_toast(
+                            &mut self.toasts,
+                            Toast {
+                                text: format!("Added todo {text}").into(),
+                                kind: ToastKind::Success,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(self.toast_duration as f64),
+                            },
+                        );
+                    }
+                }
+            } else if a.action.starts_with("todo:remove:") {
+                refresh = true;
+                set_focus = true;
+                if current.starts_with("note list") {
+                    self.pending_query = Some(current.clone());
+                    command_changed_query = true;
+                }
+                if self.enable_toasts {
+                    let label = a.label.strip_prefix("Remove todo ").unwrap_or(&a.label);
+                    push_toast(
+                        &mut self.toasts,
+                        Toast {
+                            text: format!("Removed todo {label}").into(),
+                            kind: ToastKind::Success,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(self.toast_duration as f64),
+                        },
+                    );
+                }
+            } else if a.action.starts_with("todo:done:") {
+                refresh = true;
+                set_focus = true;
+                self.pending_query = Some(current.clone());
+                command_changed_query = true;
+                if self.enable_toasts {
+                    let label = a
+                        .label
+                        .trim_start_matches("[x] ")
+                        .trim_start_matches("[ ] ");
+                    push_toast(
+                        &mut self.toasts,
+                        Toast {
+                            text: format!("Toggled todo {label}").into(),
+                            kind: ToastKind::Success,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(self.toast_duration as f64),
+                        },
+                    );
+                }
+            } else if a.action.starts_with("todo:pset:") {
+                refresh = true;
+                set_focus = true;
+                if self.enable_toasts {
+                    push_toast(
+                        &mut self.toasts,
+                        Toast {
+                            text: "Updated todo priority".into(),
+                            kind: ToastKind::Success,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(self.toast_duration as f64),
+                        },
+                    );
+                }
+            } else if a.action.starts_with("todo:tag:") {
+                refresh = true;
+                set_focus = true;
+                if self.enable_toasts {
+                    push_toast(
+                        &mut self.toasts,
+                        Toast {
+                            text: "Updated todo tags".into(),
+                            kind: ToastKind::Success,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(self.toast_duration as f64),
+                        },
+                    );
+                }
+            } else if a.action == "todo:clear" {
+                refresh = true;
+                set_focus = true;
+                if self.enable_toasts {
+                    push_toast(
+                        &mut self.toasts,
+                        Toast {
+                            text: "Cleared completed todos".into(),
+                            kind: ToastKind::Success,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(self.toast_duration as f64),
+                        },
+                    );
+                }
+            } else if a.action.starts_with("snippet:remove:") {
+                refresh = true;
+                set_focus = true;
+                if self.enable_toasts {
+                    push_toast(
+                        &mut self.toasts,
+                        Toast {
+                            text: format!("Removed snippet {}", a.label).into(),
+                            kind: ToastKind::Success,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(self.toast_duration as f64),
+                        },
+                    );
+                }
+            } else if a.action.starts_with("tempfile:remove:") {
+                refresh = true;
+                set_focus = true;
+            } else if a.action.starts_with("tempfile:alias:") {
+                refresh = true;
+                set_focus = true;
+            } else if a.action == "tempfile:new" || a.action.starts_with("tempfile:new:") {
+                if self.preserve_command {
+                    self.query = "tmp new ".into();
+                } else {
+                    self.query.clear();
+                }
+                command_changed_query = true;
+                set_focus = true;
+            } else if a.action.starts_with("timer:cancel:") && current.starts_with("timer rm") {
+                refresh = true;
+                set_focus = true;
+            } else if a.action.starts_with("timer:pause:") && current.starts_with("timer pause") {
+                refresh = true;
+                set_focus = true;
+            } else if a.action.starts_with("timer:resume:") && current.starts_with("timer resume") {
+                refresh = true;
+                set_focus = true;
+            } else if a.action.starts_with("timer:start:") && current.starts_with("timer add") {
+                if self.preserve_command {
+                    self.query = "timer add ".into();
+                } else {
+                    self.query.clear();
+                }
+                command_changed_query = true;
+                set_focus = true;
+            }
+            if self.clear_query_after_run && !command_changed_query {
+                self.query.clear();
+                refresh = true;
+                set_focus = true;
+            }
+            if self.hide_after_run
+                && !a.action.starts_with("bookmark:add:")
+                && !a.action.starts_with("bookmark:remove:")
+                && !a.action.starts_with("folder:add:")
+                && !a.action.starts_with("folder:remove:")
+                && !a.action.starts_with("snippet:remove:")
+                && !a.action.starts_with("fav:add:")
+                && !a.action.starts_with("fav:remove:")
+                && !a.action.starts_with("screenshot:")
+                && !a.action.starts_with("calc:")
+                && !a.action.starts_with("todo:done:")
+            {
+                self.visible_flag.store(false, Ordering::SeqCst);
+            }
+        }
+        if refresh {
+            self.last_results_valid = false;
+            self.search();
+        }
+        if set_focus {
+            self.focus_input();
+        } else if self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open() {
+            self.focus_input();
+        }
     }
 
     fn any_panel_open(&self) -> bool {
@@ -2040,6 +2507,23 @@ impl eframe::App for LauncherApp {
                     .map(|b| (b.url, b.alias))
                     .collect();
                 }
+                WatchEvent::Dashboard(_) => {
+                    self.dashboard.reload();
+                    for warn in &self.dashboard.warnings {
+                        tracing::warn!("dashboard: {}", warn);
+                        if self.enable_toasts {
+                            push_toast(
+                                &mut self.toasts,
+                                Toast {
+                                    text: warn.clone().into(),
+                                    kind: ToastKind::Warning,
+                                    options: ToastOptions::default()
+                                        .duration_in_seconds(self.toast_duration as f64),
+                                },
+                            );
+                        }
+                    }
+                }
                 WatchEvent::Recycle(res) => match res {
                     Ok(()) => {
                         if self.enable_toasts {
@@ -2206,751 +2690,94 @@ impl eframe::App for LauncherApp {
                 if let Some(i) = launch_idx {
                     if let Some(a) = self.results.get(i) {
                         let a = a.clone();
-                        let current = self.query.clone();
-                        let mut refresh = false;
-                        let mut set_focus = false;
-                        let mut command_changed_query = false;
-                        if let Some(new_q) = a.action.strip_prefix("query:") {
-                            tracing::debug!("query action via Enter: {new_q}");
-                            self.query = new_q.to_string();
-                            self.last_timer_query = new_q.starts_with("timer list")
-                                || new_q.starts_with("alarm list");
-                            self.search();
-                            set_focus = true;
-                            tracing::debug!("move_cursor_end set via Enter key");
-                            self.move_cursor_end = true;
-                        } else if a.action == "help:show" {
-                            self.help_window.open = true;
-                        } else if a.action == "timer:dialog:timer" {
-                            self.timer_dialog.open_timer();
-                        } else if a.action == "timer:dialog:alarm" {
-                            self.timer_dialog.open_alarm();
-                        } else if a.action == "shell:dialog" {
-                            self.shell_cmd_dialog.open();
-                        } else if a.action == "note:dialog" {
-                            self.notes_dialog.open();
-                        } else if a.action == "note:unused_assets" {
-                            self.unused_assets_dialog.open();
-                        } else if a.action == "bookmark:dialog" {
-                            self.add_bookmark_dialog.open();
-                        } else if a.action == "snippet:dialog" {
-                            self.snippet_dialog.open();
-                        } else if let Some(alias) = a.action.strip_prefix("snippet:edit:") {
-                            self.snippet_dialog.open_edit(alias);
-                        } else if a.action == "macro:dialog" {
-                            self.macro_dialog.open();
-                        } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
-                            if label.is_empty() {
-                                self.fav_dialog.open();
-                            } else {
-                                self.fav_dialog.open_edit(label);
-                            }
-                        } else if a.action == "todo:dialog" {
-                            self.todo_dialog.open();
-                        } else if a.action == "todo:view" {
-                            self.todo_view_dialog.open();
-                        } else if let Some(idx) = a.action.strip_prefix("todo:edit:") {
-                            if let Ok(i) = idx.parse::<usize>() {
-                                self.todo_view_dialog.open_edit(i);
-                            }
-                        } else if a.action == "clipboard:dialog" {
-                            self.clipboard_dialog.open();
-                        } else if let Some(slug) = a.action.strip_prefix("note:open:") {
-                            let slug = slug.to_string();
-                            self.open_note_panel(&slug, None);
-                        } else if let Some(rest) = a.action.strip_prefix("note:new:") {
-                            let mut parts = rest.splitn(2, ':');
-                            let slug = parts.next().unwrap_or("").to_string();
-                            let template = parts.next().map(|s| s.to_string());
-                            self.open_note_panel(&slug, template.as_deref());
-                        } else if a.action == "note:tags" {
-                            self.open_note_tags();
-                            set_focus = true;
-                        } else if let Some(link) = a.action.strip_prefix("note:link:") {
-                            self.open_note_link(link);
-                        } else if let Some(slug) = a.action.strip_prefix("note:remove:") {
-                            self.delete_note(slug);
-                        } else if a.action == "convert:panel" {
-                            self.convert_panel.open();
-                        } else if a.action == "tempfile:dialog" {
-                            self.tempfile_dialog.open();
-                        } else if a.action == "settings:dialog" {
-                            self.show_settings = true;
-                        } else if a.action == "volume:dialog" {
-                            self.volume_dialog.open();
-                        } else if a.action == "brightness:dialog" {
-                            self.brightness_dialog.open();
-                        } else if let Some(n) = a.action.strip_prefix("sysinfo:cpu_list:") {
-                            if let Ok(count) = n.parse::<usize>() {
-                                self.cpu_list_dialog.open(count);
-                            }
-                        } else if a.action.starts_with("tab:switch:") {
-                            if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Switching to {}", a.label).into(),
-                                        kind: ToastKind::Info,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
-                            }
-                            let act = a.clone();
-                            std::thread::spawn(move || {
-                                if let Err(e) = launch_action(&act) {
-                                    tracing::error!(?e, "failed to switch tab");
-                                }
-                            });
-                            if a.action != "help:show" {
-                                let _ = history::append_history(
-                                    HistoryEntry {
-                                        query: current.clone(),
-                                        query_lc: String::new(),
-                                        action: a.clone(),
-                                    },
-                                    self.history_limit,
-                                );
-                                let count = self.usage.entry(a.action.clone()).or_insert(0);
-                                *count += 1;
-                            }
-                        } else if let Some(mode) = a.action.strip_prefix("screenshot:") {
-                            use crate::actions::screenshot::Mode as ScreenshotMode;
-                            let (mode, clip) = match mode {
-                                "window" => (ScreenshotMode::Window, false),
-                                "region" => (ScreenshotMode::Region, false),
-                                "desktop" => (ScreenshotMode::Desktop, false),
-                                "window_clip" => (ScreenshotMode::Window, true),
-                                "region_clip" => (ScreenshotMode::Region, true),
-                                "desktop_clip" => (ScreenshotMode::Desktop, true),
-                                _ => (ScreenshotMode::Desktop, false),
-                            };
-                            if let Err(e) = crate::plugins::screenshot::launch_editor(self, mode, clip)
-                            {
-                                self.set_error(format!("Failed: {e}"));
-                            } else if a.action != "help:show" {
-                                let _ = history::append_history(
-                                    HistoryEntry {
-                                        query: current.clone(),
-                                        query_lc: String::new(),
-                                        action: a.clone(),
-                                    },
-                                    self.history_limit,
-                                );
-                                let count = self.usage.entry(a.action.clone()).or_insert(0);
-                                *count += 1;
-                            }
-                        } else if let Err(e) = launch_action(&a) {
-                            if a.desc == "Fav" && !a.action.starts_with("fav:") {
-                                tracing::error!(?e, fav=%a.label, "failed to run favorite");
-                            }
-                            self.set_error(format!("Failed: {e}"));
-                            if self.enable_toasts {
-                                push_toast(&mut self.toasts, Toast {
-                                    text: format!("Failed: {e}").into(),
-                                    kind: ToastKind::Error,
-                                    options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
-                                });
-                            }
-                        } else {
-                            if a.desc == "Fav" && !a.action.starts_with("fav:") {
-                                tracing::info!(fav=%a.label, command=%a.action, "ran favorite");
-                            }
-                            if self.enable_toasts && a.action != "recycle:clean" {
-                                let msg = if a.action.starts_with("clipboard:") {
-                                    format!("Copied {}", a.label)
-                                } else {
-                                    format!("Launched {}", a.label)
-                                };
-                                push_toast(&mut self.toasts, Toast {
-                                    text: msg.into(),
-                                    kind: ToastKind::Success,
-                                    options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
-                                });
-                            }
-                            if a.action != "help:show" {
-                                let _ = history::append_history(
-                                    HistoryEntry {
-                                        query: current.clone(),
-                                        query_lc: String::new(),
-                                        action: a.clone(),
-                                    },
-                                    self.history_limit,
-                                );
-                                let count = self.usage.entry(a.action.clone()).or_insert(0);
-                                *count += 1;
-                            }
-                            if a.action == "note:reload" {
-                                refresh = true;
-                                set_focus = true;
-                                if self.enable_toasts {
-                                    push_toast(
-                                        &mut self.toasts,
-                                        Toast {
-                                            text: "Reloaded notes".into(),
-                                            kind: ToastKind::Success,
-                                            options: ToastOptions::default()
-                                                .duration_in_seconds(self.toast_duration as f64),
-                                        },
-                                    );
-                                }
-                            } else if a.action.starts_with("bookmark:add:") {
-                                if self.preserve_command {
-                                    self.query = "bm add ".into();
-                                } else {
-                                    self.query.clear();
-                                }
-                                command_changed_query = true;
-                                refresh = true;
-                                set_focus = true;
-                            } else if a.action.starts_with("bookmark:remove:") {
-                                refresh = true;
-                                set_focus = true;
-                            } else if a.action.starts_with("folder:add:") {
-                                if self.preserve_command {
-                                    self.query = "f add ".into();
-                                } else {
-                                    self.query.clear();
-                                }
-                                command_changed_query = true;
-                                refresh = true;
-                                set_focus = true;
-                            } else if a.action.starts_with("folder:remove:") {
-                                refresh = true;
-                                set_focus = true;
-                            } else if a.action.starts_with("fav:add:") {
-                                refresh = true;
-                                set_focus = true;
-                            } else if a.action.starts_with("fav:remove:") {
-                                refresh = true;
-                                set_focus = true;
-                            } else if a.action.starts_with("todo:add:") {
-                                if self.preserve_command {
-                                    self.query = "todo add ".into();
-                                } else {
-                                    self.query.clear();
-                                }
-                                command_changed_query = true;
-                                refresh = true;
-                                set_focus = true;
-                                if self.enable_toasts {
-                                    if let Some(text) = a
-                                        .action
-                                        .strip_prefix("todo:add:")
-                                        .and_then(|r| r.split('|').next())
-                                    {
-                                        push_toast(&mut self.toasts, Toast {
-                                            text: format!("Added todo {text}").into(),
-                                            kind: ToastKind::Success,
-                                            options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
-                                        });
-                                    }
-                                }
-                            } else if a.action.starts_with("todo:remove:") {
-                                refresh = true;
-                                set_focus = true;
-                                if current.starts_with("note list") {
-                                    self.pending_query = Some(current.clone());
-                                    command_changed_query = true;
-                                }
-                                if self.enable_toasts {
-                                    let label =
-                                        a.label.strip_prefix("Remove todo ").unwrap_or(&a.label);
-                                    push_toast(&mut self.toasts, Toast {
-                                        text: format!("Removed todo {label}").into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
-                                    });
-                                }
-                            } else if a.action.starts_with("todo:done:") {
-                                refresh = true;
-                                set_focus = true;
-                                // Re-run the current query so the todo list reflects the
-                                // updated completion state immediately.
-                                self.pending_query = Some(current.clone());
-                                command_changed_query = true;
-                                if self.enable_toasts {
-                                    let label = a
-                                        .label
-                                        .trim_start_matches("[x] ")
-                                        .trim_start_matches("[ ] ");
-                                    push_toast(&mut self.toasts, Toast {
-                                        text: format!("Toggled todo {label}").into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
-                                    });
-                                }
-                            } else if a.action.starts_with("todo:pset:") {
-                                refresh = true;
-                                set_focus = true;
-                                if self.enable_toasts {
-                                    push_toast(&mut self.toasts, Toast {
-                                        text: "Updated todo priority".into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
-                                    });
-                                }
-                            } else if a.action.starts_with("todo:tag:") {
-                                refresh = true;
-                                set_focus = true;
-                                if self.enable_toasts {
-                                    push_toast(&mut self.toasts, Toast {
-                                        text: "Updated todo tags".into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
-                                    });
-                                }
-                            } else if a.action == "todo:clear" {
-                                refresh = true;
-                                set_focus = true;
-                                if self.enable_toasts {
-                                    push_toast(&mut self.toasts, Toast {
-                                        text: "Cleared completed todos".into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
-                                    });
-                                }
-                            } else if a.action.starts_with("snippet:remove:") {
-                                refresh = true;
-                                set_focus = true;
-                                if self.enable_toasts {
-                                    push_toast(&mut self.toasts, Toast {
-                                        text: format!("Removed snippet {}", a.label).into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
-                                    });
-                                }
-                            } else if a.action.starts_with("tempfile:remove:") {
-                                refresh = true;
-                                set_focus = true;
-                            } else if a.action.starts_with("tempfile:alias:") {
-                                refresh = true;
-                                set_focus = true;
-                            } else if a.action == "tempfile:new"
-                                || a.action.starts_with("tempfile:new:")
-                            {
-                                if self.preserve_command {
-                                    self.query = "tmp new ".into();
-                                } else {
-                                    self.query.clear();
-                                }
-                                command_changed_query = true;
-                                set_focus = true;
-                            } else if a.action.starts_with("timer:cancel:")
-                                && current.starts_with("timer rm")
-                            {
-                                refresh = true;
-                                set_focus = true;
-                            } else if a.action.starts_with("timer:pause:")
-                                && current.starts_with("timer pause")
-                            {
-                                refresh = true;
-                                set_focus = true;
-                            } else if a.action.starts_with("timer:resume:")
-                                && current.starts_with("timer resume")
-                            {
-                                refresh = true;
-                                set_focus = true;
-                            } else if a.action.starts_with("timer:start:")
-                                && current.starts_with("timer add")
-                            {
-                                if self.preserve_command {
-                                    self.query = "timer add ".into();
-                                } else {
-                                    self.query.clear();
-                                }
-                                command_changed_query = true;
-                                set_focus = true;
-                            }
-                            if self.clear_query_after_run && !command_changed_query {
-                                self.query.clear();
-                                refresh = true;
-                                set_focus = true;
-                            }
-                            if self.hide_after_run
-                                && !a.action.starts_with("bookmark:add:")
-                                && !a.action.starts_with("bookmark:remove:")
-                                && !a.action.starts_with("folder:add:")
-                                && !a.action.starts_with("folder:remove:")
-                                && !a.action.starts_with("snippet:remove:")
-                                && !a.action.starts_with("fav:add:")
-                                && !a.action.starts_with("fav:remove:")
-                                && !a.action.starts_with("screenshot:")
-                                && !a.action.starts_with("calc:")
-                                && !a.action.starts_with("todo:done:")
-                            {
-                                self.visible_flag.store(false, Ordering::SeqCst);
-                            }
-                        }
-                        if refresh {
-                            // Ensure file removals update the visible results list
-                            self.last_results_valid = false;
-                            self.search();
-                        }
-                        if set_focus {
-                            self.focus_input();
-                        } else if self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open()
-                        {
-                            self.focus_input();
-                        }
+                        self.activate_action(a, None, ActivationSource::Enter);
                     }
                 }
             });
 
-            let area_height = ui.available_height();
-            ScrollArea::vertical()
-                .max_height(area_height)
-                .show(ui, |ui| {
-                    scale_ui(ui, self.list_scale, |ui| {
-                        let mut refresh = false;
-                        let mut set_focus = false;
-                        let mut clicked_query: Option<String> = None;
-                        let show_full = self
-                            .enabled_capabilities
-                            .as_ref()
-                            .and_then(|m| m.get("folders"))
-                            .map(|caps| caps.contains(&"show_full_path".to_string()))
-                            .unwrap_or(false);
-                        for idx in 0..self.results.len() {
-                            let a = self.results[idx].clone();
-                            let aliased = self
-                                .folder_aliases
-                                .get(&a.action)
-                                .and_then(|v| v.as_ref());
-                            let show_path = show_full || aliased.is_none();
-                            let text = if show_path {
-                                format!("{} : {}", a.label, a.desc)
-                            } else {
-                                a.label.clone()
-                            };
-                            let mut resp = ui.add_sized(
-                                [ui.available_width(), 0.0],
-                                egui::SelectableLabel::new(self.selected == Some(idx), text),
-                            );
-                            let tooltip = if a.desc == "Timer"
-                                && a.action.starts_with("timer:show:")
-                            {
-                                if let Ok(id) = a.action[11..].parse::<u64>() {
-                                    if let Some(ts) = crate::plugins::timer::timer_start_ts(id) {
-                                        format!("Started {}", crate::plugins::timer::format_ts(ts))
+            let use_dashboard = self.should_show_dashboard(&trimmed);
+            if use_dashboard {
+                let ctx = DashboardContext {
+                    actions: &self.actions,
+                    usage: &self.usage,
+                    plugins: &self.plugins,
+                    default_location: self.dashboard_default_location.as_deref(),
+                };
+                if let Some(action) = self.dashboard.ui(ui, &ctx, WidgetActivation::Click) {
+                    self.activate_action(action.action, action.query_override, ActivationSource::Dashboard);
+                }
+            } else {
+                let area_height = ui.available_height();
+                ScrollArea::vertical()
+                    .max_height(area_height)
+                    .show(ui, |ui| {
+                        scale_ui(ui, self.list_scale, |ui| {
+                            let mut refresh = false;
+                            let mut set_focus = false;
+                            let show_full = self
+                                .enabled_capabilities
+                                .as_ref()
+                                .and_then(|m| m.get("folders"))
+                                .map(|caps| caps.contains(&"show_full_path".to_string()))
+                                .unwrap_or(false);
+                            for idx in 0..self.results.len() {
+                                let a = self.results[idx].clone();
+                                let aliased = self
+                                    .folder_aliases
+                                    .get(&a.action)
+                                    .and_then(|v| v.as_ref());
+                                let show_path = show_full || aliased.is_none();
+                                let text = if show_path {
+                                    format!("{} : {}", a.label, a.desc)
+                                } else {
+                                    a.label.clone()
+                                };
+                                let mut resp = ui.add_sized(
+                                    [ui.available_width(), 0.0],
+                                    egui::SelectableLabel::new(self.selected == Some(idx), text),
+                                );
+                                let tooltip = if a.desc == "Timer"
+                                    && a.action.starts_with("timer:show:")
+                                {
+                                    if let Ok(id) = a.action[11..].parse::<u64>() {
+                                        if let Some(ts) = crate::plugins::timer::timer_start_ts(id) {
+                                            format!("Started {}", crate::plugins::timer::format_ts(ts))
+                                        } else {
+                                            a.action.clone()
+                                        }
                                     } else {
                                         a.action.clone()
                                     }
                                 } else {
                                     a.action.clone()
-                                }
-                            } else {
-                                a.action.clone()
-                            };
-                            let menu_resp = resp.on_hover_text(tooltip);
-                            let custom_idx = self
-                                .actions
-                                .iter()
-                                .take(self.custom_len)
-                                .position(|act| act.action == a.action && act.label == a.label);
-                            if self.folder_aliases.contains_key(&a.action)
-                                && !a.action.starts_with("folder:")
-                            {
-                                menu_resp.clone().context_menu(|ui| {
-                                    if ui.button("Set Alias").clicked() {
-                                        self.alias_dialog.open(&a.action);
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Remove Folder").clicked() {
-                                        if let Err(e) = crate::plugins::folders::remove_folder(
-                                            crate::plugins::folders::FOLDERS_FILE,
-                                            &a.action,
-                                        ) {
-                                            self.error =
-                                                Some(format!("Failed to remove folder: {e}"));
-                                        } else {
-                                            refresh = true;
-                                            set_focus = true;
-                                            if self.enable_toasts {
-                                                push_toast(&mut self.toasts, Toast {
-                                                    text: format!("Removed folder {}", a.label)
-                                                        .into(),
-                                                    kind: ToastKind::Success,
-                                                    options: ToastOptions::default()
-                                                        .duration_in_seconds(self.toast_duration as f64),
-                                                });
-                                            }
-                                        }
-                                        ui.close_menu();
-                                    }
-                                });
-                            } else if self.bookmark_aliases.contains_key(&a.action) {
-                                menu_resp.clone().context_menu(|ui| {
-                                    if ui.button("Set Alias").clicked() {
-                                        self.bookmark_alias_dialog.open(&a.action);
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Remove Bookmark").clicked() {
-                                        if let Err(e) = crate::plugins::bookmarks::remove_bookmark(
-                                            crate::plugins::bookmarks::BOOKMARKS_FILE,
-                                            &a.action,
-                                        ) {
-                                            self.error =
-                                                Some(format!("Failed to remove bookmark: {e}"));
-                                        } else {
-                                            refresh = true;
-                                            set_focus = true;
-                                            if self.enable_toasts {
-                                                push_toast(&mut self.toasts, Toast {
-                                                    text: format!("Removed bookmark {}", a.label)
-                                                        .into(),
-                                                    kind: ToastKind::Success,
-                                                    options: ToastOptions::default()
-                                                        .duration_in_seconds(self.toast_duration as f64),
-                                                });
-                                            }
-                                        }
-                                        ui.close_menu();
-                                    }
-                                });
-                            } else if a.desc == "Timer" && a.action.starts_with("timer:show:") {
-                                if let Ok(id) = a.action[11..].parse::<u64>() {
-                                    let query = self.query.trim().to_string();
+                                };
+                                let menu_resp = resp.on_hover_text(tooltip);
+                                let custom_idx = self
+                                    .actions
+                                    .iter()
+                                    .take(self.custom_len)
+                                    .position(|act| act.action == a.action && act.label == a.label);
+                                if self.folder_aliases.contains_key(&a.action)
+                                    && !a.action.starts_with("folder:")
+                                {
                                     menu_resp.clone().context_menu(|ui| {
-                                        if ui.button("Pause Timer").clicked() {
-                                            crate::plugins::timer::pause_timer(id);
-                                            if query.starts_with("timer list") {
-                                                refresh = true;
-                                                set_focus = true;
-                                                if self.enable_toasts {
-                                                    push_toast(&mut self.toasts, Toast {
-                                                        text: format!("Paused timer {}", a.label)
-                                                            .into(),
-                                                        kind: ToastKind::Success,
-                                                        options: ToastOptions::default()
-                                                            .duration_in_seconds(self.toast_duration as f64),
-                                                    });
-                                                }
-                                            }
+                                        if ui.button("Set Alias").clicked() {
+                                            self.alias_dialog.open(&a.action);
                                             ui.close_menu();
                                         }
-                                        if ui.button("Remove Timer").clicked() {
-                                            crate::plugins::timer::cancel_timer(id);
-                                            if query.starts_with("timer list") {
-                                                refresh = true;
-                                                set_focus = true;
-                                                if self.enable_toasts {
-                                                    push_toast(&mut self.toasts, Toast {
-                                                        text: format!("Removed timer {}", a.label)
-                                                            .into(),
-                                                        kind: ToastKind::Success,
-                                                        options: ToastOptions::default()
-                                                            .duration_in_seconds(self.toast_duration as f64),
-                                                    });
-                                                }
-                                            }
-                                            ui.close_menu();
-                                        }
-                                    });
-                                }
-                            } else if a.desc == "Stopwatch" && a.action.starts_with("stopwatch:show:") {
-                                if let Ok(id) = a.action["stopwatch:show:".len()..].parse::<u64>() {
-                                    let query = self.query.trim().to_string();
-                                    menu_resp.clone().context_menu(|ui| {
-                                        if ui.button("Pause Stopwatch").clicked() {
-                                            crate::plugins::stopwatch::pause_stopwatch(id);
-                                            if query.starts_with("sw list") {
-                                                refresh = true;
-                                                set_focus = true;
-                                                if self.enable_toasts {
-                                                    push_toast(&mut self.toasts, Toast {
-                                                        text: format!("Paused stopwatch {}", a.label).into(),
-                                                        kind: ToastKind::Success,
-                                                        options: ToastOptions::default()
-                                                            .duration_in_seconds(self.toast_duration as f64),
-                                                    });
-                                                }
-                                            }
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Resume Stopwatch").clicked() {
-                                            crate::plugins::stopwatch::resume_stopwatch(id);
-                                            if query.starts_with("sw list") {
-                                                refresh = true;
-                                                set_focus = true;
-                                                if self.enable_toasts {
-                                                    push_toast(&mut self.toasts, Toast {
-                                                        text: format!("Resumed stopwatch {}", a.label).into(),
-                                                        kind: ToastKind::Success,
-                                                        options: ToastOptions::default()
-                                                            .duration_in_seconds(self.toast_duration as f64),
-                                                    });
-                                                }
-                                            }
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Stop Stopwatch").clicked() {
-                                            crate::plugins::stopwatch::stop_stopwatch(id);
-                                            if query.starts_with("sw list") {
-                                                refresh = true;
-                                                set_focus = true;
-                                                if self.enable_toasts {
-                                                    push_toast(&mut self.toasts, Toast {
-                                                        text: format!("Stopped stopwatch {}", a.label).into(),
-                                                        kind: ToastKind::Success,
-                                                        options: ToastOptions::default()
-                                                            .duration_in_seconds(self.toast_duration as f64),
-                                                    });
-                                                }
-                                            }
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Copy Time").clicked() {
-                                            if let Some(time) =
-                                                crate::plugins::stopwatch::format_elapsed(id)
-                                            {
-                                                if let Err(e) =
-                                                    crate::actions::clipboard::set_text(&time)
-                                                {
-                                                    self.error =
-                                                        Some(format!("Failed to copy time: {e}"));
-                                                } else if self.enable_toasts {
-                                                    push_toast(&mut self.toasts, Toast {
-                                                        text: format!("Copied {time}").into(),
-                                                        kind: ToastKind::Success,
-                                                        options: ToastOptions::default()
-                                                            .duration_in_seconds(self.toast_duration as f64),
-                                                    });
-                                                }
-                                            }
-                                            ui.close_menu();
-                                        }
-                                    });
-                                }
-                            } else if a.desc == "Snippet" {
-                                menu_resp.clone().context_menu(|ui| {
-                                    if ui.button("Edit Snippet").clicked() {
-                                        self.snippet_dialog.open_edit(&a.label);
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Remove Snippet").clicked() {
-                                        if let Err(e) = remove_snippet(SNIPPETS_FILE, &a.label) {
-                                            self.error =
-                                                Some(format!("Failed to remove snippet: {e}"));
-                                        } else {
-                                            refresh = true;
-                                            set_focus = true;
-                                            if self.enable_toasts {
-                                                push_toast(&mut self.toasts, Toast {
-                                                    text: format!("Removed snippet {}", a.label)
-                                                        .into(),
-                                                    kind: ToastKind::Success,
-                                                    options: ToastOptions::default()
-                                                        .duration_in_seconds(self.toast_duration as f64),
-                                                });
-                                            }
-                                        }
-                                        ui.close_menu();
-                                    }
-                                });
-                            } else if a.desc == "Tempfile" && !a.action.starts_with("tempfile:") {
-                                let file_path = a.action.clone();
-                                menu_resp.clone().context_menu(|ui| {
-                                    if ui.button("Set Alias").clicked() {
-                                        self.tempfile_alias_dialog.open(&file_path);
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Delete File").clicked() {
-                                        if let Err(e) = crate::plugins::tempfile::remove_file(
-                                            std::path::Path::new(&file_path),
-                                        ) {
-                                            self.error =
-                                                Some(format!("Failed to delete file: {e}"));
-                                        } else {
-                                            refresh = true;
-                                            set_focus = true;
-                                            if self.enable_toasts {
-                                                push_toast(&mut self.toasts, Toast {
-                                                    text: format!("Removed file {}", a.label)
-                                                        .into(),
-                                                    kind: ToastKind::Success,
-                                                    options: ToastOptions::default()
-                                                        .duration_in_seconds(self.toast_duration as f64),
-                                                });
-                                            }
-                                        }
-                                        ui.close_menu();
-                                    }
-                                });
-                            } else if a.desc == "Note"
-                                && a.action.starts_with("note:open:")
-                            {
-                                let slug = a.action.rsplit(':').next().unwrap_or("").to_string();
-                                menu_resp.clone().context_menu(|ui| {
-                                    if ui.button("Edit Note").clicked() {
-                                        self.open_note_panel(&slug, None);
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Open in Notepad").clicked() {
-                                        match crate::plugins::note::load_notes() {
-                                            Ok(notes) => {
-                                                if let Some(note) =
-                                                    notes.iter().find(|n| n.slug == slug)
-                                                {
-                                                    if let Err(e) = std::process::Command::new(
-                                                        "notepad.exe",
-                                                    )
-                                                    .arg(&note.path)
-                                                    .spawn()
-                                                    {
-                                                        self.error = Some(e.to_string());
-                                                    }
-                                                } else {
-                                                    self.error =
-                                                        Some("Note not found".to_string());
-                                                }
-                                            }
-                                            Err(e) => {
-                                                self.error = Some(e.to_string());
-                                            }
-                                        }
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Open in Neovim").clicked() {
-                                        if self.open_note_in_neovim(
-                                            &slug,
-                                            crate::plugins::note::load_notes,
-                                            |path| spawn_external(path, NoteExternalOpen::Wezterm),
-                                        ) {
-                                            ui.close_menu();
-                                        }
-                                    }
-                                    if ui.button("Remove Note").clicked() {
-                                        self.delete_note(&slug);
-                                        refresh = true;
-                                        set_focus = true;
-                                        ui.close_menu();
-                                    }
-                                });
-                            } else if a.desc == "Clipboard"
-                                && a.action.starts_with("clipboard:copy:")
-                            {
-                                let idx_str = a.action.rsplit(':').next().unwrap_or("");
-                                if let Ok(cb_idx) = idx_str.parse::<usize>() {
-                                    let cb_label = a.label.clone();
-                                    menu_resp.clone().context_menu(|ui| {
-                                        if ui.button("Edit Entry").clicked() {
-                                            self.clipboard_dialog.open_edit(cb_idx);
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Remove Entry").clicked() {
-                                            if let Err(e) = crate::plugins::clipboard::remove_entry(
-                                                crate::plugins::clipboard::CLIPBOARD_FILE,
-                                                cb_idx,
+                                        if ui.button("Remove Folder").clicked() {
+                                            if let Err(e) = crate::plugins::folders::remove_folder(
+                                                crate::plugins::folders::FOLDERS_FILE,
+                                                &a.action,
                                             ) {
                                                 self.error =
-                                                    Some(format!("Failed to remove entry: {e}"));
+                                                    Some(format!("Failed to remove folder: {e}"));
                                             } else {
                                                 refresh = true;
                                                 set_focus = true;
                                                 if self.enable_toasts {
                                                     push_toast(&mut self.toasts, Toast {
-                                                        text: format!("Removed entry {}", cb_label)
+                                                        text: format!("Removed folder {}", a.label)
                                                             .into(),
                                                         kind: ToastKind::Success,
                                                         options: ToastOptions::default()
@@ -2961,362 +2788,331 @@ impl eframe::App for LauncherApp {
                                             ui.close_menu();
                                         }
                                     });
-                                }
-                            } else if a.desc == "Todo" && a.action.starts_with("todo:done:") {
-                                let idx_str = a.action.rsplit(':').next().unwrap_or("");
-                                if let Ok(todo_idx) = idx_str.parse::<usize>() {
+                                } else if self.bookmark_aliases.contains_key(&a.action) {
                                     menu_resp.clone().context_menu(|ui| {
-                                        if ui.button("Edit Todo").clicked() {
-                                            self.todo_view_dialog.open_edit(todo_idx);
+                                        if ui.button("Set Alias").clicked() {
+                                            self.bookmark_alias_dialog.open(&a.action);
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Remove Bookmark").clicked() {
+                                            if let Err(e) = crate::plugins::bookmarks::remove_bookmark(
+                                                crate::plugins::bookmarks::BOOKMARKS_FILE,
+                                                &a.action,
+                                            ) {
+                                                self.error =
+                                                    Some(format!("Failed to remove bookmark: {e}"));
+                                            } else {
+                                                refresh = true;
+                                                set_focus = true;
+                                                if self.enable_toasts {
+                                                    push_toast(&mut self.toasts, Toast {
+                                                        text: format!("Removed bookmark {}", a.label)
+                                                            .into(),
+                                                        kind: ToastKind::Success,
+                                                        options: ToastOptions::default()
+                                                            .duration_in_seconds(self.toast_duration as f64),
+                                                    });
+                                                }
+                                            }
+                                            ui.close_menu();
+                                        }
+                                    });
+                                } else if a.desc == "Timer" && a.action.starts_with("timer:show:") {
+                                    if let Ok(id) = a.action[11..].parse::<u64>() {
+                                        let query = self.query.trim().to_string();
+                                        menu_resp.clone().context_menu(|ui| {
+                                            if ui.button("Pause Timer").clicked() {
+                                                crate::plugins::timer::pause_timer(id);
+                                                if query.starts_with("timer list") {
+                                                    refresh = true;
+                                                    set_focus = true;
+                                                    if self.enable_toasts {
+                                                        push_toast(&mut self.toasts, Toast {
+                                                            text: format!("Paused timer {}", a.label)
+                                                                .into(),
+                                                            kind: ToastKind::Success,
+                                                            options: ToastOptions::default()
+                                                                .duration_in_seconds(self.toast_duration as f64),
+                                                        });
+                                                    }
+                                                }
+                                                ui.close_menu();
+                                            }
+                                            if ui.button("Remove Timer").clicked() {
+                                                crate::plugins::timer::cancel_timer(id);
+                                                if query.starts_with("timer list") {
+                                                    refresh = true;
+                                                    set_focus = true;
+                                                    if self.enable_toasts {
+                                                        push_toast(&mut self.toasts, Toast {
+                                                            text: format!("Removed timer {}", a.label)
+                                                                .into(),
+                                                            kind: ToastKind::Success,
+                                                            options: ToastOptions::default()
+                                                                .duration_in_seconds(self.toast_duration as f64),
+                                                        });
+                                                    }
+                                                }
+                                                ui.close_menu();
+                                            }
+                                        });
+                                    }
+                                } else if a.desc == "Stopwatch" && a.action.starts_with("stopwatch:show:") {
+                                    if let Ok(id) = a.action["stopwatch:show:".len()..].parse::<u64>() {
+                                        let query = self.query.trim().to_string();
+                                        menu_resp.clone().context_menu(|ui| {
+                                            if ui.button("Pause Stopwatch").clicked() {
+                                                crate::plugins::stopwatch::pause_stopwatch(id);
+                                                if query.starts_with("sw list") {
+                                                    refresh = true;
+                                                    set_focus = true;
+                                                    if self.enable_toasts {
+                                                        push_toast(&mut self.toasts, Toast {
+                                                            text: format!("Paused stopwatch {}", a.label).into(),
+                                                            kind: ToastKind::Success,
+                                                            options: ToastOptions::default()
+                                                                .duration_in_seconds(self.toast_duration as f64),
+                                                        });
+                                                    }
+                                                }
+                                                ui.close_menu();
+                                            }
+                                            if ui.button("Resume Stopwatch").clicked() {
+                                                crate::plugins::stopwatch::resume_stopwatch(id);
+                                                if query.starts_with("sw list") {
+                                                    refresh = true;
+                                                    set_focus = true;
+                                                    if self.enable_toasts {
+                                                        push_toast(&mut self.toasts, Toast {
+                                                            text: format!("Resumed stopwatch {}", a.label).into(),
+                                                            kind: ToastKind::Success,
+                                                            options: ToastOptions::default()
+                                                                .duration_in_seconds(self.toast_duration as f64),
+                                                        });
+                                                    }
+                                                }
+                                                ui.close_menu();
+                                            }
+                                            if ui.button("Stop Stopwatch").clicked() {
+                                                crate::plugins::stopwatch::stop_stopwatch(id);
+                                                if query.starts_with("sw list") {
+                                                    refresh = true;
+                                                    set_focus = true;
+                                                    if self.enable_toasts {
+                                                        push_toast(&mut self.toasts, Toast {
+                                                            text: format!("Stopped stopwatch {}", a.label).into(),
+                                                            kind: ToastKind::Success,
+                                                            options: ToastOptions::default()
+                                                                .duration_in_seconds(self.toast_duration as f64),
+                                                        });
+                                                    }
+                                                }
+                                                ui.close_menu();
+                                            }
+                                            if ui.button("Copy Time").clicked() {
+                                                if let Some(time) =
+                                                    crate::plugins::stopwatch::format_elapsed(id)
+                                                {
+                                                    if let Err(e) =
+                                                        crate::actions::clipboard::set_text(&time)
+                                                    {
+                                                        self.error =
+                                                            Some(format!("Failed to copy time: {e}"));
+                                                    } else if self.enable_toasts {
+                                                        push_toast(&mut self.toasts, Toast {
+                                                            text: format!("Copied {time}").into(),
+                                                            kind: ToastKind::Success,
+                                                            options: ToastOptions::default()
+                                                                .duration_in_seconds(self.toast_duration as f64),
+                                                        });
+                                                    }
+                                                }
+                                                ui.close_menu();
+                                            }
+                                        });
+                                    }
+                                } else if a.desc == "Snippet" {
+                                    menu_resp.clone().context_menu(|ui| {
+                                        if ui.button("Edit Snippet").clicked() {
+                                            self.snippet_dialog.open_edit(&a.label);
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Remove Snippet").clicked() {
+                                            if let Err(e) = remove_snippet(SNIPPETS_FILE, &a.label) {
+                                                self.error =
+                                                    Some(format!("Failed to remove snippet: {e}"));
+                                            } else {
+                                                refresh = true;
+                                                set_focus = true;
+                                                if self.enable_toasts {
+                                                    push_toast(&mut self.toasts, Toast {
+                                                        text: format!("Removed snippet {}", a.label)
+                                                            .into(),
+                                                        kind: ToastKind::Success,
+                                                        options: ToastOptions::default()
+                                                            .duration_in_seconds(self.toast_duration as f64),
+                                                    });
+                                                }
+                                            }
+                                            ui.close_menu();
+                                        }
+                                    });
+                                } else if a.desc == "Tempfile" && !a.action.starts_with("tempfile:") {
+                                    let file_path = a.action.clone();
+                                    menu_resp.clone().context_menu(|ui| {
+                                        if ui.button("Set Alias").clicked() {
+                                            self.tempfile_alias_dialog.open(&file_path);
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Delete File").clicked() {
+                                            if let Err(e) = crate::plugins::tempfile::remove_file(
+                                                std::path::Path::new(&file_path),
+                                            ) {
+                                                self.error =
+                                                    Some(format!("Failed to delete file: {e}"));
+                                            } else {
+                                                refresh = true;
+                                                set_focus = true;
+                                                if self.enable_toasts {
+                                                    push_toast(&mut self.toasts, Toast {
+                                                        text: format!("Removed file {}", a.label)
+                                                            .into(),
+                                                        kind: ToastKind::Success,
+                                                        options: ToastOptions::default()
+                                                            .duration_in_seconds(self.toast_duration as f64),
+                                                    });
+                                                }
+                                            }
+                                            ui.close_menu();
+                                        }
+                                    });
+                                } else if a.desc == "Note"
+                                    && a.action.starts_with("note:open:")
+                                {
+                                    let slug = a.action.rsplit(':').next().unwrap_or("").to_string();
+                                    menu_resp.clone().context_menu(|ui| {
+                                        if ui.button("Edit Note").clicked() {
+                                            self.open_note_panel(&slug, None);
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Open in Notepad").clicked() {
+                                            match crate::plugins::note::load_notes() {
+                                                Ok(notes) => {
+                                                    if let Some(note) =
+                                                        notes.iter().find(|n| n.slug == slug)
+                                                    {
+                                                        if let Err(e) = std::process::Command::new(
+                                                            "notepad.exe",
+                                                        )
+                                                        .arg(&note.path)
+                                                        .spawn()
+                                                        {
+                                                            self.error = Some(e.to_string());
+                                                        }
+                                                    } else {
+                                                        self.error =
+                                                            Some("Note not found".to_string());
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    self.error = Some(e.to_string());
+                                                }
+                                            }
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Open in Neovim").clicked() {
+                                            if self.open_note_in_neovim(
+                                                &slug,
+                                                crate::plugins::note::load_notes,
+                                                |path| spawn_external(path, NoteExternalOpen::Wezterm),
+                                            ) {
+                                                ui.close_menu();
+                                            }
+                                        }
+                                        if ui.button("Remove Note").clicked() {
+                                            self.delete_note(&slug);
+                                            refresh = true;
+                                            set_focus = true;
+                                            ui.close_menu();
+                                        }
+                                    });
+                                } else if a.desc == "Clipboard"
+                                    && a.action.starts_with("clipboard:copy:")
+                                {
+                                    let idx_str = a.action.rsplit(':').next().unwrap_or("");
+                                    if let Ok(cb_idx) = idx_str.parse::<usize>() {
+                                        let cb_label = a.label.clone();
+                                        menu_resp.clone().context_menu(|ui| {
+                                            if ui.button("Edit Entry").clicked() {
+                                                self.clipboard_dialog.open_edit(cb_idx);
+                                                ui.close_menu();
+                                            }
+                                            if ui.button("Remove Entry").clicked() {
+                                                if let Err(e) = crate::plugins::clipboard::remove_entry(
+                                                    crate::plugins::clipboard::CLIPBOARD_FILE,
+                                                    cb_idx,
+                                                ) {
+                                                    self.error =
+                                                        Some(format!("Failed to remove entry: {e}"));
+                                                } else {
+                                                    refresh = true;
+                                                    set_focus = true;
+                                                    if self.enable_toasts {
+                                                        push_toast(&mut self.toasts, Toast {
+                                                            text: format!("Removed entry {}", cb_label)
+                                                                .into(),
+                                                            kind: ToastKind::Success,
+                                                            options: ToastOptions::default()
+                                                                .duration_in_seconds(self.toast_duration as f64),
+                                                        });
+                                                    }
+                                                }
+                                                ui.close_menu();
+                                            }
+                                        });
+                                    }
+                                } else if a.desc == "Todo" && a.action.starts_with("todo:done:") {
+                                    let idx_str = a.action.rsplit(':').next().unwrap_or("");
+                                    if let Ok(todo_idx) = idx_str.parse::<usize>() {
+                                        menu_resp.clone().context_menu(|ui| {
+                                            if ui.button("Edit Todo").clicked() {
+                                                self.todo_view_dialog.open_edit(todo_idx);
+                                                ui.close_menu();
+                                            }
+                                        });
+                                    }
+                                }
+                                if let Some(idx_act) = custom_idx {
+                                    menu_resp.clone().context_menu(|ui| {
+                                        if ui.button("Edit App").clicked() {
+                                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                                            self.show_editor = true;
                                             ui.close_menu();
                                         }
                                     });
                                 }
-                            }
-                            if let Some(idx_act) = custom_idx {
-                                menu_resp.clone().context_menu(|ui| {
-                                    if ui.button("Edit App").clicked() {
-                                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                                        self.show_editor = true;
-                                        ui.close_menu();
-                                    }
-                                });
-                            }
-                            resp = menu_resp;
-                            if self.selected == Some(idx) {
-                                resp.scroll_to_me(Some(egui::Align::Center));
-                            }
-                            if resp.clicked() {
-                                let current = self.query.clone();
-                                let mut command_changed_query = false;
-                                if let Some(new_q) = a.action.strip_prefix("query:") {
-                                    tracing::debug!("query action via click: {new_q}");
-                                    clicked_query = Some(new_q.to_string());
-                                    command_changed_query = true;
-                                    set_focus = true;
-                                    tracing::debug!("move_cursor_end set via mouse click");
-                                    self.move_cursor_end = true;
-                                } else if a.action == "help:show" {
-                                    self.help_window.open = true;
-                                } else if a.action == "timer:dialog:timer" {
-                                    self.timer_dialog.open_timer();
-                                } else if a.action == "timer:dialog:alarm" {
-                                    self.timer_dialog.open_alarm();
-                                } else if a.action == "shell:dialog" {
-                                    self.shell_cmd_dialog.open();
-                                } else if a.action == "note:dialog" {
-                                    self.notes_dialog.open();
-                                } else if a.action == "note:unused_assets" {
-                                    self.unused_assets_dialog.open();
-                                } else if a.action == "bookmark:dialog" {
-                                    self.add_bookmark_dialog.open();
-                                } else if a.action == "snippet:dialog" {
-                            self.snippet_dialog.open();
-                        } else if let Some(alias) = a.action.strip_prefix("snippet:edit:") {
-                            self.snippet_dialog.open_edit(alias);
-                        } else if a.action == "macro:dialog" {
-                            self.macro_dialog.open();
-                        } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
-                            if label.is_empty() {
-                                self.fav_dialog.open();
-                            } else {
-                                self.fav_dialog.open_edit(label);
-                            }
-                        } else if a.action == "todo:dialog" {
-                            self.todo_dialog.open();
-                        } else if a.action == "todo:view" {
-                            self.todo_view_dialog.open();
-                        } else if let Some(idx) = a.action.strip_prefix("todo:edit:") {
-                            if let Ok(i) = idx.parse::<usize>() {
-                                self.todo_view_dialog.open_edit(i);
-                            }
-                        } else if a.action == "clipboard:dialog" {
-                            self.clipboard_dialog.open();
-                        } else if let Some(slug) = a.action.strip_prefix("note:open:") {
-                            let slug = slug.to_string();
-                            self.open_note_panel(&slug, None);
-                        } else if let Some(rest) = a.action.strip_prefix("note:new:") {
-                            let mut parts = rest.splitn(2, ':');
-                            let slug = parts.next().unwrap_or("").to_string();
-                            let template = parts.next().map(|s| s.to_string());
-                            self.open_note_panel(&slug, template.as_deref());
-                        } else if a.action == "note:tags" {
-                            self.open_note_tags();
-                            set_focus = true;
-                        } else if let Some(link) = a.action.strip_prefix("note:link:") {
-                                self.open_note_link(link);
-                            } else if let Some(slug) = a.action.strip_prefix("note:remove:") {
-                                self.delete_note(slug);
-                            } else if a.action == "convert:panel" {
-                                self.convert_panel.open();
-                            } else if a.action == "tempfile:dialog" {
-                                self.tempfile_dialog.open();
-                            } else if a.action == "settings:dialog" {
-                                self.show_settings = true;
-                            } else if a.action == "volume:dialog" {
-                                self.volume_dialog.open();
-                            } else if a.action == "brightness:dialog" {
-                                self.brightness_dialog.open();
-                            } else if let Some(n) = a.action.strip_prefix("sysinfo:cpu_list:") {
-                                if let Ok(count) = n.parse::<usize>() {
-                                    self.cpu_list_dialog.open(count);
+                                resp = menu_resp;
+                                if self.selected == Some(idx) {
+                                    resp.scroll_to_me(Some(egui::Align::Center));
                                 }
-                            } else if let Some(mode) = a.action.strip_prefix("screenshot:") {
-                                use crate::actions::screenshot::Mode as ScreenshotMode;
-                                let (mode, clip) = match mode {
-                                    "window" => (ScreenshotMode::Window, false),
-                                    "region" => (ScreenshotMode::Region, false),
-                                    "desktop" => (ScreenshotMode::Desktop, false),
-                                    "window_clip" => (ScreenshotMode::Window, true),
-                                    "region_clip" => (ScreenshotMode::Region, true),
-                                    "desktop_clip" => (ScreenshotMode::Desktop, true),
-                                    _ => (ScreenshotMode::Desktop, false),
-                                };
-                                if let Err(e) = crate::plugins::screenshot::launch_editor(self, mode, clip)
-                                {
-                                    self.set_error(format!("Failed: {e}"));
-                                } else if a.action != "help:show" {
-                                    let _ = history::append_history(
-                                        HistoryEntry {
-                                            query: current.clone(),
-                                            query_lc: String::new(),
-                                            action: a.clone(),
-                                        },
-                                        self.history_limit,
-                                    );
-                                    let count = self.usage.entry(a.action.clone()).or_insert(0);
-                                    *count += 1;
+                                if resp.clicked() {
+                                    self.selected = Some(idx);
+                                    self.activate_action(a.clone(), None, ActivationSource::Click);
                                 }
-                            } else if let Err(e) = launch_action(&a) {
-                                if a.desc == "Fav" && !a.action.starts_with("fav:") {
-                                    tracing::error!(?e, fav=%a.label, "failed to run favorite");
-                                }
-                                self.error = Some(format!("Failed: {e}"));
-                                    self.error_time = Some(Instant::now());
-                                    if self.enable_toasts {
-                                        push_toast(&mut self.toasts, Toast {
-                                            text: format!("Failed: {e}").into(),
-                                            kind: ToastKind::Error,
-                                            options: ToastOptions::default()
-                                                .duration_in_seconds(self.toast_duration as f64),
-                                        });
-                                    }
-                                } else {
-                                    if a.desc == "Fav" && !a.action.starts_with("fav:") {
-                                        tracing::info!(fav=%a.label, command=%a.action, "ran favorite");
-                                    }
-                            if self.enable_toasts && a.action != "recycle:clean" {
-                                let msg = if a.action.starts_with("clipboard:") {
-                                    format!("Copied {}", a.label)
-                                } else {
-                                    format!("Launched {}", a.label)
-                                };
-                                push_toast(&mut self.toasts, Toast {
-                                    text: msg.into(),
-                                    kind: ToastKind::Success,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(self.toast_duration as f64),
-                                });
                             }
-                                    if a.action != "help:show" {
-                                        let _ = history::append_history(
-                                            HistoryEntry {
-                                                query: current.clone(),
-                                                query_lc: String::new(),
-                                                action: a.clone(),
-                                            },
-                                            self.history_limit,
-                                        );
-                                        let count = self.usage.entry(a.action.clone()).or_insert(0);
-                                        *count += 1;
-                                    }
-                                    if a.action.starts_with("bookmark:add:") {
-                                        if self.preserve_command {
-                                            self.query = "bm add ".into();
-                                        } else {
-                                            self.query.clear();
-                                        }
-                                        command_changed_query = true;
-                                        refresh = true;
-                                        set_focus = true;
-                                    } else if a.action.starts_with("bookmark:remove:") {
-                                        refresh = true;
-                                        set_focus = true;
-                                    } else if a.action.starts_with("folder:add:") {
-                                        if self.preserve_command {
-                                            self.query = "f add ".into();
-                                        } else {
-                                            self.query.clear();
-                                        }
-                                        command_changed_query = true;
-                                        refresh = true;
-                                        set_focus = true;
-                                    } else if a.action.starts_with("folder:remove:") {
-                                        refresh = true;
-                                        set_focus = true;
-                                    } else if a.action.starts_with("fav:add:") {
-                                        refresh = true;
-                                        set_focus = true;
-                                    } else if a.action.starts_with("fav:remove:") {
-                                        refresh = true;
-                                        set_focus = true;
-                                    } else if a.action.starts_with("todo:add:") {
-                                        if self.preserve_command {
-                                            self.query = "todo add ".into();
-                                        } else {
-                                            self.query.clear();
-                                        }
-                                        command_changed_query = true;
-                                        refresh = true;
-                                        set_focus = true;
-                                        if self.enable_toasts {
-                                            if let Some(text) = a
-                                                .action
-                                                .strip_prefix("todo:add:")
-                                                .and_then(|r| r.split('|').next())
-                                            {
-                                                push_toast(&mut self.toasts, Toast {
-                                                    text: format!("Added todo {text}").into(),
-                                                    kind: ToastKind::Success,
-                                                    options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
-                                                });
-                                            }
-                                        }
-                                    } else if a.action.starts_with("todo:remove:") {
-                                        refresh = true;
-                                        set_focus = true;
-                                        if current.starts_with("note list") {
-                                            clicked_query = Some(current.clone());
-                                            command_changed_query = true;
-                                        }
-                                        if self.enable_toasts {
-                                            let label = a
-                                                .label
-                                                .strip_prefix("Remove todo ")
-                                                .unwrap_or(&a.label);
-                                            push_toast(&mut self.toasts, Toast {
-                                                text: format!("Removed todo {label}").into(),
-                                                kind: ToastKind::Success,
-                                                options: ToastOptions::default()
-                                                    .duration_in_seconds(self.toast_duration as f64),
-                                            });
-                                        }
-                                    } else if a.action.starts_with("todo:done:") {
-                                        refresh = true;
-                                        set_focus = true;
-                                        // Re-run the current query so the visible list refreshes
-                                        // with the toggled completion state.
-                                        clicked_query = Some(current.clone());
-                                        command_changed_query = true;
-                                        if self.enable_toasts {
-                                            let label = a
-                                                .label
-                                                .trim_start_matches("[x] ")
-                                                .trim_start_matches("[ ] ");
-                                            push_toast(&mut self.toasts, Toast {
-                                                text: format!("Toggled todo {label}").into(),
-                                                kind: ToastKind::Success,
-                                                options: ToastOptions::default()
-                                                    .duration_in_seconds(self.toast_duration as f64),
-                                            });
-                                        }
-                                    } else if a.action.starts_with("todo:pset:") {
-                                        refresh = true;
-                                        set_focus = true;
-                                        if self.enable_toasts {
-                                            push_toast(&mut self.toasts, Toast {
-                                                text: "Updated todo priority".into(),
-                                                kind: ToastKind::Success,
-                                                options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
-                                            });
-                                        }
-                                    } else if a.action.starts_with("todo:tag:") {
-                                        refresh = true;
-                                        set_focus = true;
-                                        if self.enable_toasts {
-                                            push_toast(&mut self.toasts, Toast {
-                                                text: "Updated todo tags".into(),
-                                                kind: ToastKind::Success,
-                                                options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
-                                            });
-                                        }
-                                    } else if a.action == "todo:clear" {
-                                        refresh = true;
-                                        set_focus = true;
-                                        if self.enable_toasts {
-                                            push_toast(&mut self.toasts, Toast {
-                                                text: "Cleared completed todos".into(),
-                                                kind: ToastKind::Success,
-                                                options: ToastOptions::default()
-                                                    .duration_in_seconds(self.toast_duration as f64),
-                                            });
-                                        }
-                                    } else if a.action.starts_with("snippet:remove:") {
-                                        refresh = true;
-                                        set_focus = true;
-                                        if self.enable_toasts {
-                                            push_toast(&mut self.toasts, Toast {
-                                                text: format!("Removed snippet {}", a.label).into(),
-                                                kind: ToastKind::Success,
-                                                options: ToastOptions::default()
-                                                    .duration_in_seconds(self.toast_duration as f64),
-                                            });
-                                        }
-                                    } else if a.action.starts_with("tempfile:remove:") {
-                                        refresh = true;
-                                        set_focus = true;
-                                    } else if a.action.starts_with("tempfile:alias:") {
-                                        refresh = true;
-                                        set_focus = true;
-                                    } else if a.action == "tempfile:new"
-                                        || a.action.starts_with("tempfile:new:")
-                                    {
-                                        if self.preserve_command {
-                                            self.query = "tmp new ".into();
-                                        } else {
-                                            self.query.clear();
-                                        }
-                                        command_changed_query = true;
-                                        set_focus = true;
-                                    }
-                                    if self.clear_query_after_run && !command_changed_query {
-                                        self.query.clear();
-                                        refresh = true;
-                                        set_focus = true;
-                                    }
-                                    if self.hide_after_run
-                                        && !a.action.starts_with("bookmark:add:")
-                                        && !a.action.starts_with("bookmark:remove:")
-                                        && !a.action.starts_with("folder:add:")
-                                        && !a.action.starts_with("folder:remove:")
-                                        && !a.action.starts_with("snippet:remove:")
-                                        && !a.action.starts_with("fav:add:")
-                                        && !a.action.starts_with("fav:remove:")
-                                        && !a.action.starts_with("calc:")
-                                        && !a.action.starts_with("todo:done:")
-                                    {
-                                        self.visible_flag.store(false, Ordering::SeqCst);
-                                    }
-                                }
-                                self.selected = Some(idx);
+                            if refresh {
+                                self.last_results_valid = false;
+                                self.search();
                             }
-                        }
-                        if let Some(new_q) = clicked_query {
-                            self.pending_query = Some(new_q);
-                        }
-                        if refresh {
-                            // Ensure file removals update the visible results list
-                            self.last_results_valid = false;
-                            self.search();
-                        }
-                        if set_focus {
-                            self.focus_input();
-                        } else if self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open()
-                        {
-                            self.focus_input();
-                        }
+                            if set_focus {
+                                self.focus_input();
+                            } else if self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open()
+                            {
+                                self.focus_input();
+                            }
+                        });
                     });
-                });
+            }
         });
         let show_editor = self.show_editor;
         if show_editor {
@@ -3335,6 +3131,20 @@ impl eframe::App for LauncherApp {
             let mut ed = std::mem::take(&mut self.plugin_editor);
             ed.ui(ctx, self);
             self.plugin_editor = ed;
+        }
+        if self.show_dashboard_editor && !self.dashboard_editor.open {
+            let registry = self.dashboard.registry().clone();
+            self.dashboard_editor.open(&self.dashboard_path, &registry);
+        }
+        if self.show_dashboard_editor {
+            let registry = self.dashboard.registry().clone();
+            let mut dlg = std::mem::take(&mut self.dashboard_editor);
+            let reload = dlg.ui(ctx, &registry);
+            self.show_dashboard_editor = dlg.open;
+            self.dashboard_editor = dlg;
+            if reload {
+                self.dashboard.reload();
+            }
         }
         let mut dlg = std::mem::take(&mut self.alias_dialog);
         dlg.ui(ctx, self);
