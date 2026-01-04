@@ -322,6 +322,9 @@ impl DashboardEditorDialog {
                                             &mut slot.settings,
                                             &settings_ctx,
                                         ) {
+                                            if result.changed {
+                                                edited = true;
+                                            }
                                             if let Some(err) = result.error {
                                                 ui.colored_label(
                                                     egui::Color32::YELLOW,
