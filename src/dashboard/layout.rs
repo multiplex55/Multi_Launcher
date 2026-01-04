@@ -14,6 +14,13 @@ pub struct NormalizedSlot {
     pub overflow: crate::dashboard::config::OverflowMode,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NormalizationIssue {
+    NegativePosition,
+    OutOfBounds,
+    Overlap { row: usize, col: usize },
+}
+
 /// Validate and normalize slot positions to the configured grid size.
 pub fn normalize_slots(
     cfg: &DashboardConfig,
@@ -30,13 +37,22 @@ pub fn normalize_slots(
             warnings.push(format!("dropping unknown widget '{}'", slot.widget));
             continue;
         }
-        if let Some(ns) = normalize_slot(slot, rows, cols, &mut occupied) {
-            normalized.push(ns);
-        } else {
-            warnings.push(format!(
-                "slot for widget '{}' is outside the grid and was ignored",
-                slot.widget
-            ));
+        match normalize_slot(slot, rows, cols, &mut occupied) {
+            Ok(ns) => normalized.push(ns),
+            Err(NormalizationIssue::NegativePosition) => warnings.push(format!(
+                "slot '{}' has a negative position and was ignored",
+                slot.id.as_deref().unwrap_or(&slot.widget)
+            )),
+            Err(NormalizationIssue::OutOfBounds) => warnings.push(format!(
+                "slot '{}' is outside the grid and was ignored",
+                slot.id.as_deref().unwrap_or(&slot.widget)
+            )),
+            Err(NormalizationIssue::Overlap { row, col }) => warnings.push(format!(
+                "slot '{}' overlaps another slot at row {}, col {}",
+                slot.id.as_deref().unwrap_or(&slot.widget),
+                row,
+                col
+            )),
         }
     }
 
@@ -48,14 +64,14 @@ fn normalize_slot(
     rows: usize,
     cols: usize,
     occupied: &mut [Vec<bool>],
-) -> Option<NormalizedSlot> {
+) -> Result<NormalizedSlot, NormalizationIssue> {
     if slot.row < 0 || slot.col < 0 {
-        return None;
+        return Err(NormalizationIssue::NegativePosition);
     }
     let row = slot.row as usize;
     let col = slot.col as usize;
     if row >= rows || col >= cols {
-        return None;
+        return Err(NormalizationIssue::OutOfBounds);
     }
     let row_span = slot.row_span.max(1).min((rows - row).max(1) as u8) as usize;
     let col_span = slot.col_span.max(1).min((cols - col).max(1) as u8) as usize;
@@ -63,7 +79,7 @@ fn normalize_slot(
     for r in row..row + row_span {
         for c in col..col + col_span {
             if occupied[r][c] {
-                return None;
+                return Err(NormalizationIssue::Overlap { row: r, col: c });
             }
         }
     }
@@ -73,7 +89,7 @@ fn normalize_slot(
         }
     }
 
-    Some(NormalizedSlot {
+    Ok(NormalizedSlot {
         id: slot.id.clone(),
         widget: slot.widget.clone(),
         row,
