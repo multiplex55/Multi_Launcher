@@ -6,17 +6,28 @@ pub struct SettingsPlugin;
 impl Plugin for SettingsPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let q = query.trim();
+        let mut actions = Vec::new();
         if let Some(rest) = crate::common::strip_prefix_ci(q, "settings") {
             if rest.is_empty() || rest.starts_with(' ') {
-                return vec![Action {
+                actions.push(Action {
                     label: "Open settings".into(),
                     desc: "Show settings panel".into(),
                     action: "settings:dialog".into(),
                     args: None,
-                }];
+                });
             }
         }
-        Vec::new()
+        if let Some(rest) = crate::common::strip_prefix_ci(q, "dashboard") {
+            if rest.is_empty() || rest.starts_with(' ') {
+                actions.push(Action {
+                    label: "Dashboard Settings".into(),
+                    desc: "Configure dashboard layout and widgets".into(),
+                    action: "dashboard:settings".into(),
+                    args: None,
+                });
+            }
+        }
+        actions
     }
 
     fn name(&self) -> &str {
@@ -32,12 +43,19 @@ impl Plugin for SettingsPlugin {
     }
 
     fn commands(&self) -> Vec<Action> {
-        vec![Action {
-            label: "settings".into(),
-            desc: "Settings".into(),
-            action: "query:settings".into(),
-            args: None,
-        }]
+        vec![
+            Action {
+                label: "settings".into(),
+                desc: "Settings".into(),
+                action: "query:settings".into(),
+                args: None,
+            },
+            Action {
+                label: "Dashboard Settings".into(),
+                desc: "Dashboard settings".into(),
+                action: "dashboard:settings".into(),
+                args: None,
+            },
+        ]
     }
 }
-

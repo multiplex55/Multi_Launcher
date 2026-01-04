@@ -4,6 +4,10 @@
         "desc": "Launch Chrome",
         "action": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
         "args": "--new-window"
+    },
+    {
+        "label": "Dashboard Settings",
+        "desc": "Configure the dashboard layout",
+        "action": "dashboard:settings"
     }
 ]
-

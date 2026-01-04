@@ -1,8 +1,11 @@
+use eframe::egui;
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::settings::SettingsPlugin;
-use multi_launcher::{actions::Action, gui::LauncherApp, plugin::PluginManager, settings::Settings};
-use std::sync::{Arc, atomic::AtomicBool};
-use eframe::egui;
+use multi_launcher::{
+    actions::Action, gui::ActivationSource, gui::LauncherApp, plugin::PluginManager,
+    settings::Settings,
+};
+use std::sync::{atomic::AtomicBool, Arc};
 
 fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
     let custom_len = actions.len();
@@ -46,7 +49,11 @@ fn search_settings_opens_panel() {
     let mut app = new_app(&ctx, actions);
     app.query = "settings".into();
     app.search();
-    let idx = app.results.iter().position(|a| a.action == "settings:dialog").unwrap();
+    let idx = app
+        .results
+        .iter()
+        .position(|a| a.action == "settings:dialog")
+        .unwrap();
     app.selected = Some(idx);
     let launch_idx = app.handle_key(egui::Key::Enter);
     assert_eq!(launch_idx, Some(idx));
@@ -59,3 +66,27 @@ fn search_settings_opens_panel() {
     assert!(app.show_settings);
 }
 
+#[test]
+fn dashboard_settings_action_opens_editor() {
+    let plugin = SettingsPlugin;
+    let results = plugin.search("dashboard settings");
+    assert!(results.iter().any(|a| a.action == "dashboard:settings"));
+
+    let ctx = egui::Context::default();
+    let actions: Vec<Action> = Vec::new();
+    let mut app = new_app(&ctx, actions);
+    app.query.clear();
+    app.search();
+    assert!(app.results.iter().any(|a| a.label == "Dashboard Settings"));
+    let action = Action {
+        label: "Dashboard Settings".into(),
+        desc: "Configure dashboard layout and widgets".into(),
+        action: "dashboard:settings".into(),
+        args: None,
+    };
+    assert!(!app.dashboard_editor.open);
+    assert!(!app.show_dashboard_editor);
+    app.activate_action(action, None, ActivationSource::Enter);
+    assert!(app.show_dashboard_editor);
+    assert!(app.dashboard_editor.open);
+}
