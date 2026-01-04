@@ -15,8 +15,7 @@ mod pinned_commands;
 mod plugin_home;
 mod recent_commands;
 mod recent_notes;
-mod todo_list;
-mod todo_summary;
+mod todo;
 mod weather_site;
 
 pub use active_timers::ActiveTimersWidget;
@@ -28,8 +27,7 @@ pub use pinned_commands::PinnedCommandsWidget;
 pub use plugin_home::PluginHomeWidget;
 pub use recent_commands::RecentCommandsWidget;
 pub use recent_notes::RecentNotesWidget;
-pub use todo_list::TodoListWidget;
-pub use todo_summary::TodoSummaryWidget;
+pub use todo::TodoWidget;
 pub use weather_site::WeatherSiteWidget;
 
 /// Result of a widget activation.
@@ -164,13 +162,8 @@ impl WidgetRegistry {
                 .with_settings_ui(FrequentCommandsWidget::settings_ui),
         );
         reg.register(
-            "todo_summary",
-            WidgetFactory::new(TodoSummaryWidget::new)
-                .with_settings_ui(TodoSummaryWidget::settings_ui),
-        );
-        reg.register(
-            "todo_list",
-            WidgetFactory::new(TodoListWidget::new).with_settings_ui(TodoListWidget::settings_ui),
+            "todo",
+            WidgetFactory::new(TodoWidget::new).with_settings_ui(TodoWidget::settings_ui),
         );
         reg.register(
             "recent_notes",
@@ -243,7 +236,7 @@ impl WidgetRegistry {
     }
 }
 
-fn merge_json(base: &Value, updates: &Value) -> Value {
+pub(crate) fn merge_json(base: &Value, updates: &Value) -> Value {
     match (base, updates) {
         (Value::Object(a), Value::Object(b)) => {
             let mut merged = a.clone();

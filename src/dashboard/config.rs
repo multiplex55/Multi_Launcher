@@ -1,4 +1,4 @@
-use crate::dashboard::widgets::WidgetRegistry;
+use crate::dashboard::widgets::{merge_json, WidgetRegistry};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -118,7 +118,7 @@ impl Default for DashboardConfig {
             slots: vec![
                 SlotConfig::with_widget("weather_site", 0, 0),
                 SlotConfig::with_widget("pinned_commands", 0, 1),
-                SlotConfig::with_widget("todo_list", 0, 2),
+                SlotConfig::with_widget("todo", 0, 2),
                 SlotConfig::with_widget("recent_commands", 1, 0),
                 SlotConfig::with_widget("frequent_commands", 1, 1),
                 SlotConfig::with_widget("recent_notes", 1, 2),
@@ -156,6 +156,7 @@ impl DashboardConfig {
     /// Remove unsupported widgets and normalize empty settings.
     pub fn sanitize(&mut self, registry: &WidgetRegistry) -> Vec<String> {
         let mut warnings = Vec::new();
+        self.migrate_todo_widgets(registry, &mut warnings);
         self.slots.retain(|slot| {
             if slot.widget.is_empty() {
                 return false;
@@ -184,6 +185,26 @@ impl DashboardConfig {
             base.join("dashboard.json")
         } else {
             PathBuf::from(base)
+        }
+    }
+
+    fn migrate_todo_widgets(&mut self, registry: &WidgetRegistry, warnings: &mut Vec<String>) {
+        for slot in &mut self.slots {
+            let Some(default_settings) = registry.default_settings("todo") else {
+                continue;
+            };
+            match slot.widget.as_str() {
+                "todo_list" | "todo_summary" => {
+                    let legacy_name = slot.widget.clone();
+                    slot.widget = "todo".into();
+                    slot.settings = merge_json(&default_settings, &slot.settings);
+                    warnings.push(format!(
+                        "dashboard widget '{}' migrated to 'todo'",
+                        legacy_name
+                    ));
+                }
+                _ => {}
+            }
         }
     }
 }
