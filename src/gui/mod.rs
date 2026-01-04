@@ -1381,6 +1381,11 @@ impl LauncherApp {
         self.dashboard_enabled && self.dashboard_show_when_empty && trimmed.trim().is_empty()
     }
 
+    #[cfg(test)]
+    pub fn move_cursor_end_flag(&self) -> bool {
+        self.move_cursor_end
+    }
+
     pub fn activate_action(
         &mut self,
         mut a: Action,

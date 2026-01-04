@@ -2,8 +2,7 @@ use multi_launcher::actions::Action;
 use multi_launcher::dashboard::config::{DashboardConfig, GridConfig, SlotConfig};
 use multi_launcher::dashboard::layout::normalize_slots;
 use multi_launcher::dashboard::widgets::WidgetRegistry;
-use multi_launcher::dashboard::ActivationSource;
-use multi_launcher::gui::LauncherApp;
+use multi_launcher::gui::{ActivationSource, LauncherApp};
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
 use std::sync::atomic::AtomicBool;
@@ -84,7 +83,7 @@ fn activation_applies_query_override_first() {
     };
     app.activate_action(action, Some("override".into()), ActivationSource::Dashboard);
     assert_eq!(app.query, "after");
-    assert!(app.move_cursor_end);
+    assert!(app.move_cursor_end_flag());
 }
 
 #[test]
