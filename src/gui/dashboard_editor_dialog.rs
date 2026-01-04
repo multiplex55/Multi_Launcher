@@ -164,8 +164,11 @@ impl DashboardEditorDialog {
                         let mut edited = false;
                         ui.push_id(idx, |ui| {
                             let collapsing_id = ui.id().with(("slot-collapse", idx));
-                            let mut state =
-                                CollapsingState::load_with_default_open(ui.ctx(), collapsing_id, true);
+                            let state = CollapsingState::load_with_default_open(
+                                ui.ctx(),
+                                collapsing_id,
+                                true,
+                            );
                             let header_response = state.show_header(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.label(format!("Slot {idx}"));
@@ -185,136 +188,135 @@ impl DashboardEditorDialog {
                                     );
                                 });
                             });
-                            state.show_body_unindented(ui, |ui| {
-                                if header_response.is_open() {
-                                    egui::ComboBox::from_label("Widget type")
-                                        .selected_text(slot.widget.clone())
-                                        .show_ui(ui, |ui| {
-                                            for name in registry.names() {
-                                                if ui
-                                                    .selectable_value(
-                                                        &mut slot.widget,
-                                                        name.clone(),
-                                                        name,
-                                                    )
-                                                    .changed()
-                                                {
-                                                    edited = true;
-                                                }
+                            let (_, _, body) = header_response.body_unindented(|ui| {
+                                egui::ComboBox::from_label("Widget type")
+                                    .selected_text(slot.widget.clone())
+                                    .show_ui(ui, |ui| {
+                                        for name in registry.names() {
+                                            if ui
+                                                .selectable_value(
+                                                    &mut slot.widget,
+                                                    name.clone(),
+                                                    name,
+                                                )
+                                                .changed()
+                                            {
+                                                edited = true;
+                                            }
+                                        }
+                                    });
+                                ui.horizontal(|ui| {
+                                    ui.label("Row");
+                                    let rows = self.config.grid.rows.max(1) as i32;
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut slot.row)
+                                                .clamp_range(0..=rows.saturating_sub(1)),
+                                        )
+                                        .changed()
+                                    {
+                                        edited = true;
+                                    }
+                                    ui.label("Col");
+                                    let cols = self.config.grid.cols.max(1) as i32;
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut slot.col)
+                                                .clamp_range(0..=cols.saturating_sub(1)),
+                                        )
+                                        .changed()
+                                    {
+                                        edited = true;
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Row span");
+                                    let rows = self.config.grid.rows.max(1) as usize;
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut slot.row_span).clamp_range(
+                                                1..=rows.saturating_sub(0).max(1) as u8,
+                                            ),
+                                        )
+                                        .changed()
+                                    {
+                                        edited = true;
+                                    }
+                                    ui.label("Col span");
+                                    let cols = self.config.grid.cols.max(1) as usize;
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut slot.col_span).clamp_range(
+                                                1..=cols.saturating_sub(0).max(1) as u8,
+                                            ),
+                                        )
+                                        .changed()
+                                    {
+                                        edited = true;
+                                    }
+                                });
+                                egui::ComboBox::from_label("Overflow")
+                                    .selected_text(slot.overflow.as_str())
+                                    .show_ui(ui, |ui| {
+                                        for mode in [
+                                            OverflowMode::Scroll,
+                                            OverflowMode::Clip,
+                                            OverflowMode::Auto,
+                                        ] {
+                                            ui.selectable_value(
+                                                &mut slot.overflow,
+                                                mode,
+                                                mode.as_str(),
+                                            );
+                                        }
+                                    });
+                                ui.separator();
+                                egui::CollapsingHeader::new("Settings")
+                                    .default_open(true)
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            if ui.button("Reset to defaults").clicked() {
+                                                slot.settings = registry
+                                                    .default_settings(&slot.widget)
+                                                    .unwrap_or_else(|| {
+                                                        Value::Object(Default::default())
+                                                    });
+                                                edited = true;
+                                            }
+                                            if slot.settings.is_null() {
+                                                ui.colored_label(
+                                                    egui::Color32::YELLOW,
+                                                    "Settings were empty; defaults will be used.",
+                                                );
+                                                slot.settings = registry
+                                                    .default_settings(&slot.widget)
+                                                    .unwrap_or_else(|| {
+                                                        Value::Object(Default::default())
+                                                    });
+                                                edited = true;
                                             }
                                         });
-                                    ui.horizontal(|ui| {
-                                        ui.label("Row");
-                                        let rows = self.config.grid.rows.max(1) as i32;
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut slot.row)
-                                                    .clamp_range(0..=rows.saturating_sub(1)),
-                                            )
-                                            .changed()
-                                        {
-                                            edited = true;
-                                        }
-                                        ui.label("Col");
-                                        let cols = self.config.grid.cols.max(1) as i32;
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut slot.col)
-                                                    .clamp_range(0..=cols.saturating_sub(1)),
-                                            )
-                                            .changed()
-                                        {
-                                            edited = true;
-                                        }
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("Row span");
-                                        let rows = self.config.grid.rows.max(1) as usize;
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut slot.row_span)
-                                                    .clamp_range(
-                                                        1..=rows.saturating_sub(0).max(1) as u8,
-                                                    ),
-                                            )
-                                            .changed()
-                                        {
-                                            edited = true;
-                                        }
-                                        ui.label("Col span");
-                                        let cols = self.config.grid.cols.max(1) as usize;
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut slot.col_span)
-                                                    .clamp_range(
-                                                        1..=cols.saturating_sub(0).max(1) as u8,
-                                                    ),
-                                            )
-                                            .changed()
-                                        {
-                                            edited = true;
-                                        }
-                                    });
-                                    egui::ComboBox::from_label("Overflow")
-                                        .selected_text(slot.overflow.as_str())
-                                        .show_ui(ui, |ui| {
-                                            for mode in [
-                                                OverflowMode::Scroll,
-                                                OverflowMode::Clip,
-                                                OverflowMode::Auto,
-                                            ] {
-                                                ui.selectable_value(
-                                                    &mut slot.overflow,
-                                                    mode,
-                                                    mode.as_str(),
+
+                                        if let Some(result) = registry.render_settings_ui(
+                                            &slot.widget,
+                                            ui,
+                                            &mut slot.settings,
+                                            &settings_ctx,
+                                        ) {
+                                            if let Some(err) = result.error {
+                                                ui.colored_label(
+                                                    egui::Color32::YELLOW,
+                                                    format!("{err}. Settings saved after edits."),
                                                 );
                                             }
-                                        });
-                                    ui.separator();
-                                    egui::CollapsingHeader::new("Settings")
-                                        .default_open(true)
-                                        .show(ui, |ui| {
-                                            ui.horizontal(|ui| {
-                                                if ui.button("Reset to defaults").clicked() {
-                                                    slot.settings = registry
-                                                        .default_settings(&slot.widget)
-                                                        .unwrap_or_else(|| {
-                                                            Value::Object(Default::default())
-                                                        });
-                                                    edited = true;
-                                                }
-                                                if slot.settings.is_null() {
-                                                    ui.colored_label(
-                                                        egui::Color32::YELLOW,
-                                                        "Settings were empty; defaults will be used.",
-                                                    );
-                                                    slot.settings = registry
-                                                        .default_settings(&slot.widget)
-                                                        .unwrap_or_else(|| {
-                                                            Value::Object(Default::default())
-                                                        });
-                                                    edited = true;
-                                                }
-                                            });
-
-                                            if let Some(result) = registry.render_settings_ui(
-                                                &slot.widget,
-                                                ui,
-                                                &mut slot.settings,
-                                                &settings_ctx,
-                                            ) {
-                                                if let Some(err) = result.error {
-                                                    ui.colored_label(
-                                                        egui::Color32::YELLOW,
-                                                        format!("{err}. Settings saved after edits."),
-                                                    );
-                                                }
-                                            } else {
-                                                ui.label("No settings available for this widget.");
-                                            }
-                                        });
-                                }
+                                        } else {
+                                            ui.label("No settings available for this widget.");
+                                        }
+                                    });
                             });
+                            if body.is_none() {
+                                // Ensure state is stored even when collapsed
+                            }
                         });
                         if removed {
                             self.config.slots.remove(idx);
