@@ -36,6 +36,13 @@ fn dashboard_config_defaults_present() {
 }
 
 #[test]
+fn dashboard_enabled_by_default() {
+    let settings = Settings::default();
+    assert!(settings.dashboard.enabled);
+    assert!(settings.dashboard.show_when_query_empty);
+}
+
+#[test]
 fn unknown_widgets_removed_during_normalization() {
     let mut cfg = DashboardConfig {
         version: 1,
