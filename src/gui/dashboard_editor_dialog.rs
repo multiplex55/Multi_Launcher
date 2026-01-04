@@ -14,6 +14,8 @@ pub struct DashboardEditorDialog {
     show_preview: bool,
     blocked_warning: Option<String>,
     drag_anchor: Option<(usize, usize)>,
+    slot_expand_all: bool,
+    slot_collapse_all: bool,
 }
 
 impl Default for DashboardEditorDialog {
@@ -28,6 +30,8 @@ impl Default for DashboardEditorDialog {
             show_preview: false,
             blocked_warning: None,
             drag_anchor: None,
+            slot_expand_all: false,
+            slot_collapse_all: false,
         }
     }
 }
@@ -153,6 +157,14 @@ impl DashboardEditorDialog {
                         if ui.button("Save").clicked() {
                             self.save();
                         }
+                        if ui.button("Expand all").clicked() {
+                            self.slot_expand_all = true;
+                            self.slot_collapse_all = false;
+                        }
+                        if ui.button("Collapse all").clicked() {
+                            self.slot_collapse_all = true;
+                            self.slot_expand_all = false;
+                        }
                     });
 
                     ui.separator();
@@ -164,11 +176,18 @@ impl DashboardEditorDialog {
                         let mut edited = false;
                         ui.push_id(idx, |ui| {
                             let collapsing_id = ui.id().with(("slot-collapse", idx));
-                            let state = CollapsingState::load_with_default_open(
+                            let mut state = CollapsingState::load_with_default_open(
                                 ui.ctx(),
                                 collapsing_id,
                                 true,
                             );
+                            if self.slot_expand_all {
+                                state.set_open(true);
+                                state.store(ui.ctx());
+                            } else if self.slot_collapse_all {
+                                state.set_open(false);
+                                state.store(ui.ctx());
+                            }
                             let header_response = state.show_header(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.label(format!("Slot {idx}"));
@@ -336,6 +355,9 @@ impl DashboardEditorDialog {
                             idx += 1;
                         }
                     }
+                    // Reset batch flags after applying once
+                    self.slot_expand_all = false;
+                    self.slot_collapse_all = false;
                 });
             });
         self.open = open;
