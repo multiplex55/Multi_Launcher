@@ -3541,7 +3541,13 @@ impl LauncherApp {
 }
 
 pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
-    rx.try_recv().ok().map(Into::into)
+    while let Ok(ev) = rx.try_recv() {
+        if matches!(ev, WatchEvent::Dashboard(_)) {
+            continue;
+        }
+        return Some(ev.into());
+    }
+    None
 }
 
 #[cfg(test)]
