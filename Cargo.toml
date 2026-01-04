@@ -61,11 +61,11 @@ lipsum = "0.9"
 egui_commonmark = "0.15.0"
 rfd = { version = "0.15.3", features = ["common-controls-v6"] }
 slab = "0.4.11"
-rdev = { git = "https://github.com/Narsil/rdev", rev = "c14f2dc5c8100a96c5d7e3013de59d6aa0b9eae2" }
+rdev = { git = "https://github.com/Narsil/rdev", rev = "c14f2dc5c8100a96c5d7e3013de59d6aa0b9eae2", features = ["x11"] }
 rodio = { version = "0.17", default-features = false, features = ["wav"] }
 
 [features]
-unstable_grab = []
+unstable_grab = ["rdev/unstable_grab"]
 
 [dev-dependencies]
 tempfile = "3"

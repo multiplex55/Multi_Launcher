@@ -1,4 +1,4 @@
-use crate::dashboard::config::{DashboardConfig, SlotConfig};
+use crate::dashboard::config::{DashboardConfig, OverflowMode, SlotConfig};
 use crate::dashboard::widgets::WidgetRegistry;
 use eframe::egui;
 
@@ -128,6 +128,21 @@ impl DashboardEditorDialog {
                                     egui::DragValue::new(&mut slot.col_span).clamp_range(1..=12),
                                 );
                             });
+                            egui::ComboBox::from_label("Overflow")
+                                .selected_text(slot.overflow.as_str())
+                                .show_ui(ui, |ui| {
+                                    for mode in [
+                                        OverflowMode::Scroll,
+                                        OverflowMode::Clip,
+                                        OverflowMode::Auto,
+                                    ] {
+                                        ui.selectable_value(
+                                            &mut slot.overflow,
+                                            mode,
+                                            mode.as_str(),
+                                        );
+                                    }
+                                });
                             ui.horizontal(|ui| {
                                 let id = slot.id.get_or_insert_with(|| format!("slot-{idx}"));
                                 ui.label("Label");

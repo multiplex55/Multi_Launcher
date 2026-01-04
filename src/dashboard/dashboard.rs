@@ -1,4 +1,4 @@
-use crate::dashboard::config::DashboardConfig;
+use crate::dashboard::config::{DashboardConfig, OverflowMode};
 use crate::dashboard::layout::{normalize_slots, NormalizedSlot};
 use crate::dashboard::widgets::{WidgetAction, WidgetRegistry};
 use crate::{actions::Action, common::json_watch::JsonWatcher};
@@ -98,29 +98,30 @@ impl Dashboard {
         activation: WidgetActivation,
     ) -> Option<WidgetAction> {
         let mut clicked = None;
-        let grid_cols = self.config.grid.cols.max(1) as usize;
-        let col_width = ui.available_width() / grid_cols.max(1) as f32;
 
         let size = egui::vec2(ui.available_width(), ui.available_height());
         let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
         let mut child = ui.child_ui(rect, egui::Layout::top_down(egui::Align::LEFT));
+        let grid_cols = self.config.grid.cols.max(1) as usize;
+        let grid_rows = self.config.grid.rows.max(1) as usize;
+        let col_width = rect.width() / grid_cols.max(1) as f32;
+        let row_height = rect.height() / grid_rows.max(1) as f32;
 
         for slot in &self.slots {
-            let rect = egui::Rect::from_min_size(
-                rect.min
-                    + egui::vec2(
-                        col_width * slot.col as f32,
-                        (slot.row as f32) * 100.0, // coarse row height
-                    ),
+            let slot_rect = egui::Rect::from_min_size(
+                rect.min + egui::vec2(col_width * slot.col as f32, row_height * slot.row as f32),
                 egui::vec2(
                     col_width * slot.col_span as f32,
-                    90.0 * slot.row_span as f32,
+                    row_height * slot.row_span as f32,
                 ),
             );
-            let mut slot_ui = child.child_ui(rect, egui::Layout::left_to_right(egui::Align::TOP));
-            if let Some(action) = self.render_slot(slot, &mut slot_ui, ctx, activation) {
-                clicked = Some(action);
-            }
+            let slot_clip = slot_rect.intersect(child.clip_rect());
+            let response = child.allocate_ui_at_rect(slot_rect, |slot_ui| {
+                slot_ui.set_clip_rect(slot_clip);
+                slot_ui.set_min_size(slot_rect.size());
+                self.render_slot(slot, slot_ui, ctx, activation)
+            });
+            clicked = clicked.or(response.inner);
         }
 
         clicked
@@ -133,17 +134,45 @@ impl Dashboard {
         ctx: &DashboardContext<'_>,
         activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        ui.group(|ui| {
-            ui.vertical(|ui| {
-                let heading = slot.id.as_deref().unwrap_or(&slot.widget);
-                ui.heading(heading);
-                self.registry
-                    .create(&slot.widget, &slot.settings)
-                    .and_then(|mut w| w.render(ui, ctx, activation))
+        let heading = slot.id.as_deref().unwrap_or(&slot.widget);
+        ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
+        ui.set_min_size(ui.available_size());
+        egui::Frame::group(ui.style())
+            .show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
+                ui.vertical(|ui| {
+                    ui.heading(heading);
+                    let body_height =
+                        (ui.available_height() - ui.spacing().item_spacing.y).max(0.0);
+                match slot.overflow {
+                    OverflowMode::Clip => {
+                        ui.set_min_height(body_height.max(0.0));
+                        self.registry
+                            .create(&slot.widget, &slot.settings)
+                            .and_then(|mut w| w.render(ui, ctx, activation))
+                    }
+                    OverflowMode::Auto | OverflowMode::Scroll => {
+                        egui::ScrollArea::vertical()
+                            .id_source(egui::Id::new((
+                                "slot-scroll",
+                                slot.id.as_deref().unwrap_or(&slot.widget),
+                                slot.row,
+                                slot.col,
+                            )))
+                            .auto_shrink([false; 2])
+                            .show(ui, |ui| {
+                                ui.set_min_height(body_height.max(0.0));
+                                self.registry
+                                    .create(&slot.widget, &slot.settings)
+                                        .and_then(|mut w| w.render(ui, ctx, activation))
+                                })
+                                .inner
+                        }
+                    }
+                })
+                .inner
             })
             .inner
-        })
-        .inner
     }
 
     pub fn registry(&self) -> &WidgetRegistry {
