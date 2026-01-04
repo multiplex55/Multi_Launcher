@@ -1387,7 +1387,7 @@ impl LauncherApp {
 
     pub fn activate_action(
         &mut self,
-        mut a: Action,
+        a: Action,
         query_override: Option<String>,
         _source: ActivationSource,
     ) {

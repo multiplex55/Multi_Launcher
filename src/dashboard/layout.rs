@@ -1,4 +1,4 @@
-use crate::dashboard::config::{DashboardConfig, SlotConfig};
+use crate::dashboard::config::{DashboardConfig, OverflowMode, SlotConfig};
 use crate::dashboard::widgets::WidgetRegistry;
 use serde_json::Value;
 
@@ -129,6 +129,7 @@ mod tests {
                 row_span: 5,
                 col_span: 5,
                 settings: json!({}),
+                overflow: OverflowMode::Scroll,
             }],
         };
         let registry = test_registry();
