@@ -18,6 +18,12 @@ pub enum PinnedLayout {
     List,
 }
 
+impl Default for PinnedLayout {
+    fn default() -> Self {
+        PinnedLayout::List
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PinnedCommandsConfig {
     #[serde(default)]

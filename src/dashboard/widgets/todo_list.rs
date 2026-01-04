@@ -150,11 +150,12 @@ impl Widget for TodoListWidget {
                 if entry.priority > 0 {
                     label.push_str(&format!(" (p{})", entry.priority));
                 }
-                if entry.done {
-                    ui.add(egui::Label::new(label).strikethrough());
+                let text = if entry.done {
+                    egui::RichText::new(label).strikethrough()
                 } else {
-                    ui.label(label);
-                }
+                    egui::RichText::new(label)
+                };
+                ui.label(text);
                 if !entry.tags.is_empty() {
                     let tags = entry.tags.join(", ");
                     ui.label(egui::RichText::new(format!("#{tags}")).small());
