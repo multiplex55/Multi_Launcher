@@ -88,6 +88,7 @@ fn normalize_slot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dashboard::config::OverflowMode;
     use serde_json::json;
 
     #[derive(Default)]
