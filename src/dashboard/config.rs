@@ -167,7 +167,9 @@ impl DashboardConfig {
         });
         for slot in &mut self.slots {
             if slot.settings.is_null() {
-                slot.settings = json!({});
+                slot.settings = registry
+                    .default_settings(&slot.widget)
+                    .unwrap_or_else(|| json!({}));
             }
         }
         warnings

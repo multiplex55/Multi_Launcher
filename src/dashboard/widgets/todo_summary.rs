@@ -1,4 +1,6 @@
-use super::{Widget, WidgetAction};
+use super::{
+    edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+};
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use eframe::egui;
@@ -17,6 +19,29 @@ pub struct TodoSummaryWidget {
 impl TodoSummaryWidget {
     pub fn new(cfg: TodoSummaryConfig) -> Self {
         Self { cfg }
+    }
+
+    pub fn settings_ui(
+        ui: &mut egui::Ui,
+        value: &mut serde_json::Value,
+        ctx: &WidgetSettingsContext<'_>,
+    ) -> WidgetSettingsUiResult {
+        edit_typed_settings(ui, value, ctx, |ui, cfg: &mut TodoSummaryConfig, _ctx| {
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label("Query override");
+                let mut query = cfg.query.clone().unwrap_or_default();
+                if ui.text_edit_singleline(&mut query).changed() {
+                    cfg.query = if query.trim().is_empty() {
+                        None
+                    } else {
+                        Some(query)
+                    };
+                    changed = true;
+                }
+            });
+            changed
+        })
     }
 }
 
