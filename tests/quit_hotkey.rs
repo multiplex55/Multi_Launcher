@@ -1,6 +1,9 @@
-use multi_launcher::hotkey::{Hotkey, HotkeyTrigger};
 use eframe::egui;
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use multi_launcher::hotkey::{Hotkey, HotkeyTrigger};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::thread;
 use std::time::Duration;
 
@@ -22,7 +25,7 @@ fn run_quit_loop(
         }
 
         if quit_requested {
-            if let Ok(mut guard) = ctx_handle.lock() {
+            if let Ok(guard) = ctx_handle.lock() {
                 if let Some(c) = &*guard {
                     c.send_viewport_cmd(egui::ViewportCommand::Close);
                     c.request_repaint();
@@ -65,8 +68,7 @@ fn quit_hotkey_exits_main_loop() {
     let cmds = ctx.commands.lock().unwrap();
     assert_eq!(cmds.len(), 1);
     match cmds[0] {
-        egui::ViewportCommand::Close => {},
+        egui::ViewportCommand::Close => {}
         _ => panic!("unexpected command"),
     }
 }
-

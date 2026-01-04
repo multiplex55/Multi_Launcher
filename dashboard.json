@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "grid": {
+    "rows": 3,
+    "cols": 3
+  },
+  "slots": [
+    {
+      "id": "Weather",
+      "widget": "weather_site",
+      "row": 0,
+      "col": 0,
+      "row_span": 1,
+      "col_span": 2,
+      "settings": {
+        "location": "Seattle"
+      }
+    },
+    {
+      "id": "Recents",
+      "widget": "recent_commands",
+      "row": 1,
+      "col": 0,
+      "row_span": 1,
+      "col_span": 1
+    },
+    {
+      "id": "Frequently used",
+      "widget": "frequent_commands",
+      "row": 1,
+      "col": 1,
+      "row_span": 1,
+      "col_span": 1
+    },
+    {
+      "id": "Todos",
+      "widget": "todo_summary",
+      "row": 2,
+      "col": 0,
+      "row_span": 1,
+      "col_span": 1
+    },
+    {
+      "id": "Notes",
+      "widget": "notes_open",
+      "row": 2,
+      "col": 1,
+      "row_span": 1,
+      "col_span": 1
+    }
+  ]
+}

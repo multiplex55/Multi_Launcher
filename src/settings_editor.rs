@@ -1,3 +1,4 @@
+use crate::dashboard::config::DashboardConfig;
 use crate::gui::LauncherApp;
 use crate::hotkey::parse_hotkey;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
@@ -59,6 +60,10 @@ pub struct SettingsEditor {
     screenshot_save_file: bool,
     screenshot_auto_save: bool,
     screenshot_use_editor: bool,
+    dashboard_enabled: bool,
+    dashboard_path: String,
+    dashboard_default_location: String,
+    dashboard_show_when_empty: bool,
     plugin_settings: std::collections::HashMap<String, serde_json::Value>,
     plugins_expanded: bool,
     expand_request: Option<bool>,
@@ -149,6 +154,18 @@ impl SettingsEditor {
             screenshot_save_file: settings.screenshot_save_file,
             screenshot_auto_save: settings.screenshot_auto_save,
             screenshot_use_editor: settings.screenshot_use_editor,
+            dashboard_enabled: settings.dashboard.enabled,
+            dashboard_path: settings
+                .dashboard
+                .config_path
+                .clone()
+                .unwrap_or_else(|| "dashboard.json".into()),
+            dashboard_default_location: settings
+                .dashboard
+                .default_location
+                .clone()
+                .unwrap_or_default(),
+            dashboard_show_when_empty: settings.dashboard.show_when_query_empty,
             plugin_settings: settings.plugin_settings.clone(),
             plugins_expanded: false,
             expand_request: None,
@@ -269,6 +286,20 @@ impl SettingsEditor {
             plugin_settings: self.plugin_settings.clone(),
             show_examples: current.show_examples,
             pinned_panels: current.pinned_panels.clone(),
+            dashboard: crate::settings::DashboardSettings {
+                enabled: self.dashboard_enabled,
+                config_path: if self.dashboard_path.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.dashboard_path.clone())
+                },
+                default_location: if self.dashboard_default_location.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.dashboard_default_location.clone())
+                },
+                show_when_query_empty: self.dashboard_show_when_empty,
+            },
         }
     }
 
@@ -446,6 +477,28 @@ impl SettingsEditor {
                                     self.static_h = app.window_size.1;
                                 }
                             });
+                        }
+
+                        ui.separator();
+                        ui.heading("Dashboard");
+                        ui.checkbox(
+                            &mut self.dashboard_enabled,
+                            "Enable dashboard when query is empty",
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label("Dashboard config path");
+                            ui.text_edit_singleline(&mut self.dashboard_path);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Default location");
+                            ui.text_edit_singleline(&mut self.dashboard_default_location);
+                        });
+                        ui.checkbox(
+                            &mut self.dashboard_show_when_empty,
+                            "Show dashboard when the search box is blank",
+                        );
+                        if ui.button("Customize Dashboard...").clicked() {
+                            app.show_dashboard_editor = true;
                         }
 
                         ui.separator();
@@ -704,6 +757,21 @@ impl SettingsEditor {
                                                 new_settings.screenshot_auto_save;
                                             app.screenshot_use_editor =
                                                 new_settings.screenshot_use_editor;
+                                            app.dashboard_enabled = new_settings.dashboard.enabled;
+                                            app.dashboard_show_when_empty =
+                                                new_settings.dashboard.show_when_query_empty;
+                                            app.dashboard_default_location =
+                                                new_settings.dashboard.default_location.clone();
+                                            app.dashboard_path = DashboardConfig::path_for(
+                                                new_settings
+                                                    .dashboard
+                                                    .config_path
+                                                    .as_deref()
+                                                    .unwrap_or("dashboard.json"),
+                                            )
+                                            .to_string_lossy()
+                                            .to_string();
+                                            app.dashboard.set_path(&app.dashboard_path);
                                             app.toast_duration = new_settings.toast_duration;
                                             app.note_more_limit = new_settings.note_more_limit;
                                             let dirs = new_settings
