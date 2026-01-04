@@ -42,7 +42,7 @@ pub enum LogFile {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DashboardSettings {
-    #[serde(default)]
+    #[serde(default = "default_dashboard_enabled")]
     pub enabled: bool,
     #[serde(default)]
     pub config_path: Option<String>,
@@ -55,7 +55,7 @@ pub struct DashboardSettings {
 impl Default for DashboardSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_dashboard_enabled(),
             config_path: None,
             default_location: None,
             show_when_query_empty: true,
@@ -253,6 +253,10 @@ fn default_timer_refresh() -> f32 {
 
 fn default_net_refresh() -> f32 {
     1.0
+}
+
+fn default_dashboard_enabled() -> bool {
+    true
 }
 
 fn default_show_dashboard_when_empty() -> bool {

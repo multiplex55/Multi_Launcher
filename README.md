@@ -167,7 +167,7 @@ Example: typing `test` will only list entries containing `test`. If an alias mat
 
 ## Dashboard
 
-Enable the dashboard from **Settings → Dashboard** to show widgets whenever the search box is empty. Use the **Customize Dashboard...** button in the same section to open the editor instead of editing `dashboard.json` by hand. Each slot exposes its settings inside the editor—for example:
+The dashboard is enabled by default on first launch and appears whenever the search box is empty. Toggle it from **Settings → Dashboard** and use the **Customize Dashboard...** button in the same section to open the editor instead of editing `dashboard.json` by hand. Each slot exposes its settings inside the editor—for example:
 
 - **Plugin home** lets you pick from the currently loaded plugins.
 - **Notes** and **Todo** widgets offer common query shortcuts from the respective plugins so you can prefill the search box.
