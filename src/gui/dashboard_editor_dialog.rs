@@ -6,7 +6,6 @@ pub struct DashboardEditorDialog {
     pub open: bool,
     path: String,
     config: DashboardConfig,
-    selected: Option<usize>,
     error: Option<String>,
     pending_save: bool,
 }
@@ -17,7 +16,6 @@ impl Default for DashboardEditorDialog {
             open: false,
             path: "dashboard.json".into(),
             config: DashboardConfig::default(),
-            selected: None,
             error: None,
             pending_save: false,
         }

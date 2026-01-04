@@ -19,7 +19,7 @@ pub struct ScreenshotEditor {
     ann_start: Option<Pos2>,
     annotations: Vec<Rect>,
     path: PathBuf,
-    clip: bool,
+    _clip: bool,
     auto_save: bool,
     zoom: f32,
 }
@@ -41,7 +41,7 @@ impl ScreenshotEditor {
             ann_start: None,
             annotations: Vec::new(),
             path,
-            clip,
+            _clip: clip,
             auto_save,
             zoom: 1.0,
         }
@@ -173,7 +173,8 @@ impl ScreenshotEditor {
                     }
                     if let Some(start) = self.ann_start {
                         if let Some(pos) = response.interact_pointer_pos() {
-                            self.annotations.push(Rect::from_two_pos(start, to_img(pos)));
+                            self.annotations
+                                .push(Rect::from_two_pos(start, to_img(pos)));
                             self.ann_start = None;
                         }
                     }

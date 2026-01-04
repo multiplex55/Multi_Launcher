@@ -209,7 +209,6 @@ mod tests {
 
     #[test]
     fn open_resets_keep_open() {
-        let ctx = egui::Context::default();
         let mut dlg = ShellCmdDialog {
             keep_open: true,
             ..Default::default()
