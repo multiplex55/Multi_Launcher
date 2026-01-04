@@ -468,7 +468,7 @@ impl DashboardEditorDialog {
                 self.drag_anchor = Some(cell);
             }
         }
-        if response.drag_released() {
+        if response.dragged_stopped() {
             if let (Some(start), Some(pos)) =
                 (self.drag_anchor.take(), response.interact_pointer_pos())
             {
@@ -649,7 +649,7 @@ impl DashboardEditorDialog {
                     candidate.col = c as i32;
                     let mut temp_cfg = DashboardConfig {
                         version: self.config.version,
-                        grid: self.config.grid,
+                        grid: self.config.grid.clone(),
                         slots: placed.clone(),
                     };
                     temp_cfg.slots.push(candidate.clone());

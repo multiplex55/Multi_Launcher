@@ -179,7 +179,7 @@ impl ScreenshotEditor {
                         }
                     }
                 }
-                if response.drag_released() {
+                if response.dragged_stopped() {
                     self.crop_start = None;
                     self.ann_start = None;
                 }
