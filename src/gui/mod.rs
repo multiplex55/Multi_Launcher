@@ -57,7 +57,7 @@ use crate::actions::folders;
 use crate::actions::{load_actions, Action};
 use crate::actions_editor::ActionsEditor;
 use crate::dashboard::config::DashboardConfig;
-use crate::dashboard::widgets::WidgetRegistry;
+use crate::dashboard::widgets::{WidgetRegistry, WidgetSettingsContext};
 use crate::dashboard::{Dashboard, DashboardContext, DashboardEvent, WidgetActivation};
 use crate::help_window::HelpWindow;
 use crate::history::{self, HistoryEntry};
@@ -3149,7 +3149,13 @@ impl eframe::App for LauncherApp {
         if self.show_dashboard_editor {
             let registry = self.dashboard.registry().clone();
             let mut dlg = std::mem::take(&mut self.dashboard_editor);
-            let reload = dlg.ui(ctx, &registry);
+            let settings_ctx = WidgetSettingsContext {
+                plugins: Some(&self.plugins),
+                actions: Some(self.actions.as_slice()),
+                usage: Some(&self.usage),
+                default_location: self.dashboard_default_location.as_deref(),
+            };
+            let reload = dlg.ui(ctx, &registry, settings_ctx);
             self.show_dashboard_editor = dlg.open;
             self.dashboard_editor = dlg;
             if reload {

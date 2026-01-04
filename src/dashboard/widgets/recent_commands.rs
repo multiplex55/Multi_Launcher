@@ -1,4 +1,6 @@
-use super::{Widget, WidgetAction};
+use super::{
+    edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+};
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,28 @@ pub struct RecentCommandsWidget {
 impl RecentCommandsWidget {
     pub fn new(cfg: RecentCommandsConfig) -> Self {
         Self { cfg }
+    }
+
+    pub fn settings_ui(
+        ui: &mut egui::Ui,
+        value: &mut serde_json::Value,
+        ctx: &WidgetSettingsContext<'_>,
+    ) -> WidgetSettingsUiResult {
+        edit_typed_settings(
+            ui,
+            value,
+            ctx,
+            |ui, cfg: &mut RecentCommandsConfig, _ctx| {
+                let mut changed = false;
+                ui.horizontal(|ui| {
+                    ui.label("Count");
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut cfg.count).clamp_range(1..=50))
+                        .changed();
+                });
+                changed
+            },
+        )
     }
 }
 

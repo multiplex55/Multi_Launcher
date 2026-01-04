@@ -1,6 +1,9 @@
-use super::{Widget, WidgetAction};
+use super::{
+    edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+};
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
+use eframe::egui;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -16,6 +19,41 @@ pub struct WeatherSiteWidget {
 impl WeatherSiteWidget {
     pub fn new(cfg: WeatherSiteConfig) -> Self {
         Self { cfg }
+    }
+
+    pub fn settings_ui(
+        ui: &mut egui::Ui,
+        value: &mut serde_json::Value,
+        ctx: &WidgetSettingsContext<'_>,
+    ) -> WidgetSettingsUiResult {
+        edit_typed_settings(ui, value, ctx, |ui, cfg: &mut WeatherSiteConfig, _ctx| {
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label("Location");
+                let mut text = cfg.location.clone().unwrap_or_default();
+                if ui.text_edit_singleline(&mut text).changed() {
+                    cfg.location = if text.trim().is_empty() {
+                        None
+                    } else {
+                        Some(text)
+                    };
+                    changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("URL template");
+                let mut url = cfg.url.clone().unwrap_or_default();
+                if ui.text_edit_singleline(&mut url).changed() {
+                    cfg.url = if url.trim().is_empty() {
+                        None
+                    } else {
+                        Some(url)
+                    };
+                    changed = true;
+                }
+            });
+            changed
+        })
     }
 
     fn effective_location<'a>(&'a self, ctx: &'a DashboardContext<'_>) -> Option<&'a str> {

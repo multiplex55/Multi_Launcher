@@ -1,6 +1,7 @@
 use crate::dashboard::config::{DashboardConfig, OverflowMode, SlotConfig};
-use crate::dashboard::widgets::WidgetRegistry;
+use crate::dashboard::widgets::{WidgetRegistry, WidgetSettingsContext};
 use eframe::egui;
+use serde_json::Value;
 
 pub struct DashboardEditorDialog {
     pub open: bool,
@@ -54,7 +55,12 @@ impl DashboardEditorDialog {
         self.pending_save = true;
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context, registry: &WidgetRegistry) -> bool {
+    pub fn ui(
+        &mut self,
+        ctx: &egui::Context,
+        registry: &WidgetRegistry,
+        settings_ctx: WidgetSettingsContext<'_>,
+    ) -> bool {
         if !self.open {
             return false;
         }
@@ -146,6 +152,47 @@ impl DashboardEditorDialog {
                                 ui.label("Label");
                                 ui.text_edit_singleline(id);
                             });
+                            ui.separator();
+                            egui::CollapsingHeader::new("Settings")
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Reset to defaults").clicked() {
+                                            slot.settings = registry
+                                                .default_settings(&slot.widget)
+                                                .unwrap_or_else(|| {
+                                                    Value::Object(Default::default())
+                                                });
+                                        }
+                                        if slot.settings.is_null() {
+                                            ui.colored_label(
+                                                egui::Color32::YELLOW,
+                                                "Settings were empty; defaults will be used.",
+                                            );
+                                            slot.settings = registry
+                                                .default_settings(&slot.widget)
+                                                .unwrap_or_else(|| {
+                                                    Value::Object(Default::default())
+                                                });
+                                        }
+                                    });
+
+                                    if let Some(result) = registry.render_settings_ui(
+                                        &slot.widget,
+                                        ui,
+                                        &mut slot.settings,
+                                        &settings_ctx,
+                                    ) {
+                                        if let Some(err) = result.error {
+                                            ui.colored_label(
+                                                egui::Color32::YELLOW,
+                                                format!("{err}. Settings saved after edits."),
+                                            );
+                                        }
+                                    } else {
+                                        ui.label("No settings available for this widget.");
+                                    }
+                                });
                         });
                     });
                     if removed {

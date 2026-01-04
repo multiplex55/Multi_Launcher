@@ -1,4 +1,4 @@
-use crate::dashboard::config::{DashboardConfig, OverflowMode, SlotConfig};
+use crate::dashboard::config::{DashboardConfig, SlotConfig};
 use crate::dashboard::widgets::WidgetRegistry;
 use serde_json::Value;
 
@@ -88,12 +88,13 @@ fn normalize_slot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dashboard::config::OverflowMode;
     use serde_json::json;
 
     #[derive(Default)]
     struct DummyWidget;
 
-    #[derive(Default, serde::Deserialize)]
+    #[derive(Default, serde::Deserialize, serde::Serialize)]
     struct DummyConfig;
 
     impl crate::dashboard::widgets::Widget for DummyWidget {
