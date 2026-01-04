@@ -1,6 +1,5 @@
 use crate::gui::LauncherApp;
-use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke};
-use egui_extras::RetainedImage;
+use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions};
 use image::RgbaImage;
 use std::path::PathBuf;
 
@@ -13,7 +12,8 @@ use std::path::PathBuf;
 pub struct ScreenshotEditor {
     pub open: bool,
     image: RgbaImage,
-    tex: RetainedImage,
+    color_image: egui::ColorImage,
+    tex: Option<TextureHandle>,
     crop_start: Option<Pos2>,
     crop_rect: Option<Rect>,
     ann_start: Option<Pos2>,
@@ -28,14 +28,12 @@ impl ScreenshotEditor {
     /// Create a new editor from the captured image.
     pub fn new(img: RgbaImage, path: PathBuf, clip: bool, auto_save: bool) -> Self {
         let size = [img.width() as usize, img.height() as usize];
-        let tex = RetainedImage::from_color_image(
-            "screenshot",
-            egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()),
-        );
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
         Self {
             open: true,
             image: img,
-            tex,
+            color_image,
+            tex: None,
             crop_start: None,
             crop_rect: None,
             ann_start: None,
@@ -140,8 +138,17 @@ impl ScreenshotEditor {
                     }
                     ui.add(egui::Slider::new(&mut self.zoom, 0.1..=4.0).text("Zoom"));
                 });
-                let tex = self.tex.texture_id(ctx);
-                let img_size = self.tex.size_vec2();
+                let tex = self.tex.get_or_insert_with(|| {
+                    ctx.load_texture(
+                        "screenshot",
+                        self.color_image.clone(),
+                        TextureOptions::LINEAR,
+                    )
+                });
+                let img_size = egui::vec2(
+                    self.color_image.size[0] as f32,
+                    self.color_image.size[1] as f32,
+                );
                 let display = img_size * self.zoom;
                 let (response, painter) = ui.allocate_painter(display, Sense::drag());
                 let to_img = |pos: Pos2| {
@@ -150,7 +157,7 @@ impl ScreenshotEditor {
                 };
                 let to_screen = |p: Pos2| response.rect.min + (p * self.zoom).to_vec2();
                 painter.image(
-                    tex,
+                    tex.id(),
                     response.rect,
                     Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
                     Color32::WHITE,
@@ -179,7 +186,7 @@ impl ScreenshotEditor {
                         }
                     }
                 }
-                if response.dragged_stopped() {
+                if response.drag_stopped() {
                     self.crop_start = None;
                     self.ann_start = None;
                 }

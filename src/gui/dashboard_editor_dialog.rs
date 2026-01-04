@@ -468,7 +468,7 @@ impl DashboardEditorDialog {
                 self.drag_anchor = Some(cell);
             }
         }
-        if response.dragged_stopped() {
+        if response.drag_stopped() {
             if let (Some(start), Some(pos)) =
                 (self.drag_anchor.take(), response.interact_pointer_pos())
             {
