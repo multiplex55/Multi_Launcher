@@ -144,20 +144,26 @@ impl Dashboard {
                     ui.heading(heading);
                     let body_height =
                         (ui.available_height() - ui.spacing().item_spacing.y).max(0.0);
-                    match slot.overflow {
-                        OverflowMode::Clip => {
-                            ui.set_min_height(body_height.max(0.0));
-                            self.registry
-                                .create(&slot.widget, &slot.settings)
-                                .and_then(|mut w| w.render(ui, ctx, activation))
-                        }
-                        OverflowMode::Auto | OverflowMode::Scroll => {
-                            egui::ScrollArea::vertical()
-                                .auto_shrink([false; 2])
-                                .show(ui, |ui| {
-                                    ui.set_min_height(body_height.max(0.0));
-                                    self.registry
-                                        .create(&slot.widget, &slot.settings)
+                match slot.overflow {
+                    OverflowMode::Clip => {
+                        ui.set_min_height(body_height.max(0.0));
+                        self.registry
+                            .create(&slot.widget, &slot.settings)
+                            .and_then(|mut w| w.render(ui, ctx, activation))
+                    }
+                    OverflowMode::Auto | OverflowMode::Scroll => {
+                        egui::ScrollArea::vertical()
+                            .id_source(egui::Id::new((
+                                "slot-scroll",
+                                slot.id.as_deref().unwrap_or(&slot.widget),
+                                slot.row,
+                                slot.col,
+                            )))
+                            .auto_shrink([false; 2])
+                            .show(ui, |ui| {
+                                ui.set_min_height(body_height.max(0.0));
+                                self.registry
+                                    .create(&slot.widget, &slot.settings)
                                         .and_then(|mut w| w.render(ui, ctx, activation))
                                 })
                                 .inner
