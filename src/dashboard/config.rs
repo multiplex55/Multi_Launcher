@@ -105,7 +105,10 @@ impl DashboardConfig {
             return Ok(Self::default());
         }
         let mut cfg: DashboardConfig = serde_json::from_str(&content)?;
-        cfg.sanitize(registry);
+        let warnings = cfg.sanitize(registry);
+        for w in warnings {
+            tracing::warn!("{w}");
+        }
         Ok(cfg)
     }
 
@@ -117,13 +120,16 @@ impl DashboardConfig {
     }
 
     /// Remove unsupported widgets and normalize empty settings.
-    pub fn sanitize(&mut self, registry: &WidgetRegistry) {
+    pub fn sanitize(&mut self, registry: &WidgetRegistry) -> Vec<String> {
+        let mut warnings = Vec::new();
         self.slots.retain(|slot| {
             if slot.widget.is_empty() {
                 return false;
             }
             if !registry.contains(&slot.widget) {
+                let msg = format!("unknown dashboard widget '{}' dropped", slot.widget);
                 tracing::warn!(widget = %slot.widget, "unknown dashboard widget dropped");
+                warnings.push(msg);
                 return false;
             }
             true
@@ -133,6 +139,7 @@ impl DashboardConfig {
                 slot.settings = json!({});
             }
         }
+        warnings
     }
 
     pub fn path_for(base: &str) -> PathBuf {

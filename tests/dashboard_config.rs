@@ -43,8 +43,8 @@ fn unknown_widgets_removed_during_normalization() {
         slots: vec![SlotConfig::with_widget("does_not_exist", 0, 0)],
     };
     let registry = WidgetRegistry::with_defaults();
-    cfg.sanitize(&registry);
-    let (slots, warnings) = normalize_slots(&cfg, &registry);
+    let warnings = cfg.sanitize(&registry);
+    let (slots, _) = normalize_slots(&cfg, &registry);
     assert!(slots.is_empty());
     assert!(!warnings.is_empty());
 }
