@@ -3149,8 +3149,12 @@ impl eframe::App for LauncherApp {
         if self.show_dashboard_editor {
             let registry = self.dashboard.registry().clone();
             let mut dlg = std::mem::take(&mut self.dashboard_editor);
+            let plugin_infos = self.plugins.plugin_infos();
+            let plugin_commands = self.plugins.commands();
             let settings_ctx = WidgetSettingsContext {
                 plugins: Some(&self.plugins),
+                plugin_infos: Some(&plugin_infos),
+                plugin_commands: Some(&plugin_commands),
                 actions: Some(self.actions.as_slice()),
                 usage: Some(&self.usage),
                 default_location: self.dashboard_default_location.as_deref(),

@@ -26,8 +26,16 @@ impl TodoSummaryWidget {
         value: &mut serde_json::Value,
         ctx: &WidgetSettingsContext<'_>,
     ) -> WidgetSettingsUiResult {
-        edit_typed_settings(ui, value, ctx, |ui, cfg: &mut TodoSummaryConfig, _ctx| {
+        edit_typed_settings(ui, value, ctx, |ui, cfg: &mut TodoSummaryConfig, ctx| {
             let mut changed = false;
+            let suggestions =
+                super::query_suggestions(ctx, &["todo"], &["todo", "todo list", "todo add"]);
+            if cfg.query.is_none() {
+                if let Some(s) = suggestions.first() {
+                    cfg.query = Some(s.clone());
+                    changed = true;
+                }
+            }
             ui.horizontal(|ui| {
                 ui.label("Query override");
                 let mut query = cfg.query.clone().unwrap_or_default();
@@ -40,6 +48,25 @@ impl TodoSummaryWidget {
                     changed = true;
                 }
             });
+            if !suggestions.is_empty() {
+                egui::ComboBox::from_label("Suggestions")
+                    .selected_text(
+                        cfg.query
+                            .as_deref()
+                            .unwrap_or("Pick a todo query from your plugins"),
+                    )
+                    .show_ui(ui, |ui| {
+                        for suggestion in &suggestions {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut cfg.query,
+                                    Some(suggestion.clone()),
+                                    suggestion,
+                                )
+                                .changed();
+                        }
+                    });
+            }
             changed
         })
     }

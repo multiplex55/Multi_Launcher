@@ -40,6 +40,8 @@ pub struct WidgetSettingsUiResult {
 #[derive(Clone, Copy)]
 pub struct WidgetSettingsContext<'a> {
     pub plugins: Option<&'a PluginManager>,
+    pub plugin_infos: Option<&'a [(String, String, Vec<String>)]>,
+    pub plugin_commands: Option<&'a [Action]>,
     pub actions: Option<&'a [Action]>,
     pub usage: Option<&'a std::collections::HashMap<String, u32>>,
     pub default_location: Option<&'a str>,
@@ -49,6 +51,8 @@ impl<'a> WidgetSettingsContext<'a> {
     pub fn empty() -> Self {
         Self {
             plugins: None,
+            plugin_infos: None,
+            plugin_commands: None,
             actions: None,
             usage: None,
             default_location: None,
@@ -216,6 +220,64 @@ fn merge_json(base: &Value, updates: &Value) -> Value {
         }
         _ => updates.clone(),
     }
+}
+
+pub(crate) fn plugin_names(ctx: &WidgetSettingsContext<'_>) -> Vec<String> {
+    if let Some(infos) = ctx.plugin_infos {
+        let mut names: Vec<String> = infos.iter().map(|(name, _, _)| name.clone()).collect();
+        names.sort();
+        names.dedup();
+        return names;
+    }
+    if let Some(manager) = ctx.plugins {
+        let mut names = manager.plugin_names();
+        names.sort();
+        names
+    } else {
+        Vec::new()
+    }
+}
+
+fn collect_query_suggestions(out: &mut Vec<String>, actions: &[Action], prefixes: &[String]) {
+    for action in actions {
+        let label = action.label.trim();
+        let label_lower = label.to_lowercase();
+        if prefixes.iter().any(|p| label_lower.starts_with(p)) {
+            if !out.iter().any(|s| s.eq_ignore_ascii_case(label)) {
+                out.push(label.to_string());
+            }
+            continue;
+        }
+        if let Some(query) = action.action.strip_prefix("query:") {
+            let q_lower = query.to_lowercase();
+            if prefixes.iter().any(|p| q_lower.starts_with(p))
+                && !out.iter().any(|s| s.eq_ignore_ascii_case(query))
+            {
+                out.push(query.to_string());
+            }
+        }
+    }
+}
+
+pub(crate) fn query_suggestions(
+    ctx: &WidgetSettingsContext<'_>,
+    plugin_prefixes: &[&str],
+    defaults: &[&str],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let prefixes: Vec<String> = plugin_prefixes.iter().map(|p| p.to_lowercase()).collect();
+    if let Some(cmds) = ctx.plugin_commands {
+        collect_query_suggestions(&mut out, cmds, &prefixes);
+    }
+    if let Some(actions) = ctx.actions {
+        collect_query_suggestions(&mut out, actions, &prefixes);
+    }
+    for def in defaults {
+        if !out.iter().any(|s| s.eq_ignore_ascii_case(def)) {
+            out.push(def.to_string());
+        }
+    }
+    out
 }
 
 pub(crate) fn edit_typed_settings<C: DeserializeOwned + Serialize + Default>(

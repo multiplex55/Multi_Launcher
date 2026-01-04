@@ -165,6 +165,17 @@ Example: typing `test` will only list entries containing `test`. If an alias mat
 `screenshot_save_file` determines whether screenshots copied to the clipboard are also written to disk. The default is `true`.
 
 
+## Dashboard
+
+Enable the dashboard from **Settings → Dashboard** to show widgets whenever the search box is empty. Use the **Customize Dashboard...** button in the same section to open the editor instead of editing `dashboard.json` by hand. Each slot exposes its settings inside the editor—for example:
+
+- **Plugin home** lets you pick from the currently loaded plugins.
+- **Notes** and **Todo** widgets offer common query shortcuts from the respective plugins so you can prefill the search box.
+- **Weather** defaults to the dashboard *Default location* value and stores the chosen location/URL template directly in the slot settings.
+
+Changes are saved back to `dashboard.json` once you click **Save** in the editor.
+
+
 If you choose `CapsLock` as the hotkey, the launcher suppresses the normal
 CapsLock toggle **when compiled with the `unstable_grab` feature enabled**.
 Press `Shift`+`CapsLock` to change the keyboard state while the application is

@@ -84,7 +84,11 @@ impl PluginHomeWidget {
     ) -> WidgetSettingsUiResult {
         edit_typed_settings(ui, value, ctx, |ui, cfg: &mut PluginHomeConfig, ctx| {
             let mut changed = false;
-            let plugin_names = ctx.plugins.map(|p| p.plugin_names()).unwrap_or_default();
+            let plugin_names = super::plugin_names(ctx);
+            if cfg.plugin.is_none() && !plugin_names.is_empty() {
+                cfg.plugin = plugin_names.first().cloned();
+                changed = true;
+            }
             egui::ComboBox::from_label("Plugin")
                 .selected_text(cfg.plugin.as_deref().unwrap_or_else(|| {
                     plugin_names

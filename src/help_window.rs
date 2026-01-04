@@ -30,6 +30,13 @@ impl HelpWindow {
                         ui.label(format!("Help overlay: {hk}"));
                     }
                     ui.separator();
+                    ui.label(egui::RichText::new("Dashboard").strong());
+                    ui.label(
+                        "Open Settings \u{2192} Dashboard \u{2192} Customize Dashboard... to edit \
+                         widget layout plus plugin-aware settings such as note/todo queries or \
+                         the weather location.",
+                    );
+                    ui.separator();
                     ui.label(egui::RichText::new("Commands").strong());
                     ui.text_edit_singleline(&mut self.filter);
                     let mut infos = app.plugins.plugin_infos();
@@ -62,6 +69,12 @@ impl HelpWindow {
             .default_size((400.0, 300.0))
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| ui.heading("Available commands"));
+                ui.separator();
+                ui.label(
+                    "Tip: Settings \u{2192} Dashboard \u{2192} Customize Dashboard... opens the \
+                     widget editor where you can configure plugin-aware defaults for notes, todos \
+                     or weather.",
+                );
                 ui.separator();
                 if ui
                     .checkbox(&mut self.show_examples, "Show examples")

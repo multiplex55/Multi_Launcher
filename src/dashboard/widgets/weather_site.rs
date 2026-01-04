@@ -26,8 +26,21 @@ impl WeatherSiteWidget {
         value: &mut serde_json::Value,
         ctx: &WidgetSettingsContext<'_>,
     ) -> WidgetSettingsUiResult {
-        edit_typed_settings(ui, value, ctx, |ui, cfg: &mut WeatherSiteConfig, _ctx| {
+        edit_typed_settings(ui, value, ctx, |ui, cfg: &mut WeatherSiteConfig, ctx| {
             let mut changed = false;
+            let default_location = ctx.default_location.map(str::to_string);
+            if cfg.location.is_none() {
+                if let Some(loc) = &default_location {
+                    cfg.location = Some(loc.clone());
+                    changed = true;
+                }
+            }
+            if cfg.url.is_none() {
+                if let Some(loc) = cfg.location.clone().or_else(|| default_location.clone()) {
+                    cfg.url = Some(format!("https://www.google.com/search?q=weather+{loc}"));
+                    changed = true;
+                }
+            }
             ui.horizontal(|ui| {
                 ui.label("Location");
                 let mut text = cfg.location.clone().unwrap_or_default();
@@ -40,6 +53,16 @@ impl WeatherSiteWidget {
                     changed = true;
                 }
             });
+            if let Some(loc) = default_location {
+                ui.horizontal(|ui| {
+                    ui.label("Dashboard default");
+                    ui.monospace(&loc);
+                    if ui.button("Use default").clicked() {
+                        cfg.location = Some(loc);
+                        changed = true;
+                    }
+                });
+            }
             ui.horizontal(|ui| {
                 ui.label("URL template");
                 let mut url = cfg.url.clone().unwrap_or_default();
