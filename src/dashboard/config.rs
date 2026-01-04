@@ -19,6 +19,34 @@ fn default_span() -> u8 {
     1
 }
 
+fn default_overflow_mode() -> OverflowMode {
+    OverflowMode::Scroll
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OverflowMode {
+    Scroll,
+    Clip,
+    Auto,
+}
+
+impl Default for OverflowMode {
+    fn default() -> Self {
+        Self::Scroll
+    }
+}
+
+impl OverflowMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OverflowMode::Scroll => "scroll",
+            OverflowMode::Clip => "clip",
+            OverflowMode::Auto => "auto",
+        }
+    }
+}
+
 /// Grid definition for the dashboard layout.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GridConfig {
@@ -52,6 +80,8 @@ pub struct SlotConfig {
     pub col_span: u8,
     #[serde(default)]
     pub settings: serde_json::Value,
+    #[serde(default = "default_overflow_mode")]
+    pub overflow: OverflowMode,
 }
 
 impl SlotConfig {
@@ -64,6 +94,7 @@ impl SlotConfig {
             row_span: default_span(),
             col_span: default_span(),
             settings: serde_json::Value::Object(Default::default()),
+            overflow: default_overflow_mode(),
         }
     }
 }

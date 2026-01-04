@@ -11,6 +11,7 @@ pub struct NormalizedSlot {
     pub row_span: usize,
     pub col_span: usize,
     pub settings: Value,
+    pub overflow: crate::dashboard::config::OverflowMode,
 }
 
 /// Validate and normalize slot positions to the configured grid size.
@@ -80,6 +81,7 @@ fn normalize_slot(
         row_span,
         col_span,
         settings: slot.settings.clone(),
+        overflow: slot.overflow,
     })
 }
 
