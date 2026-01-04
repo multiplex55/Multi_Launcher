@@ -6,19 +6,29 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+mod active_timers;
+mod clipboard_snippets;
 mod frequent_commands;
 mod note_meta;
 mod notes_open;
+mod pinned_commands;
 mod plugin_home;
 mod recent_commands;
+mod recent_notes;
+mod todo_list;
 mod todo_summary;
 mod weather_site;
 
+pub use active_timers::ActiveTimersWidget;
+pub use clipboard_snippets::ClipboardSnippetsWidget;
 pub use frequent_commands::FrequentCommandsWidget;
 pub use note_meta::NoteMetaWidget;
 pub use notes_open::NotesOpenWidget;
+pub use pinned_commands::PinnedCommandsWidget;
 pub use plugin_home::PluginHomeWidget;
 pub use recent_commands::RecentCommandsWidget;
+pub use recent_notes::RecentNotesWidget;
+pub use todo_list::TodoListWidget;
 pub use todo_summary::TodoSummaryWidget;
 pub use weather_site::WeatherSiteWidget;
 
@@ -157,6 +167,30 @@ impl WidgetRegistry {
             "todo_summary",
             WidgetFactory::new(TodoSummaryWidget::new)
                 .with_settings_ui(TodoSummaryWidget::settings_ui),
+        );
+        reg.register(
+            "todo_list",
+            WidgetFactory::new(TodoListWidget::new).with_settings_ui(TodoListWidget::settings_ui),
+        );
+        reg.register(
+            "recent_notes",
+            WidgetFactory::new(RecentNotesWidget::new)
+                .with_settings_ui(RecentNotesWidget::settings_ui),
+        );
+        reg.register(
+            "pinned_commands",
+            WidgetFactory::new(PinnedCommandsWidget::new)
+                .with_settings_ui(PinnedCommandsWidget::settings_ui),
+        );
+        reg.register(
+            "active_timers",
+            WidgetFactory::new(ActiveTimersWidget::new)
+                .with_settings_ui(ActiveTimersWidget::settings_ui),
+        );
+        reg.register(
+            "clipboard_snippets",
+            WidgetFactory::new(ClipboardSnippetsWidget::new)
+                .with_settings_ui(ClipboardSnippetsWidget::settings_ui),
         );
         reg
     }
