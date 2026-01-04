@@ -34,7 +34,7 @@
     },
     {
       "id": "Todos",
-      "widget": "todo_summary",
+      "widget": "todo",
       "row": 2,
       "col": 0,
       "row_span": 1,

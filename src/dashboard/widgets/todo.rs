@@ -1,5 +1,6 @@
 use super::{
-    edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+    edit_typed_settings, query_suggestions, Widget, WidgetAction, WidgetSettingsContext,
+    WidgetSettingsUiResult,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -26,31 +27,34 @@ fn default_count() -> usize {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TodoListConfig {
+pub struct TodoWidgetConfig {
     #[serde(default = "default_count")]
     pub count: usize,
     #[serde(default)]
     pub show_done: bool,
     #[serde(default)]
     pub sort: TodoSort,
+    #[serde(default)]
+    pub query: Option<String>,
 }
 
-impl Default for TodoListConfig {
+impl Default for TodoWidgetConfig {
     fn default() -> Self {
         Self {
             count: default_count(),
             show_done: false,
             sort: TodoSort::default(),
+            query: None,
         }
     }
 }
 
-pub struct TodoListWidget {
-    cfg: TodoListConfig,
+pub struct TodoWidget {
+    cfg: TodoWidgetConfig,
 }
 
-impl TodoListWidget {
-    pub fn new(cfg: TodoListConfig) -> Self {
+impl TodoWidget {
+    pub fn new(cfg: TodoWidgetConfig) -> Self {
         Self { cfg }
     }
 
@@ -59,8 +63,9 @@ impl TodoListWidget {
         value: &mut serde_json::Value,
         ctx: &WidgetSettingsContext<'_>,
     ) -> WidgetSettingsUiResult {
-        edit_typed_settings(ui, value, ctx, |ui, cfg: &mut TodoListConfig, _ctx| {
+        edit_typed_settings(ui, value, ctx, |ui, cfg: &mut TodoWidgetConfig, ctx| {
             let mut changed = false;
+            ui.heading("List");
             ui.horizontal(|ui| {
                 ui.label("Show");
                 changed |= ui
@@ -88,6 +93,48 @@ impl TodoListWidget {
                         .selectable_value(&mut cfg.sort, TodoSort::Alphabetical, "Alphabetical")
                         .changed();
                 });
+
+            ui.separator();
+            ui.heading("Open action");
+            let suggestions = query_suggestions(ctx, &["todo"], &["todo", "todo list", "todo add"]);
+            if cfg.query.is_none() {
+                if let Some(s) = suggestions.first() {
+                    cfg.query = Some(s.clone());
+                    changed = true;
+                }
+            }
+            ui.horizontal(|ui| {
+                ui.label("Query override");
+                let mut query = cfg.query.clone().unwrap_or_default();
+                if ui.text_edit_singleline(&mut query).changed() {
+                    cfg.query = if query.trim().is_empty() {
+                        None
+                    } else {
+                        Some(query)
+                    };
+                    changed = true;
+                }
+            });
+            if !suggestions.is_empty() {
+                egui::ComboBox::from_label("Suggestions")
+                    .selected_text(
+                        cfg.query
+                            .as_deref()
+                            .unwrap_or("Pick a todo query from your plugins"),
+                    )
+                    .show_ui(ui, |ui| {
+                        for suggestion in &suggestions {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut cfg.query,
+                                    Some(suggestion.clone()),
+                                    suggestion,
+                                )
+                                .changed();
+                        }
+                    });
+            }
+
             changed
         })
     }
@@ -106,23 +153,30 @@ impl TodoListWidget {
             }),
         }
     }
-}
 
-impl Default for TodoListWidget {
-    fn default() -> Self {
-        Self {
-            cfg: TodoListConfig::default(),
-        }
+    fn render_summary(&self, ui: &mut egui::Ui) -> Option<WidgetAction> {
+        let todos = TODO_DATA.read().ok().map(|t| t.clone()).unwrap_or_default();
+        let done = todos.iter().filter(|t| t.done).count();
+        let total = todos.len();
+        let mut action = None;
+        ui.horizontal(|ui| {
+            ui.label(format!("Todos: {done}/{total} done"));
+            if ui.button("Open todos").clicked() {
+                action = Some(WidgetAction {
+                    action: Action {
+                        label: "Todos".into(),
+                        desc: "Todo".into(),
+                        action: "todo:dialog".into(),
+                        args: None,
+                    },
+                    query_override: self.cfg.query.clone().or_else(|| Some("todo".into())),
+                });
+            }
+        });
+        action
     }
-}
 
-impl Widget for TodoListWidget {
-    fn render(
-        &mut self,
-        ui: &mut egui::Ui,
-        _ctx: &DashboardContext<'_>,
-        _activation: WidgetActivation,
-    ) -> Option<WidgetAction> {
+    fn render_list(&self, ui: &mut egui::Ui) -> Option<WidgetAction> {
         let todos = TODO_DATA.read().ok().map(|t| t.clone()).unwrap_or_default();
 
         let mut entries: Vec<(usize, TodoEntry)> = todos.into_iter().enumerate().collect();
@@ -161,7 +215,7 @@ impl Widget for TodoListWidget {
                     ui.label(egui::RichText::new(format!("#{tags}")).small());
                 }
                 if ui.small_button("Open").clicked() {
-                    clicked = Some(WidgetAction {
+                    clicked.get_or_insert(WidgetAction {
                         action: Action {
                             label: entry.text.clone(),
                             desc: "Todo".into(),
@@ -175,5 +229,31 @@ impl Widget for TodoListWidget {
         }
 
         clicked
+    }
+}
+
+impl Default for TodoWidget {
+    fn default() -> Self {
+        Self {
+            cfg: TodoWidgetConfig::default(),
+        }
+    }
+}
+
+impl Widget for TodoWidget {
+    fn render(
+        &mut self,
+        ui: &mut egui::Ui,
+        _ctx: &DashboardContext<'_>,
+        _activation: WidgetActivation,
+    ) -> Option<WidgetAction> {
+        let mut action = self.render_summary(ui);
+        ui.separator();
+        if action.is_none() {
+            action = self.render_list(ui);
+        } else {
+            self.render_list(ui);
+        }
+        action
     }
 }

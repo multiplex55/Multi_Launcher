@@ -76,6 +76,26 @@ fn layout_clamps_to_grid_and_prevents_overlap() {
 }
 
 #[test]
+fn legacy_todo_widgets_are_migrated() {
+    let mut cfg = DashboardConfig {
+        version: 1,
+        grid: GridConfig { rows: 1, cols: 2 },
+        slots: vec![
+            SlotConfig::with_widget("todo_list", 0, 0),
+            SlotConfig::with_widget("todo_summary", 0, 1),
+        ],
+    };
+    let registry = WidgetRegistry::with_defaults();
+    let warnings = cfg.sanitize(&registry);
+    assert_eq!(cfg.slots.len(), 2);
+    assert!(warnings.iter().any(|w| w.contains("todo_list")));
+    assert!(warnings.iter().any(|w| w.contains("todo_summary")));
+    for slot in cfg.slots {
+        assert_eq!(slot.widget, "todo");
+    }
+}
+
+#[test]
 fn activation_applies_query_override_first() {
     let ctx = eframe::egui::Context::default();
     let mut app = new_app(&ctx);
