@@ -50,7 +50,7 @@ impl PluginHomeWidget {
         Self { cfg }
     }
 
-    fn plugin<'a>(&self, ctx: &'a DashboardContext<'a>) -> Option<&'a (dyn crate::plugin::Plugin)> {
+    fn plugin<'a>(&self, ctx: &'a DashboardContext<'a>) -> Option<&'a dyn crate::plugin::Plugin> {
         let name = self.plugin_name(ctx)?;
         ctx.plugins
             .iter()
