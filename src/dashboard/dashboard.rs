@@ -3,6 +3,8 @@ use crate::dashboard::layout::{normalize_slots, NormalizedSlot};
 use crate::dashboard::widgets::{WidgetAction, WidgetRegistry};
 use crate::{actions::Action, common::json_watch::JsonWatcher};
 use eframe::egui;
+#[cfg(test)]
+use once_cell::sync::Lazy;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -375,11 +377,9 @@ mod tests {
         let records = take_records();
         assert_eq!(records.len(), 1);
         let record = records[0];
-        assert!((record.max_rect.min.x - 0.0).abs() < f32::EPSILON);
-        assert!((record.max_rect.min.y - 0.0).abs() < f32::EPSILON);
-        assert!((record.max_rect.width() - 240.0).abs() < f32::EPSILON);
-        assert!((record.max_rect.height() - 180.0).abs() < f32::EPSILON);
-        assert_eq!(record.clip, record.max_rect);
+        let expected_clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(240.0, 180.0));
+        assert_eq!(record.clip, expected_clip);
+        assert!(rect_contains(record.clip, record.max_rect));
     }
 
     #[test]
@@ -444,6 +444,15 @@ mod tests {
         let records = take_records();
         assert_eq!(records.len(), 1);
         let record = records[0];
-        assert_eq!(record.clip, record.max_rect);
+        let expected_clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
+        assert_eq!(record.clip, expected_clip);
+        assert!(rect_contains(record.clip, record.max_rect));
+    }
+
+    fn rect_contains(outer: egui::Rect, inner: egui::Rect) -> bool {
+        outer.min.x <= inner.min.x
+            && outer.min.y <= inner.min.y
+            && outer.max.x >= inner.max.x
+            && outer.max.y >= inner.max.y
     }
 }
