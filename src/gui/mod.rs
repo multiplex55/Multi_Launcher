@@ -1466,6 +1466,10 @@ impl LauncherApp {
             self.tempfile_dialog.open();
         } else if a.action == "settings:dialog" {
             self.show_settings = true;
+        } else if a.action == "dashboard:settings" {
+            let registry = self.dashboard.registry().clone();
+            self.dashboard_editor.open(&self.dashboard_path, &registry);
+            self.show_dashboard_editor = true;
         } else if a.action == "volume:dialog" {
             self.volume_dialog.open();
         } else if a.action == "brightness:dialog" {
