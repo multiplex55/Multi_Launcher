@@ -9,7 +9,6 @@ use std::collections::HashMap;
 mod frequent_commands;
 mod note_meta;
 mod notes_open;
-mod plugin_home;
 mod recent_commands;
 mod todo_summary;
 mod weather_site;
@@ -17,7 +16,6 @@ mod weather_site;
 pub use frequent_commands::FrequentCommandsWidget;
 pub use note_meta::NoteMetaWidget;
 pub use notes_open::NotesOpenWidget;
-pub use plugin_home::PluginHomeWidget;
 pub use recent_commands::RecentCommandsWidget;
 pub use todo_summary::TodoSummaryWidget;
 pub use weather_site::WeatherSiteWidget;
@@ -82,7 +80,6 @@ impl WidgetRegistry {
             WidgetFactory::new(FrequentCommandsWidget::new),
         );
         reg.register("todo_summary", WidgetFactory::new(TodoSummaryWidget::new));
-        reg.register("plugin_home", WidgetFactory::new(PluginHomeWidget::new));
         reg
     }
 
