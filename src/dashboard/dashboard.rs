@@ -3,8 +3,6 @@ use crate::dashboard::layout::{normalize_slots, NormalizedSlot};
 use crate::dashboard::widgets::{WidgetAction, WidgetRegistry};
 use crate::{actions::Action, common::json_watch::JsonWatcher};
 use eframe::egui;
-#[cfg(test)]
-use once_cell::sync::Lazy;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -337,9 +335,10 @@ mod tests {
     }
 
     fn dashboard_context<'a>(plugins: &'a PluginManager) -> DashboardContext<'a> {
+        static EMPTY_USAGE: Lazy<HashMap<String, u32>> = Lazy::new(HashMap::new);
         DashboardContext {
             actions: &[],
-            usage: &HashMap::new(),
+            usage: &EMPTY_USAGE,
             plugins,
             default_location: None,
         }
