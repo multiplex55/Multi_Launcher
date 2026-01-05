@@ -5,30 +5,39 @@ use eframe::egui;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 mod active_timers;
+mod browser_tabs;
 mod clipboard_snippets;
 mod frequent_commands;
 mod note_meta;
 mod notes_open;
 mod pinned_commands;
 mod plugin_home;
+mod process_list;
 mod recent_commands;
 mod recent_notes;
+mod system_actions;
 mod todo;
 mod weather_site;
+mod window_list;
 
 pub use active_timers::ActiveTimersWidget;
+pub use browser_tabs::BrowserTabsWidget;
 pub use clipboard_snippets::ClipboardSnippetsWidget;
 pub use frequent_commands::FrequentCommandsWidget;
 pub use note_meta::NoteMetaWidget;
 pub use notes_open::NotesOpenWidget;
 pub use pinned_commands::PinnedCommandsWidget;
 pub use plugin_home::PluginHomeWidget;
+pub use process_list::ProcessesWidget;
 pub use recent_commands::RecentCommandsWidget;
 pub use recent_notes::RecentNotesWidget;
+pub use system_actions::SystemWidget;
 pub use todo::TodoWidget;
 pub use weather_site::WeatherSiteWidget;
+pub use window_list::WindowsWidget;
 
 /// Result of a widget activation.
 #[derive(Debug, Clone)]
@@ -82,6 +91,14 @@ pub trait Widget: Send {
     ) -> Option<WidgetAction>;
 
     fn on_config_updated(&mut self, _settings: &Value) {}
+
+    fn header_ui(
+        &mut self,
+        _ui: &mut egui::Ui,
+        _ctx: &DashboardContext<'_>,
+    ) -> Option<WidgetAction> {
+        None
+    }
 }
 
 /// Factory for building widgets from JSON settings.
@@ -187,6 +204,23 @@ impl WidgetRegistry {
             WidgetFactory::new(ClipboardSnippetsWidget::new)
                 .with_settings_ui(ClipboardSnippetsWidget::settings_ui),
         );
+        reg.register(
+            "browser_tabs",
+            WidgetFactory::new(BrowserTabsWidget::new)
+                .with_settings_ui(BrowserTabsWidget::settings_ui),
+        );
+        reg.register(
+            "processes",
+            WidgetFactory::new(ProcessesWidget::new).with_settings_ui(ProcessesWidget::settings_ui),
+        );
+        reg.register(
+            "windows",
+            WidgetFactory::new(WindowsWidget::new).with_settings_ui(WindowsWidget::settings_ui),
+        );
+        reg.register(
+            "system",
+            WidgetFactory::new(SystemWidget::new).with_settings_ui(SystemWidget::settings_ui),
+        );
         reg
     }
 
@@ -265,6 +299,15 @@ pub(crate) fn plugin_names(ctx: &WidgetSettingsContext<'_>) -> Vec<String> {
     } else {
         Vec::new()
     }
+}
+
+pub(crate) fn find_plugin<'a>(
+    ctx: &'a DashboardContext<'a>,
+    name: &str,
+) -> Option<&'a dyn crate::plugin::Plugin> {
+    ctx.plugins
+        .iter()
+        .find_map(|p| if p.name() == name { Some(&**p) } else { None })
 }
 
 fn collect_query_suggestions(out: &mut Vec<String>, actions: &[Action], prefixes: &[String]) {
@@ -346,4 +389,63 @@ pub(crate) fn edit_typed_settings<C: DeserializeOwned + Serialize + Default>(
     }
 
     WidgetSettingsUiResult { changed, error }
+}
+
+#[derive(Debug, Clone)]
+pub struct TimedCache<T> {
+    pub data: T,
+    pub last_refresh: Instant,
+    pub interval: Duration,
+}
+
+impl<T> TimedCache<T> {
+    pub fn new(data: T, interval: Duration) -> Self {
+        Self {
+            data,
+            last_refresh: Instant::now() - interval,
+            interval,
+        }
+    }
+
+    pub fn should_refresh(&self) -> bool {
+        self.last_refresh.elapsed() >= self.interval
+    }
+
+    pub fn refresh(&mut self, update: impl FnOnce(&mut T)) {
+        update(&mut self.data);
+        self.last_refresh = Instant::now();
+    }
+
+    pub fn touch(&mut self) {
+        self.last_refresh = Instant::now();
+    }
+
+    pub fn set_interval(&mut self, interval: Duration) {
+        self.interval = interval;
+    }
+
+    pub fn invalidate(&mut self) {
+        self.last_refresh = Instant::now() - self.interval;
+    }
+}
+
+pub(crate) fn refresh_interval_setting(
+    ui: &mut egui::Ui,
+    seconds: &mut f32,
+    tooltip: &str,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("Refresh every");
+        let resp = ui
+            .add(
+                egui::DragValue::new(seconds)
+                    .clamp_range(1.0..=300.0)
+                    .speed(0.5),
+            )
+            .on_hover_text(tooltip);
+        changed |= resp.changed();
+        ui.label("seconds");
+    });
+    changed
 }
