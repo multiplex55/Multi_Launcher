@@ -40,6 +40,8 @@ pub use system_actions::SystemWidget;
 pub use todo::TodoWidget;
 pub use weather_site::WeatherSiteWidget;
 pub use window_list::WindowsWidget;
+mod action_groups;
+pub use action_groups::ActionGroupWidget;
 
 /// Result of a widget activation.
 #[derive(Debug, Clone)]
@@ -87,6 +89,7 @@ pub type SettingsUiFn =
 pub struct WidgetMetadata {
     pub name: String,
     pub has_settings_ui: bool,
+    pub description: Option<String>,
 }
 
 /// Widget trait implemented by all dashboard widgets.
@@ -115,6 +118,7 @@ pub struct WidgetDescriptor {
     ctor: std::sync::Arc<dyn Fn(&Value) -> Box<dyn Widget> + Send + Sync>,
     default_settings: std::sync::Arc<dyn Fn() -> Value + Send + Sync>,
     settings_ui: Option<SettingsUiFn>,
+    description: Option<String>,
 }
 
 pub type WidgetFactory = WidgetDescriptor;
@@ -135,11 +139,17 @@ impl WidgetDescriptor {
                 serde_json::to_value(C::default()).unwrap_or_else(|_| json!({}))
             }),
             settings_ui: None,
+            description: None,
         }
     }
 
     pub fn with_settings_ui(mut self, settings_ui: SettingsUiFn) -> Self {
         self.settings_ui = Some(settings_ui);
+        self
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
         self
     }
 
@@ -159,6 +169,7 @@ impl WidgetDescriptor {
         WidgetMetadata {
             name: name.to_string(),
             has_settings_ui: self.settings_ui.is_some(),
+            description: self.description.clone(),
         }
     }
 }
@@ -244,6 +255,38 @@ impl WidgetRegistry {
         reg.register(
             "system",
             WidgetFactory::new(SystemWidget::new).with_settings_ui(SystemWidget::settings_ui),
+        );
+        reg.register(
+            "quick_actions",
+            ActionGroupWidget::descriptor(action_groups::GroupKind::QuickActions).with_description(
+                "Favorites, bookmarks, folders, and snippets grouped with quick buttons.",
+            ),
+        );
+        reg.register(
+            "continuity",
+            ActionGroupWidget::descriptor(action_groups::GroupKind::Continuity)
+                .with_description("Last session items: history, usage, and calculator history."),
+        );
+        reg.register(
+            "task_time",
+            ActionGroupWidget::descriptor(action_groups::GroupKind::TaskTime)
+                .with_description("Todos, active timers, and stopwatches in one place."),
+        );
+        reg.register(
+            "system_glance",
+            ActionGroupWidget::descriptor(action_groups::GroupKind::SystemGlance)
+                .with_description("CPU/RAM/Disk, network, IP, processes, recycle bin."),
+        );
+        reg.register(
+            "workspace",
+            ActionGroupWidget::descriptor(action_groups::GroupKind::Workspace)
+                .with_description("Open windows and browser tabs with refresh controls."),
+        );
+        reg.register(
+            "utilities",
+            ActionGroupWidget::descriptor(action_groups::GroupKind::Utilities).with_description(
+                "Clipboard, conversions, timestamp, media, volume, and brightness controls.",
+            ),
         );
         reg
     }

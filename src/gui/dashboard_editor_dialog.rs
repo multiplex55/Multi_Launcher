@@ -447,6 +447,11 @@ impl DashboardEditorDialog {
                 settings_changed = true;
             }
         });
+        if let Some(meta) = registry.metadata_for(&widget_name) {
+            if let Some(desc) = meta.description.as_deref() {
+                ui.label(egui::RichText::new(desc).small());
+            }
+        }
 
         if let Some(result) =
             registry.render_settings_ui(&widget_name, ui, &mut slot.settings, settings_ctx)

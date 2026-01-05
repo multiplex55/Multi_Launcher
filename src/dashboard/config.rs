@@ -8,7 +8,7 @@ fn default_version() -> u32 {
 }
 
 fn default_rows() -> u8 {
-    3
+    2
 }
 
 fn default_cols() -> u8 {
@@ -116,14 +116,12 @@ impl Default for DashboardConfig {
             version: default_version(),
             grid: GridConfig::default(),
             slots: vec![
-                SlotConfig::with_widget("weather_site", 0, 0),
-                SlotConfig::with_widget("pinned_commands", 0, 1),
-                SlotConfig::with_widget("todo", 0, 2),
-                SlotConfig::with_widget("recent_commands", 1, 0),
-                SlotConfig::with_widget("frequent_commands", 1, 1),
-                SlotConfig::with_widget("recent_notes", 1, 2),
-                SlotConfig::with_widget("active_timers", 2, 0),
-                SlotConfig::with_widget("clipboard_snippets", 2, 1),
+                SlotConfig::with_widget("quick_actions", 0, 0),
+                SlotConfig::with_widget("continuity", 0, 1),
+                SlotConfig::with_widget("task_time", 0, 2),
+                SlotConfig::with_widget("system_glance", 1, 0),
+                SlotConfig::with_widget("workspace", 1, 1),
+                SlotConfig::with_widget("utilities", 1, 2),
             ],
         }
     }
