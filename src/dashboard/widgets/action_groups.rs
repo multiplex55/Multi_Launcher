@@ -39,6 +39,10 @@ pub enum SourceKind {
     Usage,
 }
 
+fn default_source_kind() -> SourceKind {
+    SourceKind::Plugin
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionSourceConfig {
     pub label: String,
@@ -50,7 +54,7 @@ pub struct ActionSourceConfig {
     pub query: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
-    #[serde(default = "SourceKind::Plugin")]
+    #[serde(default = "default_source_kind")]
     pub kind: SourceKind,
 }
 
@@ -86,6 +90,12 @@ impl ActionGroupConfig {
     }
 }
 
+impl Default for ActionGroupConfig {
+    fn default() -> Self {
+        Self::defaults_for(GroupKind::QuickActions)
+    }
+}
+
 #[derive(Clone, Default)]
 struct SourceResult {
     label: String,
@@ -113,6 +123,7 @@ impl ActionGroupWidget {
             }),
             default_settings: Arc::new(move || default_value.clone()),
             settings_ui: Some(Self::settings_ui),
+            description: None,
         }
     }
 
