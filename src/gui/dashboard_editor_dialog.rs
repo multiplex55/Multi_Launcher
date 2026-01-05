@@ -321,51 +321,6 @@ impl DashboardEditorDialog {
                                         }
                                     });
                                 ui.separator();
-                                egui::CollapsingHeader::new("Settings")
-                                    .default_open(true)
-                                    .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            if ui.button("Reset to defaults").clicked() {
-                                                slot.settings = registry
-                                                    .default_settings(&slot.widget)
-                                                    .unwrap_or_else(|| {
-                                                        Value::Object(Default::default())
-                                                    });
-                                                edited = true;
-                                            }
-                                            if slot.settings.is_null() {
-                                                ui.colored_label(
-                                                    egui::Color32::YELLOW,
-                                                    "Settings were empty; defaults will be used.",
-                                                );
-                                                slot.settings = registry
-                                                    .default_settings(&slot.widget)
-                                                    .unwrap_or_else(|| {
-                                                        Value::Object(Default::default())
-                                                    });
-                                                edited = true;
-                                            }
-                                        });
-
-                                        if let Some(result) = registry.render_settings_ui(
-                                            &slot.widget,
-                                            ui,
-                                            &mut slot.settings,
-                                            &settings_ctx,
-                                        ) {
-                                            if result.changed {
-                                                edited = true;
-                                            }
-                                            if let Some(err) = result.error {
-                                                ui.colored_label(
-                                                    egui::Color32::YELLOW,
-                                                    format!("{err}. Settings saved after edits."),
-                                                );
-                                            }
-                                        } else {
-                                            ui.label("No settings available for this widget.");
-                                        }
-                                    });
                             });
                             if body.is_none() {
                                 // Ensure state is stored even when collapsed
@@ -392,6 +347,8 @@ impl DashboardEditorDialog {
                             idx += 1;
                         }
                     }
+                    ui.separator();
+                    self.render_selected_settings(ui, registry, &settings_ctx);
                     // Reset batch flags after applying once
                     self.slot_expand_all = false;
                     self.slot_collapse_all = false;
@@ -446,6 +403,72 @@ impl DashboardEditorDialog {
         }
     }
 
+    fn render_selected_settings(
+        &mut self,
+        ui: &mut egui::Ui,
+        registry: &WidgetRegistry,
+        settings_ctx: &WidgetSettingsContext<'_>,
+    ) {
+        ui.heading("Settings");
+        if self.config.slots.is_empty() {
+            ui.label("Add a slot to edit its settings.");
+            return;
+        }
+        let Some(selected_idx) = self.selected_slot else {
+            ui.label("Select a slot to edit settings.");
+            return;
+        };
+        if selected_idx >= self.config.slots.len() {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "Selected slot no longer exists; please reselect.",
+            );
+            return;
+        }
+
+        let slot = &mut self.config.slots[selected_idx];
+        let widget_name = slot.widget.clone();
+        let default_settings = registry
+            .default_settings(&widget_name)
+            .unwrap_or_else(|| Value::Object(Default::default()));
+        let mut settings_changed = Self::ensure_slot_settings_defaults(slot, &default_settings, ui);
+
+        ui.horizontal(|ui| {
+            ui.label(format!("Widget: {widget_name}"));
+            if let Some(meta) = registry.metadata_for(&widget_name) {
+                if meta.has_settings_ui {
+                    ui.colored_label(egui::Color32::GREEN, "Settings available");
+                } else {
+                    ui.colored_label(egui::Color32::GRAY, "No custom settings UI");
+                }
+            }
+            if ui.button("Reset to defaults").clicked() {
+                slot.settings = default_settings.clone();
+                settings_changed = true;
+            }
+        });
+
+        if let Some(result) =
+            registry.render_settings_ui(&widget_name, ui, &mut slot.settings, settings_ctx)
+        {
+            if result.changed {
+                settings_changed = true;
+            }
+            if let Some(err) = result.error {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!("{err}. Settings saved after edits."),
+                );
+            }
+        } else {
+            ui.label("No settings available for this widget.");
+        }
+
+        if settings_changed {
+            self.blocked_warning = None;
+        }
+    }
+
     fn max_row_span_for(&self, slot: &SlotConfig) -> u8 {
         let rows = self.config.grid.rows.max(1) as usize;
         let row = slot.row.max(0) as usize;
@@ -456,6 +479,22 @@ impl DashboardEditorDialog {
         let cols = self.config.grid.cols.max(1) as usize;
         let col = slot.col.max(0) as usize;
         cols.saturating_sub(col).max(1) as u8
+    }
+
+    fn ensure_slot_settings_defaults(
+        slot: &mut SlotConfig,
+        default_settings: &Value,
+        ui: &mut egui::Ui,
+    ) -> bool {
+        if slot.settings.is_null() {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "Settings were empty; defaults were applied.",
+            );
+            slot.settings = default_settings.clone();
+            return true;
+        }
+        false
     }
 
     fn commit_slot(

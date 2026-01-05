@@ -1,5 +1,5 @@
 use multi_launcher::actions::Action;
-use multi_launcher::dashboard::config::{DashboardConfig, GridConfig, SlotConfig};
+use multi_launcher::dashboard::config::{DashboardConfig, GridConfig, OverflowMode, SlotConfig};
 use multi_launcher::dashboard::layout::normalize_slots;
 use multi_launcher::dashboard::widgets::WidgetRegistry;
 use multi_launcher::gui::{ActivationSource, LauncherApp};
@@ -93,6 +93,31 @@ fn legacy_todo_widgets_are_migrated() {
     for slot in cfg.slots {
         assert_eq!(slot.widget, "todo");
     }
+}
+
+#[test]
+fn null_settings_are_defaulted() {
+    let mut cfg = DashboardConfig {
+        version: 1,
+        grid: GridConfig { rows: 1, cols: 1 },
+        slots: vec![SlotConfig {
+            id: None,
+            widget: "weather_site".into(),
+            row: 0,
+            col: 0,
+            row_span: 1,
+            col_span: 1,
+            settings: serde_json::Value::Null,
+            overflow: OverflowMode::Scroll,
+        }],
+    };
+    let registry = WidgetRegistry::with_defaults();
+    let warnings = cfg.sanitize(&registry);
+    assert!(warnings.is_empty());
+    assert_eq!(
+        cfg.slots[0].settings,
+        registry.default_settings("weather_site").unwrap()
+    );
 }
 
 #[test]
