@@ -1,10 +1,11 @@
 use crate::dashboard::config::{DashboardConfig, OverflowMode};
 use crate::dashboard::layout::{normalize_slots, NormalizedSlot};
-use crate::dashboard::widgets::{WidgetAction, WidgetRegistry};
+use crate::dashboard::widgets::{Widget, WidgetAction, WidgetRegistry};
 use crate::{actions::Action, common::json_watch::JsonWatcher};
 use eframe::egui;
 #[cfg(test)]
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,10 +28,47 @@ pub struct DashboardContext<'a> {
     pub default_location: Option<&'a str>,
 }
 
+#[derive(Debug)]
+struct SlotRuntime {
+    slot: NormalizedSlot,
+    widget: Box<dyn Widget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum SlotKey {
+    Id {
+        id: String,
+        widget: String,
+    },
+    Position {
+        widget: String,
+        row: usize,
+        col: usize,
+    },
+}
+
+impl SlotKey {
+    fn from_slot(slot: &NormalizedSlot) -> Self {
+        if let Some(id) = &slot.id {
+            SlotKey::Id {
+                id: id.clone(),
+                widget: slot.widget.clone(),
+            }
+        } else {
+            SlotKey::Position {
+                widget: slot.widget.clone(),
+                row: slot.row,
+                col: slot.col,
+            }
+        }
+    }
+}
+
 pub struct Dashboard {
     config_path: PathBuf,
     pub config: DashboardConfig,
     pub slots: Vec<NormalizedSlot>,
+    runtime_slots: Vec<SlotRuntime>,
     registry: WidgetRegistry,
     watcher: Option<JsonWatcher>,
     pub warnings: Vec<String>,
@@ -45,15 +83,18 @@ impl Dashboard {
     ) -> Self {
         let path = config_path.as_ref().to_path_buf();
         let (config, slots, warnings) = Self::load_internal(&path, &registry);
-        Self {
+        let mut dashboard = Self {
             config_path: path,
             config,
-            slots,
+            slots: Vec::new(),
+            runtime_slots: Vec::new(),
             registry,
             watcher: None,
             warnings,
             event_cb,
-        }
+        };
+        dashboard.rebuild_runtime_slots(slots);
+        dashboard
     }
 
     fn load_internal(
@@ -68,11 +109,39 @@ impl Dashboard {
         (cfg, slots, warnings)
     }
 
+    fn rebuild_runtime_slots(&mut self, slots: Vec<NormalizedSlot>) {
+        let mut reusable: HashMap<SlotKey, SlotRuntime> = self
+            .runtime_slots
+            .drain(..)
+            .map(|rt| (SlotKey::from_slot(&rt.slot), rt))
+            .collect();
+
+        let mut runtime_slots = Vec::with_capacity(slots.len());
+        for slot in &slots {
+            if let Some(mut runtime) = reusable.remove(&SlotKey::from_slot(slot)) {
+                let settings_changed = runtime.slot.settings != slot.settings;
+                runtime.slot = slot.clone();
+                if settings_changed {
+                    runtime.widget.on_config_updated(&runtime.slot.settings);
+                }
+                runtime_slots.push(runtime);
+            } else if let Some(widget) = self.registry.create(&slot.widget, &slot.settings) {
+                runtime_slots.push(SlotRuntime {
+                    slot: slot.clone(),
+                    widget,
+                });
+            }
+        }
+
+        self.slots = slots;
+        self.runtime_slots = runtime_slots;
+    }
+
     pub fn reload(&mut self) {
         let (cfg, slots, warnings) = Self::load_internal(&self.config_path, &self.registry);
         self.config = cfg;
-        self.slots = slots;
         self.warnings = warnings;
+        self.rebuild_runtime_slots(slots);
     }
 
     pub fn set_path(&mut self, path: impl AsRef<Path>) {
@@ -109,12 +178,17 @@ impl Dashboard {
         let (rect, _) = ui.allocate_exact_size(available_size, egui::Sense::hover());
         let mut child = ui.child_ui(rect, egui::Layout::top_down(egui::Align::LEFT));
 
-        for slot in &self.slots {
+        for slot in &mut self.runtime_slots {
+            let normalized = &slot.slot;
             let slot_rect = egui::Rect::from_min_size(
-                rect.min + egui::vec2(col_width * slot.col as f32, row_height * slot.row as f32),
+                rect.min
+                    + egui::vec2(
+                        col_width * normalized.col as f32,
+                        row_height * normalized.row as f32,
+                    ),
                 egui::vec2(
-                    col_width * slot.col_span as f32,
-                    row_height * slot.row_span as f32,
+                    col_width * normalized.col_span as f32,
+                    row_height * normalized.row_span as f32,
                 ),
             );
             let slot_clip = slot_rect.intersect(child.clip_rect());
@@ -131,15 +205,15 @@ impl Dashboard {
 
     fn render_slot(
         &self,
-        slot: &NormalizedSlot,
+        slot: &mut SlotRuntime,
         slot_rect: egui::Rect,
         slot_clip: egui::Rect,
         ui: &mut egui::Ui,
         ctx: &DashboardContext<'_>,
         activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        let heading = slot.id.as_deref().unwrap_or(&slot.widget);
-        let height_id = slot_height_id(slot);
+        let heading = slot.slot.id.as_deref().unwrap_or(&slot.slot.widget);
+        let height_id = slot_height_id(&slot.slot);
         let previous_height = ui
             .ctx()
             .data(|d| d.get_temp::<f32>(height_id))
@@ -155,7 +229,7 @@ impl Dashboard {
                     let body_height =
                         (slot_rect.height() - heading_rect.height() - ui.spacing().item_spacing.y)
                             .max(0.0);
-                    let overflow = match slot.overflow {
+                    let overflow = match slot.slot.overflow {
                         OverflowMode::Clip => OverflowPolicy::Clip,
                         OverflowMode::Scroll => OverflowPolicy::Scroll,
                         OverflowMode::Auto => {
@@ -177,7 +251,7 @@ impl Dashboard {
                             ctx,
                             activation,
                             body_height,
-                            slot.overflow,
+                            slot.slot.overflow,
                         ),
                     };
 
@@ -193,7 +267,7 @@ impl Dashboard {
 
     fn render_clipped_widget(
         &self,
-        slot: &NormalizedSlot,
+        slot: &mut SlotRuntime,
         ui: &mut egui::Ui,
         ctx: &DashboardContext<'_>,
         activation: WidgetActivation,
@@ -206,7 +280,7 @@ impl Dashboard {
 
     fn render_scrollable_widget(
         &self,
-        slot: &NormalizedSlot,
+        slot: &mut SlotRuntime,
         ui: &mut egui::Ui,
         ctx: &DashboardContext<'_>,
         activation: WidgetActivation,
@@ -216,9 +290,9 @@ impl Dashboard {
         let mut measured_height = 0.0;
         let scroll_id = egui::Id::new((
             "slot-scroll",
-            slot.id.as_deref().unwrap_or(&slot.widget),
-            slot.row,
-            slot.col,
+            slot.slot.id.as_deref().unwrap_or(&slot.slot.widget),
+            slot.slot.row,
+            slot.slot.col,
         ));
         let scroll_area = egui::ScrollArea::vertical()
             .id_source(scroll_id)
@@ -242,16 +316,13 @@ impl Dashboard {
 
     fn render_widget_content(
         &self,
-        slot: &NormalizedSlot,
+        slot: &mut SlotRuntime,
         ui: &mut egui::Ui,
         ctx: &DashboardContext<'_>,
         activation: WidgetActivation,
     ) -> (Option<WidgetAction>, f32) {
         let start_cursor = ui.cursor().min.y;
-        let action = self
-            .registry
-            .create(&slot.widget, &slot.settings)
-            .and_then(|mut w| w.render(ui, ctx, activation));
+        let action = slot.widget.render(ui, ctx, activation);
         let end_cursor = ui.cursor().max.y;
         (action, (end_cursor - start_cursor).max(0.0))
     }
@@ -284,7 +355,9 @@ mod tests {
     use crate::plugin::PluginManager;
     use once_cell::sync::Lazy;
     use serde::{Deserialize, Serialize};
+    use serde_json::json;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     #[derive(Default, Serialize, Deserialize)]
@@ -293,12 +366,25 @@ mod tests {
     #[derive(Default)]
     struct RecordingWidget;
 
+    #[derive(Default, Serialize, Deserialize, Clone)]
+    struct UpdatingConfig {
+        label: String,
+    }
+
+    #[derive(Default)]
+    struct UpdatingWidget {
+        label: String,
+    }
+
     #[derive(Clone, Copy)]
     struct SlotRecord {
         clip: egui::Rect,
     }
 
     static RECORDS: Lazy<Mutex<Vec<SlotRecord>>> = Lazy::new(|| Mutex::new(Vec::new()));
+    static RENDERS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+    static CREATED: AtomicUsize = AtomicUsize::new(0);
+    static UPDATED: AtomicUsize = AtomicUsize::new(0);
 
     impl Widget for RecordingWidget {
         fn render(
@@ -319,8 +405,31 @@ mod tests {
         }
     }
 
+    impl Widget for UpdatingWidget {
+        fn render(
+            &mut self,
+            _ui: &mut egui::Ui,
+            _ctx: &DashboardContext<'_>,
+            _activation: WidgetActivation,
+        ) -> Option<WidgetAction> {
+            RENDERS.lock().unwrap().push(self.label.clone());
+            None
+        }
+
+        fn on_config_updated(&mut self, settings: &serde_json::Value) {
+            if let Ok(cfg) = serde_json::from_value::<UpdatingConfig>(settings.clone()) {
+                self.label = cfg.label;
+                UPDATED.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
     fn take_records() -> Vec<SlotRecord> {
         std::mem::take(&mut *RECORDS.lock().unwrap())
+    }
+
+    fn take_renders() -> Vec<String> {
+        std::mem::take(&mut *RENDERS.lock().unwrap())
     }
 
     fn recording_registry() -> WidgetRegistry {
@@ -328,6 +437,20 @@ mod tests {
         reg.register(
             "record",
             WidgetFactory::new(|_: RecordingConfig| RecordingWidget),
+        );
+        reg
+    }
+
+    fn updating_registry() -> WidgetRegistry {
+        let mut reg = WidgetRegistry::default();
+        reg.register(
+            "updating",
+            WidgetFactory::new(|cfg: UpdatingConfig| {
+                CREATED.fetch_add(1, Ordering::SeqCst);
+                UpdatingWidget {
+                    label: cfg.label.clone(),
+                }
+            }),
         );
         reg
     }
@@ -441,5 +564,62 @@ mod tests {
         let record = records[0];
         let expected_clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
         assert_eq!(record.clip, expected_clip);
+    }
+
+    #[test]
+    fn reuses_widget_instances_on_reload() {
+        CREATED.store(0, Ordering::SeqCst);
+        UPDATED.store(0, Ordering::SeqCst);
+        take_renders();
+
+        let cfg = DashboardConfig {
+            version: 1,
+            grid: GridConfig { rows: 1, cols: 1 },
+            slots: vec![SlotConfig {
+                settings: json!({ "label": "first" }),
+                ..SlotConfig::with_widget("updating", 0, 0)
+            }],
+        };
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        cfg.save(tmp.path()).unwrap();
+
+        let registry = updating_registry();
+        let mut dashboard = dashboard_with_config(tmp.path(), registry);
+        let plugins = PluginManager::new();
+        let ctx = dashboard_context(&plugins);
+
+        egui::__run_test_ui(|ui| {
+            let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
+            ui.allocate_ui_at_rect(rect, |ui| {
+                dashboard.ui(ui, &ctx, WidgetActivation::Click);
+            });
+        });
+
+        assert_eq!(CREATED.load(Ordering::SeqCst), 1);
+        assert_eq!(UPDATED.load(Ordering::SeqCst), 0);
+        assert_eq!(take_renders(), vec!["first".to_string()]);
+
+        let updated_cfg = DashboardConfig {
+            version: 1,
+            grid: GridConfig { rows: 1, cols: 1 },
+            slots: vec![SlotConfig {
+                settings: json!({ "label": "second" }),
+                ..SlotConfig::with_widget("updating", 0, 0)
+            }],
+        };
+        updated_cfg.save(tmp.path()).unwrap();
+
+        dashboard.reload();
+
+        egui::__run_test_ui(|ui| {
+            let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
+            ui.allocate_ui_at_rect(rect, |ui| {
+                dashboard.ui(ui, &ctx, WidgetActivation::Click);
+            });
+        });
+
+        assert_eq!(CREATED.load(Ordering::SeqCst), 1);
+        assert_eq!(UPDATED.load(Ordering::SeqCst), 1);
+        assert_eq!(take_renders(), vec!["second".to_string()]);
     }
 }

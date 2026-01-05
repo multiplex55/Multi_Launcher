@@ -80,6 +80,8 @@ pub trait Widget: Send {
         ctx: &DashboardContext<'_>,
         activation: WidgetActivation,
     ) -> Option<WidgetAction>;
+
+    fn on_config_updated(&mut self, _settings: &Value) {}
 }
 
 /// Factory for building widgets from JSON settings.
