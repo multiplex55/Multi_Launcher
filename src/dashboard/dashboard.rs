@@ -28,7 +28,6 @@ pub struct DashboardContext<'a> {
     pub default_location: Option<&'a str>,
 }
 
-#[derive(Debug)]
 struct SlotRuntime {
     slot: NormalizedSlot,
     widget: Box<dyn Widget>,
@@ -195,7 +194,7 @@ impl Dashboard {
             let response = child.allocate_ui_at_rect(slot_rect, |slot_ui| {
                 slot_ui.set_clip_rect(slot_clip);
                 slot_ui.set_min_size(slot_rect.size());
-                self.render_slot(slot, slot_rect, slot_clip, slot_ui, ctx, activation)
+                Self::render_slot(slot, slot_rect, slot_clip, slot_ui, ctx, activation)
             });
             clicked = clicked.or(response.inner);
         }
@@ -204,7 +203,6 @@ impl Dashboard {
     }
 
     fn render_slot(
-        &self,
         slot: &mut SlotRuntime,
         slot_rect: egui::Rect,
         slot_clip: egui::Rect,
@@ -212,7 +210,11 @@ impl Dashboard {
         ctx: &DashboardContext<'_>,
         activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        let heading = slot.slot.id.as_deref().unwrap_or(&slot.slot.widget);
+        let heading = slot
+            .slot
+            .id
+            .clone()
+            .unwrap_or_else(|| slot.slot.widget.clone());
         let height_id = slot_height_id(&slot.slot);
         let previous_height = ui
             .ctx()
@@ -243,9 +245,9 @@ impl Dashboard {
 
                     let (action, content_height) = match overflow {
                         OverflowPolicy::Clip => {
-                            self.render_clipped_widget(slot, ui, ctx, activation, body_height)
+                            Self::render_clipped_widget(slot, ui, ctx, activation, body_height)
                         }
-                        OverflowPolicy::Scroll => self.render_scrollable_widget(
+                        OverflowPolicy::Scroll => Self::render_scrollable_widget(
                             slot,
                             ui,
                             ctx,
@@ -266,7 +268,6 @@ impl Dashboard {
     }
 
     fn render_clipped_widget(
-        &self,
         slot: &mut SlotRuntime,
         ui: &mut egui::Ui,
         ctx: &DashboardContext<'_>,
@@ -275,11 +276,10 @@ impl Dashboard {
     ) -> (Option<WidgetAction>, f32) {
         ui.set_min_height(body_height);
         ui.set_max_height(body_height);
-        self.render_widget_content(slot, ui, ctx, activation)
+        Self::render_widget_content(slot, ui, ctx, activation)
     }
 
     fn render_scrollable_widget(
-        &self,
         slot: &mut SlotRuntime,
         ui: &mut egui::Ui,
         ctx: &DashboardContext<'_>,
@@ -305,7 +305,7 @@ impl Dashboard {
 
         let output = scroll_area.show_viewport(ui, |ui, _viewport| {
             ui.set_min_height(body_height);
-            let (action, height) = self.render_widget_content(slot, ui, ctx, activation);
+            let (action, height) = Self::render_widget_content(slot, ui, ctx, activation);
             measured_height = height;
             action
         });
@@ -315,7 +315,6 @@ impl Dashboard {
     }
 
     fn render_widget_content(
-        &self,
         slot: &mut SlotRuntime,
         ui: &mut egui::Ui,
         ctx: &DashboardContext<'_>,
