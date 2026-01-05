@@ -96,6 +96,31 @@ fn legacy_todo_widgets_are_migrated() {
 }
 
 #[test]
+fn null_settings_are_defaulted() {
+    let mut cfg = DashboardConfig {
+        version: 1,
+        grid: GridConfig { rows: 1, cols: 1 },
+        slots: vec![SlotConfig {
+            id: None,
+            widget: "weather_site".into(),
+            row: 0,
+            col: 0,
+            row_span: 1,
+            col_span: 1,
+            settings: serde_json::Value::Null,
+            overflow: OverflowMode::Scroll,
+        }],
+    };
+    let registry = WidgetRegistry::with_defaults();
+    let warnings = cfg.sanitize(&registry);
+    assert!(warnings.is_empty());
+    assert_eq!(
+        cfg.slots[0].settings,
+        registry.default_settings("weather_site").unwrap()
+    );
+}
+
+#[test]
 fn activation_applies_query_override_first() {
     let ctx = eframe::egui::Context::default();
     let mut app = new_app(&ctx);

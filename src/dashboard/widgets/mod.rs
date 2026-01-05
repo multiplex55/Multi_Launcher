@@ -81,6 +81,12 @@ impl<'a> WidgetSettingsContext<'a> {
 pub type SettingsUiFn =
     fn(&mut egui::Ui, &mut Value, &WidgetSettingsContext<'_>) -> WidgetSettingsUiResult;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WidgetMetadata {
+    pub name: String,
+    pub has_settings_ui: bool,
+}
+
 /// Widget trait implemented by all dashboard widgets.
 pub trait Widget: Send {
     fn render(
@@ -101,15 +107,17 @@ pub trait Widget: Send {
     }
 }
 
-/// Factory for building widgets from JSON settings.
+/// Descriptor for building widgets from JSON settings.
 #[derive(Clone)]
-pub struct WidgetFactory {
+pub struct WidgetDescriptor {
     ctor: std::sync::Arc<dyn Fn(&Value) -> Box<dyn Widget> + Send + Sync>,
-    default_settings: Value,
+    default_settings: std::sync::Arc<dyn Fn() -> Value + Send + Sync>,
     settings_ui: Option<SettingsUiFn>,
 }
 
-impl WidgetFactory {
+pub type WidgetFactory = WidgetDescriptor;
+
+impl WidgetDescriptor {
     pub fn new<
         T: Widget + Default + 'static,
         C: DeserializeOwned + Serialize + Default + 'static,
@@ -121,7 +129,9 @@ impl WidgetFactory {
                 let cfg = serde_json::from_value::<C>(v.clone()).unwrap_or_default();
                 Box::new(build(cfg))
             }),
-            default_settings: serde_json::to_value(C::default()).unwrap_or_else(|_| json!({})),
+            default_settings: std::sync::Arc::new(|| {
+                serde_json::to_value(C::default()).unwrap_or_else(|_| json!({}))
+            }),
             settings_ui: None,
         }
     }
@@ -132,7 +142,7 @@ impl WidgetFactory {
     }
 
     pub fn default_settings(&self) -> Value {
-        self.default_settings.clone()
+        (self.default_settings)()
     }
 
     pub fn settings_ui(&self) -> Option<SettingsUiFn> {
@@ -142,11 +152,18 @@ impl WidgetFactory {
     pub fn create(&self, settings: &Value) -> Box<dyn Widget> {
         (self.ctor)(settings)
     }
+
+    pub fn metadata(&self, name: &str) -> WidgetMetadata {
+        WidgetMetadata {
+            name: name.to_string(),
+            has_settings_ui: self.settings_ui.is_some(),
+        }
+    }
 }
 
 #[derive(Clone, Default)]
 pub struct WidgetRegistry {
-    map: HashMap<String, WidgetFactory>,
+    map: HashMap<String, WidgetDescriptor>,
 }
 
 impl WidgetRegistry {
@@ -248,8 +265,26 @@ impl WidgetRegistry {
         names
     }
 
+    pub fn metadata(&self) -> Vec<WidgetMetadata> {
+        let mut meta: Vec<WidgetMetadata> = self
+            .map
+            .iter()
+            .map(|(name, descriptor)| descriptor.metadata(name))
+            .collect();
+        meta.sort_by(|a, b| a.name.cmp(&b.name));
+        meta
+    }
+
+    pub fn metadata_for(&self, name: &str) -> Option<WidgetMetadata> {
+        self.map.get(name).map(|d| d.metadata(name))
+    }
+
     pub fn default_settings(&self, name: &str) -> Option<Value> {
         self.map.get(name).map(|f| f.default_settings())
+    }
+
+    pub fn descriptor(&self, name: &str) -> Option<&WidgetDescriptor> {
+        self.map.get(name)
     }
 
     pub fn settings_ui_fn(&self, name: &str) -> Option<SettingsUiFn> {
@@ -448,4 +483,29 @@ pub(crate) fn refresh_interval_setting(
         ui.label("seconds");
     });
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_json_preserves_unknown_fields() {
+        let base = json!({"known": 1, "extra": {"keep": true}});
+        let updates = json!({"known": 2});
+        let merged = merge_json(&base, &updates);
+        assert_eq!(merged["known"], json!(2));
+        assert_eq!(merged["extra"], json!({"keep": true}));
+    }
+
+    #[test]
+    fn metadata_reports_settings_ui() {
+        let descriptor = WidgetDescriptor::new(WeatherSiteWidget::new);
+        let descriptor_with_ui = WidgetDescriptor::new(WeatherSiteWidget::new)
+            .with_settings_ui(WeatherSiteWidget::settings_ui);
+        let meta_without = descriptor.metadata("test");
+        let meta_with = descriptor_with_ui.metadata("test");
+        assert!(!meta_without.has_settings_ui);
+        assert!(meta_with.has_settings_ui);
+    }
 }
