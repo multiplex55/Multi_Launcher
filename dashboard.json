@@ -47,6 +47,21 @@
       "col": 1,
       "row_span": 1,
       "col_span": 1
+    },
+    {
+      "id": "Pinned results",
+      "widget": "pinned_query_results",
+      "row": 0,
+      "col": 2,
+      "row_span": 1,
+      "col_span": 1,
+      "settings": {
+        "engine": "omni_search",
+        "query": "o list",
+        "limit": 6,
+        "refresh_interval_secs": 45,
+        "click_behavior": "run_action"
+      }
     }
   ]
 }

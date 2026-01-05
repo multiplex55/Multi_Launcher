@@ -175,6 +175,7 @@ The dashboard is enabled by default on first launch and appears whenever the sea
 - **Todo List** lists the next pending todos with checkboxes to toggle completion. Settings: `count`, `show_done`, `sort`. Sample queries: `todo edit`, `todo view`.
 - **Recent Notes List** shows the most recently modified notes and can filter by tag. Settings: `count`, `filter_tag`, `show_snippet`, `open_mode`. Sample queries: `note open <title>`, `note list #tag`.
 - **Pinned Commands/Favorites** renders a custom set of action IDs (including favorites) in either a list or wrapped grid. Settings: `action_ids`, `layout`. Sample queries: `fav add`, any pinned action label to rerun it.
+- **Pinned Query Results** runs a saved query against any plugin or the `omni_search` engine and pins the top matches as buttons. Settings: `engine`, `query`, `limit`, `refresh_interval_secs`, `click_behavior`.
 - **Active Timers** highlights running timers with quick pause/cancel controls and optional completion history. Settings: `count`, `show_completed_recently`. Sample queries: `timer list`, `timer pause`.
 - **Clipboard + Snippets/System Snapshot** surfaces the latest clipboard entries, common snippets, and a CPU/memory/disk snapshot when available. Settings: `clipboard_count`, `snippet_count`, `show_system`. Sample queries: `cb list`, `cs list`, `info`.
 
