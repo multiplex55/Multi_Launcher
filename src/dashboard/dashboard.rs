@@ -227,10 +227,18 @@ impl Dashboard {
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
                 ui.vertical(|ui| {
-                    let heading_rect = ui.heading(heading).rect;
+                    let header_start = ui.cursor().min.y;
+                    let mut header_action = None;
+                    ui.with_layout(
+                        egui::Layout::left_to_right(egui::Align::Center).with_main_justify(true),
+                        |ui| {
+                            let _heading_rect = ui.heading(heading);
+                            header_action = slot.widget.header_ui(ui, ctx);
+                        },
+                    );
+                    let header_height = (ui.cursor().max.y - header_start).max(0.0);
                     let body_height =
-                        (slot_rect.height() - heading_rect.height() - ui.spacing().item_spacing.y)
-                            .max(0.0);
+                        (slot_rect.height() - header_height - ui.spacing().item_spacing.y).max(0.0);
                     let overflow = match slot.slot.overflow {
                         OverflowMode::Clip => OverflowPolicy::Clip,
                         OverflowMode::Scroll => OverflowPolicy::Scroll,
@@ -260,7 +268,7 @@ impl Dashboard {
                     ui.ctx()
                         .data_mut(|d| d.insert_temp(height_id, content_height));
 
-                    action
+                    header_action.or(action)
                 })
                 .inner
             })
