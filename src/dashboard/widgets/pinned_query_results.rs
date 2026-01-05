@@ -124,7 +124,11 @@ impl PinnedQueryResultsWidget {
 
                 if !suggestions.is_empty() {
                     egui::ComboBox::from_label("Suggestions")
-                        .selected_text(cfg.query.clone())
+                        .selected_text(if cfg.query.trim().is_empty() {
+                            "Pick a query"
+                        } else {
+                            &cfg.query
+                        })
                         .show_ui(ui, |ui| {
                             for suggestion in &suggestions {
                                 changed |= ui
@@ -136,6 +140,9 @@ impl PinnedQueryResultsWidget {
                                     .changed();
                             }
                         });
+                } else if cfg.query.trim().is_empty() {
+                    cfg.query = default_query();
+                    changed = true;
                 }
 
                 ui.horizontal(|ui| {
@@ -147,10 +154,10 @@ impl PinnedQueryResultsWidget {
                 });
 
                 changed |= refresh_interval_setting(
-                ui,
-                &mut cfg.refresh_interval_secs,
-                "Query results are cached. The widget refreshes after this many seconds unless you click Refresh.",
-            );
+                    ui,
+                    &mut cfg.refresh_interval_secs,
+                    "Query results are cached. The widget refreshes after this many seconds unless you click Refresh.",
+                );
 
                 egui::ComboBox::from_label("Click behavior")
                     .selected_text(match cfg.click_behavior {
@@ -282,17 +289,21 @@ impl Widget for PinnedQueryResultsWidget {
             ui.colored_label(egui::Color32::YELLOW, err);
         }
 
-        if self.cache.data.is_empty() {
-            ui.label("No pinned results. Adjust the query in settings.");
-            return None;
-        }
-
         let mut clicked = None;
-        for action in &self.cache.data {
-            if ui.button(&action.label).clicked() {
-                clicked = Some(self.build_click_action(action));
+        ui.vertical(|ui| {
+            if self.cache.data.is_empty() {
+                ui.label("No pinned results. Adjust the query in settings.");
+                return;
             }
-        }
+
+            let button_width = ui.available_width();
+            for action in &self.cache.data {
+                let response = ui.add_sized([button_width, 28.0], egui::Button::new(&action.label));
+                if response.clicked() {
+                    clicked = Some(self.build_click_action(action));
+                }
+            }
+        });
 
         clicked
     }
