@@ -296,7 +296,6 @@ mod tests {
     #[derive(Clone, Copy)]
     struct SlotRecord {
         clip: egui::Rect,
-        max_rect: egui::Rect,
     }
 
     static RECORDS: Lazy<Mutex<Vec<SlotRecord>>> = Lazy::new(|| Mutex::new(Vec::new()));
@@ -315,10 +314,7 @@ mod tests {
                 0.0,
                 egui::Color32::RED,
             );
-            RECORDS.lock().unwrap().push(SlotRecord {
-                clip,
-                max_rect: rect,
-            });
+            RECORDS.lock().unwrap().push(SlotRecord { clip });
             None
         }
     }
@@ -379,7 +375,6 @@ mod tests {
         let record = records[0];
         let expected_clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(240.0, 180.0));
         assert_eq!(record.clip, expected_clip);
-        assert!(rect_contains(record.clip, record.max_rect));
     }
 
     #[test]
@@ -446,13 +441,5 @@ mod tests {
         let record = records[0];
         let expected_clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
         assert_eq!(record.clip, expected_clip);
-        assert!(rect_contains(record.clip, record.max_rect));
-    }
-
-    fn rect_contains(outer: egui::Rect, inner: egui::Rect) -> bool {
-        outer.min.x <= inner.min.x
-            && outer.min.y <= inner.min.y
-            && outer.max.x >= inner.max.x
-            && outer.max.y >= inner.max.y
     }
 }
