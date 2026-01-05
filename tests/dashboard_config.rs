@@ -1,5 +1,5 @@
 use multi_launcher::actions::Action;
-use multi_launcher::dashboard::config::{DashboardConfig, GridConfig, SlotConfig};
+use multi_launcher::dashboard::config::{DashboardConfig, GridConfig, OverflowMode, SlotConfig};
 use multi_launcher::dashboard::layout::normalize_slots;
 use multi_launcher::dashboard::widgets::WidgetRegistry;
 use multi_launcher::gui::{ActivationSource, LauncherApp};
