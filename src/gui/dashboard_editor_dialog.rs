@@ -281,28 +281,27 @@ impl DashboardEditorDialog {
                                 });
                                 ui.horizontal(|ui| {
                                     ui.label("Row span");
-                                    let rows = self.config.grid.rows.max(1) as usize;
+                                    let max_row_span = self.max_row_span_for(&slot);
                                     if ui
                                         .add(
                                             egui::DragValue::new(&mut slot.row_span)
-                                                .clamp_range(1..=self.max_row_span_for(&slot)),
+                                                .clamp_range(1..=max_row_span),
                                         )
                                         .changed()
                                     {
-                                        slot.row_span =
-                                            slot.row_span.min(self.max_row_span_for(&slot));
+                                        slot.row_span = slot.row_span.min(max_row_span);
                                         edited = true;
                                     }
                                     ui.label("Col span");
+                                    let max_col_span = self.max_col_span_for(&slot);
                                     if ui
                                         .add(
                                             egui::DragValue::new(&mut slot.col_span)
-                                                .clamp_range(1..=self.max_col_span_for(&slot)),
+                                                .clamp_range(1..=max_col_span),
                                         )
                                         .changed()
                                     {
-                                        slot.col_span =
-                                            slot.col_span.min(self.max_col_span_for(&slot));
+                                        slot.col_span = slot.col_span.min(max_col_span);
                                         edited = true;
                                     }
                                 });
@@ -462,7 +461,7 @@ impl DashboardEditorDialog {
     fn commit_slot(
         &mut self,
         idx: usize,
-        mut slot: SlotConfig,
+        slot: SlotConfig,
         registry: &WidgetRegistry,
     ) -> Result<(), String> {
         if idx >= self.config.slots.len() {
@@ -611,8 +610,8 @@ impl DashboardEditorDialog {
                 ),
             );
             let is_selected = selected_slot_cfg.as_ref().map_or(false, |selected| {
-                let selected_row = selected.row.max(0) as usize;
-                let selected_col = selected.col.max(0) as usize;
+                let selected_row = selected.row.max(0);
+                let selected_col = selected.col.max(0);
                 (display_slot.id.is_some() && display_slot.id == selected.id)
                     || (display_slot.id.is_none()
                         && selected.id.is_none()
