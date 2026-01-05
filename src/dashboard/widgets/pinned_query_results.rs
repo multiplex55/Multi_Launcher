@@ -1,0 +1,329 @@
+use super::{
+    edit_typed_settings, find_plugin, plugin_names, query_suggestions, refresh_interval_setting,
+    TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+};
+use crate::actions::Action;
+use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
+use eframe::egui;
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+fn default_engine() -> String {
+    "omni_search".into()
+}
+
+fn default_query() -> String {
+    "o list".into()
+}
+
+fn default_limit() -> usize {
+    6
+}
+
+fn default_refresh_interval() -> f32 {
+    45.0
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClickBehavior {
+    RunAction,
+    FillQuery,
+}
+
+impl Default for ClickBehavior {
+    fn default() -> Self {
+        ClickBehavior::RunAction
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PinnedQueryResultsConfig {
+    #[serde(default = "default_engine")]
+    pub engine: String,
+    #[serde(default = "default_query")]
+    pub query: String,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default = "default_refresh_interval")]
+    pub refresh_interval_secs: f32,
+    #[serde(default)]
+    pub click_behavior: ClickBehavior,
+}
+
+impl Default for PinnedQueryResultsConfig {
+    fn default() -> Self {
+        Self {
+            engine: default_engine(),
+            query: default_query(),
+            limit: default_limit(),
+            refresh_interval_secs: default_refresh_interval(),
+            click_behavior: ClickBehavior::default(),
+        }
+    }
+}
+
+pub struct PinnedQueryResultsWidget {
+    cfg: PinnedQueryResultsConfig,
+    cache: TimedCache<Vec<Action>>,
+    error: Option<String>,
+}
+
+impl PinnedQueryResultsWidget {
+    pub fn new(cfg: PinnedQueryResultsConfig) -> Self {
+        let interval = Duration::from_secs_f32(cfg.refresh_interval_secs.max(1.0));
+        Self {
+            cfg,
+            cache: TimedCache::new(Vec::new(), interval),
+            error: None,
+        }
+    }
+
+    pub fn settings_ui(
+        ui: &mut egui::Ui,
+        value: &mut serde_json::Value,
+        ctx: &WidgetSettingsContext<'_>,
+    ) -> WidgetSettingsUiResult {
+        edit_typed_settings(
+            ui,
+            value,
+            ctx,
+            |ui, cfg: &mut PinnedQueryResultsConfig, ctx| {
+                let mut changed = false;
+
+                let mut engines = plugin_names(ctx);
+                if !engines.iter().any(|e| e == "omni_search") {
+                    engines.insert(0, "omni_search".into());
+                }
+                if cfg.engine.trim().is_empty() {
+                    cfg.engine = default_engine();
+                    changed = true;
+                }
+
+                egui::ComboBox::from_label("Engine")
+                    .selected_text(&cfg.engine)
+                    .show_ui(ui, |ui| {
+                        for engine in &engines {
+                            changed |= ui
+                                .selectable_value(&mut cfg.engine, engine.clone(), engine)
+                                .changed();
+                        }
+                    });
+
+                let prefix_candidates = Self::suggestion_prefixes(&cfg.engine);
+                let prefix_refs: Vec<&str> = prefix_candidates.iter().map(|s| s.as_str()).collect();
+                let default_suggestions = Self::default_queries(&cfg.engine);
+                let default_refs: Vec<&str> =
+                    default_suggestions.iter().map(|s| s.as_str()).collect();
+                let suggestions = query_suggestions(ctx, &prefix_refs, &default_refs);
+
+                ui.horizontal(|ui| {
+                    ui.label("Query");
+                    changed |= ui.text_edit_singleline(&mut cfg.query).changed();
+                });
+
+                if !suggestions.is_empty() {
+                    egui::ComboBox::from_label("Suggestions")
+                        .selected_text(if cfg.query.trim().is_empty() {
+                            "Pick a query"
+                        } else {
+                            &cfg.query
+                        })
+                        .show_ui(ui, |ui| {
+                            for suggestion in &suggestions {
+                                changed |= ui
+                                    .selectable_value(
+                                        &mut cfg.query,
+                                        suggestion.clone(),
+                                        suggestion,
+                                    )
+                                    .changed();
+                            }
+                        });
+                } else if cfg.query.trim().is_empty() {
+                    cfg.query = default_query();
+                    changed = true;
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label("Limit");
+                    let resp = ui
+                        .add(egui::DragValue::new(&mut cfg.limit).clamp_range(1..=30))
+                        .on_hover_text("Maximum number of actions to pin from the query results.");
+                    changed |= resp.changed();
+                });
+
+                changed |= refresh_interval_setting(
+                    ui,
+                    &mut cfg.refresh_interval_secs,
+                    "Query results are cached. The widget refreshes after this many seconds unless you click Refresh.",
+                );
+
+                egui::ComboBox::from_label("Click behavior")
+                    .selected_text(match cfg.click_behavior {
+                        ClickBehavior::RunAction => "Run action",
+                        ClickBehavior::FillQuery => "Fill search box",
+                    })
+                    .show_ui(ui, |ui| {
+                        changed |= ui
+                            .selectable_value(
+                                &mut cfg.click_behavior,
+                                ClickBehavior::RunAction,
+                                "Run action",
+                            )
+                            .changed();
+                        changed |= ui
+                            .selectable_value(
+                                &mut cfg.click_behavior,
+                                ClickBehavior::FillQuery,
+                                "Fill search box",
+                            )
+                            .changed();
+                    });
+
+                changed
+            },
+        )
+    }
+
+    fn refresh_interval(&self) -> Duration {
+        Duration::from_secs_f32(self.cfg.refresh_interval_secs.max(1.0))
+    }
+
+    fn update_interval(&mut self) {
+        self.cache.set_interval(self.refresh_interval());
+    }
+
+    fn refresh(&mut self, ctx: &DashboardContext<'_>) {
+        self.update_interval();
+        let (actions, error) = self.run_query(ctx);
+        self.error = error;
+        self.cache.refresh(|data| *data = actions);
+    }
+
+    fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
+        self.update_interval();
+        if self.cache.should_refresh() {
+            self.refresh(ctx);
+        }
+    }
+
+    fn run_query(&self, ctx: &DashboardContext<'_>) -> (Vec<Action>, Option<String>) {
+        let query = self.cfg.query.trim();
+        if query.is_empty() {
+            return (
+                Vec::new(),
+                Some("Set a query in the widget settings.".into()),
+            );
+        }
+
+        let engine_name = self.cfg.engine.trim();
+        let Some(plugin) = find_plugin(ctx, engine_name) else {
+            return (
+                Vec::new(),
+                Some(format!("Engine '{engine_name}' is not available.")),
+            );
+        };
+
+        let mut actions = plugin.search(query);
+        let limit = self.cfg.limit.max(1);
+        if actions.len() > limit {
+            actions.truncate(limit);
+        }
+        (actions, None)
+    }
+
+    fn build_click_action(&self, action: &Action) -> WidgetAction {
+        match self.cfg.click_behavior {
+            ClickBehavior::RunAction => WidgetAction {
+                query_override: Some(action.label.clone()),
+                action: action.clone(),
+            },
+            ClickBehavior::FillQuery => WidgetAction {
+                query_override: Some(action.label.clone()),
+                action: Action {
+                    label: action.label.clone(),
+                    desc: action.desc.clone(),
+                    action: format!("query:{}", action.label),
+                    args: None,
+                },
+            },
+        }
+    }
+
+    fn suggestion_prefixes(engine: &str) -> Vec<String> {
+        if engine.eq_ignore_ascii_case("omni_search") {
+            vec!["o".into()]
+        } else {
+            vec![engine.to_string()]
+        }
+    }
+
+    fn default_queries(engine: &str) -> Vec<String> {
+        if engine.eq_ignore_ascii_case("omni_search") {
+            vec!["o list".into(), "o".into()]
+        } else if engine.is_empty() {
+            vec![default_query()]
+        } else {
+            vec![format!("{engine} list"), format!("{engine} ")]
+        }
+    }
+}
+
+impl Default for PinnedQueryResultsWidget {
+    fn default() -> Self {
+        Self::new(PinnedQueryResultsConfig::default())
+    }
+}
+
+impl Widget for PinnedQueryResultsWidget {
+    fn render(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &DashboardContext<'_>,
+        _activation: WidgetActivation,
+    ) -> Option<WidgetAction> {
+        self.maybe_refresh(ctx);
+
+        if let Some(err) = &self.error {
+            ui.colored_label(egui::Color32::YELLOW, err);
+        }
+
+        let mut clicked = None;
+        ui.vertical(|ui| {
+            if self.cache.data.is_empty() {
+                ui.label("No pinned results. Adjust the query in settings.");
+                return;
+            }
+
+            let button_width = ui.available_width();
+            for action in &self.cache.data {
+                let response = ui.add_sized([button_width, 28.0], egui::Button::new(&action.label));
+                if response.clicked() {
+                    clicked = Some(self.build_click_action(action));
+                }
+            }
+        });
+
+        clicked
+    }
+
+    fn on_config_updated(&mut self, settings: &serde_json::Value) {
+        if let Ok(cfg) = serde_json::from_value::<PinnedQueryResultsConfig>(settings.clone()) {
+            self.cfg = cfg;
+            self.update_interval();
+            self.cache.invalidate();
+        }
+    }
+
+    fn header_ui(&mut self, ui: &mut egui::Ui, ctx: &DashboardContext<'_>) -> Option<WidgetAction> {
+        let tooltip = format!(
+            "Cached for {:.0}s. Refresh to update pinned results immediately.",
+            self.cfg.refresh_interval_secs
+        );
+        if ui.small_button("Refresh").on_hover_text(tooltip).clicked() {
+            self.refresh(ctx);
+        }
+        None
+    }
+}

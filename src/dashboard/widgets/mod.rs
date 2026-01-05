@@ -14,6 +14,7 @@ mod frequent_commands;
 mod note_meta;
 mod notes_open;
 mod pinned_commands;
+mod pinned_query_results;
 mod plugin_home;
 mod process_list;
 mod recent_commands;
@@ -30,6 +31,7 @@ pub use frequent_commands::FrequentCommandsWidget;
 pub use note_meta::NoteMetaWidget;
 pub use notes_open::NotesOpenWidget;
 pub use pinned_commands::PinnedCommandsWidget;
+pub use pinned_query_results::PinnedQueryResultsWidget;
 pub use plugin_home::PluginHomeWidget;
 pub use process_list::ProcessesWidget;
 pub use recent_commands::RecentCommandsWidget;
@@ -210,6 +212,11 @@ impl WidgetRegistry {
             "pinned_commands",
             WidgetFactory::new(PinnedCommandsWidget::new)
                 .with_settings_ui(PinnedCommandsWidget::settings_ui),
+        );
+        reg.register(
+            "pinned_query_results",
+            WidgetFactory::new(PinnedQueryResultsWidget::new)
+                .with_settings_ui(PinnedQueryResultsWidget::settings_ui),
         );
         reg.register(
             "active_timers",
