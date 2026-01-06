@@ -39,11 +39,21 @@ impl Default for ClipboardSnippetsConfig {
 
 pub struct ClipboardSnippetsWidget {
     cfg: ClipboardSnippetsConfig,
+    cached_history: Vec<String>,
+    cached_snippets: Vec<crate::plugins::snippets::SnippetEntry>,
+    last_clipboard_version: u64,
+    last_snippets_version: u64,
 }
 
 impl ClipboardSnippetsWidget {
     pub fn new(cfg: ClipboardSnippetsConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            cached_history: Vec::new(),
+            cached_snippets: Vec::new(),
+            last_clipboard_version: u64::MAX,
+            last_snippets_version: u64::MAX,
+        }
     }
 
     pub fn settings_ui(
@@ -114,12 +124,30 @@ impl ClipboardSnippetsWidget {
         };
         Some((cpu, mem, disk))
     }
+
+    fn refresh_data(&mut self, ctx: &DashboardContext<'_>) {
+        if self.last_clipboard_version != ctx.clipboard_version {
+            self.cached_history = load_history(CLIPBOARD_FILE)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            self.last_clipboard_version = ctx.clipboard_version;
+        }
+        if self.last_snippets_version != ctx.snippets_version {
+            self.cached_snippets = load_snippets(SNIPPETS_FILE).unwrap_or_default();
+            self.last_snippets_version = ctx.snippets_version;
+        }
+    }
 }
 
 impl Default for ClipboardSnippetsWidget {
     fn default() -> Self {
         Self {
             cfg: ClipboardSnippetsConfig::default(),
+            cached_history: Vec::new(),
+            cached_snippets: Vec::new(),
+            last_clipboard_version: u64::MAX,
+            last_snippets_version: u64::MAX,
         }
     }
 }
@@ -128,16 +156,19 @@ impl Widget for ClipboardSnippetsWidget {
     fn render(
         &mut self,
         ui: &mut egui::Ui,
-        _ctx: &DashboardContext<'_>,
+        ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
+        self.refresh_data(ctx);
         let mut clicked = None;
-        let history = load_history(CLIPBOARD_FILE).unwrap_or_default();
-        let snippets = load_snippets(SNIPPETS_FILE).unwrap_or_default();
-
-        if !history.is_empty() {
+        if !self.cached_history.is_empty() {
             ui.label("Clipboard");
-            for (idx, entry) in history.iter().enumerate().take(self.cfg.clipboard_count) {
+            for (idx, entry) in self
+                .cached_history
+                .iter()
+                .enumerate()
+                .take(self.cfg.clipboard_count)
+            {
                 if ui
                     .button(Self::shorten(entry, 60))
                     .on_hover_text(entry)
@@ -156,10 +187,10 @@ impl Widget for ClipboardSnippetsWidget {
             }
         }
 
-        if self.cfg.snippet_count > 0 && !snippets.is_empty() {
+        if self.cfg.snippet_count > 0 && !self.cached_snippets.is_empty() {
             ui.separator();
             ui.label("Snippets");
-            for snippet in snippets.iter().take(self.cfg.snippet_count) {
+            for snippet in self.cached_snippets.iter().take(self.cfg.snippet_count) {
                 if ui
                     .button(format!(
                         "{} — {}",

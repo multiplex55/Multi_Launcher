@@ -5,9 +5,14 @@ use crate::plugin::Plugin;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 
 pub const FAV_FILE: &str = "fav.json";
+
+static FAV_VERSION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FavEntry {
@@ -29,6 +34,7 @@ pub fn load_favs(path: &str) -> anyhow::Result<Vec<FavEntry>> {
 pub fn save_favs(path: &str, favs: &[FavEntry]) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(favs)?;
     std::fs::write(path, json)?;
+    bump_fav_version();
     Ok(())
 }
 
@@ -60,6 +66,14 @@ pub fn remove_fav(path: &str, label: &str) -> anyhow::Result<()> {
         save_favs(path, &list)?;
     }
     Ok(())
+}
+
+pub fn fav_version() -> u64 {
+    FAV_VERSION.load(Ordering::SeqCst)
+}
+
+fn bump_fav_version() {
+    FAV_VERSION.fetch_add(1, Ordering::SeqCst);
 }
 
 /// Resolve a command and optional arguments against a plugin's search results.
@@ -117,6 +131,7 @@ impl FavPlugin {
                     if let Ok(mut lock) = data_clone.lock() {
                         *lock = list;
                     }
+                    bump_fav_version();
                 }
             }
         })

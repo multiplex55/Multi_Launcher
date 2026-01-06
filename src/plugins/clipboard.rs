@@ -1,13 +1,18 @@
 use crate::actions::Action;
+use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::plugin::Plugin;
 use arboard::Clipboard;
 use eframe::egui;
-use crate::common::json_watch::{watch_json, JsonWatcher};
 use serde_json;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 
 pub const CLIPBOARD_FILE: &str = "clipboard_history.json";
+
+static CLIPBOARD_VERSION: AtomicU64 = AtomicU64::new(0);
 
 /// Load clipboard history from `path`.
 ///
@@ -26,6 +31,7 @@ pub fn save_history(path: &str, history: &VecDeque<String>) -> anyhow::Result<()
     let list: Vec<String> = history.iter().cloned().collect();
     let json = serde_json::to_string_pretty(&list)?;
     std::fs::write(path, json)?;
+    bump_clipboard_version();
     Ok(())
 }
 
@@ -42,6 +48,14 @@ pub fn remove_entry(path: &str, index: usize) -> anyhow::Result<()> {
 /// Clear the clipboard history file at `path`.
 pub fn clear_history_file(path: &str) -> anyhow::Result<()> {
     save_history(path, &VecDeque::new())
+}
+
+pub fn clipboard_version() -> u64 {
+    CLIPBOARD_VERSION.load(Ordering::SeqCst)
+}
+
+fn bump_clipboard_version() {
+    CLIPBOARD_VERSION.fetch_add(1, Ordering::SeqCst);
 }
 
 pub struct ClipboardPlugin {
@@ -78,6 +92,7 @@ impl ClipboardPlugin {
                     if let Ok(mut lock) = history_clone.lock() {
                         *lock = list;
                     }
+                    bump_clipboard_version();
                 }
             }
         })

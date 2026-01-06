@@ -13,9 +13,14 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, RwLock,
+};
 
 pub const TODO_FILE: &str = "todo.json";
+
+static TODO_VERSION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TodoEntry {
@@ -40,6 +45,14 @@ fn invalidate_todo_cache() {
     if let Ok(mut cache) = TODO_CACHE.write() {
         cache.clear();
     }
+}
+
+fn bump_todo_version() {
+    TODO_VERSION.fetch_add(1, Ordering::SeqCst);
+}
+
+pub fn todo_version() -> u64 {
+    TODO_VERSION.load(Ordering::SeqCst)
 }
 
 /// Sort todo entries by priority descending (highest priority first).
@@ -69,6 +82,7 @@ fn update_cache(list: Vec<TodoEntry>) {
         *lock = list;
     }
     invalidate_todo_cache();
+    bump_todo_version();
 }
 
 /// Append a new todo entry with `text`, `priority` and `tags`.
@@ -167,6 +181,7 @@ impl TodoPlugin {
                     if let Ok(mut c) = cache_clone.write() {
                         c.clear();
                     }
+                    bump_todo_version();
                 }
             }
         })

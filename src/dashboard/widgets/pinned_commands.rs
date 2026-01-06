@@ -34,11 +34,21 @@ pub struct PinnedCommandsConfig {
 
 pub struct PinnedCommandsWidget {
     cfg: PinnedCommandsConfig,
+    cached_favorites: Vec<FavEntry>,
+    cached_resolved: Vec<Action>,
+    last_actions_version: u64,
+    last_fav_version: u64,
 }
 
 impl PinnedCommandsWidget {
     pub fn new(cfg: PinnedCommandsConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            cached_favorites: Vec::new(),
+            cached_resolved: Vec::new(),
+            last_actions_version: u64::MAX,
+            last_fav_version: u64::MAX,
+        }
     }
 
     pub fn settings_ui(
@@ -139,12 +149,34 @@ impl PinnedCommandsWidget {
                 }
             })
     }
+
+    fn refresh_cache(&mut self, ctx: &DashboardContext<'_>) {
+        if self.last_actions_version == ctx.actions_version
+            && self.last_fav_version == ctx.fav_version
+        {
+            return;
+        }
+
+        self.cached_favorites = load_favs(FAV_FILE).unwrap_or_default();
+        self.cached_resolved.clear();
+        for id in &self.cfg.action_ids {
+            if let Some(action) = self.resolve_action(ctx.actions, &self.cached_favorites, id) {
+                self.cached_resolved.push(action);
+            }
+        }
+        self.last_actions_version = ctx.actions_version;
+        self.last_fav_version = ctx.fav_version;
+    }
 }
 
 impl Default for PinnedCommandsWidget {
     fn default() -> Self {
         Self {
             cfg: PinnedCommandsConfig::default(),
+            cached_favorites: Vec::new(),
+            cached_resolved: Vec::new(),
+            last_actions_version: u64::MAX,
+            last_fav_version: u64::MAX,
         }
     }
 }
@@ -156,25 +188,19 @@ impl Widget for PinnedCommandsWidget {
         ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        let favorites = load_favs(FAV_FILE).unwrap_or_default();
-        let mut resolved = Vec::new();
-        for id in &self.cfg.action_ids {
-            if let Some(action) = self.resolve_action(ctx.actions, &favorites, id) {
-                resolved.push(action);
-            }
-        }
-        if resolved.is_empty() {
+        self.refresh_cache(ctx);
+        if self.cached_resolved.is_empty() {
             ui.label("Pick actions or favorites in the widget settings.");
             return None;
         }
 
         match self.cfg.layout {
             PinnedLayout::List => {
-                for action in resolved {
+                for action in &self.cached_resolved {
                     if ui.button(&action.label).clicked() {
                         return Some(WidgetAction {
                             query_override: Some(action.label.clone()),
-                            action,
+                            action: action.clone(),
                         });
                     }
                 }
@@ -182,7 +208,7 @@ impl Widget for PinnedCommandsWidget {
             PinnedLayout::Grid => {
                 let mut clicked = None;
                 ui.horizontal_wrapped(|ui| {
-                    for action in &resolved {
+                    for action in &self.cached_resolved {
                         if ui.button(&action.label).clicked() {
                             clicked = Some(action.clone());
                         }

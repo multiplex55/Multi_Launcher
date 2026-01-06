@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static ACTIONS_VERSION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Action {
@@ -18,22 +21,31 @@ pub fn load_actions(path: &str) -> anyhow::Result<Vec<Action>> {
 pub fn save_actions(path: &str, actions: &[Action]) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(actions)?;
     std::fs::write(path, json)?;
+    bump_actions_version();
     Ok(())
 }
 
-pub mod clipboard;
-pub mod timer;
-pub mod stopwatch;
-pub mod shell;
+pub fn actions_version() -> u64 {
+    ACTIONS_VERSION.load(Ordering::SeqCst)
+}
+
+pub fn bump_actions_version() {
+    ACTIONS_VERSION.fetch_add(1, Ordering::SeqCst);
+}
+
 pub mod bookmarks;
-pub mod folders;
-pub mod history;
-pub mod todo;
-pub mod snippets;
-pub mod tempfiles;
-pub mod media;
-pub mod system;
+pub mod calc;
+pub mod clipboard;
 pub mod exec;
 pub mod fav;
+pub mod folders;
+pub mod history;
+pub mod media;
 pub mod screenshot;
-pub mod calc;
+pub mod shell;
+pub mod snippets;
+pub mod stopwatch;
+pub mod system;
+pub mod tempfiles;
+pub mod timer;
+pub mod todo;

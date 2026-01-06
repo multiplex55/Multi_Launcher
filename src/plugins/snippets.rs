@@ -4,9 +4,14 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 
 pub const SNIPPETS_FILE: &str = "snippets.json";
+
+static SNIPPETS_VERSION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SnippetEntry {
@@ -28,6 +33,7 @@ pub fn load_snippets(path: &str) -> anyhow::Result<Vec<SnippetEntry>> {
 pub fn save_snippets(path: &str, snippets: &[SnippetEntry]) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(snippets)?;
     std::fs::write(path, json)?;
+    bump_snippets_version();
     Ok(())
 }
 
@@ -53,6 +59,14 @@ pub fn remove_snippet(path: &str, alias: &str) -> anyhow::Result<()> {
         save_snippets(path, &list)?;
     }
     Ok(())
+}
+
+pub fn snippets_version() -> u64 {
+    SNIPPETS_VERSION.load(Ordering::SeqCst)
+}
+
+fn bump_snippets_version() {
+    SNIPPETS_VERSION.fetch_add(1, Ordering::SeqCst);
 }
 
 pub struct SnippetsPlugin {
@@ -81,6 +95,7 @@ impl SnippetsPlugin {
                                 if let Ok(mut lock) = data_clone.lock() {
                                     *lock = list;
                                 }
+                                bump_snippets_version();
                             }
                         }
                     }

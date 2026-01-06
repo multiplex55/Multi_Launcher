@@ -55,11 +55,17 @@ impl Default for RecentNotesConfig {
 
 pub struct RecentNotesWidget {
     cfg: RecentNotesConfig,
+    cached_notes: Vec<Note>,
+    last_notes_version: u64,
 }
 
 impl RecentNotesWidget {
     pub fn new(cfg: RecentNotesConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            cached_notes: Vec::new(),
+            last_notes_version: u64::MAX,
+        }
     }
 
     pub fn settings_ui(
@@ -181,12 +187,22 @@ impl RecentNotesWidget {
             clean.to_string()
         }
     }
+
+    fn refresh_notes(&mut self, ctx: &DashboardContext<'_>) {
+        if self.last_notes_version == ctx.notes_version {
+            return;
+        }
+        self.cached_notes = load_notes().unwrap_or_default();
+        self.last_notes_version = ctx.notes_version;
+    }
 }
 
 impl Default for RecentNotesWidget {
     fn default() -> Self {
         Self {
             cfg: RecentNotesConfig::default(),
+            cached_notes: Vec::new(),
+            last_notes_version: u64::MAX,
         }
     }
 }
@@ -195,10 +211,11 @@ impl Widget for RecentNotesWidget {
     fn render(
         &mut self,
         ui: &mut egui::Ui,
-        _ctx: &DashboardContext<'_>,
+        ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        let mut notes = load_notes().unwrap_or_default();
+        self.refresh_notes(ctx);
+        let mut notes = self.cached_notes.clone();
         if let Some(tag) = &self.cfg.filter_tag {
             notes.retain(|n| n.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)));
         }
