@@ -3,6 +3,7 @@ use crate::dashboard::widgets::{WidgetRegistry, WidgetSettingsContext};
 use eframe::egui;
 use eframe::egui::collapsing_header::CollapsingState;
 use serde_json::Value;
+use std::collections::HashSet;
 
 #[derive(Default)]
 struct SlotCoverage {
@@ -29,6 +30,7 @@ pub struct DashboardEditorDialog {
     drag_anchor: Option<(usize, usize)>,
     slot_expand_all: bool,
     slot_collapse_all: bool,
+    snap_on_edit: bool,
 }
 
 impl Default for DashboardEditorDialog {
@@ -45,6 +47,7 @@ impl Default for DashboardEditorDialog {
             drag_anchor: None,
             slot_expand_all: false,
             slot_collapse_all: false,
+            snap_on_edit: false,
         }
     }
 }
@@ -129,6 +132,7 @@ impl DashboardEditorDialog {
                     ui.horizontal(|ui| {
                         ui.label("Preview");
                         ui.checkbox(&mut self.show_preview, "Show preview");
+                        ui.checkbox(&mut self.snap_on_edit, "Snap to free space on edit");
                         if ui.button("Auto-place nearest").clicked() {
                             if let Some(idx) = self.selected_slot {
                                 if let Err(err) = self.auto_place(idx, registry) {
@@ -161,8 +165,20 @@ impl DashboardEditorDialog {
                             }
                         }
                     }
+                    let rows = self.config.grid.rows.max(1) as usize;
+                    let cols = self.config.grid.cols.max(1) as usize;
+                    let occupancy = self.occupancy_map(rows, cols, None);
+                    let conflict_messages = self.conflict_messages(&occupancy, rows, cols);
+                    let has_conflicts = occupancy.slot_conflicts.iter().any(|c| *c);
                     if self.show_preview {
-                        self.preview(ui, registry);
+                        self.preview(ui, registry, &occupancy);
+                    }
+
+                    if !conflict_messages.is_empty() {
+                        ui.separator();
+                        for msg in &conflict_messages {
+                            ui.colored_label(egui::Color32::RED, msg);
+                        }
                     }
 
                     ui.separator();
@@ -175,8 +191,16 @@ impl DashboardEditorDialog {
                         if ui.button("Reload from disk").clicked() {
                             self.reload(registry);
                         }
-                        if ui.button("Save").clicked() {
-                            self.save();
+                        ui.add_enabled_ui(!has_conflicts, |ui| {
+                            if ui.button("Save").clicked() {
+                                self.save();
+                            }
+                        });
+                        if has_conflicts {
+                            ui.colored_label(
+                                egui::Color32::RED,
+                                "Resolve slot conflicts before saving.",
+                            );
                         }
                         if ui.button("Expand all").clicked() {
                             self.slot_expand_all = true;
@@ -340,7 +364,9 @@ impl DashboardEditorDialog {
                             self.ensure_selected_slot();
                         } else if edited && slot != original_slot {
                             if let Err(err) = self.commit_slot(idx, slot, registry) {
-                                self.blocked_warning = Some(err);
+                                if self.blocked_warning.is_none() {
+                                    self.blocked_warning = Some(err);
+                                }
                             }
                             idx += 1;
                         } else {
@@ -508,11 +534,34 @@ impl DashboardEditorDialog {
         }
         let rows = self.config.grid.rows.max(1) as usize;
         let cols = self.config.grid.cols.max(1) as usize;
-        let clamped = self.validate_slot(idx, slot, rows, cols, registry)?;
-
-        self.blocked_warning = None;
-        self.config.slots[idx] = clamped;
-        Ok(())
+        let occupancy = self.occupancy_map(rows, cols, Some(idx));
+        match self.validate_slot(idx, slot.clone(), rows, cols, registry, &occupancy) {
+            Ok(clamped) => {
+                self.blocked_warning = None;
+                self.config.slots[idx] = clamped;
+                Ok(())
+            }
+            Err(err) => {
+                if self.snap_on_edit {
+                    match self.auto_place_slot(idx, slot, registry) {
+                        Ok(placed) => {
+                            self.blocked_warning = Some(
+                                "Slot snapped to the nearest free space after a conflict.".into(),
+                            );
+                            self.config.slots[idx] = placed;
+                            return Ok(());
+                        }
+                        Err(auto_err) => {
+                            self.blocked_warning =
+                                Some(format!("{err}; auto-place failed: {auto_err}"));
+                        }
+                    }
+                } else {
+                    self.blocked_warning = Some(err.clone());
+                }
+                Err(err)
+            }
+        }
     }
 
     fn validate_slot(
@@ -522,6 +571,7 @@ impl DashboardEditorDialog {
         rows: usize,
         cols: usize,
         registry: &WidgetRegistry,
+        occupancy: &OccupancyMap,
     ) -> Result<SlotConfig, String> {
         let target_label = Self::slot_label(&slot);
         let mut clamped = slot.clone();
@@ -537,8 +587,6 @@ impl DashboardEditorDialog {
                 target_label
             ));
         }
-
-        let occupancy = self.occupancy_map(rows, cols, Some(idx));
         let coverage = Self::coverage_for_slot(&clamped, rows, cols);
         if coverage.out_of_bounds {
             return Err(format!(
@@ -573,7 +621,7 @@ impl DashboardEditorDialog {
         Ok(clamped)
     }
 
-    fn preview(&mut self, ui: &mut egui::Ui, registry: &WidgetRegistry) {
+    fn preview(&mut self, ui: &mut egui::Ui, registry: &WidgetRegistry, occupancy: &OccupancyMap) {
         let rows = self.config.grid.rows.max(1) as usize;
         let cols = self.config.grid.cols.max(1) as usize;
         if rows == 0 || cols == 0 {
@@ -584,7 +632,6 @@ impl DashboardEditorDialog {
         if self.selected_slot.is_none() && !self.config.slots.is_empty() {
             self.selected_slot = Some(0);
         }
-        let occupancy = self.occupancy_map(rows, cols, None);
         let occupancy_without_selected = self.occupancy_map(rows, cols, self.selected_slot);
 
         let grid_size = egui::vec2((cols as f32).max(1.0) * 40.0, (rows as f32).max(1.0) * 40.0);
@@ -746,7 +793,9 @@ impl DashboardEditorDialog {
                         registry,
                     );
                     if let Err(err) = res {
-                        self.blocked_warning = Some(err);
+                        if self.blocked_warning.is_none() {
+                            self.blocked_warning = Some(err);
+                        }
                     }
                 }
             }
@@ -772,7 +821,9 @@ impl DashboardEditorDialog {
                         registry,
                     );
                     if let Err(err) = res {
-                        self.blocked_warning = Some(err);
+                        if self.blocked_warning.is_none() {
+                            self.blocked_warning = Some(err);
+                        }
                     }
                 }
             }
@@ -801,6 +852,23 @@ impl DashboardEditorDialog {
                     },
                 ),
             );
+            if conflict {
+                for r in row..row + row_span {
+                    for c in col..col + col_span {
+                        if !occupancy_without_selected.owners[r][c].is_empty() {
+                            let cell_rect = egui::Rect::from_min_size(
+                                rect.min + egui::vec2(col_w * c as f32, row_h * r as f32),
+                                egui::vec2(col_w, row_h),
+                            );
+                            painter.rect_stroke(
+                                cell_rect.shrink(1.0),
+                                1.0,
+                                (1.0, egui::Color32::from_rgb(200, 64, 64)),
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -898,6 +966,50 @@ impl DashboardEditorDialog {
         Self::build_occupancy_map_for(&self.config.slots, rows, cols, exclude)
     }
 
+    fn conflict_messages(&self, occupancy: &OccupancyMap, rows: usize, cols: usize) -> Vec<String> {
+        let mut messages = Vec::new();
+        let mut seen = HashSet::new();
+        for (idx, slot) in self.config.slots.iter().enumerate() {
+            if !occupancy.slot_conflicts.get(idx).copied().unwrap_or(false) {
+                continue;
+            }
+            let label = Self::slot_label(slot);
+            let coverage = Self::coverage_for_slot(slot, rows, cols);
+            if coverage.out_of_bounds {
+                messages.push(format!(
+                    "Slot '{}' at row {}, col {} exceeds the {}x{} grid.",
+                    label, slot.row, slot.col, rows, cols
+                ));
+            }
+            for (r, c) in coverage.cells {
+                let owners = occupancy.owners.get(r).and_then(|row| row.get(c));
+                if let Some(owners) = owners {
+                    if owners.len() > 1 {
+                        for other_idx in owners {
+                            if *other_idx == idx {
+                                continue;
+                            }
+                            let key = (idx.min(*other_idx), idx.max(*other_idx), r, c);
+                            if seen.insert(key) {
+                                let other_label = self
+                                    .config
+                                    .slots
+                                    .get(*other_idx)
+                                    .map(Self::slot_label)
+                                    .unwrap_or_else(|| "another slot".to_string());
+                                messages.push(format!(
+                                    "Slot '{}' overlaps '{}' at row {}, col {}",
+                                    label, other_label, r, c
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        messages
+    }
+
     fn slot_label(slot: &SlotConfig) -> String {
         slot.id.clone().unwrap_or_else(|| slot.widget.clone())
     }
@@ -918,13 +1030,19 @@ impl DashboardEditorDialog {
         (row, col)
     }
 
-    fn auto_place(&mut self, idx: usize, registry: &WidgetRegistry) -> Result<(), String> {
+    fn auto_place_slot(
+        &self,
+        idx: usize,
+        slot: SlotConfig,
+        _registry: &WidgetRegistry,
+    ) -> Result<SlotConfig, String> {
         if idx >= self.config.slots.len() {
             return Err("Select a slot to auto-place".into());
         }
         let rows = self.config.grid.rows.max(1) as usize;
         let cols = self.config.grid.cols.max(1) as usize;
         let mut base_cfg = self.config.clone();
+        base_cfg.slots[idx] = slot.clone();
         let mut slot = base_cfg.slots.remove(idx);
         Self::clamp_slot(&mut slot, rows, cols);
         let base_occupancy = Self::build_occupancy_map_for(&base_cfg.slots, rows, cols, None);
@@ -959,19 +1077,26 @@ impl DashboardEditorDialog {
             }
         }
         if let Some((_, r, c)) = best {
-            return self.commit_slot(
-                idx,
-                SlotConfig {
-                    row: r as i32,
-                    col: c as i32,
-                    row_span: span_r as u8,
-                    col_span: span_c as u8,
-                    ..slot.clone()
-                },
-                registry,
-            );
+            return Ok(SlotConfig {
+                row: r as i32,
+                col: c as i32,
+                row_span: span_r as u8,
+                col_span: span_c as u8,
+                ..slot.clone()
+            });
         }
         Err("No free space for this span".into())
+    }
+
+    fn auto_place(&mut self, idx: usize, registry: &WidgetRegistry) -> Result<(), String> {
+        if idx >= self.config.slots.len() {
+            return Err("Select a slot to auto-place".into());
+        }
+        let slot = self.config.slots[idx].clone();
+        let placed = self.auto_place_slot(idx, slot, registry)?;
+        self.config.slots[idx] = placed;
+        self.blocked_warning = None;
+        Ok(())
     }
 
     fn can_fit(

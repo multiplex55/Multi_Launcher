@@ -3,6 +3,7 @@ use crate::dashboard::layout::{normalize_slots, NormalizedSlot};
 use crate::dashboard::widgets::{Widget, WidgetAction, WidgetRegistry};
 use crate::{actions::Action, common::json_watch::JsonWatcher};
 use eframe::egui;
+use eframe::egui::scroll_area::ScrollBarVisibility;
 #[cfg(test)]
 use once_cell::sync::Lazy;
 use serde_json;
@@ -10,6 +11,8 @@ use siphasher::sip::SipHasher24;
 use std::collections::HashMap;
 use std::hash::Hasher;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DashboardEvent {
@@ -242,11 +245,6 @@ impl Dashboard {
             .id
             .clone()
             .unwrap_or_else(|| slot.slot.widget.clone());
-        let height_id = slot_height_id(&slot.slot);
-        let previous_height = ui
-            .ctx()
-            .data(|d| d.get_temp::<f32>(height_id))
-            .unwrap_or_default();
 
         ui.set_clip_rect(slot_clip);
         ui.set_min_size(slot_rect.size());
@@ -266,32 +264,28 @@ impl Dashboard {
                         (slot_rect.height() - header_height - ui.spacing().item_spacing.y).max(0.0);
                     let overflow = match slot.slot.overflow {
                         OverflowMode::Clip => OverflowPolicy::Clip,
-                        OverflowMode::Scroll => OverflowPolicy::Scroll,
-                        OverflowMode::Auto => {
-                            if previous_height > body_height {
-                                OverflowPolicy::Scroll
-                            } else {
-                                OverflowPolicy::Clip
-                            }
-                        }
+                        OverflowMode::Scroll => OverflowPolicy::Scroll {
+                            visibility: ScrollBarVisibility::AlwaysVisible,
+                        },
+                        OverflowMode::Auto => OverflowPolicy::Scroll {
+                            visibility: ScrollBarVisibility::WhenNeeded,
+                        },
                     };
 
-                    let (action, content_height) = match overflow {
+                    let action = match overflow {
                         OverflowPolicy::Clip => {
                             Self::render_clipped_widget(slot, ui, ctx, activation, body_height)
                         }
-                        OverflowPolicy::Scroll => Self::render_scrollable_widget(
+                        OverflowPolicy::Scroll { visibility } => Self::render_scrollable_widget(
                             slot,
                             ui,
                             ctx,
                             activation,
                             body_height,
-                            slot.slot.overflow,
+                            slot_clip,
+                            visibility,
                         ),
                     };
-
-                    ui.ctx()
-                        .data_mut(|d| d.insert_temp(height_id, content_height));
 
                     header_action.or(action)
                 })
@@ -306,7 +300,7 @@ impl Dashboard {
         ctx: &DashboardContext<'_>,
         activation: WidgetActivation,
         body_height: f32,
-    ) -> (Option<WidgetAction>, f32) {
+    ) -> Option<WidgetAction> {
         ui.set_min_height(body_height);
         ui.set_max_height(body_height);
         Self::render_widget_content(slot, ui, ctx, activation)
@@ -318,9 +312,9 @@ impl Dashboard {
         ctx: &DashboardContext<'_>,
         activation: WidgetActivation,
         body_height: f32,
-        overflow: OverflowMode,
-    ) -> (Option<WidgetAction>, f32) {
-        let mut measured_height = 0.0;
+        slot_clip: egui::Rect,
+        visibility: ScrollBarVisibility,
+    ) -> Option<WidgetAction> {
         let scroll_id = egui::Id::new((
             "slot-scroll",
             slot.slot.id.as_deref().unwrap_or(&slot.slot.widget),
@@ -331,20 +325,18 @@ impl Dashboard {
             .id_source(scroll_id)
             .auto_shrink([false; 2])
             .max_height(body_height)
-            .enable_scrolling(matches!(
-                overflow,
-                OverflowMode::Scroll | OverflowMode::Auto
-            ));
+            .scroll_bar_visibility(visibility);
+        #[cfg(test)]
+        SCROLL_VISIBILITY_RECORDS.lock().unwrap().push(visibility);
 
-        let output = scroll_area.show_viewport(ui, |ui, _viewport| {
-            ui.set_min_height(body_height);
-            let (action, height) = Self::render_widget_content(slot, ui, ctx, activation);
-            measured_height = height;
-            action
-        });
-
-        let content_height = output.content_size.y.max(measured_height);
-        (output.inner, content_height)
+        scroll_area
+            .show_viewport(ui, |ui, _viewport| {
+                ui.set_clip_rect(slot_clip);
+                ui.set_min_height(body_height);
+                ui.set_max_height(body_height);
+                Self::render_widget_content(slot, ui, ctx, activation)
+            })
+            .inner
     }
 
     fn render_widget_content(
@@ -367,17 +359,12 @@ impl Dashboard {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OverflowPolicy {
     Clip,
-    Scroll,
+    Scroll { visibility: ScrollBarVisibility },
 }
 
-fn slot_height_id(slot: &NormalizedSlot) -> egui::Id {
-    egui::Id::new((
-        "dashboard-slot-height",
-        slot.id.as_deref().unwrap_or(&slot.widget),
-        slot.row,
-        slot.col,
-    ))
-}
+#[cfg(test)]
+static SCROLL_VISIBILITY_RECORDS: Lazy<Mutex<Vec<ScrollBarVisibility>>> =
+    Lazy::new(|| Mutex::new(Vec::new()));
 
 #[cfg(test)]
 mod tests {
@@ -462,6 +449,10 @@ mod tests {
 
     fn take_renders() -> Vec<String> {
         std::mem::take(&mut *RENDERS.lock().unwrap())
+    }
+
+    fn take_scroll_visibilities() -> Vec<ScrollBarVisibility> {
+        std::mem::take(&mut *SCROLL_VISIBILITY_RECORDS.lock().unwrap())
     }
 
     fn recording_registry() -> WidgetRegistry {
@@ -574,6 +565,7 @@ mod tests {
 
     #[test]
     fn auto_overflow_scrolls_when_needed() {
+        take_scroll_visibilities();
         let cfg = DashboardConfig {
             version: 1,
             grid: GridConfig { rows: 1, cols: 1 },
@@ -602,6 +594,44 @@ mod tests {
         let record = records[0];
         let expected_clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
         assert_eq!(record.clip, expected_clip);
+        assert_eq!(
+            take_scroll_visibilities(),
+            vec![ScrollBarVisibility::WhenNeeded]
+        );
+    }
+
+    #[test]
+    fn clip_overflow_clips_without_scroll() {
+        take_scroll_visibilities();
+        let cfg = DashboardConfig {
+            version: 1,
+            grid: GridConfig { rows: 1, cols: 1 },
+            slots: vec![SlotConfig {
+                overflow: OverflowMode::Clip,
+                ..SlotConfig::with_widget("record", 0, 0)
+            }],
+        };
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        cfg.save(tmp.path()).unwrap();
+
+        let registry = recording_registry();
+        let mut dashboard = dashboard_with_config(tmp.path(), registry);
+        let plugins = PluginManager::new();
+        let ctx = dashboard_context(&plugins);
+
+        egui::__run_test_ui(|ui| {
+            let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
+            ui.allocate_ui_at_rect(rect, |ui| {
+                dashboard.ui(ui, &ctx, WidgetActivation::Click);
+            });
+        });
+
+        let records = take_records();
+        assert_eq!(records.len(), 1);
+        let record = records[0];
+        let expected_clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
+        assert_eq!(record.clip, expected_clip);
+        assert!(take_scroll_visibilities().is_empty());
     }
 
     #[test]
