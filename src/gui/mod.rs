@@ -2500,6 +2500,7 @@ impl eframe::App for LauncherApp {
                         self.custom_len = custom_len;
                         self.update_action_cache();
                         self.search();
+                        crate::actions::bump_actions_version();
                         tracing::info!("actions reloaded");
                     }
                 }
@@ -2716,6 +2717,12 @@ impl eframe::App for LauncherApp {
                     usage: &self.usage,
                     plugins: &self.plugins,
                     default_location: self.dashboard_default_location.as_deref(),
+                    actions_version: crate::actions::actions_version(),
+                    fav_version: crate::plugins::fav::fav_version(),
+                    notes_version: crate::plugins::note::note_version(),
+                    todo_version: crate::plugins::todo::todo_version(),
+                    clipboard_version: crate::plugins::clipboard::clipboard_version(),
+                    snippets_version: crate::plugins::snippets::snippets_version(),
                 };
                 if let Some(action) = self.dashboard.ui(ui, &ctx, WidgetActivation::Click) {
                     self.activate_action(action.action, action.query_override, ActivationSource::Dashboard);

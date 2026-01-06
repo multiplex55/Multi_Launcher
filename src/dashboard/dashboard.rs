@@ -5,7 +5,10 @@ use crate::{actions::Action, common::json_watch::JsonWatcher};
 use eframe::egui;
 #[cfg(test)]
 use once_cell::sync::Lazy;
+use serde_json;
+use siphasher::sip::SipHasher24;
 use std::collections::HashMap;
+use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,10 +29,17 @@ pub struct DashboardContext<'a> {
     pub usage: &'a std::collections::HashMap<String, u32>,
     pub plugins: &'a crate::plugin::PluginManager,
     pub default_location: Option<&'a str>,
+    pub actions_version: u64,
+    pub fav_version: u64,
+    pub notes_version: u64,
+    pub todo_version: u64,
+    pub clipboard_version: u64,
+    pub snippets_version: u64,
 }
 
 struct SlotRuntime {
     slot: NormalizedSlot,
+    hash: u64,
     widget: Box<dyn Widget>,
 }
 
@@ -61,6 +71,20 @@ impl SlotKey {
             }
         }
     }
+}
+
+fn slot_hash(slot: &NormalizedSlot) -> u64 {
+    let mut hasher = SipHasher24::new_with_keys(0, 0);
+    hasher.write(slot.widget.as_bytes());
+    hasher.write_u64(slot.row as u64);
+    hasher.write_u64(slot.col as u64);
+    hasher.write_u64(slot.row_span as u64);
+    hasher.write_u64(slot.col_span as u64);
+    hasher.write(slot.overflow.as_str().as_bytes());
+    if let Ok(bytes) = serde_json::to_vec(&slot.settings) {
+        hasher.write(&bytes);
+    }
+    hasher.finish()
 }
 
 pub struct Dashboard {
@@ -117,16 +141,19 @@ impl Dashboard {
 
         let mut runtime_slots = Vec::with_capacity(slots.len());
         for slot in &slots {
-            if let Some(mut runtime) = reusable.remove(&SlotKey::from_slot(slot)) {
-                let settings_changed = runtime.slot.settings != slot.settings;
+            let new_hash = slot_hash(slot);
+            let reused = reusable
+                .remove(&SlotKey::from_slot(slot))
+                .and_then(|rt| (rt.hash == new_hash).then_some(rt));
+
+            if let Some(mut runtime) = reused {
                 runtime.slot = slot.clone();
-                if settings_changed {
-                    runtime.widget.on_config_updated(&runtime.slot.settings);
-                }
+                runtime.hash = new_hash;
                 runtime_slots.push(runtime);
             } else if let Some(widget) = self.registry.create(&slot.widget, &slot.settings) {
                 runtime_slots.push(SlotRuntime {
                     slot: slot.clone(),
+                    hash: new_hash,
                     widget,
                 });
             }
@@ -467,6 +494,12 @@ mod tests {
             usage: &EMPTY_USAGE,
             plugins,
             default_location: None,
+            actions_version: 0,
+            fav_version: 0,
+            notes_version: 0,
+            todo_version: 0,
+            clipboard_version: 0,
+            snippets_version: 0,
         }
     }
 
@@ -623,8 +656,8 @@ mod tests {
             });
         });
 
-        assert_eq!(CREATED.load(Ordering::SeqCst), 1);
-        assert_eq!(UPDATED.load(Ordering::SeqCst), 1);
+        assert_eq!(CREATED.load(Ordering::SeqCst), 2);
+        assert_eq!(UPDATED.load(Ordering::SeqCst), 0);
         assert_eq!(take_renders(), vec!["second".to_string()]);
     }
 }

@@ -5,12 +5,16 @@ use chrono::Local;
 use eframe::egui;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoteExternalOpen {
@@ -115,6 +119,7 @@ static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"#([A-Za-z0-9_]+)").unwrap
 static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
 // Matches markdown image syntax `![alt](path)` capturing the path portion.
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[[^\]]*\]\(([^)]+)\)").unwrap());
+static NOTE_VERSION: AtomicU64 = AtomicU64::new(0);
 
 fn extract_tags(content: &str) -> Vec<String> {
     let mut tags: Vec<String> = Vec::new();
@@ -322,7 +327,16 @@ pub fn refresh_cache() -> anyhow::Result<()> {
     if let Ok(mut guard) = CACHE.lock() {
         *guard = cache;
     }
+    bump_note_version();
     Ok(())
+}
+
+fn bump_note_version() {
+    NOTE_VERSION.fetch_add(1, Ordering::SeqCst);
+}
+
+pub fn note_version() -> u64 {
+    NOTE_VERSION.load(Ordering::SeqCst)
 }
 
 /// Return a list of all unique tags from the cached notes.
@@ -445,17 +459,52 @@ pub struct NotePlugin {
     data: Arc<Mutex<NoteCache>>,
     templates: Arc<Mutex<HashMap<String, String>>>,
     external_open: NoteExternalOpen,
+    #[allow(dead_code)]
+    watcher: Option<RecommendedWatcher>,
 }
 
 impl NotePlugin {
     pub fn new() -> Self {
         let _ = refresh_cache();
         let _ = refresh_template_cache();
+        let data = CACHE.clone();
+        let templates = TEMPLATE_CACHE.clone();
+        let dir = notes_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let watcher = RecommendedWatcher::new(
+            move |res: notify::Result<notify::Event>| {
+                if let Ok(event) = res {
+                    if matches!(
+                        event.kind,
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                    ) {
+                        let _ = refresh_cache();
+                    }
+                }
+            },
+            Config::default(),
+        )
+        .ok()
+        .and_then(|mut w| {
+            if w.watch(&dir, RecursiveMode::NonRecursive)
+                .or_else(|_| {
+                    dir.parent()
+                        .map(|p| w.watch(p, RecursiveMode::NonRecursive))
+                        .unwrap_or(Ok(()))
+                })
+                .is_ok()
+            {
+                Some(w)
+            } else {
+                None
+            }
+        });
         Self {
             matcher: SkimMatcherV2::default(),
-            data: CACHE.clone(),
-            templates: TEMPLATE_CACHE.clone(),
+            data,
+            templates,
             external_open: NoteExternalOpen::Wezterm,
+            watcher,
         }
     }
 }
