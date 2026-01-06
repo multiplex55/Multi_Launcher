@@ -268,7 +268,7 @@ impl Dashboard {
                             visibility: ScrollBarVisibility::AlwaysVisible,
                         },
                         OverflowMode::Auto => OverflowPolicy::Scroll {
-                            visibility: ScrollBarVisibility::WhenNeeded,
+                            visibility: ScrollBarVisibility::VisibleWhenNeeded,
                         },
                     };
 
@@ -344,11 +344,8 @@ impl Dashboard {
         ui: &mut egui::Ui,
         ctx: &DashboardContext<'_>,
         activation: WidgetActivation,
-    ) -> (Option<WidgetAction>, f32) {
-        let start_cursor = ui.cursor().min.y;
-        let action = slot.widget.render(ui, ctx, activation);
-        let end_cursor = ui.cursor().max.y;
-        (action, (end_cursor - start_cursor).max(0.0))
+    ) -> Option<WidgetAction> {
+        slot.widget.render(ui, ctx, activation)
     }
 
     pub fn registry(&self) -> &WidgetRegistry {
@@ -596,7 +593,7 @@ mod tests {
         assert_eq!(record.clip, expected_clip);
         assert_eq!(
             take_scroll_visibilities(),
-            vec![ScrollBarVisibility::WhenNeeded]
+            vec![ScrollBarVisibility::VisibleWhenNeeded]
         );
     }
 
