@@ -1,6 +1,6 @@
 use super::{
-    edit_typed_settings, find_plugin, refresh_interval_setting, TimedCache, Widget, WidgetAction,
-    WidgetSettingsContext, WidgetSettingsUiResult,
+    edit_typed_settings, refresh_interval_setting, Widget, WidgetAction, WidgetSettingsContext,
+    WidgetSettingsUiResult,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -35,18 +35,11 @@ impl Default for ProcessesConfig {
 
 pub struct ProcessesWidget {
     cfg: ProcessesConfig,
-    cache: TimedCache<Vec<Action>>,
-    error: Option<String>,
 }
 
 impl ProcessesWidget {
     pub fn new(cfg: ProcessesConfig) -> Self {
-        let interval = Duration::from_secs_f32(cfg.refresh_interval_secs.max(1.0));
-        Self {
-            cfg,
-            cache: TimedCache::new(Vec::new(), interval),
-            error: None,
-        }
+        Self { cfg }
     }
 
     pub fn settings_ui(
@@ -75,35 +68,9 @@ impl ProcessesWidget {
     fn refresh_interval(&self) -> Duration {
         Duration::from_secs_f32(self.cfg.refresh_interval_secs.max(1.0))
     }
-
-    fn update_interval(&mut self) {
-        self.cache.set_interval(self.refresh_interval());
-    }
-
-    fn refresh(&mut self, ctx: &DashboardContext<'_>) {
-        self.update_interval();
-        let (actions, error) = Self::load_processes(ctx);
-        self.error = error;
-        self.cache.refresh(|data| *data = actions);
-    }
-
-    fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
-        self.update_interval();
-        if self.cache.should_refresh() {
-            self.refresh(ctx);
-        }
-    }
-
-    fn load_processes(ctx: &DashboardContext<'_>) -> (Vec<Action>, Option<String>) {
-        let Some(plugin) = find_plugin(ctx, "processes") else {
-            return (Vec::new(), Some("Processes plugin not available.".into()));
-        };
-        (plugin.search("ps"), None)
-    }
-
-    fn grouped_actions(&self) -> Vec<(String, Option<Action>, Option<Action>)> {
+    fn grouped_actions(&self, actions: &[Action]) -> Vec<(String, Option<Action>, Option<Action>)> {
         let mut grouped: Vec<(String, Option<Action>, Option<Action>)> = Vec::new();
-        for action in &self.cache.data {
+        for action in actions {
             let label = action.label.to_lowercase();
             let idx = grouped.iter().position(|(desc, _, _)| desc == &action.desc);
             let entry = if let Some(idx) = idx {
@@ -138,33 +105,42 @@ impl Widget for ProcessesWidget {
         ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        self.maybe_refresh(ctx);
+        ctx.data_cache
+            .maybe_refresh_processes(ctx.plugins, self.refresh_interval());
+        let snapshot = ctx.data_cache.snapshot();
 
-        if let Some(err) = &self.error {
+        if let Some(err) = &snapshot.process_error {
             ui.colored_label(egui::Color32::YELLOW, err);
         }
 
-        if self.cache.data.is_empty() {
+        if snapshot.processes.is_empty() {
             ui.label("No processes found.");
             return None;
         }
 
         let mut clicked = None;
-        for (desc, switch, kill) in self.grouped_actions() {
-            ui.horizontal(|ui| {
-                if let Some(action) = &switch {
-                    if ui.button(&action.label).clicked() {
-                        clicked = Some(action.clone());
-                    }
+        let grouped = self.grouped_actions(snapshot.processes.as_ref());
+        let row_height =
+            ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y + 8.0;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false; 2])
+            .show_rows(ui, row_height, grouped.len(), |ui, range| {
+                for (desc, switch, kill) in &grouped[range] {
+                    ui.horizontal(|ui| {
+                        if let Some(action) = switch {
+                            if ui.button(&action.label).clicked() {
+                                clicked = Some(action.clone());
+                            }
+                        }
+                        if let Some(action) = kill {
+                            if ui.small_button("Kill").clicked() {
+                                clicked = Some(action.clone());
+                            }
+                        }
+                        ui.label(egui::RichText::new(desc).small());
+                    });
                 }
-                if let Some(action) = &kill {
-                    if ui.small_button("Kill").clicked() {
-                        clicked = Some(action.clone());
-                    }
-                }
-                ui.label(egui::RichText::new(desc).small());
             });
-        }
 
         clicked.map(|action| WidgetAction {
             query_override: Some(action.label.clone()),
@@ -175,8 +151,6 @@ impl Widget for ProcessesWidget {
     fn on_config_updated(&mut self, settings: &serde_json::Value) {
         if let Ok(cfg) = serde_json::from_value::<ProcessesConfig>(settings.clone()) {
             self.cfg = cfg;
-            self.update_interval();
-            self.cache.invalidate();
         }
     }
 
@@ -186,7 +160,7 @@ impl Widget for ProcessesWidget {
             self.cfg.refresh_interval_secs
         );
         if ui.small_button("Refresh").on_hover_text(tooltip).clicked() {
-            self.refresh(ctx);
+            ctx.data_cache.refresh_processes(ctx.plugins);
         }
         None
     }

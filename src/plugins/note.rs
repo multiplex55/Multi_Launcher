@@ -202,7 +202,7 @@ pub fn get_template(name: &str) -> Option<String> {
         .and_then(|m| m.get(name).cloned())
 }
 
-fn notes_dir() -> PathBuf {
+pub fn notes_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("ML_NOTES_DIR") {
         return PathBuf::from(dir);
     }

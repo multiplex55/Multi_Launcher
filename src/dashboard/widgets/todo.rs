@@ -4,7 +4,7 @@ use super::{
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
-use crate::plugins::todo::{mark_done, TodoEntry, TODO_DATA, TODO_FILE};
+use crate::plugins::todo::{mark_done, TodoEntry, TODO_FILE};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
@@ -154,8 +154,7 @@ impl TodoWidget {
         }
     }
 
-    fn render_summary(&self, ui: &mut egui::Ui) -> Option<WidgetAction> {
-        let todos = TODO_DATA.read().ok().map(|t| t.clone()).unwrap_or_default();
+    fn render_summary(&self, ui: &mut egui::Ui, todos: &[TodoEntry]) -> Option<WidgetAction> {
         let done = todos.iter().filter(|t| t.done).count();
         let total = todos.len();
         let mut action = None;
@@ -176,10 +175,13 @@ impl TodoWidget {
         action
     }
 
-    fn render_list(&self, ui: &mut egui::Ui) -> Option<WidgetAction> {
-        let todos = TODO_DATA.read().ok().map(|t| t.clone()).unwrap_or_default();
-
-        let mut entries: Vec<(usize, TodoEntry)> = todos.into_iter().enumerate().collect();
+    fn render_list(
+        &self,
+        ui: &mut egui::Ui,
+        ctx: &DashboardContext<'_>,
+        todos: &[TodoEntry],
+    ) -> Option<WidgetAction> {
+        let mut entries: Vec<(usize, TodoEntry)> = todos.iter().cloned().enumerate().collect();
         if !self.cfg.show_done {
             entries.retain(|(_, t)| !t.done);
         }
@@ -192,41 +194,49 @@ impl TodoWidget {
         }
 
         let mut clicked = None;
-        for (idx, entry) in entries.into_iter() {
-            let mut entry_done = entry.done;
-            ui.horizontal(|ui| {
-                if ui.checkbox(&mut entry_done, "").changed() {
-                    if let Err(err) = mark_done(TODO_FILE, idx) {
-                        tracing::error!("Failed to toggle todo #{idx}: {err}");
-                    }
-                }
-                let mut label = entry.text.clone();
-                if entry.priority > 0 {
-                    label.push_str(&format!(" (p{})", entry.priority));
-                }
-                let text = if entry.done {
-                    egui::RichText::new(label).strikethrough()
-                } else {
-                    egui::RichText::new(label)
-                };
-                ui.label(text);
-                if !entry.tags.is_empty() {
-                    let tags = entry.tags.join(", ");
-                    ui.label(egui::RichText::new(format!("#{tags}")).small());
-                }
-                if ui.small_button("Open").clicked() {
-                    clicked.get_or_insert(WidgetAction {
-                        action: Action {
-                            label: entry.text.clone(),
-                            desc: "Todo".into(),
-                            action: format!("todo:edit:{idx}"),
-                            args: None,
-                        },
-                        query_override: Some(format!("todo edit {}", entry.text)),
+        let row_height =
+            ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y + 8.0;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false; 2])
+            .show_rows(ui, row_height, entries.len(), |ui, range| {
+                for (idx, entry) in entries[range].iter().cloned() {
+                    let mut entry_done = entry.done;
+                    ui.horizontal(|ui| {
+                        if ui.checkbox(&mut entry_done, "").changed() {
+                            if let Err(err) = mark_done(TODO_FILE, idx) {
+                                tracing::error!("Failed to toggle todo #{idx}: {err}");
+                            } else {
+                                ctx.data_cache.refresh_todos();
+                            }
+                        }
+                        let mut label = entry.text.clone();
+                        if entry.priority > 0 {
+                            label.push_str(&format!(" (p{})", entry.priority));
+                        }
+                        let text = if entry.done {
+                            egui::RichText::new(label).strikethrough()
+                        } else {
+                            egui::RichText::new(label)
+                        };
+                        ui.label(text);
+                        if !entry.tags.is_empty() {
+                            let tags = entry.tags.join(", ");
+                            ui.label(egui::RichText::new(format!("#{tags}")).small());
+                        }
+                        if ui.small_button("Open").clicked() {
+                            clicked.get_or_insert(WidgetAction {
+                                action: Action {
+                                    label: entry.text.clone(),
+                                    desc: "Todo".into(),
+                                    action: format!("todo:edit:{idx}"),
+                                    args: None,
+                                },
+                                query_override: Some(format!("todo edit {}", entry.text)),
+                            });
+                        }
                     });
                 }
             });
-        }
 
         clicked
     }
@@ -244,15 +254,17 @@ impl Widget for TodoWidget {
     fn render(
         &mut self,
         ui: &mut egui::Ui,
-        _ctx: &DashboardContext<'_>,
+        ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        let mut action = self.render_summary(ui);
+        let snapshot = ctx.data_cache.snapshot();
+        let todos = snapshot.todos.as_ref();
+        let mut action = self.render_summary(ui, todos);
         ui.separator();
         if action.is_none() {
-            action = self.render_list(ui);
+            action = self.render_list(ui, ctx, todos);
         } else {
-            self.render_list(ui);
+            self.render_list(ui, ctx, todos);
         }
         action
     }

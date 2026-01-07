@@ -1,4 +1,5 @@
 use crate::dashboard::config::{DashboardConfig, OverflowMode};
+use crate::dashboard::data_cache::DashboardDataCache;
 use crate::dashboard::layout::{normalize_slots, NormalizedSlot};
 use crate::dashboard::widgets::{Widget, WidgetAction, WidgetRegistry};
 use crate::{actions::Action, common::json_watch::JsonWatcher};
@@ -29,9 +30,11 @@ pub enum WidgetActivation {
 /// Context shared with widgets at render time.
 pub struct DashboardContext<'a> {
     pub actions: &'a [Action],
+    pub actions_by_id: &'a std::collections::HashMap<String, Action>,
     pub usage: &'a std::collections::HashMap<String, u32>,
     pub plugins: &'a crate::plugin::PluginManager,
     pub default_location: Option<&'a str>,
+    pub data_cache: &'a DashboardDataCache,
     pub actions_version: u64,
     pub fav_version: u64,
     pub notes_version: u64,
@@ -145,11 +148,11 @@ impl Dashboard {
         let mut runtime_slots = Vec::with_capacity(slots.len());
         for slot in &slots {
             let new_hash = slot_hash(slot);
-            let reused = reusable
-                .remove(&SlotKey::from_slot(slot))
-                .and_then(|rt| (rt.hash == new_hash).then_some(rt));
-
-            if let Some(mut runtime) = reused {
+            let key = SlotKey::from_slot(slot);
+            if let Some(mut runtime) = reusable.remove(&key) {
+                if runtime.hash != new_hash {
+                    runtime.widget.on_config_updated(&slot.settings);
+                }
                 runtime.slot = slot.clone();
                 runtime.hash = new_hash;
                 runtime_slots.push(runtime);
@@ -475,13 +478,19 @@ mod tests {
         reg
     }
 
-    fn dashboard_context<'a>(plugins: &'a PluginManager) -> DashboardContext<'a> {
+    fn dashboard_context<'a>(
+        plugins: &'a PluginManager,
+        data_cache: &'a DashboardDataCache,
+    ) -> DashboardContext<'a> {
         static EMPTY_USAGE: Lazy<HashMap<String, u32>> = Lazy::new(HashMap::new);
+        static EMPTY_ACTIONS_BY_ID: Lazy<HashMap<String, Action>> = Lazy::new(HashMap::new);
         DashboardContext {
             actions: &[],
+            actions_by_id: &EMPTY_ACTIONS_BY_ID,
             usage: &EMPTY_USAGE,
             plugins,
             default_location: None,
+            data_cache,
             actions_version: 0,
             fav_version: 0,
             notes_version: 0,
@@ -510,7 +519,8 @@ mod tests {
         let registry = recording_registry();
         let mut dashboard = dashboard_with_config(tmp.path(), registry);
         let plugins = PluginManager::new();
-        let ctx = dashboard_context(&plugins);
+        let data_cache = DashboardDataCache::new();
+        let ctx = dashboard_context(&plugins, &data_cache);
 
         egui::__run_test_ui(|ui| {
             let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(240.0, 180.0));
@@ -542,7 +552,8 @@ mod tests {
         let registry = recording_registry();
         let mut dashboard = dashboard_with_config(tmp.path(), registry);
         let plugins = PluginManager::new();
-        let ctx = dashboard_context(&plugins);
+        let data_cache = DashboardDataCache::new();
+        let ctx = dashboard_context(&plugins, &data_cache);
 
         egui::__run_test_ui(|ui| {
             let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 200.0));
@@ -577,7 +588,8 @@ mod tests {
         let registry = recording_registry();
         let mut dashboard = dashboard_with_config(tmp.path(), registry);
         let plugins = PluginManager::new();
-        let ctx = dashboard_context(&plugins);
+        let data_cache = DashboardDataCache::new();
+        let ctx = dashboard_context(&plugins, &data_cache);
 
         egui::__run_test_ui(|ui| {
             let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
@@ -614,7 +626,8 @@ mod tests {
         let registry = recording_registry();
         let mut dashboard = dashboard_with_config(tmp.path(), registry);
         let plugins = PluginManager::new();
-        let ctx = dashboard_context(&plugins);
+        let data_cache = DashboardDataCache::new();
+        let ctx = dashboard_context(&plugins, &data_cache);
 
         egui::__run_test_ui(|ui| {
             let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
@@ -651,7 +664,8 @@ mod tests {
         let registry = updating_registry();
         let mut dashboard = dashboard_with_config(tmp.path(), registry);
         let plugins = PluginManager::new();
-        let ctx = dashboard_context(&plugins);
+        let data_cache = DashboardDataCache::new();
+        let ctx = dashboard_context(&plugins, &data_cache);
 
         egui::__run_test_ui(|ui| {
             let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
@@ -683,8 +697,8 @@ mod tests {
             });
         });
 
-        assert_eq!(CREATED.load(Ordering::SeqCst), 2);
-        assert_eq!(UPDATED.load(Ordering::SeqCst), 0);
+        assert_eq!(CREATED.load(Ordering::SeqCst), 1);
+        assert_eq!(UPDATED.load(Ordering::SeqCst), 1);
         assert_eq!(take_renders(), vec!["second".to_string()]);
     }
 }
