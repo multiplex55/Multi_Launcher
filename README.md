@@ -178,6 +178,17 @@ The dashboard is enabled by default on first launch and appears whenever the sea
 - **Pinned Query Results** runs a saved query against any plugin or the `omni_search` engine and pins the top matches as buttons. Settings: `engine`, `query`, `limit`, `refresh_interval_secs`, `click_behavior`. The default layout places it in the second row; adjust the slot in `dashboard.json` or the dashboard editor to reposition it.
 - **Active Timers** highlights running timers with quick pause/cancel controls and optional completion history. Settings: `count`, `show_completed_recently`. Sample queries: `timer list`, `timer pause`.
 - **Clipboard + Snippets/System Snapshot** surfaces the latest clipboard entries, common snippets, and a CPU/memory/disk snapshot when available. Settings: `clipboard_count`, `snippet_count`, `show_system`. Sample queries: `cb list`, `cs list`, `info`.
+- **Query List** runs a saved query across enabled plugins and pins the top matches. Settings: `query`, `count`, `refresh_ms`, `show_desc`.
+- **System Status** displays cached CPU, memory, disk, network, volume, and brightness metrics. Settings: `refresh_interval_secs`, `show_cpu`, `show_memory`, `show_disk`, `show_network`, `show_volume`, `show_brightness`.
+- **Now Playing** exposes media transport controls as buttons. Settings: `show_play`, `show_pause`, `show_prev`, `show_next`.
+- **Clipboard Recent** lists the most recent clipboard entries as copy buttons. Settings: `count`.
+- **Snippet Favorites** shows favorites that map to snippet actions. Settings: `count`. Sample queries: `fav add`, `cs list`.
+- **Notes Recent** lists recently modified notes with optional snippets/tags. Settings: `count`, `show_snippet`, `show_tags`.
+- **Notes Tags** displays the most common note tags. Settings: `count`, `show_counts`. Sample query: `note list #tag`.
+- **Todo Focus** highlights the highest priority todo with quick open/complete controls. Settings: `show_done`, `query`.
+- **Todo Burndown** summarizes todo progress with optional progress bar. Settings: `show_progress`.
+- **Windows Overview** summarizes open windows with optional close buttons. Settings: `limit`, `refresh_interval_secs`, `show_close`.
+- **Quick Tools** renders a customizable strip of query buttons. Settings: `queries`.
 
 Changes are saved back to `dashboard.json` once you click **Save** in the editor.
 

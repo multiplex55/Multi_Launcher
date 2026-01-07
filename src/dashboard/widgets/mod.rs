@@ -9,37 +9,59 @@ use std::time::{Duration, Instant};
 
 mod active_timers;
 mod browser_tabs;
+mod clipboard_recent;
 mod clipboard_snippets;
 mod frequent_commands;
 mod note_meta;
+mod notes_recent;
+mod notes_tags;
 mod notes_open;
+mod now_playing;
 mod pinned_commands;
 mod pinned_query_results;
 mod plugin_home;
 mod process_list;
+mod query_list;
 mod recent_commands;
 mod recent_notes;
+mod snippets_favorites;
 mod system_actions;
+mod system_status;
+mod todo_burndown;
+mod todo_focus;
 mod todo;
 mod weather_site;
 mod window_list;
+mod windows_overview;
+mod quick_tools;
 
 pub use active_timers::ActiveTimersWidget;
 pub use browser_tabs::BrowserTabsWidget;
+pub use clipboard_recent::ClipboardRecentWidget;
 pub use clipboard_snippets::ClipboardSnippetsWidget;
 pub use frequent_commands::FrequentCommandsWidget;
 pub use note_meta::NoteMetaWidget;
+pub use notes_recent::NotesRecentWidget;
+pub use notes_tags::NotesTagsWidget;
 pub use notes_open::NotesOpenWidget;
+pub use now_playing::NowPlayingWidget;
 pub use pinned_commands::PinnedCommandsWidget;
 pub use pinned_query_results::PinnedQueryResultsWidget;
 pub use plugin_home::PluginHomeWidget;
 pub use process_list::ProcessesWidget;
+pub use query_list::QueryListWidget;
 pub use recent_commands::RecentCommandsWidget;
 pub use recent_notes::RecentNotesWidget;
+pub use snippets_favorites::SnippetsFavoritesWidget;
 pub use system_actions::SystemWidget;
+pub use system_status::SystemStatusWidget;
+pub use todo_burndown::TodoBurndownWidget;
+pub use todo_focus::TodoFocusWidget;
 pub use todo::TodoWidget;
 pub use weather_site::WeatherSiteWidget;
 pub use window_list::WindowsWidget;
+pub use windows_overview::WindowsOverviewWidget;
+pub use quick_tools::QuickToolsWidget;
 
 /// Result of a widget activation.
 #[derive(Debug, Clone)]
@@ -219,6 +241,10 @@ impl WidgetRegistry {
                 .with_settings_ui(PinnedQueryResultsWidget::settings_ui),
         );
         reg.register(
+            "query_list",
+            WidgetFactory::new(QueryListWidget::new).with_settings_ui(QueryListWidget::settings_ui),
+        );
+        reg.register(
             "active_timers",
             WidgetFactory::new(ActiveTimersWidget::new)
                 .with_settings_ui(ActiveTimersWidget::settings_ui),
@@ -227,6 +253,11 @@ impl WidgetRegistry {
             "clipboard_snippets",
             WidgetFactory::new(ClipboardSnippetsWidget::new)
                 .with_settings_ui(ClipboardSnippetsWidget::settings_ui),
+        );
+        reg.register(
+            "clipboard_recent",
+            WidgetFactory::new(ClipboardRecentWidget::new)
+                .with_settings_ui(ClipboardRecentWidget::settings_ui),
         );
         reg.register(
             "browser_tabs",
@@ -242,8 +273,50 @@ impl WidgetRegistry {
             WidgetFactory::new(WindowsWidget::new).with_settings_ui(WindowsWidget::settings_ui),
         );
         reg.register(
+            "windows_overview",
+            WidgetFactory::new(WindowsOverviewWidget::new)
+                .with_settings_ui(WindowsOverviewWidget::settings_ui),
+        );
+        reg.register(
             "system",
             WidgetFactory::new(SystemWidget::new).with_settings_ui(SystemWidget::settings_ui),
+        );
+        reg.register(
+            "system_status",
+            WidgetFactory::new(SystemStatusWidget::new)
+                .with_settings_ui(SystemStatusWidget::settings_ui),
+        );
+        reg.register(
+            "now_playing",
+            WidgetFactory::new(NowPlayingWidget::new)
+                .with_settings_ui(NowPlayingWidget::settings_ui),
+        );
+        reg.register(
+            "snippets_favorites",
+            WidgetFactory::new(SnippetsFavoritesWidget::new)
+                .with_settings_ui(SnippetsFavoritesWidget::settings_ui),
+        );
+        reg.register(
+            "notes_recent",
+            WidgetFactory::new(NotesRecentWidget::new)
+                .with_settings_ui(NotesRecentWidget::settings_ui),
+        );
+        reg.register(
+            "notes_tags",
+            WidgetFactory::new(NotesTagsWidget::new).with_settings_ui(NotesTagsWidget::settings_ui),
+        );
+        reg.register(
+            "todo_focus",
+            WidgetFactory::new(TodoFocusWidget::new).with_settings_ui(TodoFocusWidget::settings_ui),
+        );
+        reg.register(
+            "todo_burndown",
+            WidgetFactory::new(TodoBurndownWidget::new)
+                .with_settings_ui(TodoBurndownWidget::settings_ui),
+        );
+        reg.register(
+            "quick_tools",
+            WidgetFactory::new(QuickToolsWidget::new).with_settings_ui(QuickToolsWidget::settings_ui),
         );
         reg
     }
