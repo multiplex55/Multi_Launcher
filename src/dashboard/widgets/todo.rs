@@ -157,10 +157,11 @@ impl TodoWidget {
             return true;
         }
         self.cfg.filter_tags.iter().any(|tag| {
+            let filter = tag.to_lowercase();
             entry
                 .tags
                 .iter()
-                .any(|t| t.eq_ignore_ascii_case(tag))
+                .any(|t| t.to_lowercase().contains(&filter))
         })
     }
 
