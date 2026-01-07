@@ -90,67 +90,71 @@ impl TodoFocusWidget {
                 }
             });
             ui.separator();
-            ui.label("Notes snapshot");
-            if let Some(notes) = ctx.notes {
-                if notes.is_empty() {
-                    ui.label("No notes available.");
-                } else {
-                    egui::ScrollArea::vertical()
-                        .max_height(120.0)
-                        .show(ui, |ui| {
-                            for note in notes {
-                                let mut label = if note.title.is_empty() {
-                                    note.slug.clone()
-                                } else {
-                                    note.title.clone()
-                                };
-                                label.push_str(&format!(" ({})", note.slug));
-                                if !note.tags.is_empty() {
-                                    label.push_str(&format!(" #{}", note.tags.join(" #")));
-                                }
-                                ui.label(label);
-                            }
-                        });
-                }
-            } else {
-                ui.label("Notes data unavailable.");
-            }
-            ui.separator();
-            ui.label("Focused todos");
-            ui.label(
-                egui::RichText::new(
-                    "Matching uses exact todo text + tags (case-insensitive). Tags are sorted \
-                    and deduplicated. If text/tags change, re-select the todo.",
-                )
-                .small(),
-            );
-            if let Some(todos) = ctx.todos {
-                if todos.is_empty() {
-                    ui.label("No todos available.");
-                } else {
-                    egui::ScrollArea::vertical()
-                        .max_height(180.0)
-                        .show(ui, |ui| {
-                            for todo in todos {
-                                let selection =
-                                    FocusedTodoSelection::normalized(&todo.text, &todo.tags);
-                                let mut is_selected =
-                                    cfg.focused_todos.iter().any(|t| t == &selection);
-                                let label = FocusedTodoSelection::display_label(todo);
-                                if ui.checkbox(&mut is_selected, label).changed() {
-                                    if is_selected {
-                                        cfg.focused_todos.push(selection);
+            ui.push_id("notes_snapshot", |ui| {
+                ui.label("Notes snapshot");
+                if let Some(notes) = ctx.notes {
+                    if notes.is_empty() {
+                        ui.label("No notes available.");
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .max_height(120.0)
+                            .show(ui, |ui| {
+                                for note in notes {
+                                    let mut label = if note.title.is_empty() {
+                                        note.slug.clone()
                                     } else {
-                                        cfg.focused_todos.retain(|t| t != &selection);
+                                        note.title.clone()
+                                    };
+                                    label.push_str(&format!(" ({})", note.slug));
+                                    if !note.tags.is_empty() {
+                                        label.push_str(&format!(" #{}", note.tags.join(" #")));
                                     }
-                                    changed = true;
+                                    ui.label(label);
                                 }
-                            }
-                        });
+                            });
+                    }
+                } else {
+                    ui.label("Notes data unavailable.");
                 }
-            } else {
-                ui.label("Todo data unavailable.");
-            }
+            });
+            ui.separator();
+            ui.push_id("focused_todos", |ui| {
+                ui.label("Focused todos");
+                ui.label(
+                    egui::RichText::new(
+                        "Matching uses exact todo text + tags (case-insensitive). Tags are sorted \
+                        and deduplicated. If text/tags change, re-select the todo.",
+                    )
+                    .small(),
+                );
+                if let Some(todos) = ctx.todos {
+                    if todos.is_empty() {
+                        ui.label("No todos available.");
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .max_height(180.0)
+                            .show(ui, |ui| {
+                                for todo in todos {
+                                    let selection =
+                                        FocusedTodoSelection::normalized(&todo.text, &todo.tags);
+                                    let mut is_selected =
+                                        cfg.focused_todos.iter().any(|t| t == &selection);
+                                    let label = FocusedTodoSelection::display_label(todo);
+                                    if ui.checkbox(&mut is_selected, label).changed() {
+                                        if is_selected {
+                                            cfg.focused_todos.push(selection);
+                                        } else {
+                                            cfg.focused_todos.retain(|t| t != &selection);
+                                        }
+                                        changed = true;
+                                    }
+                                }
+                            });
+                    }
+                } else {
+                    ui.label("Todo data unavailable.");
+                }
+            });
             changed
         })
     }
