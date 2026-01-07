@@ -12,10 +12,8 @@ mod browser_tabs;
 mod clipboard_recent;
 mod clipboard_snippets;
 mod frequent_commands;
-mod note_meta;
 mod notes_recent;
 mod notes_tags;
-mod notes_open;
 mod now_playing;
 mod pinned_commands;
 mod pinned_query_results;
@@ -27,7 +25,6 @@ mod recent_notes;
 mod snippets_favorites;
 mod system_actions;
 mod system_status;
-mod todo_burndown;
 mod todo_focus;
 mod todo;
 mod weather_site;
@@ -40,10 +37,8 @@ pub use browser_tabs::BrowserTabsWidget;
 pub use clipboard_recent::ClipboardRecentWidget;
 pub use clipboard_snippets::ClipboardSnippetsWidget;
 pub use frequent_commands::FrequentCommandsWidget;
-pub use note_meta::NoteMetaWidget;
 pub use notes_recent::NotesRecentWidget;
 pub use notes_tags::NotesTagsWidget;
-pub use notes_open::NotesOpenWidget;
 pub use now_playing::NowPlayingWidget;
 pub use pinned_commands::PinnedCommandsWidget;
 pub use pinned_query_results::PinnedQueryResultsWidget;
@@ -55,7 +50,6 @@ pub use recent_notes::RecentNotesWidget;
 pub use snippets_favorites::SnippetsFavoritesWidget;
 pub use system_actions::SystemWidget;
 pub use system_status::SystemStatusWidget;
-pub use todo_burndown::TodoBurndownWidget;
 pub use todo_focus::TodoFocusWidget;
 pub use todo::TodoWidget;
 pub use weather_site::WeatherSiteWidget;
@@ -204,14 +198,6 @@ impl WidgetRegistry {
                 .with_settings_ui(PluginHomeWidget::settings_ui),
         );
         reg.register(
-            "notes_open",
-            WidgetFactory::new(NotesOpenWidget::new).with_settings_ui(NotesOpenWidget::settings_ui),
-        );
-        reg.register(
-            "note_meta",
-            WidgetFactory::new(NoteMetaWidget::new).with_settings_ui(NoteMetaWidget::settings_ui),
-        );
-        reg.register(
             "recent_commands",
             WidgetFactory::new(RecentCommandsWidget::new)
                 .with_settings_ui(RecentCommandsWidget::settings_ui),
@@ -222,7 +208,7 @@ impl WidgetRegistry {
                 .with_settings_ui(FrequentCommandsWidget::settings_ui),
         );
         reg.register(
-            "todo",
+            "todos",
             WidgetFactory::new(TodoWidget::new).with_settings_ui(TodoWidget::settings_ui),
         );
         reg.register(
@@ -308,11 +294,6 @@ impl WidgetRegistry {
         reg.register(
             "todo_focus",
             WidgetFactory::new(TodoFocusWidget::new).with_settings_ui(TodoFocusWidget::settings_ui),
-        );
-        reg.register(
-            "todo_burndown",
-            WidgetFactory::new(TodoBurndownWidget::new)
-                .with_settings_ui(TodoBurndownWidget::settings_ui),
         );
         reg.register(
             "quick_tools",

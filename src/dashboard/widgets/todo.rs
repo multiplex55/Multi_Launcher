@@ -26,12 +26,20 @@ fn default_count() -> usize {
     5
 }
 
+fn default_show_progress() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoWidgetConfig {
     #[serde(default = "default_count")]
     pub count: usize,
     #[serde(default)]
     pub show_done: bool,
+    #[serde(default = "default_show_progress")]
+    pub show_progress: bool,
+    #[serde(default)]
+    pub filter_tags: Vec<String>,
     #[serde(default)]
     pub sort: TodoSort,
     #[serde(default)]
@@ -43,6 +51,8 @@ impl Default for TodoWidgetConfig {
         Self {
             count: default_count(),
             show_done: false,
+            show_progress: default_show_progress(),
+            filter_tags: Vec::new(),
             sort: TodoSort::default(),
             query: None,
         }
@@ -75,6 +85,9 @@ impl TodoWidget {
             });
             changed |= ui
                 .checkbox(&mut cfg.show_done, "Include completed")
+                .changed();
+            changed |= ui
+                .checkbox(&mut cfg.show_progress, "Show progress bar")
                 .changed();
             egui::ComboBox::from_label("Sort by")
                 .selected_text(match cfg.sort {
@@ -139,6 +152,19 @@ impl TodoWidget {
         })
     }
 
+    fn tags_match(&self, entry: &TodoEntry) -> bool {
+        if self.cfg.filter_tags.is_empty() {
+            return true;
+        }
+        self.cfg.filter_tags.iter().any(|tag| {
+            let filter = tag.to_lowercase();
+            entry
+                .tags
+                .iter()
+                .any(|t| t.to_lowercase().contains(&filter))
+        })
+    }
+
     fn sort_entries(entries: &mut Vec<(usize, TodoEntry)>, sort: TodoSort) {
         match sort {
             TodoSort::Priority => {
@@ -154,22 +180,40 @@ impl TodoWidget {
         }
     }
 
-    fn render_summary(&self, ui: &mut egui::Ui, todos: &[TodoEntry]) -> Option<WidgetAction> {
-        let done = todos.iter().filter(|t| t.done).count();
-        let total = todos.len();
+    fn render_summary(&mut self, ui: &mut egui::Ui, todos: &[TodoEntry]) -> Option<WidgetAction> {
+        let filtered: Vec<&TodoEntry> = todos.iter().filter(|t| self.tags_match(t)).collect();
+        let done = filtered.iter().filter(|t| t.done).count();
+        let total = filtered.len();
+        let remaining = total.saturating_sub(done);
         let mut action = None;
-        ui.horizontal(|ui| {
-            ui.label(format!("Todos: {done}/{total} done"));
-            if ui.button("Open todos").clicked() {
-                action = Some(WidgetAction {
-                    action: Action {
-                        label: "Todos".into(),
-                        desc: "Todo".into(),
-                        action: "todo:dialog".into(),
-                        args: None,
-                    },
-                    query_override: self.cfg.query.clone().or_else(|| Some("todo".into())),
-                });
+        ui.vertical(|ui| {
+            let mut tags_value = self.cfg.filter_tags.join(", ");
+            ui.horizontal(|ui| {
+                ui.label("Filter tags");
+                if ui.text_edit_singleline(&mut tags_value).changed() {
+                    self.cfg.filter_tags = parse_tags(&tags_value);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(format!("Todos: {done}/{total} done"));
+                if ui.button("Open todos").clicked() {
+                    action = Some(WidgetAction {
+                        action: Action {
+                            label: "Todos".into(),
+                            desc: "Todo".into(),
+                            action: "todo:dialog".into(),
+                            args: None,
+                        },
+                        query_override: self.cfg.query.clone().or_else(|| Some("todo".into())),
+                    });
+                }
+            });
+            if self.cfg.show_progress {
+                ui.label(format!("Remaining: {remaining}"));
+                if total > 0 {
+                    let pct = done as f32 / total as f32;
+                    ui.add(egui::ProgressBar::new(pct).show_percentage());
+                }
             }
         });
         action
@@ -181,7 +225,12 @@ impl TodoWidget {
         ctx: &DashboardContext<'_>,
         todos: &[TodoEntry],
     ) -> Option<WidgetAction> {
-        let mut entries: Vec<(usize, TodoEntry)> = todos.iter().cloned().enumerate().collect();
+        let mut entries: Vec<(usize, TodoEntry)> = todos
+            .iter()
+            .cloned()
+            .enumerate()
+            .filter(|(_, t)| self.tags_match(t))
+            .collect();
         if !self.cfg.show_done {
             entries.retain(|(_, t)| !t.done);
         }
@@ -242,6 +291,14 @@ impl TodoWidget {
 
         clicked
     }
+}
+
+fn parse_tags(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|tag| tag.trim())
+        .filter(|tag| !tag.is_empty())
+        .map(|tag| tag.to_string())
+        .collect()
 }
 
 impl Default for TodoWidget {
