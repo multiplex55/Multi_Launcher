@@ -3664,10 +3664,20 @@ impl LauncherApp {
 
 pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
     while let Ok(ev) = rx.try_recv() {
-        if matches!(ev, WatchEvent::Dashboard(_)) {
-            continue;
+        match ev {
+            WatchEvent::Actions | WatchEvent::Folders | WatchEvent::Bookmarks => {
+                return Some(ev.into());
+            }
+            WatchEvent::Dashboard(_)
+            | WatchEvent::Clipboard
+            | WatchEvent::Snippets
+            | WatchEvent::Notes
+            | WatchEvent::Todos
+            | WatchEvent::Favorites => {
+                continue;
+            }
+            WatchEvent::Recycle(_) => return Some(ev.into()),
         }
-        return Some(ev.into());
     }
     None
 }
