@@ -122,7 +122,9 @@ impl Widget for ProcessesWidget {
         let grouped = self.grouped_actions(snapshot.processes.as_ref());
         let row_height =
             ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y + 8.0;
+        let scroll_id = ui.id().with("process_list_scroll");
         egui::ScrollArea::vertical()
+            .id_source(scroll_id)
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, grouped.len(), |ui, range| {
                 for (desc, switch, kill) in &grouped[range] {

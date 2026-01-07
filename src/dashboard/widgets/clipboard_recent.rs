@@ -85,7 +85,9 @@ impl Widget for ClipboardRecentWidget {
         let rows = history.len().min(self.cfg.count);
         let row_height =
             ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y + 6.0;
+        let scroll_id = ui.id().with("clipboard_recent_scroll");
         egui::ScrollArea::vertical()
+            .id_source(scroll_id)
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, rows, |ui, range| {
                 for idx in range {

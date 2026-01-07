@@ -155,7 +155,9 @@ impl Widget for NotesRecentWidget {
         if self.cfg.show_tags {
             row_height += small_height + 2.0;
         }
+        let scroll_id = ui.id().with("notes_recent_scroll");
         egui::ScrollArea::vertical()
+            .id_source(scroll_id)
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, self.cached.len(), |ui, range| {
                 for note in &self.cached[range] {
