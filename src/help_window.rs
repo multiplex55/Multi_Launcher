@@ -206,7 +206,7 @@ fn example_queries(name: &str) -> Option<&'static [&'static str]> {
         "stopwatch" => Some(&["sw start", "sw list"]),
         "task_manager" => Some(&["tm"]),
         "text_case" => Some(&["case snake Hello World"]),
-        "todo" => Some(&["todo add buy milk", "todo list"]),
+        "todo" => Some(&["todo add buy milk @home", "todo list"]),
         "wikipedia" => Some(&["wiki rust"]),
         "help" => Some(&["help"]),
         _ => None,

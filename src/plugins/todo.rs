@@ -286,7 +286,8 @@ impl TodoPlugin {
                         if let Ok(n) = p.parse::<u8>() {
                             priority = n;
                         }
-                    } else if let Some(tag) = part.strip_prefix('#') {
+                    } else if let Some(tag) = part.strip_prefix('#').or_else(|| part.strip_prefix('@'))
+                    {
                         if !tag.is_empty() {
                             tags.push(tag.to_string());
                         }
