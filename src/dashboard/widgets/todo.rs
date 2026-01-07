@@ -39,6 +39,8 @@ pub struct TodoWidgetConfig {
     #[serde(default = "default_show_progress")]
     pub show_progress: bool,
     #[serde(default)]
+    pub filter_tags: Vec<String>,
+    #[serde(default)]
     pub sort: TodoSort,
     #[serde(default)]
     pub query: Option<String>,
@@ -50,6 +52,7 @@ impl Default for TodoWidgetConfig {
             count: default_count(),
             show_done: false,
             show_progress: default_show_progress(),
+            filter_tags: Vec::new(),
             sort: TodoSort::default(),
             query: None,
         }
@@ -86,6 +89,14 @@ impl TodoWidget {
             changed |= ui
                 .checkbox(&mut cfg.show_progress, "Show progress bar")
                 .changed();
+            let mut tags_value = cfg.filter_tags.join(", ");
+            ui.horizontal(|ui| {
+                ui.label("Filter tags");
+                if ui.text_edit_singleline(&mut tags_value).changed() {
+                    cfg.filter_tags = parse_tags(&tags_value);
+                    changed = true;
+                }
+            });
             egui::ComboBox::from_label("Sort by")
                 .selected_text(match cfg.sort {
                     TodoSort::Priority => "Priority",
@@ -149,6 +160,18 @@ impl TodoWidget {
         })
     }
 
+    fn tags_match(&self, entry: &TodoEntry) -> bool {
+        if self.cfg.filter_tags.is_empty() {
+            return true;
+        }
+        self.cfg.filter_tags.iter().any(|tag| {
+            entry
+                .tags
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(tag))
+        })
+    }
+
     fn sort_entries(entries: &mut Vec<(usize, TodoEntry)>, sort: TodoSort) {
         match sort {
             TodoSort::Priority => {
@@ -165,8 +188,9 @@ impl TodoWidget {
     }
 
     fn render_summary(&self, ui: &mut egui::Ui, todos: &[TodoEntry]) -> Option<WidgetAction> {
-        let done = todos.iter().filter(|t| t.done).count();
-        let total = todos.len();
+        let filtered: Vec<&TodoEntry> = todos.iter().filter(|t| self.tags_match(t)).collect();
+        let done = filtered.iter().filter(|t| t.done).count();
+        let total = filtered.len();
         let remaining = total.saturating_sub(done);
         let mut action = None;
         ui.vertical(|ui| {
@@ -201,7 +225,12 @@ impl TodoWidget {
         ctx: &DashboardContext<'_>,
         todos: &[TodoEntry],
     ) -> Option<WidgetAction> {
-        let mut entries: Vec<(usize, TodoEntry)> = todos.iter().cloned().enumerate().collect();
+        let mut entries: Vec<(usize, TodoEntry)> = todos
+            .iter()
+            .cloned()
+            .enumerate()
+            .filter(|(_, t)| self.tags_match(t))
+            .collect();
         if !self.cfg.show_done {
             entries.retain(|(_, t)| !t.done);
         }
@@ -262,6 +291,14 @@ impl TodoWidget {
 
         clicked
     }
+}
+
+fn parse_tags(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|tag| tag.trim())
+        .filter(|tag| !tag.is_empty())
+        .map(|tag| tag.to_string())
+        .collect()
 }
 
 impl Default for TodoWidget {
