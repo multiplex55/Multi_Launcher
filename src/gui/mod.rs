@@ -58,7 +58,9 @@ use crate::actions::{load_actions, Action};
 use crate::actions_editor::ActionsEditor;
 use crate::dashboard::config::DashboardConfig;
 use crate::dashboard::widgets::{WidgetRegistry, WidgetSettingsContext};
-use crate::dashboard::{Dashboard, DashboardContext, DashboardEvent, WidgetActivation};
+use crate::dashboard::{
+    Dashboard, DashboardContext, DashboardDataCache, DashboardEvent, WidgetActivation,
+};
 use crate::help_window::HelpWindow;
 use crate::history::{self, HistoryEntry};
 use crate::indexer;
@@ -91,7 +93,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use url::Url;
 
 const SUBCOMMANDS: &[&str] = &[
@@ -123,6 +125,11 @@ pub enum WatchEvent {
     Actions,
     Folders,
     Bookmarks,
+    Clipboard,
+    Snippets,
+    Notes,
+    Todos,
+    Favorites,
     Dashboard(DashboardEvent),
     Recycle(Result<(), String>),
 }
@@ -147,6 +154,11 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::Actions => TestWatchEvent::Actions,
             WatchEvent::Folders => TestWatchEvent::Folders,
             WatchEvent::Bookmarks => TestWatchEvent::Bookmarks,
+            WatchEvent::Clipboard => TestWatchEvent::Actions,
+            WatchEvent::Snippets => TestWatchEvent::Actions,
+            WatchEvent::Notes => TestWatchEvent::Actions,
+            WatchEvent::Todos => TestWatchEvent::Actions,
+            WatchEvent::Favorites => TestWatchEvent::Actions,
             WatchEvent::Dashboard(_) => TestWatchEvent::Actions,
             WatchEvent::Recycle(_) => unreachable!(),
         }
@@ -296,6 +308,7 @@ pub struct LauncherApp {
     /// actions are edited the entire `Arc` is replaced with a new one.
     pub actions: Arc<Vec<Action>>,
     action_cache: Vec<(String, String)>,
+    actions_by_id: HashMap<String, Action>,
     command_cache: Vec<Action>,
     completion_index: Option<Map<Vec<u8>>>,
     suggestions: Vec<String>,
@@ -321,6 +334,7 @@ pub struct LauncherApp {
     #[allow(dead_code)] // required to keep watchers alive
     watchers: Vec<RecommendedWatcher>,
     pub dashboard: Dashboard,
+    dashboard_data_cache: DashboardDataCache,
     pub dashboard_enabled: bool,
     pub dashboard_show_when_empty: bool,
     pub dashboard_path: String,
@@ -427,6 +441,11 @@ impl LauncherApp {
             .actions
             .iter()
             .map(|a| (a.label.to_lowercase(), a.desc.to_lowercase()))
+            .collect();
+        self.actions_by_id = self
+            .actions
+            .iter()
+            .map(|a| (a.action.clone(), a.clone()))
             .collect();
         self.update_completion_index();
     }
@@ -807,6 +826,62 @@ impl LauncherApp {
             }
         }
 
+        let notes_dir = crate::plugins::note::notes_dir();
+        let _ = std::fs::create_dir_all(&notes_dir);
+
+        #[cfg(not(test))]
+        for (path, event) in [
+            (
+                Path::new(crate::plugins::clipboard::CLIPBOARD_FILE),
+                WatchEvent::Clipboard,
+            ),
+            (
+                Path::new(crate::plugins::snippets::SNIPPETS_FILE),
+                WatchEvent::Snippets,
+            ),
+            (
+                Path::new(crate::plugins::todo::TODO_FILE),
+                WatchEvent::Todos,
+            ),
+            (
+                Path::new(crate::plugins::fav::FAV_FILE),
+                WatchEvent::Favorites,
+            ),
+            (notes_dir.as_path(), WatchEvent::Notes),
+        ] {
+            match watch_file(path, tx.clone(), event) {
+                Ok(w) => watchers.push(w),
+                Err(e) => tracing::error!("watch error: {:?}", e),
+            }
+        }
+
+        #[cfg(test)]
+        for (path, event) in [
+            (
+                Path::new(crate::plugins::clipboard::CLIPBOARD_FILE),
+                WatchEvent::Clipboard,
+            ),
+            (
+                Path::new(crate::plugins::snippets::SNIPPETS_FILE),
+                WatchEvent::Snippets,
+            ),
+            (
+                Path::new(crate::plugins::todo::TODO_FILE),
+                WatchEvent::Todos,
+            ),
+            (
+                Path::new(crate::plugins::fav::FAV_FILE),
+                WatchEvent::Favorites,
+            ),
+            (notes_dir.as_path(), WatchEvent::Notes),
+        ] {
+            if path.exists() {
+                if let Ok(w) = watch_file(path, tx.clone(), event) {
+                    watchers.push(w);
+                }
+            }
+        }
+
         let initial_visible = visible_flag.load(Ordering::SeqCst);
 
         let offscreen_pos = {
@@ -830,6 +905,12 @@ impl LauncherApp {
 
         let settings_editor = SettingsEditor::new_with_plugins(&settings);
         let plugin_editor = PluginEditor::new(&settings);
+        let actions_by_id = actions
+            .iter()
+            .map(|a| (a.action.clone(), a.clone()))
+            .collect::<HashMap<_, _>>();
+        let dashboard_data_cache = DashboardDataCache::new();
+        dashboard_data_cache.refresh_all(&plugins);
         let mut app = Self {
             actions: Arc::clone(&actions),
             query: String::new(),
@@ -851,6 +932,7 @@ impl LauncherApp {
             settings_path,
             watchers,
             dashboard,
+            dashboard_data_cache,
             dashboard_enabled: settings.dashboard.enabled,
             dashboard_show_when_empty: settings.dashboard.show_when_query_empty,
             dashboard_path: dashboard_path.to_string_lossy().to_string(),
@@ -951,6 +1033,7 @@ impl LauncherApp {
             last_stopwatch_query: false,
             pending_query: None,
             action_cache: Vec::new(),
+            actions_by_id,
             command_cache: Vec::new(),
             completion_index: None,
             suggestions: Vec::new(),
@@ -2522,6 +2605,21 @@ impl eframe::App for LauncherApp {
                     .map(|b| (b.url, b.alias))
                     .collect();
                 }
+                WatchEvent::Clipboard => {
+                    self.dashboard_data_cache.refresh_clipboard();
+                }
+                WatchEvent::Snippets => {
+                    self.dashboard_data_cache.refresh_snippets();
+                }
+                WatchEvent::Notes => {
+                    self.dashboard_data_cache.refresh_notes();
+                }
+                WatchEvent::Todos => {
+                    self.dashboard_data_cache.refresh_todos();
+                }
+                WatchEvent::Favorites => {
+                    self.dashboard_data_cache.refresh_favorites();
+                }
                 WatchEvent::Dashboard(_) => {
                     self.dashboard.reload();
                     for warn in &self.dashboard.warnings {
@@ -2712,11 +2810,13 @@ impl eframe::App for LauncherApp {
 
             let use_dashboard = self.should_show_dashboard(&trimmed);
             if use_dashboard {
-                let ctx = DashboardContext {
+                let dash_ctx = DashboardContext {
                     actions: &self.actions,
+                    actions_by_id: &self.actions_by_id,
                     usage: &self.usage,
                     plugins: &self.plugins,
                     default_location: self.dashboard_default_location.as_deref(),
+                    data_cache: &self.dashboard_data_cache,
                     actions_version: crate::actions::actions_version(),
                     fav_version: crate::plugins::fav::fav_version(),
                     notes_version: crate::plugins::note::note_version(),
@@ -2724,7 +2824,8 @@ impl eframe::App for LauncherApp {
                     clipboard_version: crate::plugins::clipboard::clipboard_version(),
                     snippets_version: crate::plugins::snippets::snippets_version(),
                 };
-                if let Some(action) = self.dashboard.ui(ui, &ctx, WidgetActivation::Click) {
+                ctx.request_repaint_after(Duration::from_millis(250));
+                if let Some(action) = self.dashboard.ui(ui, &dash_ctx, WidgetActivation::Click) {
                     self.activate_action(action.action, action.query_override, ActivationSource::Dashboard);
                 }
             } else {

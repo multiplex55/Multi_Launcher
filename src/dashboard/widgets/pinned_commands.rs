@@ -114,7 +114,7 @@ impl PinnedCommandsWidget {
 
     fn resolve_action<'a>(
         &self,
-        actions: &'a [Action],
+        actions_by_id: &'a std::collections::HashMap<String, Action>,
         favorites: &'a [FavEntry],
         id: &str,
     ) -> Option<Action> {
@@ -132,22 +132,14 @@ impl PinnedCommandsWidget {
             }
         }
 
-        actions
-            .iter()
-            .find(|a| a.action == id)
-            .cloned()
-            .or_else(|| {
-                if let Some(fav) = favorites.iter().find(|f| f.action == id) {
-                    Some(Action {
-                        label: fav.label.clone(),
-                        desc: "Fav".into(),
-                        action: fav.action.clone(),
-                        args: fav.args.clone(),
-                    })
-                } else {
-                    None
-                }
+        actions_by_id.get(id).cloned().or_else(|| {
+            favorites.iter().find(|f| f.action == id).map(|fav| Action {
+                label: fav.label.clone(),
+                desc: "Fav".into(),
+                action: fav.action.clone(),
+                args: fav.args.clone(),
             })
+        })
     }
 
     fn refresh_cache(&mut self, ctx: &DashboardContext<'_>) {
@@ -157,10 +149,12 @@ impl PinnedCommandsWidget {
             return;
         }
 
-        self.cached_favorites = load_favs(FAV_FILE).unwrap_or_default();
+        let snapshot = ctx.data_cache.snapshot();
+        self.cached_favorites = snapshot.favorites.as_ref().clone();
         self.cached_resolved.clear();
         for id in &self.cfg.action_ids {
-            if let Some(action) = self.resolve_action(ctx.actions, &self.cached_favorites, id) {
+            if let Some(action) = self.resolve_action(ctx.actions_by_id, &self.cached_favorites, id)
+            {
                 self.cached_resolved.push(action);
             }
         }

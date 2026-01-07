@@ -3,7 +3,7 @@ use super::{
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
-use crate::plugins::note::{load_notes, Note};
+use crate::plugins::note::Note;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
@@ -55,17 +55,11 @@ impl Default for RecentNotesConfig {
 
 pub struct RecentNotesWidget {
     cfg: RecentNotesConfig,
-    cached_notes: Vec<Note>,
-    last_notes_version: u64,
 }
 
 impl RecentNotesWidget {
     pub fn new(cfg: RecentNotesConfig) -> Self {
-        Self {
-            cfg,
-            cached_notes: Vec::new(),
-            last_notes_version: u64::MAX,
-        }
+        Self { cfg }
     }
 
     pub fn settings_ui(
@@ -187,22 +181,12 @@ impl RecentNotesWidget {
             clean.to_string()
         }
     }
-
-    fn refresh_notes(&mut self, ctx: &DashboardContext<'_>) {
-        if self.last_notes_version == ctx.notes_version {
-            return;
-        }
-        self.cached_notes = load_notes().unwrap_or_default();
-        self.last_notes_version = ctx.notes_version;
-    }
 }
 
 impl Default for RecentNotesWidget {
     fn default() -> Self {
         Self {
             cfg: RecentNotesConfig::default(),
-            cached_notes: Vec::new(),
-            last_notes_version: u64::MAX,
         }
     }
 }
@@ -214,8 +198,8 @@ impl Widget for RecentNotesWidget {
         ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        self.refresh_notes(ctx);
-        let mut notes = self.cached_notes.clone();
+        let snapshot = ctx.data_cache.snapshot();
+        let mut notes: Vec<Note> = snapshot.notes.as_ref().clone();
         if let Some(tag) = &self.cfg.filter_tag {
             notes.retain(|n| n.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)));
         }
@@ -227,28 +211,43 @@ impl Widget for RecentNotesWidget {
             return None;
         }
 
-        for note in notes {
-            let display = note.alias.as_ref().unwrap_or(&note.title);
-            let (action, query_override) = self.build_action(&note);
-            let mut clicked = false;
-            ui.vertical(|ui| {
-                clicked |= ui.button(display).clicked();
-                if self.cfg.show_snippet {
-                    ui.label(egui::RichText::new(Self::snippet(&note)).small());
-                }
-                if !note.tags.is_empty() {
-                    ui.label(egui::RichText::new(format!("#{}", note.tags.join(" #"))).small());
-                }
-                ui.add_space(4.0);
-            });
-            if clicked {
-                return Some(WidgetAction {
-                    action,
-                    query_override,
-                });
-            }
+        let mut clicked = None;
+        let body_height = ui.text_style_height(&egui::TextStyle::Body);
+        let small_height = ui.text_style_height(&egui::TextStyle::Small);
+        let mut row_height = body_height + ui.spacing().item_spacing.y + 8.0;
+        if self.cfg.show_snippet {
+            row_height += small_height + 2.0;
         }
+        row_height += small_height + 2.0;
 
-        None
+        egui::ScrollArea::vertical()
+            .auto_shrink([false; 2])
+            .show_rows(ui, row_height, notes.len(), |ui, range| {
+                for note in &notes[range] {
+                    let display = note.alias.as_ref().unwrap_or(&note.title);
+                    let (action, query_override) = self.build_action(note);
+                    let mut clicked_row = false;
+                    ui.vertical(|ui| {
+                        clicked_row |= ui.button(display).clicked();
+                        if self.cfg.show_snippet {
+                            ui.label(egui::RichText::new(Self::snippet(note)).small());
+                        }
+                        if !note.tags.is_empty() {
+                            ui.label(
+                                egui::RichText::new(format!("#{}", note.tags.join(" #"))).small(),
+                            );
+                        }
+                        ui.add_space(4.0);
+                    });
+                    if clicked_row {
+                        clicked = Some(WidgetAction {
+                            action,
+                            query_override,
+                        });
+                    }
+                }
+            });
+
+        clicked
     }
 }

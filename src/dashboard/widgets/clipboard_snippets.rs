@@ -3,8 +3,6 @@ use super::{
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
-use crate::plugins::clipboard::{load_history, CLIPBOARD_FILE};
-use crate::plugins::snippets::{load_snippets, SNIPPETS_FILE};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use sysinfo::{Disks, System};
@@ -39,21 +37,11 @@ impl Default for ClipboardSnippetsConfig {
 
 pub struct ClipboardSnippetsWidget {
     cfg: ClipboardSnippetsConfig,
-    cached_history: Vec<String>,
-    cached_snippets: Vec<crate::plugins::snippets::SnippetEntry>,
-    last_clipboard_version: u64,
-    last_snippets_version: u64,
 }
 
 impl ClipboardSnippetsWidget {
     pub fn new(cfg: ClipboardSnippetsConfig) -> Self {
-        Self {
-            cfg,
-            cached_history: Vec::new(),
-            cached_snippets: Vec::new(),
-            last_clipboard_version: u64::MAX,
-            last_snippets_version: u64::MAX,
-        }
+        Self { cfg }
     }
 
     pub fn settings_ui(
@@ -124,30 +112,12 @@ impl ClipboardSnippetsWidget {
         };
         Some((cpu, mem, disk))
     }
-
-    fn refresh_data(&mut self, ctx: &DashboardContext<'_>) {
-        if self.last_clipboard_version != ctx.clipboard_version {
-            self.cached_history = load_history(CLIPBOARD_FILE)
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
-            self.last_clipboard_version = ctx.clipboard_version;
-        }
-        if self.last_snippets_version != ctx.snippets_version {
-            self.cached_snippets = load_snippets(SNIPPETS_FILE).unwrap_or_default();
-            self.last_snippets_version = ctx.snippets_version;
-        }
-    }
 }
 
 impl Default for ClipboardSnippetsWidget {
     fn default() -> Self {
         Self {
             cfg: ClipboardSnippetsConfig::default(),
-            cached_history: Vec::new(),
-            cached_snippets: Vec::new(),
-            last_clipboard_version: u64::MAX,
-            last_snippets_version: u64::MAX,
         }
     }
 }
@@ -159,38 +129,43 @@ impl Widget for ClipboardSnippetsWidget {
         ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        self.refresh_data(ctx);
+        let snapshot = ctx.data_cache.snapshot();
+        let history = snapshot.clipboard_history.as_ref();
+        let snippets = snapshot.snippets.as_ref();
         let mut clicked = None;
-        if !self.cached_history.is_empty() {
+        if !history.is_empty() {
             ui.label("Clipboard");
-            for (idx, entry) in self
-                .cached_history
-                .iter()
-                .enumerate()
-                .take(self.cfg.clipboard_count)
-            {
-                if ui
-                    .button(Self::shorten(entry, 60))
-                    .on_hover_text(entry)
-                    .clicked()
-                {
-                    clicked = Some(WidgetAction {
-                        action: Action {
-                            label: "Copy from clipboard history".into(),
-                            desc: "Clipboard".into(),
-                            action: format!("clipboard:copy:{idx}"),
-                            args: None,
-                        },
-                        query_override: Some("cb list".into()),
-                    });
-                }
-            }
+            let rows = history.len().min(self.cfg.clipboard_count);
+            let row_height =
+                ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y + 6.0;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show_rows(ui, row_height, rows, |ui, range| {
+                    for idx in range {
+                        let entry = &history[idx];
+                        if ui
+                            .button(Self::shorten(entry, 60))
+                            .on_hover_text(entry)
+                            .clicked()
+                        {
+                            clicked = Some(WidgetAction {
+                                action: Action {
+                                    label: "Copy from clipboard history".into(),
+                                    desc: "Clipboard".into(),
+                                    action: format!("clipboard:copy:{idx}"),
+                                    args: None,
+                                },
+                                query_override: Some("cb list".into()),
+                            });
+                        }
+                    }
+                });
         }
 
-        if self.cfg.snippet_count > 0 && !self.cached_snippets.is_empty() {
+        if self.cfg.snippet_count > 0 && !snippets.is_empty() {
             ui.separator();
             ui.label("Snippets");
-            for snippet in self.cached_snippets.iter().take(self.cfg.snippet_count) {
+            for snippet in snippets.iter().take(self.cfg.snippet_count) {
                 if ui
                     .button(format!(
                         "{} — {}",
