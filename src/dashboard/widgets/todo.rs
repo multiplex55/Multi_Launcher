@@ -89,14 +89,6 @@ impl TodoWidget {
             changed |= ui
                 .checkbox(&mut cfg.show_progress, "Show progress bar")
                 .changed();
-            let mut tags_value = cfg.filter_tags.join(", ");
-            ui.horizontal(|ui| {
-                ui.label("Filter tags");
-                if ui.text_edit_singleline(&mut tags_value).changed() {
-                    cfg.filter_tags = parse_tags(&tags_value);
-                    changed = true;
-                }
-            });
             egui::ComboBox::from_label("Sort by")
                 .selected_text(match cfg.sort {
                     TodoSort::Priority => "Priority",
@@ -187,13 +179,20 @@ impl TodoWidget {
         }
     }
 
-    fn render_summary(&self, ui: &mut egui::Ui, todos: &[TodoEntry]) -> Option<WidgetAction> {
+    fn render_summary(&mut self, ui: &mut egui::Ui, todos: &[TodoEntry]) -> Option<WidgetAction> {
         let filtered: Vec<&TodoEntry> = todos.iter().filter(|t| self.tags_match(t)).collect();
         let done = filtered.iter().filter(|t| t.done).count();
         let total = filtered.len();
         let remaining = total.saturating_sub(done);
         let mut action = None;
         ui.vertical(|ui| {
+            let mut tags_value = self.cfg.filter_tags.join(", ");
+            ui.horizontal(|ui| {
+                ui.label("Filter tags");
+                if ui.text_edit_singleline(&mut tags_value).changed() {
+                    self.cfg.filter_tags = parse_tags(&tags_value);
+                }
+            });
             ui.horizontal(|ui| {
                 ui.label(format!("Todos: {done}/{total} done"));
                 if ui.button("Open todos").clicked() {
