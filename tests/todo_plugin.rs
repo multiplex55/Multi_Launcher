@@ -51,6 +51,15 @@ fn search_add_with_priority_and_tags() {
 }
 
 #[test]
+fn search_add_with_at_tags() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let plugin = TodoPlugin::default();
+    let results = plugin.search("todo add task @a @b");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "todo:add:task|0|a,b");
+}
+
+#[test]
 fn search_add_without_text_opens_dialog() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let plugin = TodoPlugin::default();
