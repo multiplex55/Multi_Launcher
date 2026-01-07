@@ -196,7 +196,9 @@ impl TodoWidget {
         let mut clicked = None;
         let row_height =
             ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y + 8.0;
+        let scroll_id = ui.id().with("todo_list_scroll");
         egui::ScrollArea::vertical()
+            .id_source(scroll_id)
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, entries.len(), |ui, range| {
                 for (idx, entry) in entries[range].iter().cloned() {

@@ -220,7 +220,9 @@ impl Widget for RecentNotesWidget {
         }
         row_height += small_height + 2.0;
 
+        let scroll_id = ui.id().with("recent_notes_scroll");
         egui::ScrollArea::vertical()
+            .id_source(scroll_id)
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, notes.len(), |ui, range| {
                 for note in &notes[range] {
