@@ -1,5 +1,5 @@
 use super::{
-    edit_typed_settings, refresh_interval_setting, Widget, WidgetSettingsContext,
+    edit_typed_settings, refresh_interval_setting, Widget, WidgetAction, WidgetSettingsContext,
     WidgetSettingsUiResult,
 };
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};

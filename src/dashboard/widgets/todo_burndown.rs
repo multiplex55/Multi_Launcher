@@ -1,4 +1,4 @@
-use super::{edit_typed_settings, Widget, WidgetSettingsContext, WidgetSettingsUiResult};
+use super::{edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult};
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
