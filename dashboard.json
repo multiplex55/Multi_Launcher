@@ -49,7 +49,7 @@
     },
     {
       "id": "Todos",
-      "widget": "todo",
+      "widget": "todos",
       "row": 2,
       "col": 0,
       "row_span": 1,
@@ -57,7 +57,7 @@
     },
     {
       "id": "Notes",
-      "widget": "notes_open",
+      "widget": "notes_recent",
       "row": 2,
       "col": 1,
       "row_span": 1,

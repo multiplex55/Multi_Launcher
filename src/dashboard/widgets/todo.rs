@@ -26,12 +26,18 @@ fn default_count() -> usize {
     5
 }
 
+fn default_show_progress() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoWidgetConfig {
     #[serde(default = "default_count")]
     pub count: usize,
     #[serde(default)]
     pub show_done: bool,
+    #[serde(default = "default_show_progress")]
+    pub show_progress: bool,
     #[serde(default)]
     pub sort: TodoSort,
     #[serde(default)]
@@ -43,6 +49,7 @@ impl Default for TodoWidgetConfig {
         Self {
             count: default_count(),
             show_done: false,
+            show_progress: default_show_progress(),
             sort: TodoSort::default(),
             query: None,
         }
@@ -75,6 +82,9 @@ impl TodoWidget {
             });
             changed |= ui
                 .checkbox(&mut cfg.show_done, "Include completed")
+                .changed();
+            changed |= ui
+                .checkbox(&mut cfg.show_progress, "Show progress bar")
                 .changed();
             egui::ComboBox::from_label("Sort by")
                 .selected_text(match cfg.sort {
@@ -157,19 +167,29 @@ impl TodoWidget {
     fn render_summary(&self, ui: &mut egui::Ui, todos: &[TodoEntry]) -> Option<WidgetAction> {
         let done = todos.iter().filter(|t| t.done).count();
         let total = todos.len();
+        let remaining = total.saturating_sub(done);
         let mut action = None;
-        ui.horizontal(|ui| {
-            ui.label(format!("Todos: {done}/{total} done"));
-            if ui.button("Open todos").clicked() {
-                action = Some(WidgetAction {
-                    action: Action {
-                        label: "Todos".into(),
-                        desc: "Todo".into(),
-                        action: "todo:dialog".into(),
-                        args: None,
-                    },
-                    query_override: self.cfg.query.clone().or_else(|| Some("todo".into())),
-                });
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("Todos: {done}/{total} done"));
+                if ui.button("Open todos").clicked() {
+                    action = Some(WidgetAction {
+                        action: Action {
+                            label: "Todos".into(),
+                            desc: "Todo".into(),
+                            action: "todo:dialog".into(),
+                            args: None,
+                        },
+                        query_override: self.cfg.query.clone().or_else(|| Some("todo".into())),
+                    });
+                }
+            });
+            if self.cfg.show_progress {
+                ui.label(format!("Remaining: {remaining}"));
+                if total > 0 {
+                    let pct = done as f32 / total as f32;
+                    ui.add(egui::ProgressBar::new(pct).show_percentage());
+                }
             }
         });
         action
