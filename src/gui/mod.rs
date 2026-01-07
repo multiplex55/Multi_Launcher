@@ -3263,6 +3263,7 @@ impl eframe::App for LauncherApp {
             let mut dlg = std::mem::take(&mut self.dashboard_editor);
             let plugin_infos = self.plugins.plugin_infos();
             let plugin_commands = self.plugins.commands();
+            let data_snapshot = self.dashboard_data_cache.snapshot();
             let settings_ctx = WidgetSettingsContext {
                 plugins: Some(&self.plugins),
                 plugin_infos: Some(&plugin_infos),
@@ -3270,6 +3271,8 @@ impl eframe::App for LauncherApp {
                 actions: Some(self.actions.as_slice()),
                 usage: Some(&self.usage),
                 default_location: self.dashboard_default_location.as_deref(),
+                notes: Some(data_snapshot.notes.as_ref()),
+                todos: Some(data_snapshot.todos.as_ref()),
             };
             let reload = dlg.ui(ctx, &registry, settings_ctx);
             self.show_dashboard_editor = dlg.open;

@@ -1,6 +1,8 @@
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use crate::plugin::PluginManager;
+use crate::plugins::note::Note;
+use crate::plugins::todo::TodoEntry;
 use eframe::egui;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
@@ -80,6 +82,8 @@ pub struct WidgetSettingsContext<'a> {
     pub actions: Option<&'a [Action]>,
     pub usage: Option<&'a std::collections::HashMap<String, u32>>,
     pub default_location: Option<&'a str>,
+    pub notes: Option<&'a [Note]>,
+    pub todos: Option<&'a [TodoEntry]>,
 }
 
 impl<'a> WidgetSettingsContext<'a> {
@@ -91,6 +95,8 @@ impl<'a> WidgetSettingsContext<'a> {
             actions: None,
             usage: None,
             default_location: None,
+            notes: None,
+            todos: None,
         }
     }
 }
