@@ -136,14 +136,16 @@ impl Widget for VolumeWidget {
                 if resp.changed() {
                     let label = format!("Set system volume to {}%", self.cache.data.system_volume);
                     let action = format!("volume:set:{}", self.cache.data.system_volume);
-                    clicked = clicked.or(Some(Self::action(label, action)));
+                    clicked.get_or_insert_with(|| Self::action(label, action));
                 }
                 ui.label(format!("{}%", self.cache.data.system_volume));
                 if ui.button("Mute active").clicked() {
-                    clicked = clicked.or(Some(Self::action(
-                        "Toggle mute for active window".into(),
-                        "volume:mute_active".into(),
-                    )));
+                    clicked.get_or_insert_with(|| {
+                        Self::action(
+                            "Toggle mute for active window".into(),
+                            "volume:mute_active".into(),
+                        )
+                    });
                 }
             });
         });
@@ -161,14 +163,14 @@ impl Widget for VolumeWidget {
                 if resp.changed() {
                     let label = format!("Set PID {} volume to {}%", proc.pid, proc.value);
                     let action = format!("volume:pid:{}:{}", proc.pid, proc.value);
-                    clicked = clicked.or(Some(Self::action(label, action)));
+                    clicked.get_or_insert_with(|| Self::action(label, action));
                 }
                 ui.label(format!("{}%", proc.value));
                 let mute_label = if proc.muted { "Unmute" } else { "Mute" };
                 if ui.button(mute_label).clicked() {
                     let label = format!("Toggle mute for PID {}", proc.pid);
                     let action = format!("volume:pid_toggle_mute:{}", proc.pid);
-                    clicked = clicked.or(Some(Self::action(label, action)));
+                    clicked.get_or_insert_with(|| Self::action(label, action));
                     proc.muted = !proc.muted;
                 }
                 if proc.muted {
