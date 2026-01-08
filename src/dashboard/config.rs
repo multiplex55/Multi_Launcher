@@ -118,7 +118,7 @@ impl Default for DashboardConfig {
             slots: vec![
                 SlotConfig::with_widget("weather_site", 0, 0),
                 SlotConfig::with_widget("pinned_commands", 0, 1),
-                SlotConfig::with_widget("todos", 0, 2),
+                SlotConfig::with_widget("todo", 0, 2),
                 SlotConfig::with_widget("recent_commands", 1, 0),
                 SlotConfig::with_widget("frequent_commands", 1, 1),
                 SlotConfig::with_widget("recent_notes", 1, 2),
@@ -190,16 +190,16 @@ impl DashboardConfig {
 
     fn migrate_todo_widgets(&mut self, registry: &WidgetRegistry, warnings: &mut Vec<String>) {
         for slot in &mut self.slots {
-            let Some(default_settings) = registry.default_settings("todos") else {
+            let Some(default_settings) = registry.default_settings("todo") else {
                 continue;
             };
             match slot.widget.as_str() {
                 "todo" | "todo_list" | "todo_summary" | "todo_burndown" => {
                     let legacy_name = slot.widget.clone();
-                    slot.widget = "todos".into();
+                    slot.widget = "todo".into();
                     slot.settings = merge_json(&default_settings, &slot.settings);
                     warnings.push(format!(
-                        "dashboard widget '{}' migrated to 'todos'",
+                        "dashboard widget '{}' migrated to 'todo'",
                         legacy_name
                     ));
                 }

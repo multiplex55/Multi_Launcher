@@ -210,7 +210,7 @@ impl WidgetRegistry {
                 .with_settings_ui(FrequentCommandsWidget::settings_ui),
         );
         reg.register(
-            "todos",
+            "todo",
             WidgetFactory::new(TodoWidget::new).with_settings_ui(TodoWidget::settings_ui),
         );
         reg.register(
