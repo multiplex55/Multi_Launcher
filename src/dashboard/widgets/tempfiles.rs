@@ -139,8 +139,8 @@ impl TempfilesWidget {
                 let file_name = path
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .unwrap_or_else(|| path.to_string_lossy().as_ref())
-                    .to_string();
+                    .map(str::to_string)
+                    .unwrap_or_else(|| path.to_string_lossy().into_owned());
                 let alias = Self::alias_for(&path);
                 TempfileEntry {
                     path,
