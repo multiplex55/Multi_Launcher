@@ -32,6 +32,9 @@ pub struct DashboardEditorDialog {
     slot_expand_all: bool,
     slot_collapse_all: bool,
     snap_on_edit: bool,
+    show_swap_buttons: bool,
+    show_remove_buttons: bool,
+    confirm_remove_slot: Option<usize>,
 }
 
 impl Default for DashboardEditorDialog {
@@ -50,6 +53,9 @@ impl Default for DashboardEditorDialog {
             slot_expand_all: false,
             slot_collapse_all: false,
             snap_on_edit: false,
+            show_swap_buttons: true,
+            show_remove_buttons: true,
+            confirm_remove_slot: None,
         }
     }
 }
@@ -135,6 +141,8 @@ impl DashboardEditorDialog {
                         ui.label("Preview");
                         ui.checkbox(&mut self.show_preview, "Show preview");
                         ui.checkbox(&mut self.snap_on_edit, "Snap to free space on edit");
+                        ui.checkbox(&mut self.show_swap_buttons, "Show swap");
+                        ui.checkbox(&mut self.show_remove_buttons, "Show remove");
                         if ui.button("Auto-place nearest").clicked() {
                             if let Some(idx) = self.selected_slot {
                                 if let Err(err) = self.auto_place(idx, registry) {
@@ -215,11 +223,39 @@ impl DashboardEditorDialog {
                     });
 
                     ui.separator();
+                    let mut confirm_remove = None;
+                    if let Some(idx) = self.confirm_remove_slot {
+                        if let Some(slot) = self.config.slots.get(idx) {
+                            let label = Self::slot_label(slot);
+                            let mut open = true;
+                            egui::Window::new("Confirm remove")
+                                .collapsible(false)
+                                .resizable(false)
+                                .open(&mut open)
+                                .show(ctx, |ui| {
+                                    ui.label(format!("Remove slot '{label}'?"));
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Remove").clicked() {
+                                            confirm_remove = Some(idx);
+                                            open = false;
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            open = false;
+                                        }
+                                    });
+                                });
+                            if !open {
+                                self.confirm_remove_slot = None;
+                            }
+                        } else {
+                            self.confirm_remove_slot = None;
+                        }
+                    }
                     let mut idx = 0;
                     while idx < self.config.slots.len() {
                         let original_slot = self.config.slots[idx].clone();
                         let mut slot = original_slot.clone();
-                        let mut removed = false;
+                        let mut removed = confirm_remove == Some(idx);
                         let mut edited = false;
                         let mut swapped = false;
                         ui.push_id(idx, |ui| {
@@ -245,52 +281,58 @@ impl DashboardEditorDialog {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            if ui.button("Remove").clicked() {
-                                                removed = true;
+                                            if self.show_remove_buttons
+                                                && ui.button("Remove").clicked()
+                                            {
+                                                self.confirm_remove_slot = Some(idx);
                                             }
                                             if ui.button("Select").clicked() {
                                                 self.selected_slot = Some(idx);
                                             }
-                                            if let Some(selected_idx) = self.selected_slot {
-                                                if selected_idx != idx
-                                                    && ui.button("Swap with selected").clicked()
-                                                {
-                                                    if let Err(err) = self.swap_slots(
-                                                        selected_idx,
-                                                        idx,
-                                                        registry,
-                                                    ) {
-                                                        self.blocked_warning = Some(err);
-                                                    }
-                                                    self.swap_anchor = None;
-                                                    swapped = true;
-                                                }
-                                            }
-                                            let is_swap_source = self.swap_anchor == Some(idx);
-                                            let swap_label = if is_swap_source {
-                                                "Swap source"
-                                            } else {
-                                                "Swap"
-                                            };
-                                            let swap_button = if is_swap_source {
-                                                egui::Button::new(swap_label)
-                                                    .fill(egui::Color32::from_rgb(60, 120, 200))
-                                            } else {
-                                                egui::Button::new(swap_label)
-                                            };
-                                            if ui.add(swap_button).clicked() {
-                                                if is_swap_source {
-                                                    self.swap_anchor = None;
-                                                } else if let Some(anchor) = self.swap_anchor {
-                                                    if let Err(err) =
-                                                        self.swap_slots(anchor, idx, registry)
+                                            if self.show_swap_buttons {
+                                                if let Some(selected_idx) = self.selected_slot {
+                                                    if selected_idx != idx
+                                                        && ui.button("Swap with selected").clicked()
                                                     {
-                                                        self.blocked_warning = Some(err);
+                                                        if let Err(err) = self.swap_slots(
+                                                            selected_idx,
+                                                            idx,
+                                                            registry,
+                                                        ) {
+                                                            self.blocked_warning = Some(err);
+                                                        }
+                                                        self.swap_anchor = None;
+                                                        swapped = true;
                                                     }
-                                                    self.swap_anchor = None;
-                                                    swapped = true;
+                                                }
+                                                let is_swap_source = self.swap_anchor == Some(idx);
+                                                let swap_label = if is_swap_source {
+                                                    "Swap source"
                                                 } else {
-                                                    self.swap_anchor = Some(idx);
+                                                    "Swap"
+                                                };
+                                                let swap_button = if is_swap_source {
+                                                    egui::Button::new(swap_label)
+                                                        .fill(egui::Color32::from_rgb(
+                                                            60, 120, 200,
+                                                        ))
+                                                } else {
+                                                    egui::Button::new(swap_label)
+                                                };
+                                                if ui.add(swap_button).clicked() {
+                                                    if is_swap_source {
+                                                        self.swap_anchor = None;
+                                                    } else if let Some(anchor) = self.swap_anchor {
+                                                        if let Err(err) =
+                                                            self.swap_slots(anchor, idx, registry)
+                                                        {
+                                                            self.blocked_warning = Some(err);
+                                                        }
+                                                        self.swap_anchor = None;
+                                                        swapped = true;
+                                                    } else {
+                                                        self.swap_anchor = Some(idx);
+                                                    }
                                                 }
                                             }
                                         },
