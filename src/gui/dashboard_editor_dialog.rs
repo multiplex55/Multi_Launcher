@@ -28,6 +28,7 @@ pub struct DashboardEditorDialog {
     show_preview: bool,
     blocked_warning: Option<String>,
     drag_anchor: Option<(usize, usize)>,
+    swap_anchor: Option<usize>,
     slot_expand_all: bool,
     slot_collapse_all: bool,
     snap_on_edit: bool,
@@ -45,6 +46,7 @@ impl Default for DashboardEditorDialog {
             show_preview: false,
             blocked_warning: None,
             drag_anchor: None,
+            swap_anchor: None,
             slot_expand_all: false,
             slot_collapse_all: false,
             snap_on_edit: false,
@@ -219,6 +221,7 @@ impl DashboardEditorDialog {
                         let mut slot = original_slot.clone();
                         let mut removed = false;
                         let mut edited = false;
+                        let mut swapped = false;
                         ui.push_id(idx, |ui| {
                             let collapsing_id = ui.id().with(("slot-collapse", idx));
                             let mut state = CollapsingState::load_with_default_open(
@@ -247,6 +250,41 @@ impl DashboardEditorDialog {
                                             }
                                             if ui.button("Select").clicked() {
                                                 self.selected_slot = Some(idx);
+                                            }
+                                            if let Some(selected_idx) = self.selected_slot {
+                                                if selected_idx != idx
+                                                    && ui.button("Swap with selected").clicked()
+                                                {
+                                                    if let Err(err) = self.swap_slots(
+                                                        selected_idx,
+                                                        idx,
+                                                        registry,
+                                                    ) {
+                                                        self.blocked_warning = Some(err);
+                                                    }
+                                                    self.swap_anchor = None;
+                                                    swapped = true;
+                                                }
+                                            }
+                                            let swap_label = if self.swap_anchor == Some(idx) {
+                                                "Swap (source)"
+                                            } else {
+                                                "Swap"
+                                            };
+                                            if ui.button(swap_label).clicked() {
+                                                if self.swap_anchor == Some(idx) {
+                                                    self.swap_anchor = None;
+                                                } else if let Some(anchor) = self.swap_anchor {
+                                                    if let Err(err) =
+                                                        self.swap_slots(anchor, idx, registry)
+                                                    {
+                                                        self.blocked_warning = Some(err);
+                                                    }
+                                                    self.swap_anchor = None;
+                                                    swapped = true;
+                                                } else {
+                                                    self.swap_anchor = Some(idx);
+                                                }
                                             }
                                         },
                                     );
@@ -361,7 +399,17 @@ impl DashboardEditorDialog {
                                     self.selected_slot = None;
                                 }
                             }
+                            if let Some(anchor) = self.swap_anchor {
+                                if anchor == idx {
+                                    self.swap_anchor = None;
+                                } else if anchor > idx {
+                                    self.swap_anchor = Some(anchor - 1);
+                                }
+                            }
                             self.ensure_selected_slot();
+                            self.ensure_swap_anchor();
+                        } else if swapped {
+                            idx += 1;
                         } else if edited && slot != original_slot {
                             if let Err(err) = self.commit_slot(idx, slot, registry) {
                                 if self.blocked_warning.is_none() {
@@ -425,6 +473,19 @@ impl DashboardEditorDialog {
         if let Some(idx) = self.selected_slot {
             if idx >= self.config.slots.len() {
                 self.selected_slot = Some(self.config.slots.len().saturating_sub(1));
+            }
+        }
+        self.ensure_swap_anchor();
+    }
+
+    fn ensure_swap_anchor(&mut self) {
+        if self.config.slots.is_empty() {
+            self.swap_anchor = None;
+            return;
+        }
+        if let Some(idx) = self.swap_anchor {
+            if idx >= self.config.slots.len() {
+                self.swap_anchor = None;
             }
         }
     }
@@ -492,6 +553,60 @@ impl DashboardEditorDialog {
 
         if settings_changed {
             self.blocked_warning = None;
+        }
+    }
+
+    fn swap_slots(
+        &mut self,
+        first: usize,
+        second: usize,
+        registry: &WidgetRegistry,
+    ) -> Result<(), String> {
+        if first >= self.config.slots.len() || second >= self.config.slots.len() {
+            return Err("Invalid slot selection".into());
+        }
+        if first == second {
+            return Ok(());
+        }
+        let rows = self.config.grid.rows.max(1) as usize;
+        let cols = self.config.grid.cols.max(1) as usize;
+        let original_first = self.config.slots[first].clone();
+        let original_second = self.config.slots[second].clone();
+
+        {
+            let (left, right) = if first < second {
+                let (left, right) = self.config.slots.split_at_mut(second);
+                (&mut left[first], &mut right[0])
+            } else {
+                let (left, right) = self.config.slots.split_at_mut(first);
+                (&mut right[0], &mut left[second])
+            };
+            std::mem::swap(&mut left.widget, &mut right.widget);
+            std::mem::swap(&mut left.settings, &mut right.settings);
+            std::mem::swap(&mut left.id, &mut right.id);
+        }
+
+        let first_slot = self.config.slots[first].clone();
+        let second_slot = self.config.slots[second].clone();
+        let occupancy_first = self.occupancy_map(rows, cols, Some(first));
+        let occupancy_second = self.occupancy_map(rows, cols, Some(second));
+        let validated_first =
+            self.validate_slot(first, first_slot, rows, cols, registry, &occupancy_first);
+        let validated_second =
+            self.validate_slot(second, second_slot, rows, cols, registry, &occupancy_second);
+
+        match (validated_first, validated_second) {
+            (Ok(first_slot), Ok(second_slot)) => {
+                self.config.slots[first] = first_slot;
+                self.config.slots[second] = second_slot;
+                self.blocked_warning = None;
+                Ok(())
+            }
+            (Err(err), _) | (_, Err(err)) => {
+                self.config.slots[first] = original_first;
+                self.config.slots[second] = original_second;
+                Err(err)
+            }
         }
     }
 
