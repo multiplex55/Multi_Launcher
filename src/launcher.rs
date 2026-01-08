@@ -229,6 +229,35 @@ pub(crate) fn clean_recycle_bin() -> windows::core::Result<()> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RecycleBinInfo {
+    pub size_bytes: u64,
+    pub items: u64,
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn query_recycle_bin() -> Option<RecycleBinInfo> {
+    use windows::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
+    let mut info = SHQUERYRBINFO {
+        cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32,
+        ..Default::default()
+    };
+    let result = unsafe { SHQueryRecycleBinW(None, &mut info) };
+    if result.is_ok() {
+        Some(RecycleBinInfo {
+            size_bytes: info.i64Size.max(0) as u64,
+            items: info.i64NumItems.max(0) as u64,
+        })
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn query_recycle_bin() -> Option<RecycleBinInfo> {
+    None
+}
+
 pub(crate) fn system_command(action: &str) -> Option<std::process::Command> {
     use std::process::Command;
     match action {

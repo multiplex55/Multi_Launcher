@@ -20,17 +20,18 @@ mod pinned_query_results;
 mod plugin_home;
 mod process_list;
 mod query_list;
+mod quick_tools;
 mod recent_commands;
 mod recent_notes;
+mod recycle_bin;
 mod snippets_favorites;
 mod system_actions;
 mod system_status;
-mod todo_focus;
 mod todo;
+mod todo_focus;
 mod weather_site;
 mod window_list;
 mod windows_overview;
-mod quick_tools;
 
 pub use active_timers::ActiveTimersWidget;
 pub use browser_tabs::BrowserTabsWidget;
@@ -45,17 +46,18 @@ pub use pinned_query_results::PinnedQueryResultsWidget;
 pub use plugin_home::PluginHomeWidget;
 pub use process_list::ProcessesWidget;
 pub use query_list::QueryListWidget;
+pub use quick_tools::QuickToolsWidget;
 pub use recent_commands::RecentCommandsWidget;
 pub use recent_notes::RecentNotesWidget;
+pub use recycle_bin::RecycleBinWidget;
 pub use snippets_favorites::SnippetsFavoritesWidget;
 pub use system_actions::SystemWidget;
 pub use system_status::SystemStatusWidget;
-pub use todo_focus::TodoFocusWidget;
 pub use todo::TodoWidget;
+pub use todo_focus::TodoFocusWidget;
 pub use weather_site::WeatherSiteWidget;
 pub use window_list::WindowsWidget;
 pub use windows_overview::WindowsOverviewWidget;
-pub use quick_tools::QuickToolsWidget;
 
 /// Result of a widget activation.
 #[derive(Debug, Clone)]
@@ -299,7 +301,13 @@ impl WidgetRegistry {
         );
         reg.register(
             "quick_tools",
-            WidgetFactory::new(QuickToolsWidget::new).with_settings_ui(QuickToolsWidget::settings_ui),
+            WidgetFactory::new(QuickToolsWidget::new)
+                .with_settings_ui(QuickToolsWidget::settings_ui),
+        );
+        reg.register(
+            "recycle_bin",
+            WidgetFactory::new(RecycleBinWidget::new)
+                .with_settings_ui(RecycleBinWidget::settings_ui),
         );
         reg
     }

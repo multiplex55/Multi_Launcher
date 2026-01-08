@@ -5,6 +5,7 @@ use crate::plugins::fav::{load_favs, FavEntry, FAV_FILE};
 use crate::plugins::note::{load_notes, Note};
 use crate::plugins::snippets::{load_snippets, SnippetEntry, SNIPPETS_FILE};
 use crate::plugins::todo::{load_todos, TodoEntry, TODO_FILE};
+use crate::{launcher, launcher::RecycleBinInfo};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use sysinfo::{Disks, Networks, System};
@@ -20,6 +21,21 @@ pub struct SystemStatusSnapshot {
     pub brightness_percent: Option<u8>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct RecycleBinSnapshot {
+    pub size_bytes: u64,
+    pub items: u64,
+}
+
+impl From<RecycleBinInfo> for RecycleBinSnapshot {
+    fn from(info: RecycleBinInfo) -> Self {
+        Self {
+            size_bytes: info.size_bytes,
+            items: info.items,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct DashboardDataSnapshot {
     pub clipboard_history: Arc<Vec<String>>,
@@ -30,6 +46,7 @@ pub struct DashboardDataSnapshot {
     pub favorites: Arc<Vec<FavEntry>>,
     pub process_error: Option<String>,
     pub system_status: Option<SystemStatusSnapshot>,
+    pub recycle_bin: Option<RecycleBinSnapshot>,
 }
 
 impl Default for DashboardDataSnapshot {
@@ -43,6 +60,7 @@ impl Default for DashboardDataSnapshot {
             favorites: Arc::new(Vec::new()),
             process_error: None,
             system_status: None,
+            recycle_bin: None,
         }
     }
 }
@@ -58,6 +76,7 @@ impl DashboardDataSnapshot {
             favorites: Arc::clone(&self.favorites),
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
+            recycle_bin: self.recycle_bin.clone(),
         }
     }
 
@@ -71,6 +90,7 @@ impl DashboardDataSnapshot {
             favorites: Arc::clone(&self.favorites),
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
+            recycle_bin: self.recycle_bin.clone(),
         }
     }
 
@@ -84,6 +104,7 @@ impl DashboardDataSnapshot {
             favorites: Arc::clone(&self.favorites),
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
+            recycle_bin: self.recycle_bin.clone(),
         }
     }
 
@@ -97,6 +118,7 @@ impl DashboardDataSnapshot {
             favorites: Arc::clone(&self.favorites),
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
+            recycle_bin: self.recycle_bin.clone(),
         }
     }
 
@@ -110,6 +132,7 @@ impl DashboardDataSnapshot {
             favorites: Arc::new(favorites),
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
+            recycle_bin: self.recycle_bin.clone(),
         }
     }
 
@@ -123,6 +146,7 @@ impl DashboardDataSnapshot {
             favorites: Arc::clone(&self.favorites),
             process_error,
             system_status: self.system_status.clone(),
+            recycle_bin: self.recycle_bin.clone(),
         }
     }
 
@@ -136,6 +160,21 @@ impl DashboardDataSnapshot {
             favorites: Arc::clone(&self.favorites),
             process_error: self.process_error.clone(),
             system_status,
+            recycle_bin: self.recycle_bin.clone(),
+        }
+    }
+
+    fn with_recycle_bin(&self, recycle_bin: Option<RecycleBinSnapshot>) -> Self {
+        Self {
+            clipboard_history: Arc::clone(&self.clipboard_history),
+            snippets: Arc::clone(&self.snippets),
+            notes: Arc::clone(&self.notes),
+            todos: Arc::clone(&self.todos),
+            processes: Arc::clone(&self.processes),
+            favorites: Arc::clone(&self.favorites),
+            process_error: self.process_error.clone(),
+            system_status: self.system_status.clone(),
+            recycle_bin,
         }
     }
 }
@@ -144,6 +183,7 @@ struct DashboardDataState {
     snapshot: Arc<DashboardDataSnapshot>,
     last_process_refresh: Instant,
     last_system_refresh: Instant,
+    last_recycle_refresh: Instant,
     last_network_totals: (u64, u64),
     last_network_time: Instant,
 }
@@ -159,6 +199,7 @@ impl DashboardDataCache {
                 snapshot: Arc::new(DashboardDataSnapshot::default()),
                 last_process_refresh: Instant::now() - Duration::from_secs(60),
                 last_system_refresh: Instant::now() - Duration::from_secs(60),
+                last_recycle_refresh: Instant::now() - Duration::from_secs(60),
                 last_network_totals: (0, 0),
                 last_network_time: Instant::now() - Duration::from_secs(60),
             }),
@@ -180,6 +221,7 @@ impl DashboardDataCache {
         self.refresh_favorites();
         self.refresh_processes(plugins);
         self.refresh_system_status();
+        self.refresh_recycle_bin();
     }
 
     pub fn refresh_clipboard(&self) {
@@ -314,6 +356,25 @@ impl DashboardDataCache {
         }
     }
 
+    pub fn maybe_refresh_recycle_bin(&self, interval: Duration) {
+        let should_refresh = self
+            .state
+            .lock()
+            .map(|state| state.last_recycle_refresh.elapsed() >= interval)
+            .unwrap_or(false);
+        if should_refresh {
+            self.refresh_recycle_bin();
+        }
+    }
+
+    pub fn refresh_recycle_bin(&self) {
+        let snapshot = launcher::query_recycle_bin().map(|data| RecycleBinSnapshot::from(data));
+        if let Ok(mut state) = self.state.lock() {
+            state.snapshot = Arc::new(state.snapshot.with_recycle_bin(snapshot));
+            state.last_recycle_refresh = Instant::now();
+        }
+    }
+
     fn load_processes(plugins: &PluginManager) -> (Vec<Action>, Option<String>) {
         let plugin = plugins.iter().find(|p| p.name() == "processes");
         if let Some(plugin) = plugin {
@@ -360,12 +421,12 @@ fn get_system_volume() -> Option<u8> {
 
 #[cfg(target_os = "windows")]
 fn get_main_display_brightness() -> Option<u8> {
-    use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
-    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
     use windows::Win32::Devices::Display::{
         DestroyPhysicalMonitors, GetMonitorBrightness, GetNumberOfPhysicalMonitorsFromHMONITOR,
         GetPhysicalMonitorsFromHMONITOR, PHYSICAL_MONITOR,
     };
+    use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
+    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
 
     unsafe extern "system" fn enum_monitors(
         hmonitor: HMONITOR,
@@ -382,8 +443,7 @@ fn get_main_display_brightness() -> Option<u8> {
                     let mut min = 0u32;
                     let mut cur = 0u32;
                     let mut max = 0u32;
-                    if GetMonitorBrightness(m.hPhysicalMonitor, &mut min, &mut cur, &mut max) != 0
-                    {
+                    if GetMonitorBrightness(m.hPhysicalMonitor, &mut min, &mut cur, &mut max) != 0 {
                         if max > min {
                             *percent_ptr = ((cur - min) * 100 / (max - min)) as u32;
                         } else {
