@@ -163,6 +163,33 @@ impl FoldersPlugin {
             watcher,
         }
     }
+
+    fn list_entries(&self, filter: &str) -> Vec<Action> {
+        let guard = match self.data.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        guard
+            .iter()
+            .filter(|f| {
+                self.matcher.fuzzy_match(&f.label, filter).is_some()
+                    || self.matcher.fuzzy_match(&f.path, filter).is_some()
+                    || f.alias
+                        .as_ref()
+                        .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
+                        .unwrap_or(false)
+            })
+            .map(|f| {
+                let label = f.alias.clone().unwrap_or_else(|| f.label.clone());
+                Action {
+                    label,
+                    desc: f.path.clone(),
+                    action: f.path.clone(),
+                    args: None,
+                }
+            })
+            .collect()
+    }
 }
 
 impl Default for FoldersPlugin {
@@ -212,36 +239,18 @@ impl Plugin for FoldersPlugin {
                 .collect();
         }
 
+        const LIST_PREFIX: &str = "f list";
+        if let Some(rest) = crate::common::strip_prefix_ci(query, LIST_PREFIX) {
+            return self.list_entries(rest.trim());
+        }
+
         const PREFIX: &str = "f";
         let rest = match crate::common::strip_prefix_ci(query, PREFIX) {
             Some(r) => r,
             None => return Vec::new(),
         };
         let filter = rest.trim();
-        let guard = match self.data.lock() {
-            Ok(g) => g,
-            Err(_) => return Vec::new(),
-        };
-        guard
-            .iter()
-            .filter(|f| {
-                self.matcher.fuzzy_match(&f.label, filter).is_some()
-                    || self.matcher.fuzzy_match(&f.path, filter).is_some()
-                    || f.alias
-                        .as_ref()
-                        .map(|a| self.matcher.fuzzy_match(a, filter).is_some())
-                        .unwrap_or(false)
-            })
-            .map(|f| {
-                let label = f.alias.clone().unwrap_or_else(|| f.label.clone());
-                Action {
-                    label,
-                    desc: f.path.clone(),
-                    action: f.path.clone(),
-                    args: None,
-                }
-            })
-            .collect()
+        self.list_entries(filter)
     }
 
     fn name(&self) -> &str {
@@ -262,6 +271,12 @@ impl Plugin for FoldersPlugin {
                 label: "f".into(),
                 desc: "Folder".into(),
                 action: "query:f ".into(),
+                args: None,
+            },
+            Action {
+                label: "f list".into(),
+                desc: "Folder".into(),
+                action: "query:f list ".into(),
                 args: None,
             },
             Action {

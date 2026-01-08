@@ -326,9 +326,9 @@ impl MacroDialog {
                 {
                     let filter = self.add_filter.trim().to_lowercase();
                     let mut actions = if plugin.name() == "folders" {
-                        plugin.search(&format!("f {}", self.add_filter))
+                        plugin.search(&format!("f list {}", self.add_filter))
                     } else if plugin.name() == "bookmarks" {
-                        plugin.search(&format!("bm {}", self.add_filter))
+                        plugin.search(&format!("bm list {}", self.add_filter))
                     } else {
                         plugin.commands()
                     };
