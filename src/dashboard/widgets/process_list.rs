@@ -20,6 +20,8 @@ fn default_refresh_interval() -> f32 {
 pub struct ProcessesConfig {
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval_secs: f32,
+    #[serde(default)]
+    pub manual_refresh_only: bool,
     #[serde(default = "default_limit")]
     pub limit: usize,
 }
@@ -28,6 +30,7 @@ impl Default for ProcessesConfig {
     fn default() -> Self {
         Self {
             refresh_interval_secs: default_refresh_interval(),
+            manual_refresh_only: false,
             limit: default_limit(),
         }
     }
@@ -35,11 +38,15 @@ impl Default for ProcessesConfig {
 
 pub struct ProcessesWidget {
     cfg: ProcessesConfig,
+    refresh_pending: bool,
 }
 
 impl ProcessesWidget {
     pub fn new(cfg: ProcessesConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            refresh_pending: false,
+        }
     }
 
     pub fn settings_ui(
@@ -59,6 +66,7 @@ impl ProcessesWidget {
             changed |= refresh_interval_setting(
                 ui,
                 &mut cfg.refresh_interval_secs,
+                &mut cfg.manual_refresh_only,
                 "Process enumeration is cached. The widget will skip refreshing until this many seconds have passed. Use Refresh to update immediately.",
             );
             changed
@@ -105,8 +113,13 @@ impl Widget for ProcessesWidget {
         ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        ctx.data_cache
-            .maybe_refresh_processes(ctx.plugins, self.refresh_interval());
+        if self.refresh_pending {
+            ctx.data_cache.refresh_processes(ctx.plugins);
+            self.refresh_pending = false;
+        } else if !self.cfg.manual_refresh_only {
+            ctx.data_cache
+                .maybe_refresh_processes(ctx.plugins, self.refresh_interval());
+        }
         let snapshot = ctx.data_cache.snapshot();
 
         if let Some(err) = &snapshot.process_error {
@@ -153,6 +166,7 @@ impl Widget for ProcessesWidget {
     fn on_config_updated(&mut self, settings: &serde_json::Value) {
         if let Ok(cfg) = serde_json::from_value::<ProcessesConfig>(settings.clone()) {
             self.cfg = cfg;
+            self.refresh_pending = true;
         }
     }
 

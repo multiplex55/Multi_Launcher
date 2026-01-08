@@ -16,12 +16,15 @@ fn default_refresh_interval() -> f32 {
 pub struct SystemConfig {
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval_secs: f32,
+    #[serde(default)]
+    pub manual_refresh_only: bool,
 }
 
 impl Default for SystemConfig {
     fn default() -> Self {
         Self {
             refresh_interval_secs: default_refresh_interval(),
+            manual_refresh_only: false,
         }
     }
 }
@@ -30,6 +33,7 @@ pub struct SystemWidget {
     cfg: SystemConfig,
     cache: TimedCache<Vec<Action>>,
     error: Option<String>,
+    refresh_pending: bool,
 }
 
 impl SystemWidget {
@@ -39,6 +43,7 @@ impl SystemWidget {
             cfg,
             cache: TimedCache::new(Vec::new(), interval),
             error: None,
+            refresh_pending: false,
         }
     }
 
@@ -51,6 +56,7 @@ impl SystemWidget {
             refresh_interval_setting(
                 ui,
                 &mut cfg.refresh_interval_secs,
+                &mut cfg.manual_refresh_only,
                 "System actions are cached. The widget will skip refreshing until this many seconds have passed. Use Refresh to update immediately.",
             )
         })
@@ -73,7 +79,10 @@ impl SystemWidget {
 
     fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
         self.update_interval();
-        if self.cache.should_refresh() {
+        if self.refresh_pending {
+            self.refresh_pending = false;
+            self.refresh(ctx);
+        } else if !self.cfg.manual_refresh_only && self.cache.should_refresh() {
             self.refresh(ctx);
         }
     }
@@ -128,6 +137,7 @@ impl Widget for SystemWidget {
             self.cfg = cfg;
             self.update_interval();
             self.cache.invalidate();
+            self.refresh_pending = true;
         }
     }
 

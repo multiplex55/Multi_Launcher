@@ -24,6 +24,8 @@ fn default_true() -> bool {
 pub struct WindowsOverviewConfig {
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval_secs: f32,
+    #[serde(default)]
+    pub manual_refresh_only: bool,
     #[serde(default = "default_limit")]
     pub limit: usize,
     #[serde(default = "default_true")]
@@ -34,6 +36,7 @@ impl Default for WindowsOverviewConfig {
     fn default() -> Self {
         Self {
             refresh_interval_secs: default_refresh_interval(),
+            manual_refresh_only: false,
             limit: default_limit(),
             show_close: true,
         }
@@ -44,6 +47,7 @@ pub struct WindowsOverviewWidget {
     cfg: WindowsOverviewConfig,
     cache: TimedCache<Vec<Action>>,
     error: Option<String>,
+    refresh_pending: bool,
 }
 
 impl WindowsOverviewWidget {
@@ -53,6 +57,7 @@ impl WindowsOverviewWidget {
             cfg,
             cache: TimedCache::new(Vec::new(), interval),
             error: None,
+            refresh_pending: false,
         }
     }
 
@@ -74,6 +79,7 @@ impl WindowsOverviewWidget {
             changed |= refresh_interval_setting(
                 ui,
                 &mut cfg.refresh_interval_secs,
+                &mut cfg.manual_refresh_only,
                 "Window enumeration is cached. The widget will skip refreshing until this many seconds have passed. Use Refresh to update immediately.",
             );
             changed
@@ -97,7 +103,10 @@ impl WindowsOverviewWidget {
 
     fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
         self.update_interval();
-        if self.cache.should_refresh() {
+        if self.refresh_pending {
+            self.refresh_pending = false;
+            self.refresh(ctx);
+        } else if !self.cfg.manual_refresh_only && self.cache.should_refresh() {
             self.refresh(ctx);
         }
     }
@@ -193,6 +202,7 @@ impl Widget for WindowsOverviewWidget {
             self.cfg = cfg;
             self.update_interval();
             self.cache.invalidate();
+            self.refresh_pending = true;
         }
     }
 

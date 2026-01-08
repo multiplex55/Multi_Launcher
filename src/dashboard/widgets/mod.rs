@@ -541,6 +541,7 @@ impl<T> TimedCache<T> {
 pub(crate) fn refresh_interval_setting(
     ui: &mut egui::Ui,
     seconds: &mut f32,
+    manual_refresh_only: &mut bool,
     tooltip: &str,
 ) -> bool {
     let mut changed = false;
@@ -556,6 +557,10 @@ pub(crate) fn refresh_interval_setting(
         changed |= resp.changed();
         ui.label("seconds");
     });
+    changed |= ui
+        .checkbox(manual_refresh_only, "Only manual refresh")
+        .on_hover_text("Disable automatic refreshes. Use the Refresh button or update settings to fetch new data.")
+        .changed();
     changed
 }
 
