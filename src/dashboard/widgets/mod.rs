@@ -25,6 +25,7 @@ mod recent_commands;
 mod recent_notes;
 mod recycle_bin;
 mod snippets_favorites;
+mod stopwatch;
 mod system_actions;
 mod system_status;
 mod tempfiles;
@@ -53,6 +54,7 @@ pub use recent_commands::RecentCommandsWidget;
 pub use recent_notes::RecentNotesWidget;
 pub use recycle_bin::RecycleBinWidget;
 pub use snippets_favorites::SnippetsFavoritesWidget;
+pub use stopwatch::StopwatchWidget;
 pub use system_actions::SystemWidget;
 pub use system_status::SystemStatusWidget;
 pub use tempfiles::TempfilesWidget;
@@ -320,6 +322,10 @@ impl WidgetRegistry {
         reg.register(
             "volume",
             WidgetFactory::new(VolumeWidget::new).with_settings_ui(VolumeWidget::settings_ui),
+        );
+        reg.register(
+            "stopwatch",
+            WidgetFactory::new(StopwatchWidget::new).with_settings_ui(StopwatchWidget::settings_ui),
         );
         reg
     }
