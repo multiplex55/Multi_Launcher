@@ -48,6 +48,8 @@ pub struct PinnedQueryResultsConfig {
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval_secs: f32,
     #[serde(default)]
+    pub manual_refresh_only: bool,
+    #[serde(default)]
     pub click_behavior: ClickBehavior,
 }
 
@@ -58,6 +60,7 @@ impl Default for PinnedQueryResultsConfig {
             query: default_query(),
             limit: default_limit(),
             refresh_interval_secs: default_refresh_interval(),
+            manual_refresh_only: false,
             click_behavior: ClickBehavior::default(),
         }
     }
@@ -67,6 +70,7 @@ pub struct PinnedQueryResultsWidget {
     cfg: PinnedQueryResultsConfig,
     cache: TimedCache<Vec<Action>>,
     error: Option<String>,
+    refresh_pending: bool,
 }
 
 impl PinnedQueryResultsWidget {
@@ -76,6 +80,7 @@ impl PinnedQueryResultsWidget {
             cfg,
             cache: TimedCache::new(Vec::new(), interval),
             error: None,
+            refresh_pending: false,
         }
     }
 
@@ -208,6 +213,7 @@ impl PinnedQueryResultsWidget {
                 changed |= refresh_interval_setting(
                     ui,
                     &mut cfg.refresh_interval_secs,
+                    &mut cfg.manual_refresh_only,
                     "Query results are cached. The widget refreshes after this many seconds unless you click Refresh.",
                 );
 
@@ -255,7 +261,10 @@ impl PinnedQueryResultsWidget {
 
     fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
         self.update_interval();
-        if self.cache.should_refresh() {
+        if self.refresh_pending {
+            self.refresh_pending = false;
+            self.refresh(ctx);
+        } else if !self.cfg.manual_refresh_only && self.cache.should_refresh() {
             self.refresh(ctx);
         }
     }
@@ -375,6 +384,7 @@ impl Widget for PinnedQueryResultsWidget {
             self.cfg = cfg;
             self.update_interval();
             self.cache.invalidate();
+            self.refresh_pending = true;
         }
     }
 

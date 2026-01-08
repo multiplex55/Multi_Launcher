@@ -24,6 +24,8 @@ fn default_show_desc() -> bool {
 pub struct QueryListConfig {
     #[serde(default = "default_refresh_ms")]
     pub refresh_ms: u64,
+    #[serde(default)]
+    pub manual_refresh_only: bool,
     #[serde(default = "default_count")]
     pub count: usize,
     #[serde(default = "default_show_desc")]
@@ -36,6 +38,7 @@ impl Default for QueryListConfig {
     fn default() -> Self {
         Self {
             refresh_ms: default_refresh_ms(),
+            manual_refresh_only: false,
             count: default_count(),
             show_desc: true,
             query: String::new(),
@@ -47,6 +50,7 @@ pub struct QueryListWidget {
     cfg: QueryListConfig,
     cache: TimedCache<Vec<Action>>,
     last_query: String,
+    refresh_pending: bool,
 }
 
 impl QueryListWidget {
@@ -57,6 +61,7 @@ impl QueryListWidget {
             cfg,
             cache: TimedCache::new(Vec::new(), interval),
             last_query,
+            refresh_pending: false,
         }
     }
 
@@ -82,6 +87,7 @@ impl QueryListWidget {
             changed |= refresh_interval_setting(
                 ui,
                 &mut refresh_secs,
+                &mut cfg.manual_refresh_only,
                 "Results are cached between refreshes.",
             );
             cfg.refresh_ms = (refresh_secs * 1000.0) as u64;
@@ -108,9 +114,12 @@ impl QueryListWidget {
         self.cache.set_interval(self.refresh_interval());
         if self.last_query != self.cfg.query {
             self.last_query = self.cfg.query.clone();
-            self.cache.invalidate();
+            self.refresh_pending = true;
         }
-        if self.cache.should_refresh() {
+        if self.refresh_pending {
+            self.refresh_pending = false;
+            self.refresh(ctx);
+        } else if !self.cfg.manual_refresh_only && self.cache.should_refresh() {
             self.refresh(ctx);
         }
     }
@@ -173,6 +182,7 @@ impl Widget for QueryListWidget {
             self.cfg = cfg;
             self.cache.set_interval(self.refresh_interval());
             self.cache.invalidate();
+            self.refresh_pending = true;
         }
     }
 
