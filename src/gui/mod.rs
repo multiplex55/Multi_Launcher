@@ -22,6 +22,7 @@ mod toast_log_dialog;
 mod todo_dialog;
 mod todo_view_dialog;
 mod unused_assets_dialog;
+pub(crate) mod volume_data;
 mod volume_dialog;
 
 pub use add_action_dialog::AddActionDialog;

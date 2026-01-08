@@ -30,6 +30,7 @@ mod system_status;
 mod tempfiles;
 mod todo;
 mod todo_focus;
+mod volume;
 mod weather_site;
 mod window_list;
 mod windows_overview;
@@ -57,6 +58,7 @@ pub use system_status::SystemStatusWidget;
 pub use tempfiles::TempfilesWidget;
 pub use todo::TodoWidget;
 pub use todo_focus::TodoFocusWidget;
+pub use volume::VolumeWidget;
 pub use weather_site::WeatherSiteWidget;
 pub use window_list::WindowsWidget;
 pub use windows_overview::WindowsOverviewWidget;
@@ -314,6 +316,10 @@ impl WidgetRegistry {
         reg.register(
             "tempfiles",
             WidgetFactory::new(TempfilesWidget::new).with_settings_ui(TempfilesWidget::settings_ui),
+        );
+        reg.register(
+            "volume",
+            WidgetFactory::new(VolumeWidget::new).with_settings_ui(VolumeWidget::settings_ui),
         );
         reg
     }
