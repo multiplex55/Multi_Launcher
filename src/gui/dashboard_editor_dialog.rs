@@ -266,13 +266,20 @@ impl DashboardEditorDialog {
                                                     swapped = true;
                                                 }
                                             }
-                                            let swap_label = if self.swap_anchor == Some(idx) {
-                                                "Swap (source)"
+                                            let is_swap_source = self.swap_anchor == Some(idx);
+                                            let swap_label = if is_swap_source {
+                                                "Swap source"
                                             } else {
                                                 "Swap"
                                             };
-                                            if ui.button(swap_label).clicked() {
-                                                if self.swap_anchor == Some(idx) {
+                                            let swap_button = if is_swap_source {
+                                                egui::Button::new(swap_label)
+                                                    .fill(egui::Color32::from_rgb(60, 120, 200))
+                                            } else {
+                                                egui::Button::new(swap_label)
+                                            };
+                                            if ui.add(swap_button).clicked() {
+                                                if is_swap_source {
                                                     self.swap_anchor = None;
                                                 } else if let Some(anchor) = self.swap_anchor {
                                                     if let Err(err) =
