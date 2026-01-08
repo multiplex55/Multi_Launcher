@@ -246,13 +246,15 @@ impl TodoWidget {
         let row_height =
             ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y + 8.0;
         let scroll_id = ui.id().with("todo_list_scroll");
-        egui::ScrollArea::vertical()
+        egui::ScrollArea::both()
             .id_source(scroll_id)
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, entries.len(), |ui, range| {
+                let min_row_width = ui.available_width().max(400.0);
                 for (idx, entry) in entries[range].iter().cloned() {
                     let mut entry_done = entry.done;
                     ui.horizontal(|ui| {
+                        ui.set_min_width(min_row_width);
                         if ui.checkbox(&mut entry_done, "").changed() {
                             if let Err(err) = mark_done(TODO_FILE, idx) {
                                 tracing::error!("Failed to toggle todo #{idx}: {err}");
@@ -269,10 +271,13 @@ impl TodoWidget {
                         } else {
                             egui::RichText::new(label)
                         };
-                        ui.label(text);
+                        ui.add(egui::Label::new(text).wrap(false));
                         if !entry.tags.is_empty() {
                             let tags = entry.tags.join(", ");
-                            ui.label(egui::RichText::new(format!("#{tags}")).small());
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(format!("#{tags}")).small())
+                                    .wrap(false),
+                            );
                         }
                         if ui.small_button("Open").clicked() {
                             clicked.get_or_insert(WidgetAction {
