@@ -482,7 +482,10 @@ impl LauncherApp {
     fn update_suggestions(&mut self) {
         self.autocomplete_index = 0;
         self.suggestions.clear();
-        if !self.query_autocomplete || self.query.is_empty() {
+        if !self.query_autocomplete
+            || self.query.is_empty()
+            || self.should_show_dashboard(self.query.as_str())
+        {
             return;
         }
         if let Some(ref index) = self.completion_index {
@@ -1089,6 +1092,8 @@ impl LauncherApp {
             trimmed.starts_with("timer list") || trimmed.starts_with("alarm list");
         self.last_stopwatch_query = trimmed.starts_with("sw list");
         if trimmed.is_empty() {
+            self.autocomplete_index = 0;
+            self.suggestions.clear();
             let mut res = self.command_cache.clone();
             for a in self.actions.iter() {
                 res.push(Action {
@@ -2672,6 +2677,7 @@ impl eframe::App for LauncherApp {
         }
 
         let trimmed = self.query.trim().to_string();
+        let use_dashboard = self.should_show_dashboard(trimmed.as_str());
         self.maybe_refresh_timer_list();
         self.maybe_refresh_stopwatch_list();
         if trimmed.eq_ignore_ascii_case("net")
@@ -2726,7 +2732,7 @@ impl eframe::App for LauncherApp {
                     self.search();
                 }
 
-                if self.query_autocomplete && !self.suggestions.is_empty() {
+                if self.query_autocomplete && !use_dashboard && !self.suggestions.is_empty() {
                     ui.vertical(|ui| {
                         for s in &self.suggestions {
                             ui.colored_label(Color32::GRAY, s);
@@ -2809,8 +2815,11 @@ impl eframe::App for LauncherApp {
                 }
             });
 
-            let use_dashboard = self.should_show_dashboard(&trimmed);
             if use_dashboard {
+                if !self.suggestions.is_empty() {
+                    self.autocomplete_index = 0;
+                    self.suggestions.clear();
+                }
                 let dash_ctx = DashboardContext {
                     actions: &self.actions,
                     actions_by_id: &self.actions_by_id,
