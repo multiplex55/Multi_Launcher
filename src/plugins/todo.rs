@@ -403,26 +403,50 @@ impl TodoPlugin {
             };
             let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
 
+            let mut requested_tags: Vec<&str> = Vec::new();
+            let mut text_tokens: Vec<&str> = Vec::new();
             let mut negative = false;
-            if let Some(stripped) = filter.strip_prefix('!') {
-                negative = true;
-                filter = stripped.trim();
+            for token in filter.split_whitespace() {
+                if let Some(stripped) = token.strip_prefix('!') {
+                    if !negative
+                        && !stripped.starts_with('@')
+                        && !stripped.starts_with('#')
+                        && text_tokens.is_empty()
+                    {
+                        negative = true;
+                        if !stripped.is_empty() {
+                            text_tokens.push(stripped);
+                        }
+                        continue;
+                    }
+                }
+
+                if let Some(tag) = token.strip_prefix('@').or_else(|| token.strip_prefix('#')) {
+                    if !tag.is_empty() {
+                        requested_tags.push(tag);
+                    }
+                } else {
+                    text_tokens.push(token);
+                }
             }
 
-            let tag_filter = filter.starts_with('#');
-            if tag_filter {
-                let tag = filter.trim_start_matches('#');
+            let text_filter = text_tokens.join(" ");
+            let has_tag_filter = !requested_tags.is_empty();
+
+            // Tag filters run first, then text filters apply fuzzy matching against remaining text.
+            if has_tag_filter {
                 entries.retain(|(_, t)| {
-                    let has_tag = t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(tag));
-                    if negative {
-                        !has_tag
-                    } else {
-                        has_tag
-                    }
+                    requested_tags.iter().all(|requested| {
+                        t.tags
+                            .iter()
+                            .any(|tag| tag.eq_ignore_ascii_case(requested))
+                    })
                 });
-            } else if !filter.is_empty() {
+            }
+
+            if !text_filter.is_empty() {
                 entries.retain(|(_, t)| {
-                    let text_match = self.matcher.fuzzy_match(&t.text, filter).is_some();
+                    let text_match = self.matcher.fuzzy_match(&t.text, &text_filter).is_some();
                     if negative {
                         !text_match
                     } else {
@@ -431,7 +455,7 @@ impl TodoPlugin {
                 });
             }
 
-            if filter.is_empty() || tag_filter {
+            if text_filter.is_empty() || has_tag_filter {
                 entries.sort_by(|a, b| b.1.priority.cmp(&a.1.priority));
             }
 
