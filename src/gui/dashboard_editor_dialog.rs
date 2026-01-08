@@ -228,6 +228,7 @@ impl DashboardEditorDialog {
                         if let Some(slot) = self.config.slots.get(idx) {
                             let label = Self::slot_label(slot);
                             let mut open = true;
+                            let mut should_close = false;
                             egui::Window::new("Confirm remove")
                                 .collapsible(false)
                                 .resizable(false)
@@ -237,13 +238,16 @@ impl DashboardEditorDialog {
                                     ui.horizontal(|ui| {
                                         if ui.button("Remove").clicked() {
                                             confirm_remove = Some(idx);
-                                            open = false;
+                                            should_close = true;
                                         }
                                         if ui.button("Cancel").clicked() {
-                                            open = false;
+                                            should_close = true;
                                         }
                                     });
                                 });
+                            if should_close {
+                                open = false;
+                            }
                             if !open {
                                 self.confirm_remove_slot = None;
                             }
@@ -255,7 +259,7 @@ impl DashboardEditorDialog {
                     while idx < self.config.slots.len() {
                         let original_slot = self.config.slots[idx].clone();
                         let mut slot = original_slot.clone();
-                        let mut removed = confirm_remove == Some(idx);
+                        let removed = confirm_remove == Some(idx);
                         let mut edited = false;
                         let mut swapped = false;
                         ui.push_id(idx, |ui| {
