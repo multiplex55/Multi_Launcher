@@ -27,6 +27,7 @@ mod recycle_bin;
 mod snippets_favorites;
 mod system_actions;
 mod system_status;
+mod tempfiles;
 mod todo;
 mod todo_focus;
 mod weather_site;
@@ -53,6 +54,7 @@ pub use recycle_bin::RecycleBinWidget;
 pub use snippets_favorites::SnippetsFavoritesWidget;
 pub use system_actions::SystemWidget;
 pub use system_status::SystemStatusWidget;
+pub use tempfiles::TempfilesWidget;
 pub use todo::TodoWidget;
 pub use todo_focus::TodoFocusWidget;
 pub use weather_site::WeatherSiteWidget;
@@ -308,6 +310,10 @@ impl WidgetRegistry {
             "recycle_bin",
             WidgetFactory::new(RecycleBinWidget::new)
                 .with_settings_ui(RecycleBinWidget::settings_ui),
+        );
+        reg.register(
+            "tempfiles",
+            WidgetFactory::new(TempfilesWidget::new).with_settings_ui(TempfilesWidget::settings_ui),
         );
         reg
     }
