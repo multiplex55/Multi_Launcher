@@ -91,24 +91,76 @@ impl PinnedQueryResultsWidget {
             |ui, cfg: &mut PinnedQueryResultsConfig, ctx| {
                 let mut changed = false;
 
-                let mut engines = plugin_names(ctx);
-                if !engines.iter().any(|e| e == "omni_search") {
-                    engines.insert(0, "omni_search".into());
-                }
-                if cfg.engine.trim().is_empty() {
-                    cfg.engine = default_engine();
+                let all_engines = if let Some(infos) = ctx.plugin_infos {
+                    infos.iter().map(|(name, _, _)| name.clone()).collect()
+                } else if let Some(manager) = ctx.plugins {
+                    manager.plugin_names()
+                } else {
+                    Vec::new()
+                };
+                let engines = plugin_names(ctx);
+                let original_engine = cfg.engine.trim().to_string();
+                let mut warning = None;
+
+                if original_engine.is_empty() {
+                    if let Some(first) = engines.first() {
+                        cfg.engine = first.clone();
+                    } else {
+                        cfg.engine = default_engine();
+                    }
                     changed = true;
+                } else if let Some(enabled) = ctx.enabled_plugins {
+                    if !enabled.contains(original_engine.as_str()) {
+                        if let Some(first) = engines.first() {
+                            if first != &original_engine {
+                                cfg.engine = first.clone();
+                                changed = true;
+                                warning = Some(format!(
+                                    "Engine '{original_engine}' is disabled in plugin settings. Using '{first}'.",
+                                ));
+                            } else {
+                                warning = Some(format!(
+                                    "Engine '{original_engine}' is disabled in plugin settings.",
+                                ));
+                            }
+                        } else {
+                            warning = Some(format!(
+                                "Engine '{original_engine}' is disabled in plugin settings.",
+                            ));
+                        }
+                    }
+                } else if !all_engines.iter().any(|name| name == &original_engine) {
+                    if let Some(first) = engines.first() {
+                        cfg.engine = first.clone();
+                        changed = true;
+                        warning = Some(format!(
+                            "Engine '{original_engine}' is not available. Using '{first}'.",
+                        ));
+                    } else {
+                        warning = Some(format!("Engine '{original_engine}' is not available."));
+                    }
                 }
 
-                egui::ComboBox::from_label("Engine")
-                    .selected_text(&cfg.engine)
-                    .show_ui(ui, |ui| {
-                        for engine in &engines {
-                            changed |= ui
-                                .selectable_value(&mut cfg.engine, engine.clone(), engine)
-                                .changed();
-                        }
-                    });
+                if engines.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        "No enabled engines available.",
+                    );
+                } else {
+                    egui::ComboBox::from_label("Engine")
+                        .selected_text(&cfg.engine)
+                        .show_ui(ui, |ui| {
+                            for engine in &engines {
+                                changed |= ui
+                                    .selectable_value(&mut cfg.engine, engine.clone(), engine)
+                                    .changed();
+                            }
+                        });
+                }
+
+                if let Some(warn) = warning {
+                    ui.colored_label(egui::Color32::YELLOW, warn);
+                }
 
                 let prefix_candidates = Self::suggestion_prefixes(&cfg.engine);
                 let prefix_refs: Vec<&str> = prefix_candidates.iter().map(|s| s.as_str()).collect();
@@ -218,6 +270,16 @@ impl PinnedQueryResultsWidget {
         }
 
         let engine_name = self.cfg.engine.trim();
+        if let Some(enabled) = ctx.enabled_plugins {
+            if !enabled.contains(engine_name) {
+                return (
+                    Vec::new(),
+                    Some(format!(
+                        "Engine '{engine_name}' is disabled in plugin settings."
+                    )),
+                );
+            }
+        }
         let Some(plugin) = find_plugin(ctx, engine_name) else {
             return (
                 Vec::new(),

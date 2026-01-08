@@ -2815,6 +2815,7 @@ impl eframe::App for LauncherApp {
                     actions_by_id: &self.actions_by_id,
                     usage: &self.usage,
                     plugins: &self.plugins,
+                    enabled_plugins: self.enabled_plugins.as_ref(),
                     default_location: self.dashboard_default_location.as_deref(),
                     data_cache: &self.dashboard_data_cache,
                     actions_version: crate::actions::actions_version(),
@@ -3270,6 +3271,7 @@ impl eframe::App for LauncherApp {
                 actions: Some(self.actions.as_slice()),
                 usage: Some(&self.usage),
                 default_location: self.dashboard_default_location.as_deref(),
+                enabled_plugins: self.enabled_plugins.as_ref(),
             };
             let reload = dlg.ui(ctx, &registry, settings_ctx);
             self.show_dashboard_editor = dlg.open;

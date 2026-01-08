@@ -4,7 +4,7 @@ use crate::plugin::PluginManager;
 use eframe::egui;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 mod active_timers;
@@ -80,6 +80,7 @@ pub struct WidgetSettingsContext<'a> {
     pub actions: Option<&'a [Action]>,
     pub usage: Option<&'a std::collections::HashMap<String, u32>>,
     pub default_location: Option<&'a str>,
+    pub enabled_plugins: Option<&'a HashSet<String>>,
 }
 
 impl<'a> WidgetSettingsContext<'a> {
@@ -91,6 +92,7 @@ impl<'a> WidgetSettingsContext<'a> {
             actions: None,
             usage: None,
             default_location: None,
+            enabled_plugins: None,
         }
     }
 }
@@ -383,13 +385,24 @@ pub(crate) fn merge_json(base: &Value, updates: &Value) -> Value {
 
 pub(crate) fn plugin_names(ctx: &WidgetSettingsContext<'_>) -> Vec<String> {
     if let Some(infos) = ctx.plugin_infos {
-        let mut names: Vec<String> = infos.iter().map(|(name, _, _)| name.clone()).collect();
+        let mut names: Vec<String> = infos
+            .iter()
+            .filter(|(name, _, _)| {
+                ctx.enabled_plugins
+                    .map(|set| set.contains(name))
+                    .unwrap_or(true)
+            })
+            .map(|(name, _, _)| name.clone())
+            .collect();
         names.sort();
         names.dedup();
         return names;
     }
     if let Some(manager) = ctx.plugins {
         let mut names = manager.plugin_names();
+        if let Some(enabled) = ctx.enabled_plugins {
+            names.retain(|name| enabled.contains(name));
+        }
         names.sort();
         names
     } else {
