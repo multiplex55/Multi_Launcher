@@ -404,42 +404,61 @@ impl TodoPlugin {
             let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
 
             let mut requested_tags: Vec<&str> = Vec::new();
+            let mut excluded_tags: Vec<&str> = Vec::new();
             let mut text_tokens: Vec<&str> = Vec::new();
             let mut negative = false;
             for token in filter.split_whitespace() {
+                let mut token = token;
+                let mut token_negated = false;
                 if let Some(stripped) = token.strip_prefix('!') {
-                    if !negative
-                        && !stripped.starts_with('@')
-                        && !stripped.starts_with('#')
-                        && text_tokens.is_empty()
-                    {
-                        negative = true;
-                        if !stripped.is_empty() {
-                            text_tokens.push(stripped);
-                        }
-                        continue;
-                    }
+                    token_negated = true;
+                    token = stripped;
                 }
 
                 if let Some(tag) = token.strip_prefix('@').or_else(|| token.strip_prefix('#')) {
                     if !tag.is_empty() {
-                        requested_tags.push(tag);
+                        if token_negated {
+                            excluded_tags.push(tag);
+                        } else {
+                            requested_tags.push(tag);
+                        }
                     }
-                } else {
+                    continue;
+                }
+
+                if token_negated
+                    && !negative
+                    && !token.is_empty()
+                    && text_tokens.is_empty()
+                {
+                    negative = true;
+                }
+
+                if !token.is_empty() {
                     text_tokens.push(token);
                 }
             }
 
             let text_filter = text_tokens.join(" ");
-            let has_tag_filter = !requested_tags.is_empty();
+            let has_tag_filter = !requested_tags.is_empty() || !excluded_tags.is_empty();
 
             // Tag filters run first, then text filters apply fuzzy matching against remaining text.
-            if has_tag_filter {
+            if !requested_tags.is_empty() {
                 entries.retain(|(_, t)| {
                     requested_tags.iter().all(|requested| {
                         t.tags
                             .iter()
                             .any(|tag| tag.eq_ignore_ascii_case(requested))
+                    })
+                });
+            }
+
+            if !excluded_tags.is_empty() {
+                entries.retain(|(_, t)| {
+                    !excluded_tags.iter().any(|excluded| {
+                        t.tags
+                            .iter()
+                            .any(|tag| tag.eq_ignore_ascii_case(excluded))
                     })
                 });
             }
