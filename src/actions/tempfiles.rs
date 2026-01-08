@@ -18,6 +18,11 @@ pub fn open_dir() -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn open_file(path: &str) -> anyhow::Result<()> {
+    open::that(Path::new(path))?;
+    Ok(())
+}
+
 pub fn clear() -> anyhow::Result<()> {
     crate::plugins::tempfile::clear_files()?;
     Ok(())

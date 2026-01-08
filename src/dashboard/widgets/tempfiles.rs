@@ -199,6 +199,15 @@ impl TempfilesWidget {
             args: None,
         }
     }
+
+    fn open_action(path: &Path, name: &str) -> Action {
+        Action {
+            label: format!("Open {name}"),
+            desc: "Tempfile".into(),
+            action: format!("tempfile:open:{}", path.to_string_lossy()),
+            args: None,
+        }
+    }
 }
 
 impl Default for TempfilesWidget {
@@ -266,6 +275,17 @@ impl Widget for TempfilesWidget {
                                 ))
                                 .small());
                             }
+                        }
+                        if ui
+                            .small_button("Open")
+                            .on_hover_text("Open file (not folder)")
+                            .clicked()
+                        {
+                            let action = Self::open_action(&entry.path, display_name);
+                            clicked = Some(WidgetAction {
+                                query_override: Some(action.label.clone()),
+                                action,
+                            });
                         }
                         if ui.small_button("Clear").clicked() {
                             let action = Self::remove_action(&entry.path, display_name);
