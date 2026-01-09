@@ -136,14 +136,14 @@ impl Widget for ProcessesWidget {
         let row_height =
             ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y + 8.0;
         let scroll_id = ui.id().with("process_list_scroll");
-        egui::ScrollArea::vertical()
+        egui::ScrollArea::both()
             .id_source(scroll_id)
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, grouped.len(), |ui, range| {
                 for (desc, switch, kill) in &grouped[range] {
                     ui.horizontal(|ui| {
                         if let Some(action) = switch {
-                            if ui.button(&action.label).clicked() {
+                            if ui.add(egui::Button::new(&action.label).wrap(false)).clicked() {
                                 clicked = Some(action.clone());
                             }
                         }
@@ -152,7 +152,7 @@ impl Widget for ProcessesWidget {
                                 clicked = Some(action.clone());
                             }
                         }
-                        ui.label(egui::RichText::new(desc).small());
+                        ui.add(egui::Label::new(egui::RichText::new(desc).small()).wrap(false));
                     });
                 }
             });

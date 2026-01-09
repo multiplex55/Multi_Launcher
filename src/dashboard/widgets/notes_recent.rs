@@ -156,20 +156,29 @@ impl Widget for NotesRecentWidget {
             row_height += small_height + 2.0;
         }
         let scroll_id = ui.id().with("notes_recent_scroll");
-        egui::ScrollArea::vertical()
+        egui::ScrollArea::both()
             .id_source(scroll_id)
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, self.cached.len(), |ui, range| {
                 for note in &self.cached[range] {
                     let mut clicked_row = false;
                     ui.vertical(|ui| {
-                        clicked_row |= ui.button(&note.title).clicked();
+                        clicked_row |= ui
+                            .add(egui::Button::new(&note.title).wrap(false))
+                            .clicked();
                         if self.cfg.show_snippet {
-                            ui.label(egui::RichText::new(&note.snippet).small());
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(&note.snippet).small())
+                                    .wrap(false),
+                            );
                         }
                         if self.cfg.show_tags && !note.tags.is_empty() {
-                            ui.label(
-                                egui::RichText::new(format!("#{}", note.tags.join(" #"))).small(),
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(format!("#{}", note.tags.join(" #")))
+                                        .small(),
+                                )
+                                .wrap(false),
                             );
                         }
                         ui.add_space(4.0);

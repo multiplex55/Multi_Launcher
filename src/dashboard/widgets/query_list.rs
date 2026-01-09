@@ -155,17 +155,20 @@ impl Widget for QueryListWidget {
             ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y + 8.0;
         let max_rows = self.cache.data.len().min(self.cfg.count);
         let scroll_id = ui.id().with("query_list_scroll");
-        egui::ScrollArea::vertical()
+        egui::ScrollArea::both()
             .id_source(scroll_id)
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, max_rows, |ui, range| {
                 for action in &self.cache.data[range] {
                     ui.horizontal(|ui| {
-                        if ui.button(&action.label).clicked() {
+                        if ui.add(egui::Button::new(&action.label).wrap(false)).clicked() {
                             clicked = Some(action.clone());
                         }
                         if self.cfg.show_desc {
-                            ui.label(egui::RichText::new(&action.desc).small());
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(&action.desc).small())
+                                    .wrap(false),
+                            );
                         }
                     });
                 }
