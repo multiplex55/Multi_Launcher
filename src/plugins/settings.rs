@@ -47,7 +47,7 @@ impl Plugin for SettingsPlugin {
             Action {
                 label: "settings".into(),
                 desc: "Settings".into(),
-                action: "query:settings".into(),
+                action: "settings:dialog".into(),
                 args: None,
             },
             Action {

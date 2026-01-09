@@ -812,7 +812,16 @@ impl SettingsEditor {
                                         }
                                     }
                                     Err(e) => {
-                                        app.set_error(format!("Failed to read settings: {e}"))
+                                        let msg = format!("Failed to read settings: {e}");
+                                        app.set_error(msg.clone());
+                                        if app.enable_toasts {
+                                            app.add_toast(Toast {
+                                                text: msg.into(),
+                                                kind: ToastKind::Error,
+                                                options: ToastOptions::default()
+                                                    .duration_in_seconds(app.toast_duration as f64),
+                                            });
+                                        }
                                     }
                                 }
                             }
