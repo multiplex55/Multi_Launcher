@@ -325,7 +325,7 @@ impl Dashboard {
             slot.slot.row,
             slot.slot.col,
         ));
-        let scroll_area = egui::ScrollArea::vertical()
+        let scroll_area = egui::ScrollArea::both()
             .id_source(scroll_id)
             .auto_shrink([false; 2])
             .max_height(body_height)
@@ -334,7 +334,9 @@ impl Dashboard {
         SCROLL_VISIBILITY_RECORDS.lock().unwrap().push(visibility);
 
         scroll_area
-            .show_viewport(ui, |ui, _viewport| {
+            .show_viewport(ui, |ui, viewport| {
+                #[cfg(test)]
+                SCROLL_VIEWPORTS.lock().unwrap().push(viewport);
                 ui.set_clip_rect(ui.clip_rect().intersect(slot_clip));
                 ui.set_min_height(body_height);
                 Self::render_widget_content(slot, ui, ctx, activation)
@@ -365,6 +367,8 @@ enum OverflowPolicy {
 #[cfg(test)]
 static SCROLL_VISIBILITY_RECORDS: Lazy<Mutex<Vec<ScrollBarVisibility>>> =
     Lazy::new(|| Mutex::new(Vec::new()));
+#[cfg(test)]
+static SCROLL_VIEWPORTS: Lazy<Mutex<Vec<egui::Rect>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 #[cfg(test)]
 mod tests {
@@ -395,6 +399,9 @@ mod tests {
         label: String,
     }
 
+    #[derive(Default)]
+    struct OverflowWidget;
+
     #[derive(Clone, Copy)]
     struct SlotRecord {
         clip: egui::Rect,
@@ -402,6 +409,7 @@ mod tests {
 
     static RECORDS: Lazy<Mutex<Vec<SlotRecord>>> = Lazy::new(|| Mutex::new(Vec::new()));
     static RENDERS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+    static OVERFLOW_RECORDS: Lazy<Mutex<Vec<egui::Rect>>> = Lazy::new(|| Mutex::new(Vec::new()));
     static CREATED: AtomicUsize = AtomicUsize::new(0);
     static UPDATED: AtomicUsize = AtomicUsize::new(0);
 
@@ -443,6 +451,21 @@ mod tests {
         }
     }
 
+    impl Widget for OverflowWidget {
+        fn render(
+            &mut self,
+            ui: &mut egui::Ui,
+            _ctx: &DashboardContext<'_>,
+            _activation: WidgetActivation,
+        ) -> Option<WidgetAction> {
+            let rect = ui
+                .allocate_space(egui::vec2(320.0, 180.0))
+                .rect;
+            OVERFLOW_RECORDS.lock().unwrap().push(rect);
+            None
+        }
+    }
+
     fn take_records() -> Vec<SlotRecord> {
         std::mem::take(&mut *RECORDS.lock().unwrap())
     }
@@ -455,12 +478,26 @@ mod tests {
         std::mem::take(&mut *SCROLL_VISIBILITY_RECORDS.lock().unwrap())
     }
 
+    fn take_scroll_viewports() -> Vec<egui::Rect> {
+        std::mem::take(&mut *SCROLL_VIEWPORTS.lock().unwrap())
+    }
+
+    fn take_overflow_records() -> Vec<egui::Rect> {
+        std::mem::take(&mut *OVERFLOW_RECORDS.lock().unwrap())
+    }
+
     fn recording_registry() -> WidgetRegistry {
         let mut reg = WidgetRegistry::default();
         reg.register(
             "record",
             WidgetFactory::new(|_: RecordingConfig| RecordingWidget),
         );
+        reg
+    }
+
+    fn overflow_registry() -> WidgetRegistry {
+        let mut reg = WidgetRegistry::default();
+        reg.register("overflow", WidgetFactory::new(|_: RecordingConfig| OverflowWidget));
         reg
     }
 
@@ -650,6 +687,46 @@ mod tests {
         let expected_clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
         assert_eq!(record.clip, expected_clip);
         assert!(take_scroll_visibilities().is_empty());
+    }
+
+    #[test]
+    fn scroll_area_allows_horizontal_and_vertical_overflow() {
+        take_scroll_visibilities();
+        take_scroll_viewports();
+        take_overflow_records();
+        let cfg = DashboardConfig {
+            version: 1,
+            grid: GridConfig { rows: 1, cols: 1 },
+            slots: vec![SlotConfig {
+                overflow: OverflowMode::Scroll,
+                ..SlotConfig::with_widget("overflow", 0, 0)
+            }],
+        };
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        cfg.save(tmp.path()).unwrap();
+
+        let registry = overflow_registry();
+        let mut dashboard = dashboard_with_config(tmp.path(), registry);
+        let plugins = PluginManager::new();
+        let data_cache = DashboardDataCache::new();
+        let ctx = dashboard_context(&plugins, &data_cache);
+
+        egui::__run_test_ui(|ui| {
+            let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(120.0, 80.0));
+            ui.allocate_ui_at_rect(rect, |ui| {
+                dashboard.ui(ui, &ctx, WidgetActivation::Click);
+            });
+        });
+
+        let viewports = take_scroll_viewports();
+        let overflow_records = take_overflow_records();
+        assert_eq!(viewports.len(), 1);
+        assert_eq!(overflow_records.len(), 1);
+        let viewport = viewports[0];
+        let overflow = overflow_records[0];
+        assert!(overflow.width() > viewport.width());
+        assert!(overflow.height() > viewport.height());
+        assert_eq!(take_scroll_visibilities(), vec![ScrollBarVisibility::AlwaysVisible]);
     }
 
     #[test]
