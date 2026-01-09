@@ -408,12 +408,10 @@ impl TodoPlugin {
             let mut text_tokens: Vec<&str> = Vec::new();
             let mut negative = false;
             for token in filter.split_whitespace() {
-                let mut token = token;
-                let mut token_negated = false;
-                if let Some(stripped) = token.strip_prefix('!') {
-                    token_negated = true;
-                    token = stripped;
-                }
+                let (token, token_negated) = token
+                    .strip_prefix('!')
+                    .map(|stripped| (stripped, true))
+                    .unwrap_or((token, false));
 
                 if let Some(tag) = token.strip_prefix('@').or_else(|| token.strip_prefix('#')) {
                     if !tag.is_empty() {
@@ -426,15 +424,10 @@ impl TodoPlugin {
                     continue;
                 }
 
-                if token_negated
-                    && !negative
-                    && !token.is_empty()
-                    && text_tokens.is_empty()
-                {
-                    negative = true;
-                }
-
                 if !token.is_empty() {
+                    if token_negated && !negative && text_tokens.is_empty() {
+                        negative = true;
+                    }
                     text_tokens.push(token);
                 }
             }
@@ -593,5 +586,65 @@ impl Plugin for TodoPlugin {
                 args: None,
             },
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn set_todos(entries: Vec<TodoEntry>) -> Vec<TodoEntry> {
+        let original = TODO_DATA.read().unwrap().clone();
+        let mut guard = TODO_DATA.write().unwrap();
+        *guard = entries;
+        original
+    }
+
+    #[test]
+    fn list_filters_by_tags_and_text() {
+        let original = set_todos(vec![
+            TodoEntry {
+                text: "foo alpha".into(),
+                done: false,
+                priority: 3,
+                tags: vec!["testing".into(), "ui".into()],
+            },
+            TodoEntry {
+                text: "bar beta".into(),
+                done: false,
+                priority: 1,
+                tags: vec!["testing".into()],
+            },
+            TodoEntry {
+                text: "foo gamma".into(),
+                done: false,
+                priority: 2,
+                tags: vec!["ui".into()],
+            },
+        ]);
+
+        let plugin = TodoPlugin {
+            matcher: SkimMatcherV2::default(),
+            data: TODO_DATA.clone(),
+            cache: TODO_CACHE.clone(),
+            watcher: None,
+        };
+
+        let list_testing = plugin.search_internal("todo list @testing");
+        let labels_testing: Vec<&str> = list_testing.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_testing, vec!["[ ] foo alpha", "[ ] bar beta"]);
+
+        let list_testing_ui = plugin.search_internal("todo list @testing @ui");
+        let labels_testing_ui: Vec<&str> =
+            list_testing_ui.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_testing_ui, vec!["[ ] foo alpha"]);
+
+        let list_negated = plugin.search_internal("todo list !foo @testing");
+        let labels_negated: Vec<&str> = list_negated.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_negated, vec!["[ ] bar beta"]);
+
+        if let Ok(mut guard) = TODO_DATA.write() {
+            *guard = original;
+        }
     }
 }
