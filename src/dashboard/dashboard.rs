@@ -337,6 +337,8 @@ impl Dashboard {
             .show_viewport(ui, |ui, viewport| {
                 #[cfg(test)]
                 SCROLL_VIEWPORTS.lock().unwrap().push(viewport);
+                #[cfg(not(test))]
+                let _ = viewport;
                 ui.set_clip_rect(ui.clip_rect().intersect(slot_clip));
                 ui.set_min_height(body_height);
                 Self::render_widget_content(slot, ui, ctx, activation)
@@ -458,9 +460,7 @@ mod tests {
             _ctx: &DashboardContext<'_>,
             _activation: WidgetActivation,
         ) -> Option<WidgetAction> {
-            let rect = ui
-                .allocate_space(egui::vec2(320.0, 180.0))
-                .rect;
+            let (_, rect) = ui.allocate_space(egui::vec2(320.0, 180.0));
             OVERFLOW_RECORDS.lock().unwrap().push(rect);
             None
         }
