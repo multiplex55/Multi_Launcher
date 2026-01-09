@@ -335,9 +335,8 @@ impl Dashboard {
 
         scroll_area
             .show_viewport(ui, |ui, _viewport| {
-                ui.set_clip_rect(slot_clip);
+                ui.set_clip_rect(ui.clip_rect().intersect(slot_clip));
                 ui.set_min_height(body_height);
-                ui.set_max_height(body_height);
                 Self::render_widget_content(slot, ui, ctx, activation)
             })
             .inner
@@ -534,8 +533,12 @@ mod tests {
         let records = take_records();
         assert_eq!(records.len(), 1);
         let record = records[0];
-        let expected_clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(240.0, 180.0));
-        assert_eq!(record.clip, expected_clip);
+        let slot_rect =
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(240.0, 180.0));
+        assert!(record.clip.min.x >= slot_rect.min.x - f32::EPSILON);
+        assert!(record.clip.min.y >= slot_rect.min.y - f32::EPSILON);
+        assert!(record.clip.max.x <= slot_rect.max.x + f32::EPSILON);
+        assert!(record.clip.max.y <= slot_rect.max.y + f32::EPSILON);
     }
 
     #[test]
@@ -603,8 +606,11 @@ mod tests {
         let records = take_records();
         assert_eq!(records.len(), 1);
         let record = records[0];
-        let expected_clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
-        assert_eq!(record.clip, expected_clip);
+        let slot_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
+        assert!(record.clip.min.x >= slot_rect.min.x - f32::EPSILON);
+        assert!(record.clip.min.y >= slot_rect.min.y - f32::EPSILON);
+        assert!(record.clip.max.x <= slot_rect.max.x + f32::EPSILON);
+        assert!(record.clip.max.y <= slot_rect.max.y + f32::EPSILON);
         assert_eq!(
             take_scroll_visibilities(),
             vec![ScrollBarVisibility::VisibleWhenNeeded]
