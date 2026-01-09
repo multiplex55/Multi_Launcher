@@ -386,6 +386,7 @@ enum ActionKind<'a> {
     BrowserTabClear,
     TempfileNew(Option<&'a str>),
     TempfileOpen,
+    TempfileOpenFile(&'a str),
     TempfileClear,
     TempfileRemove(&'a str),
     TempfileAlias {
@@ -713,6 +714,9 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if s == "tempfile:new" {
         return ActionKind::TempfileNew(None);
     }
+    if let Some(path) = s.strip_prefix("tempfile:open:") {
+        return ActionKind::TempfileOpenFile(path);
+    }
     if s == "tempfile:open" {
         return ActionKind::TempfileOpen;
     }
@@ -910,6 +914,7 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         }
         ActionKind::TempfileNew(alias) => tempfiles::new(alias),
         ActionKind::TempfileOpen => tempfiles::open_dir(),
+        ActionKind::TempfileOpenFile(path) => tempfiles::open_file(path),
         ActionKind::TempfileClear => tempfiles::clear(),
         ActionKind::TempfileRemove(path) => tempfiles::remove(path),
         ActionKind::TempfileAlias { path, alias } => tempfiles::set_alias(path, alias),
