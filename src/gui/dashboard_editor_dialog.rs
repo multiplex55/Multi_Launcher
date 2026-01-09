@@ -18,6 +18,11 @@ struct OccupancyMap {
     slot_conflicts: Vec<bool>,
 }
 
+enum SplitDirection {
+    Horizontal,
+    Vertical,
+}
+
 pub struct DashboardEditorDialog {
     pub open: bool,
     path: String,
@@ -219,6 +224,20 @@ impl DashboardEditorDialog {
                         if ui.button("Collapse all").clicked() {
                             self.slot_collapse_all = true;
                             self.slot_expand_all = false;
+                        }
+                        if ui.button("Split H").clicked() {
+                            if let Err(err) =
+                                self.split_selected_slot(registry, SplitDirection::Horizontal)
+                            {
+                                self.blocked_warning = Some(err);
+                            }
+                        }
+                        if ui.button("Split V").clicked() {
+                            if let Err(err) =
+                                self.split_selected_slot(registry, SplitDirection::Vertical)
+                            {
+                                self.blocked_warning = Some(err);
+                            }
                         }
                     });
 
@@ -802,7 +821,11 @@ impl DashboardEditorDialog {
         }
         let occupancy_without_selected = self.occupancy_map(rows, cols, self.selected_slot);
 
-        let grid_size = egui::vec2((cols as f32).max(1.0) * 40.0, (rows as f32).max(1.0) * 40.0);
+        let cell_size = 60.0;
+        let grid_size = egui::vec2(
+            (cols as f32).max(1.0) * cell_size,
+            (rows as f32).max(1.0) * cell_size,
+        );
         let (response, painter) = ui.allocate_painter(grid_size, egui::Sense::click_and_drag());
         let rect = response.rect;
         let row_h = rect.height() / rows as f32;
@@ -896,13 +919,16 @@ impl DashboardEditorDialog {
                     },
                 ),
             );
-            painter.text(
-                slot_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                display_slot.id.as_deref().unwrap_or(&display_slot.widget),
-                egui::FontId::monospace(12.0),
-                ui.visuals().strong_text_color(),
+            let slot_label = Self::slot_label(&display_slot);
+            let slot_response = ui.interact(
+                slot_rect,
+                ui.id().with(("preview-slot", idx)),
+                egui::Sense::hover(),
             );
+            slot_response.on_hover_text(format!(
+                "{slot_label} (row {}, col {}, span {}x{})",
+                display_slot.row, display_slot.col, display_slot.row_span, display_slot.col_span
+            ));
         }
 
         let mut drag_preview: Option<(usize, usize, usize, usize, bool)> = None;
@@ -1332,5 +1358,85 @@ impl DashboardEditorDialog {
 
         self.config.slots = placed;
         Ok(())
+    }
+
+    fn split_selected_slot(
+        &mut self,
+        registry: &WidgetRegistry,
+        direction: SplitDirection,
+    ) -> Result<(), String> {
+        let Some(selected_idx) = self.selected_slot else {
+            return Err("Select a slot to split.".into());
+        };
+        if selected_idx >= self.config.slots.len() {
+            return Err("Selected slot no longer exists; please reselect.".into());
+        }
+
+        let rows = self.config.grid.rows.max(1) as usize;
+        let cols = self.config.grid.cols.max(1) as usize;
+        let original_slot = self.config.slots[selected_idx].clone();
+        let (primary_span, secondary_span) = match direction {
+            SplitDirection::Horizontal => {
+                if original_slot.row_span <= 1 {
+                    return Err("Selected slot cannot be split horizontally.".into());
+                }
+                let primary = original_slot.row_span / 2;
+                (primary.max(1), original_slot.row_span - primary.max(1))
+            }
+            SplitDirection::Vertical => {
+                if original_slot.col_span <= 1 {
+                    return Err("Selected slot cannot be split vertically.".into());
+                }
+                let primary = original_slot.col_span / 2;
+                (primary.max(1), original_slot.col_span - primary.max(1))
+            }
+        };
+
+        let mut updated_slot = original_slot.clone();
+        let mut new_slot =
+            SlotConfig::with_widget("weather_site", original_slot.row, original_slot.col);
+        match direction {
+            SplitDirection::Horizontal => {
+                updated_slot.row_span = primary_span;
+                new_slot.row = original_slot.row + primary_span as i32;
+                new_slot.col = original_slot.col;
+                new_slot.row_span = secondary_span;
+                new_slot.col_span = original_slot.col_span;
+            }
+            SplitDirection::Vertical => {
+                updated_slot.col_span = primary_span;
+                new_slot.col = original_slot.col + primary_span as i32;
+                new_slot.row = original_slot.row;
+                new_slot.col_span = secondary_span;
+                new_slot.row_span = original_slot.row_span;
+            }
+        }
+
+        let original_slots = self.config.slots.clone();
+        self.config.slots[selected_idx] = updated_slot.clone();
+        self.config.slots.push(new_slot.clone());
+        let new_idx = self.config.slots.len() - 1;
+
+        let updated_result = {
+            let occupancy = self.occupancy_map(rows, cols, Some(selected_idx));
+            self.validate_slot(selected_idx, updated_slot, rows, cols, registry, &occupancy)
+        };
+        let new_result = {
+            let occupancy = self.occupancy_map(rows, cols, Some(new_idx));
+            self.validate_slot(new_idx, new_slot, rows, cols, registry, &occupancy)
+        };
+
+        match (updated_result, new_result) {
+            (Ok(updated_slot), Ok(new_slot)) => {
+                self.config.slots[selected_idx] = updated_slot;
+                self.config.slots[new_idx] = new_slot;
+                self.blocked_warning = None;
+                Ok(())
+            }
+            (Err(err), _) | (_, Err(err)) => {
+                self.config.slots = original_slots;
+                Err(err)
+            }
+        }
     }
 }
