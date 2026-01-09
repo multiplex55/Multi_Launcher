@@ -526,6 +526,29 @@ impl LauncherApp {
         self.error = Some(msg);
         self.error_time = Some(Instant::now());
     }
+
+    fn open_settings_dialog(&mut self) {
+        if !self.show_settings {
+            match Settings::load(&self.settings_path) {
+                Ok(settings) => {
+                    self.settings_editor = SettingsEditor::new_with_plugins(&settings);
+                }
+                Err(e) => {
+                    let msg = format!("Failed to load settings: {e}");
+                    self.set_error(msg.clone());
+                    if self.enable_toasts {
+                        self.add_toast(Toast {
+                            text: msg.into(),
+                            kind: ToastKind::Error,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(self.toast_duration as f64),
+                        });
+                    }
+                }
+            }
+        }
+        self.show_settings = true;
+    }
     pub fn update_paths(
         &mut self,
         plugin_dirs: Option<Vec<String>>,
@@ -1554,7 +1577,7 @@ impl LauncherApp {
         } else if a.action == "tempfile:dialog" {
             self.tempfile_dialog.open();
         } else if a.action == "settings:dialog" {
-            self.show_settings = true;
+            self.open_settings_dialog();
         } else if a.action == "dashboard:settings" {
             let registry = self.dashboard.registry().clone();
             self.dashboard_editor.open(&self.dashboard_path, &registry);
@@ -2252,7 +2275,7 @@ impl LauncherApp {
             Panel::CpuListDialog => self.cpu_list_dialog.open = true,
             Panel::ToastLogDialog => self.toast_log_dialog.open = true,
             Panel::Editor => self.show_editor = true,
-            Panel::Settings => self.show_settings = true,
+            Panel::Settings => self.open_settings_dialog(),
             Panel::Plugins => self.show_plugins = true,
         }
         if !self.panel_stack.contains(&panel) {
