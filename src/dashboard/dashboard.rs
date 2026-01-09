@@ -334,8 +334,8 @@ impl Dashboard {
         SCROLL_VISIBILITY_RECORDS.lock().unwrap().push(visibility);
 
         scroll_area
-            .show_viewport(ui, |ui, viewport| {
-                ui.set_clip_rect(slot_clip.intersect(viewport));
+            .show_viewport(ui, |ui, _viewport| {
+                ui.set_clip_rect(ui.clip_rect().intersect(slot_clip));
                 ui.set_min_height(body_height);
                 Self::render_widget_content(slot, ui, ctx, activation)
             })
