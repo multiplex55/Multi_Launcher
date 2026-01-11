@@ -461,25 +461,8 @@ impl DashboardEditorDialog {
                             }
                         });
                         if removed {
-                            self.config.slots.remove(idx);
-                            if let Some(sel) = self.selected_slot {
-                                if sel >= idx && !self.config.slots.is_empty() {
-                                    let next =
-                                        sel.saturating_sub(1).min(self.config.slots.len() - 1);
-                                    self.selected_slot = Some(next);
-                                } else if self.config.slots.is_empty() {
-                                    self.selected_slot = None;
-                                }
-                            }
-                            if let Some(anchor) = self.swap_anchor {
-                                if anchor == idx {
-                                    self.swap_anchor = None;
-                                } else if anchor > idx {
-                                    self.swap_anchor = Some(anchor - 1);
-                                }
-                            }
-                            self.ensure_selected_slot();
-                            self.ensure_swap_anchor();
+                            self.apply_slot_removal(idx);
+                            confirm_remove = None;
                         } else if swapped {
                             idx += 1;
                         } else if edited && slot != original_slot {
@@ -515,6 +498,31 @@ impl DashboardEditorDialog {
             Self::clamp_slot(slot, rows, cols);
         }
         self.ensure_selected_slot();
+    }
+
+    fn apply_slot_removal(&mut self, idx: usize) {
+        if idx >= self.config.slots.len() {
+            return;
+        }
+        self.config.slots.remove(idx);
+        if let Some(sel) = self.selected_slot {
+            if sel >= idx && !self.config.slots.is_empty() {
+                let next = sel.saturating_sub(1).min(self.config.slots.len() - 1);
+                self.selected_slot = Some(next);
+            } else if self.config.slots.is_empty() {
+                self.selected_slot = None;
+            }
+        }
+        if let Some(anchor) = self.swap_anchor {
+            if anchor == idx {
+                self.swap_anchor = None;
+            } else if anchor > idx {
+                self.swap_anchor = Some(anchor - 1);
+            }
+        }
+        self.confirm_remove_slot = None;
+        self.ensure_selected_slot();
+        self.ensure_swap_anchor();
     }
 
     fn clamp_slot(slot: &mut SlotConfig, rows: usize, cols: usize) -> bool {
@@ -1438,5 +1446,36 @@ impl DashboardEditorDialog {
                 Err(err)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removing_one_slot_only_removes_the_target() {
+        let mut dialog = DashboardEditorDialog::default();
+        dialog.config = DashboardConfig {
+            grid: Default::default(),
+            version: 1,
+            slots: vec![
+                SlotConfig::with_widget("weather_site", 0, 0),
+                SlotConfig::with_widget("todo", 0, 1),
+                SlotConfig::with_widget("recent_notes", 0, 2),
+            ],
+        };
+        dialog.selected_slot = Some(2);
+        dialog.swap_anchor = Some(2);
+        dialog.confirm_remove_slot = Some(0);
+
+        dialog.apply_slot_removal(0);
+
+        assert_eq!(dialog.config.slots.len(), 2);
+        assert_eq!(dialog.config.slots[0].widget, "todo");
+        assert_eq!(dialog.config.slots[1].widget, "recent_notes");
+        assert_eq!(dialog.selected_slot, Some(1));
+        assert_eq!(dialog.swap_anchor, Some(1));
+        assert!(dialog.confirm_remove_slot.is_none());
     }
 }
