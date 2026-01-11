@@ -197,6 +197,8 @@ pub struct CalendarSnapshot {
     pub events_next_7_days: Vec<EventInstance>,
     pub month_markers: Vec<NaiveDate>,
     pub next_trigger: Option<NaiveDateTime>,
+    pub event_titles: HashMap<String, String>,
+    pub event_tags: HashMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -644,11 +646,22 @@ pub fn build_snapshot(now: NaiveDateTime) -> CalendarSnapshot {
         .map(|e| e.start)
         .min();
 
+    let event_titles = events
+        .iter()
+        .map(|event| (event.id.clone(), event.title.clone()))
+        .collect();
+    let event_tags = events
+        .iter()
+        .map(|event| (event.id.clone(), event.tags.clone()))
+        .collect();
+
     CalendarSnapshot {
         events_today,
         events_next_7_days,
         month_markers: markers,
         next_trigger,
+        event_titles,
+        event_tags,
     }
 }
 
