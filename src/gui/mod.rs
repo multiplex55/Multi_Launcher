@@ -3,6 +3,9 @@ mod add_bookmark_dialog;
 mod alias_dialog;
 mod bookmark_alias_dialog;
 mod brightness_dialog;
+mod calendar_event_details;
+mod calendar_event_editor;
+mod calendar_popover;
 mod clipboard_dialog;
 mod convert_panel;
 mod cpu_list_dialog;
@@ -31,6 +34,9 @@ pub use alias_dialog::AliasDialog;
 pub use bookmark_alias_dialog::BookmarkAliasDialog;
 pub use brightness_dialog::BrightnessDialog;
 pub use brightness_dialog::BRIGHTNESS_QUERIES;
+pub use calendar_event_details::CalendarEventDetails;
+pub use calendar_event_editor::CalendarEventEditor;
+pub use calendar_popover::CalendarPopover;
 pub use clipboard_dialog::ClipboardDialog;
 pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
@@ -75,6 +81,7 @@ use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{append_toast_log, TOAST_LOG_FILE};
 use crate::usage::{self, USAGE_FILE};
 use crate::visibility::apply_visibility;
+use chrono::NaiveDate;
 use dashboard_editor_dialog::DashboardEditorDialog;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
@@ -255,6 +262,9 @@ pub enum Panel {
     BrightnessDialog,
     CpuListDialog,
     ToastLogDialog,
+    CalendarPopover,
+    CalendarEventEditor,
+    CalendarEventDetails,
     Editor,
     Settings,
     Plugins,
@@ -288,6 +298,9 @@ struct PanelStates {
     brightness_dialog: bool,
     cpu_list_dialog: bool,
     toast_log_dialog: bool,
+    calendar_popover: bool,
+    calendar_event_editor: bool,
+    calendar_event_details: bool,
     editor: bool,
     settings: bool,
     plugins: bool,
@@ -385,6 +398,9 @@ pub struct LauncherApp {
     brightness_dialog: BrightnessDialog,
     cpu_list_dialog: CpuListDialog,
     toast_log_dialog: ToastLogDialog,
+    calendar_popover: CalendarPopover,
+    calendar_event_editor: CalendarEventEditor,
+    calendar_event_details: CalendarEventDetails,
     panel_stack: Vec<Panel>,
     panel_states: PanelStates,
     pinned_panels: Vec<Panel>,
@@ -425,6 +441,11 @@ pub struct LauncherApp {
     pub screenshot_save_file: bool,
     pub screenshot_auto_save: bool,
     pub screenshot_use_editor: bool,
+    pub calendar_popover_open: bool,
+    pub calendar_editor_open: bool,
+    pub calendar_details_open: bool,
+    pub calendar_selected_date: Option<NaiveDate>,
+    pub calendar_selected_event: Option<String>,
     last_timer_update: Instant,
     last_net_update: Instant,
     last_stopwatch_update: Instant,
@@ -1012,6 +1033,9 @@ impl LauncherApp {
             brightness_dialog: BrightnessDialog::default(),
             cpu_list_dialog: CpuListDialog::default(),
             toast_log_dialog: ToastLogDialog::default(),
+            calendar_popover: CalendarPopover::default(),
+            calendar_event_editor: CalendarEventEditor::default(),
+            calendar_event_details: CalendarEventDetails::default(),
             panel_stack: Vec::new(),
             panel_states: PanelStates::default(),
             pinned_panels: settings.pinned_panels.clone(),
@@ -1051,6 +1075,11 @@ impl LauncherApp {
             screenshot_save_file: settings.screenshot_save_file,
             screenshot_auto_save: settings.screenshot_auto_save,
             screenshot_use_editor: settings.screenshot_use_editor,
+            calendar_popover_open: false,
+            calendar_editor_open: false,
+            calendar_details_open: false,
+            calendar_selected_date: None,
+            calendar_selected_event: None,
             last_timer_update: Instant::now(),
             last_net_update: Instant::now(),
             last_stopwatch_update: Instant::now(),
@@ -1530,18 +1559,15 @@ impl LauncherApp {
         } else if a.action == "calendar:open" || a.action.starts_with("calendar:open:") {
             let view = a.action.strip_prefix("calendar:open:").unwrap_or("default");
             let now = chrono::Local::now().naive_local();
-            let mut state = crate::plugins::calendar::load_state(
-                crate::plugins::calendar::CALENDAR_STATE_FILE,
-            )
-            .unwrap_or_default();
+            let mut state =
+                crate::plugins::calendar::load_state(crate::plugins::calendar::CALENDAR_STATE_FILE)
+                    .unwrap_or_default();
             state.last_opened = Some(now);
             state.last_viewed_day = Some(now.date());
-            if let Err(err) =
-                crate::plugins::calendar::save_state(
-                    crate::plugins::calendar::CALENDAR_STATE_FILE,
-                    &state,
-                )
-            {
+            if let Err(err) = crate::plugins::calendar::save_state(
+                crate::plugins::calendar::CALENDAR_STATE_FILE,
+                &state,
+            ) {
                 if self.enable_toasts {
                     push_toast(
                         &mut self.toasts,
@@ -1560,6 +1586,7 @@ impl LauncherApp {
                 refresh = true;
                 set_focus = true;
             }
+            self.open_calendar_popover(Some(now.date()));
             if self.enable_toasts {
                 let label = if view == "default" {
                     "Opened calendar".to_string()
@@ -1697,10 +1724,7 @@ impl LauncherApp {
                         .map(|event| Action {
                             label: crate::plugins::calendar::format_event_label(&event),
                             desc: "Calendar".into(),
-                            action: format!(
-                                "calendar:jump:{}",
-                                event.start.format("%Y-%m-%d")
-                            ),
+                            action: format!("calendar:jump:{}", event.start.format("%Y-%m-%d")),
                             args: None,
                         })
                         .collect();
@@ -1745,12 +1769,7 @@ impl LauncherApp {
                 .map(|d| d.clone())
                 .unwrap_or_default();
             let until = now + chrono::Duration::days(7);
-            let instances = crate::plugins::calendar::expand_instances(
-                &events,
-                now,
-                until,
-                50,
-            );
+            let instances = crate::plugins::calendar::expand_instances(&events, now, until, 50);
             let titles: std::collections::HashMap<_, _> =
                 events.into_iter().map(|e| (e.id, e.title)).collect();
             self.query = "cal upcoming".into();
@@ -1762,11 +1781,7 @@ impl LauncherApp {
                         .cloned()
                         .unwrap_or_else(|| "Calendar event".to_string());
                     let label = if instance.all_day {
-                        format!(
-                            "{} ({} all-day)",
-                            title,
-                            instance.start.format("%Y-%m-%d")
-                        )
+                        format!("{} ({} all-day)", title, instance.start.format("%Y-%m-%d"))
                     } else {
                         format!(
                             "{} ({} {})",
@@ -1778,10 +1793,7 @@ impl LauncherApp {
                     Action {
                         label,
                         desc: "Calendar".into(),
-                        action: format!(
-                            "calendar:jump:{}",
-                            instance.start.format("%Y-%m-%d")
-                        ),
+                        action: format!("calendar:jump:{}", instance.start.format("%Y-%m-%d")),
                         args: None,
                     }
                 })
@@ -1795,8 +1807,7 @@ impl LauncherApp {
         } else if let Some(input) = a.action.strip_prefix("calendar:snooze:") {
             let mut parts = input.split_whitespace();
             if let (Some(duration_str), Some(event_id)) = (parts.next(), parts.next()) {
-                if let Some(duration) =
-                    crate::plugins::calendar::parse_duration_spec(duration_str)
+                if let Some(duration) = crate::plugins::calendar::parse_duration_spec(duration_str)
                 {
                     match crate::plugins::calendar::snooze_event(event_id, duration) {
                         Ok(true) => {
@@ -2279,6 +2290,9 @@ impl LauncherApp {
             || self.brightness_dialog.open
             || self.cpu_list_dialog.open
             || self.toast_log_dialog.open
+            || self.calendar_popover_open
+            || self.calendar_editor_open
+            || self.calendar_details_open
             || self.help_window.open
             || self.help_window.overlay_open
             || self.show_editor
@@ -2439,6 +2453,18 @@ impl LauncherApp {
                 self.toast_log_dialog.open = false;
                 self.panel_states.toast_log_dialog = false;
             }
+            Panel::CalendarPopover => {
+                self.calendar_popover_open = false;
+                self.panel_states.calendar_popover = false;
+            }
+            Panel::CalendarEventEditor => {
+                self.calendar_editor_open = false;
+                self.panel_states.calendar_event_editor = false;
+            }
+            Panel::CalendarEventDetails => {
+                self.calendar_details_open = false;
+                self.panel_states.calendar_event_details = false;
+            }
             Panel::Editor => {
                 self.show_editor = false;
                 self.panel_states.editor = false;
@@ -2565,6 +2591,18 @@ impl LauncherApp {
                 self.toast_log_dialog.open = false;
                 self.panel_states.toast_log_dialog = false;
             }
+            Panel::CalendarPopover => {
+                self.calendar_popover_open = false;
+                self.panel_states.calendar_popover = false;
+            }
+            Panel::CalendarEventEditor => {
+                self.calendar_editor_open = false;
+                self.panel_states.calendar_event_editor = false;
+            }
+            Panel::CalendarEventDetails => {
+                self.calendar_details_open = false;
+                self.panel_states.calendar_event_details = false;
+            }
             Panel::Editor => {
                 self.show_editor = false;
                 self.panel_states.editor = false;
@@ -2609,6 +2647,9 @@ impl LauncherApp {
             Panel::BrightnessDialog => self.brightness_dialog.open = true,
             Panel::CpuListDialog => self.cpu_list_dialog.open = true,
             Panel::ToastLogDialog => self.toast_log_dialog.open = true,
+            Panel::CalendarPopover => self.calendar_popover_open = true,
+            Panel::CalendarEventEditor => self.calendar_editor_open = true,
+            Panel::CalendarEventDetails => self.calendar_details_open = true,
             Panel::Editor => self.show_editor = true,
             Panel::Settings => self.open_settings_dialog(),
             Panel::Plugins => self.show_plugins = true,
@@ -2754,6 +2795,21 @@ impl LauncherApp {
             self.toast_log_dialog.open,
             toast_log_dialog,
             Panel::ToastLogDialog
+        );
+        check!(
+            self.calendar_popover_open,
+            calendar_popover,
+            Panel::CalendarPopover
+        );
+        check!(
+            self.calendar_editor_open,
+            calendar_event_editor,
+            Panel::CalendarEventEditor
+        );
+        check!(
+            self.calendar_details_open,
+            calendar_event_details,
+            Panel::CalendarEventDetails
         );
         check!(self.show_editor, editor, Panel::Editor);
         check!(self.show_settings, settings, Panel::Settings);
@@ -3742,6 +3798,15 @@ impl eframe::App for LauncherApp {
         let mut toast_dlg = std::mem::take(&mut self.toast_log_dialog);
         toast_dlg.ui(ctx, self);
         self.toast_log_dialog = toast_dlg;
+        let mut calendar_popover = std::mem::take(&mut self.calendar_popover);
+        calendar_popover.ui(ctx, self);
+        self.calendar_popover = calendar_popover;
+        let mut calendar_editor = std::mem::take(&mut self.calendar_event_editor);
+        calendar_editor.ui(ctx, self);
+        self.calendar_event_editor = calendar_editor;
+        let mut calendar_details = std::mem::take(&mut self.calendar_event_details);
+        calendar_details.ui(ctx, self);
+        self.calendar_event_details = calendar_details;
         self.enforce_pinned();
         self.update_panel_stack();
     }
@@ -3881,6 +3946,32 @@ impl LauncherApp {
                 },
             );
         }
+    }
+
+    pub fn open_calendar_popover(&mut self, date: Option<NaiveDate>) {
+        let today = chrono::Local::now().naive_local().date();
+        self.calendar_selected_date = Some(date.unwrap_or(today));
+        self.calendar_selected_event = None;
+        self.calendar_popover_open = true;
+    }
+
+    pub fn open_calendar_editor(
+        &mut self,
+        event: Option<crate::plugins::calendar::CalendarEvent>,
+        split_scope: Option<(
+            crate::gui::calendar_event_details::RecurrenceScope,
+            chrono::NaiveDateTime,
+        )>,
+    ) {
+        if let Some(event) = event {
+            self.calendar_event_editor.open(Some(event), split_scope);
+        } else {
+            let date = self
+                .calendar_selected_date
+                .unwrap_or_else(|| chrono::Local::now().naive_local().date());
+            self.calendar_event_editor.open_new(date);
+        }
+        self.calendar_editor_open = true;
     }
 
     /// Filter the note list to only show notes containing the given tag.

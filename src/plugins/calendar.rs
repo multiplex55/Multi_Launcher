@@ -556,7 +556,7 @@ fn generate_yearly_occurrence(
     .map(|d| NaiveDateTime::new(d, base.time()))
 }
 
-fn add_months(date: NaiveDate, months: i32) -> NaiveDate {
+pub(crate) fn add_months(date: NaiveDate, months: i32) -> NaiveDate {
     let mut year = date.year();
     let mut month = date.month() as i32 + months;
     while month > 12 {
@@ -568,6 +568,10 @@ fn add_months(date: NaiveDate, months: i32) -> NaiveDate {
         year -= 1;
     }
     NaiveDate::from_ymd_opt(year, month as u32, 1).unwrap_or(date)
+}
+
+pub fn new_event_id() -> String {
+    next_event_id()
 }
 
 fn nth_weekday_of_month(year: i32, month: u32, nth: &NthWeekday) -> Option<NaiveDate> {
@@ -880,10 +884,8 @@ pub fn parse_calendar_search(input: &str) -> Result<CalendarSearchRequest, Strin
                 tags.push(tag.trim().to_lowercase());
             }
         } else if let Some(date) = token.strip_prefix("after:") {
-            let parsed =
-                NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d").map_err(|_| {
-                    "Invalid after: date (use YYYY-MM-DD)".to_string()
-                })?;
+            let parsed = NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d")
+                .map_err(|_| "Invalid after: date (use YYYY-MM-DD)".to_string())?;
             after = Some(parsed);
         } else {
             query_parts.push(token);
