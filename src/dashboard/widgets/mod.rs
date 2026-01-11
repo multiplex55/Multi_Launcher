@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 mod active_timers;
 mod browser_tabs;
+mod calendar;
 mod clipboard_recent;
 mod clipboard_snippets;
 mod frequent_commands;
@@ -38,6 +39,7 @@ mod windows_overview;
 
 pub use active_timers::ActiveTimersWidget;
 pub use browser_tabs::BrowserTabsWidget;
+pub use calendar::CalendarWidget;
 pub use clipboard_recent::ClipboardRecentWidget;
 pub use clipboard_snippets::ClipboardSnippetsWidget;
 pub use frequent_commands::FrequentCommandsWidget;
@@ -259,6 +261,10 @@ impl WidgetRegistry {
             "browser_tabs",
             WidgetFactory::new(BrowserTabsWidget::new)
                 .with_settings_ui(BrowserTabsWidget::settings_ui),
+        );
+        reg.register(
+            "calendar",
+            WidgetFactory::new(CalendarWidget::new).with_settings_ui(CalendarWidget::settings_ui),
         );
         reg.register(
             "processes",
