@@ -48,8 +48,9 @@ impl CalendarPopover {
         let calendar = snapshot.calendar.as_ref();
         let markers = build_marker_set(calendar, self.view_month);
 
+        let mut open = app.calendar_popover_open;
         egui::Window::new("Calendar")
-            .open(&mut app.calendar_popover_open)
+            .open(&mut open)
             .resizable(true)
             .default_size((480.0, 320.0))
             .show(ctx, |ui| {
@@ -95,6 +96,7 @@ impl CalendarPopover {
                     });
                 });
             });
+        app.calendar_popover_open = open;
     }
 }
 

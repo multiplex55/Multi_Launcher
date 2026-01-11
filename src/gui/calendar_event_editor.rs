@@ -193,8 +193,9 @@ impl CalendarEventEditor {
         if !app.calendar_editor_open {
             return;
         }
+        let mut open = app.calendar_editor_open;
         egui::Window::new("Calendar Event")
-            .open(&mut app.calendar_editor_open)
+            .open(&mut open)
             .resizable(true)
             .default_size((420.0, 400.0))
             .show(ctx, |ui| {
@@ -329,7 +330,7 @@ impl CalendarEventEditor {
                                 Weekday::Sat,
                                 Weekday::Sun,
                             ] {
-                                let mut selected = self.weekly_days.contains(&weekday);
+                                let selected = self.weekly_days.contains(&weekday);
                                 if ui.selectable_label(selected, weekday.to_string()).clicked() {
                                     if selected {
                                         self.weekly_days.retain(|d| *d != weekday);
@@ -398,14 +399,15 @@ impl CalendarEventEditor {
                         if let Err(err) = self.save(app) {
                             app.set_error(err);
                         } else {
-                            app.calendar_editor_open = false;
+                            open = false;
                         }
                     }
                     if ui.button("Cancel").clicked() {
-                        app.calendar_editor_open = false;
+                        open = false;
                     }
                 });
             });
+        app.calendar_editor_open = open;
     }
 
     fn save(&mut self, app: &mut LauncherApp) -> Result<(), String> {
@@ -544,7 +546,7 @@ impl CalendarEventEditor {
         };
 
         if let Some(scope) = self.split_from.take() {
-            apply_split_scope(&mut events, &scope)?;
+            apply_split_scope(&mut events, &scope).map_err(|err| err.to_string())?;
             events.push(event);
         } else if let Some(pos) = events.iter().position(|e| e.id == id) {
             events[pos] = event;

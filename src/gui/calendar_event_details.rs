@@ -100,8 +100,9 @@ impl CalendarEventDetails {
             event.tags.join(", ")
         };
 
+        let mut open = app.calendar_details_open;
         egui::Window::new("Event Details")
-            .open(&mut app.calendar_details_open)
+            .open(&mut open)
             .resizable(true)
             .default_size((360.0, 220.0))
             .show(ctx, |ui| {
@@ -151,7 +152,7 @@ impl CalendarEventDetails {
                             _ => None,
                         };
                         app.open_calendar_editor(Some(event.clone()), split_scope);
-                        app.calendar_details_open = false;
+                        open = false;
                     }
                     if ui.button("Duplicate").clicked() {
                         let mut events =
@@ -211,7 +212,7 @@ impl CalendarEventDetails {
                             app.set_error(format!("Failed to delete event: {err}"));
                         } else {
                             app.dashboard_data_cache.refresh_calendar();
-                            app.calendar_details_open = false;
+                            open = false;
                             app.calendar_selected_event = None;
                         }
                     }
@@ -229,6 +230,7 @@ impl CalendarEventDetails {
                     }
                 });
             });
+        app.calendar_details_open = open;
     }
 }
 
