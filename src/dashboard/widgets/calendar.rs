@@ -343,7 +343,7 @@ impl CalendarWidget {
             };
             let label = format!("{} • {}", instance.start.format("%Y-%m-%d"), time_label);
             let button = egui::Button::new(
-                egui::RichText::new(format!("{title} ({label})")).text_style(text_style),
+                egui::RichText::new(format!("{title} ({label})")).text_style(text_style.clone()),
             );
             if ui.add(button).clicked() {
                 action = Some(WidgetAction {
@@ -391,10 +391,8 @@ impl Widget for CalendarWidget {
         let snapshot = ctx.data_cache.snapshot();
         let calendar = snapshot.calendar.as_ref();
 
-        let mut action = None;
-        action = self.render_header(ui, selected_date);
-        if action.is_some() {
-            return action;
+        if let Some(action) = self.render_header(ui, selected_date) {
+            return Some(action);
         }
 
         ui.separator();
@@ -407,7 +405,7 @@ impl Widget for CalendarWidget {
         }
 
         let list_action = self.render_event_list(ui, calendar, selected_date, now, today);
-        action.or(list_action)
+        list_action
     }
 
     fn on_config_updated(&mut self, settings: &serde_json::Value) {
