@@ -40,6 +40,7 @@ pub struct DashboardContext<'a> {
     pub fav_version: u64,
     pub notes_version: u64,
     pub todo_version: u64,
+    pub calendar_version: u64,
     pub clipboard_version: u64,
     pub snippets_version: u64,
 }
@@ -497,7 +498,10 @@ mod tests {
 
     fn overflow_registry() -> WidgetRegistry {
         let mut reg = WidgetRegistry::default();
-        reg.register("overflow", WidgetFactory::new(|_: RecordingConfig| OverflowWidget));
+        reg.register(
+            "overflow",
+            WidgetFactory::new(|_: RecordingConfig| OverflowWidget),
+        );
         reg
     }
 
@@ -533,6 +537,7 @@ mod tests {
             fav_version: 0,
             notes_version: 0,
             todo_version: 0,
+            calendar_version: 0,
             clipboard_version: 0,
             snippets_version: 0,
         }
@@ -570,8 +575,7 @@ mod tests {
         let records = take_records();
         assert_eq!(records.len(), 1);
         let record = records[0];
-        let slot_rect =
-            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(240.0, 180.0));
+        let slot_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(240.0, 180.0));
         assert!(record.clip.min.x >= slot_rect.min.x - f32::EPSILON);
         assert!(record.clip.min.y >= slot_rect.min.y - f32::EPSILON);
         assert!(record.clip.max.x <= slot_rect.max.x + f32::EPSILON);
@@ -726,7 +730,10 @@ mod tests {
         let overflow = overflow_records[0];
         assert!(overflow.width() > viewport.width());
         assert!(overflow.height() > viewport.height());
-        assert_eq!(take_scroll_visibilities(), vec![ScrollBarVisibility::AlwaysVisible]);
+        assert_eq!(
+            take_scroll_visibilities(),
+            vec![ScrollBarVisibility::AlwaysVisible]
+        );
     }
 
     #[test]

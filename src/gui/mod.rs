@@ -2855,6 +2855,7 @@ impl eframe::App for LauncherApp {
                     fav_version: crate::plugins::fav::fav_version(),
                     notes_version: crate::plugins::note::note_version(),
                     todo_version: crate::plugins::todo::todo_version(),
+                    calendar_version: crate::plugins::calendar::calendar_version(),
                     clipboard_version: crate::plugins::clipboard::clipboard_version(),
                     snippets_version: crate::plugins::snippets::snippets_version(),
                 };

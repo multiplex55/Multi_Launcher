@@ -1,11 +1,15 @@
 use crate::actions::Action;
 use crate::plugin::PluginManager;
+use crate::plugins::calendar::{
+    build_snapshot, refresh_events_from_disk, CalendarSnapshot, CALENDAR_EVENTS_FILE,
+};
 use crate::plugins::clipboard::{load_history, CLIPBOARD_FILE};
 use crate::plugins::fav::{load_favs, FavEntry, FAV_FILE};
 use crate::plugins::note::{load_notes, Note};
 use crate::plugins::snippets::{load_snippets, SnippetEntry, SNIPPETS_FILE};
 use crate::plugins::todo::{load_todos, TodoEntry, TODO_FILE};
 use crate::{launcher, launcher::RecycleBinInfo};
+use chrono::Local;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use sysinfo::{Disks, Networks, System};
@@ -42,6 +46,7 @@ pub struct DashboardDataSnapshot {
     pub snippets: Arc<Vec<SnippetEntry>>,
     pub notes: Arc<Vec<Note>>,
     pub todos: Arc<Vec<TodoEntry>>,
+    pub calendar: Arc<CalendarSnapshot>,
     pub processes: Arc<Vec<Action>>,
     pub favorites: Arc<Vec<FavEntry>>,
     pub process_error: Option<String>,
@@ -56,6 +61,7 @@ impl Default for DashboardDataSnapshot {
             snippets: Arc::new(Vec::new()),
             notes: Arc::new(Vec::new()),
             todos: Arc::new(Vec::new()),
+            calendar: Arc::new(CalendarSnapshot::default()),
             processes: Arc::new(Vec::new()),
             favorites: Arc::new(Vec::new()),
             process_error: None,
@@ -72,6 +78,7 @@ impl DashboardDataSnapshot {
             snippets: Arc::clone(&self.snippets),
             notes: Arc::clone(&self.notes),
             todos: Arc::clone(&self.todos),
+            calendar: Arc::clone(&self.calendar),
             processes: Arc::clone(&self.processes),
             favorites: Arc::clone(&self.favorites),
             process_error: self.process_error.clone(),
@@ -86,6 +93,7 @@ impl DashboardDataSnapshot {
             snippets: Arc::new(snippets),
             notes: Arc::clone(&self.notes),
             todos: Arc::clone(&self.todos),
+            calendar: Arc::clone(&self.calendar),
             processes: Arc::clone(&self.processes),
             favorites: Arc::clone(&self.favorites),
             process_error: self.process_error.clone(),
@@ -100,6 +108,7 @@ impl DashboardDataSnapshot {
             snippets: Arc::clone(&self.snippets),
             notes: Arc::new(notes),
             todos: Arc::clone(&self.todos),
+            calendar: Arc::clone(&self.calendar),
             processes: Arc::clone(&self.processes),
             favorites: Arc::clone(&self.favorites),
             process_error: self.process_error.clone(),
@@ -114,6 +123,7 @@ impl DashboardDataSnapshot {
             snippets: Arc::clone(&self.snippets),
             notes: Arc::clone(&self.notes),
             todos: Arc::new(todos),
+            calendar: Arc::clone(&self.calendar),
             processes: Arc::clone(&self.processes),
             favorites: Arc::clone(&self.favorites),
             process_error: self.process_error.clone(),
@@ -128,6 +138,7 @@ impl DashboardDataSnapshot {
             snippets: Arc::clone(&self.snippets),
             notes: Arc::clone(&self.notes),
             todos: Arc::clone(&self.todos),
+            calendar: Arc::clone(&self.calendar),
             processes: Arc::clone(&self.processes),
             favorites: Arc::new(favorites),
             process_error: self.process_error.clone(),
@@ -142,6 +153,7 @@ impl DashboardDataSnapshot {
             snippets: Arc::clone(&self.snippets),
             notes: Arc::clone(&self.notes),
             todos: Arc::clone(&self.todos),
+            calendar: Arc::clone(&self.calendar),
             processes: Arc::new(processes),
             favorites: Arc::clone(&self.favorites),
             process_error,
@@ -156,6 +168,7 @@ impl DashboardDataSnapshot {
             snippets: Arc::clone(&self.snippets),
             notes: Arc::clone(&self.notes),
             todos: Arc::clone(&self.todos),
+            calendar: Arc::clone(&self.calendar),
             processes: Arc::clone(&self.processes),
             favorites: Arc::clone(&self.favorites),
             process_error: self.process_error.clone(),
@@ -170,11 +183,27 @@ impl DashboardDataSnapshot {
             snippets: Arc::clone(&self.snippets),
             notes: Arc::clone(&self.notes),
             todos: Arc::clone(&self.todos),
+            calendar: Arc::clone(&self.calendar),
             processes: Arc::clone(&self.processes),
             favorites: Arc::clone(&self.favorites),
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
             recycle_bin,
+        }
+    }
+
+    fn with_calendar(&self, calendar: CalendarSnapshot) -> Self {
+        Self {
+            clipboard_history: Arc::clone(&self.clipboard_history),
+            snippets: Arc::clone(&self.snippets),
+            notes: Arc::clone(&self.notes),
+            todos: Arc::clone(&self.todos),
+            calendar: Arc::new(calendar),
+            processes: Arc::clone(&self.processes),
+            favorites: Arc::clone(&self.favorites),
+            process_error: self.process_error.clone(),
+            system_status: self.system_status.clone(),
+            recycle_bin: self.recycle_bin.clone(),
         }
     }
 }
@@ -218,6 +247,7 @@ impl DashboardDataCache {
         self.refresh_snippets();
         self.refresh_notes();
         self.refresh_todos();
+        self.refresh_calendar();
         self.refresh_favorites();
         self.refresh_processes(plugins);
         self.refresh_system_status();
@@ -252,6 +282,14 @@ impl DashboardDataCache {
         let todos = load_todos(TODO_FILE).unwrap_or_default();
         if let Ok(mut state) = self.state.lock() {
             state.snapshot = Arc::new(state.snapshot.with_todos(todos));
+        }
+    }
+
+    pub fn refresh_calendar(&self) {
+        let _ = refresh_events_from_disk(CALENDAR_EVENTS_FILE);
+        let snapshot = build_snapshot(Local::now().naive_local());
+        if let Ok(mut state) = self.state.lock() {
+            state.snapshot = Arc::new(state.snapshot.with_calendar(snapshot));
         }
     }
 
