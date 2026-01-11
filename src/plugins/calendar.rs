@@ -1,5 +1,8 @@
 //! Calendar data models and utilities.
+use crate::actions::Action;
 use crate::common::json_watch::{watch_json, JsonWatcher};
+use crate::common::strip_prefix_ci;
+use crate::plugin::Plugin;
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -14,6 +17,7 @@ pub const CALENDAR_EVENTS_FILE: &str = "calendar/events.json";
 pub const CALENDAR_STATE_FILE: &str = "calendar/state.json";
 
 static CALENDAR_VERSION: AtomicU64 = AtomicU64::new(0);
+static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(1);
 
 pub fn calendar_version() -> u64 {
     CALENDAR_VERSION.load(Ordering::SeqCst)
@@ -21,6 +25,15 @@ pub fn calendar_version() -> u64 {
 
 fn bump_calendar_version() {
     CALENDAR_VERSION.fetch_add(1, Ordering::SeqCst);
+}
+
+fn next_event_id() -> String {
+    let next = NEXT_EVENT_ID.fetch_add(1, Ordering::SeqCst);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("evt-{ts}-{next}")
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
@@ -783,5 +796,504 @@ mod weekday_vec_serde {
                 _ => Err(serde::de::Error::custom("invalid weekday")),
             })
             .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CalendarAddRequest {
+    pub date: NaiveDate,
+    pub time: Option<NaiveTime>,
+    pub all_day: bool,
+    pub title: String,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CalendarSearchRequest {
+    pub query: String,
+    pub tags: Vec<String>,
+    pub after: Option<NaiveDate>,
+}
+
+pub fn parse_date_reference(input: &str, now: NaiveDate) -> Option<NaiveDate> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_lowercase();
+    if lower == "today" {
+        return Some(now);
+    }
+    if lower == "tomorrow" {
+        return Some(now + Duration::days(1));
+    }
+    if let Some(rest) = lower.strip_prefix("next ") {
+        if let Some(target) = parse_weekday(rest) {
+            return Some(next_weekday(now, target));
+        }
+    }
+    NaiveDate::parse_from_str(trimmed, "%Y-%m-%d").ok()
+}
+
+pub fn parse_calendar_add(input: &str, now: NaiveDateTime) -> Result<CalendarAddRequest, String> {
+    let mut parts = input.splitn(2, '|');
+    let left = parts.next().unwrap_or("").trim();
+    let notes = parts
+        .next()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    if left.is_empty() {
+        return Err("Expected a date, time, and title".into());
+    }
+    let tokens: Vec<&str> = left.split_whitespace().collect();
+    if tokens.is_empty() {
+        return Err("Expected a date, time, and title".into());
+    }
+    let (date, consumed) = parse_date_tokens(&tokens, now.date())
+        .ok_or_else(|| "Invalid date (use today, tomorrow, next mon, or YYYY-MM-DD)".to_string())?;
+    let time_token = tokens
+        .get(consumed)
+        .ok_or_else(|| "Expected a time (e.g., 09:00) or all-day".to_string())?;
+    let time_spec = parse_time_spec(time_token)?;
+    let title_tokens = tokens.get(consumed + 1..).unwrap_or(&[]);
+    if title_tokens.is_empty() {
+        return Err("Expected a title after the time".into());
+    }
+    let title = title_tokens.join(" ");
+    Ok(CalendarAddRequest {
+        date,
+        time: time_spec.time,
+        all_day: time_spec.all_day,
+        title,
+        notes,
+    })
+}
+
+pub fn parse_calendar_search(input: &str) -> Result<CalendarSearchRequest, String> {
+    let mut tags = Vec::new();
+    let mut query_parts = Vec::new();
+    let mut after = None;
+    for token in input.split_whitespace() {
+        if let Some(tag) = token.strip_prefix("tag:") {
+            if !tag.trim().is_empty() {
+                tags.push(tag.trim().to_lowercase());
+            }
+        } else if let Some(date) = token.strip_prefix("after:") {
+            let parsed =
+                NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d").map_err(|_| {
+                    "Invalid after: date (use YYYY-MM-DD)".to_string()
+                })?;
+            after = Some(parsed);
+        } else {
+            query_parts.push(token);
+        }
+    }
+    Ok(CalendarSearchRequest {
+        query: query_parts.join(" "),
+        tags,
+        after,
+    })
+}
+
+pub fn add_event(request: CalendarAddRequest, now: NaiveDateTime) -> anyhow::Result<CalendarEvent> {
+    let start_time = request
+        .time
+        .unwrap_or_else(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+    let start = NaiveDateTime::new(request.date, start_time);
+    let event = CalendarEvent {
+        id: next_event_id(),
+        title: request.title,
+        start,
+        end: None,
+        duration_minutes: None,
+        all_day: request.all_day,
+        notes: request.notes,
+        recurrence: None,
+        reminders: Vec::new(),
+        tags: Vec::new(),
+        category: None,
+        created_at: now,
+        updated_at: None,
+    };
+    let mut events = CALENDAR_DATA.read().map(|d| d.clone()).unwrap_or_default();
+    events.push(event.clone());
+    save_events(CALENDAR_EVENTS_FILE, &events)?;
+    Ok(event)
+}
+
+pub fn snooze_event(event_id: &str, duration: Duration) -> anyhow::Result<bool> {
+    let mut events = CALENDAR_DATA.read().map(|d| d.clone()).unwrap_or_default();
+    let mut updated = false;
+    let now = chrono::Local::now().naive_local();
+    for event in &mut events {
+        if event.id == event_id {
+            event.start += duration;
+            if let Some(end) = event.end {
+                event.end = Some(end + duration);
+            }
+            event.updated_at = Some(now);
+            updated = true;
+            break;
+        }
+    }
+    if updated {
+        save_events(CALENDAR_EVENTS_FILE, &events)?;
+    }
+    Ok(updated)
+}
+
+pub fn search_events(request: &CalendarSearchRequest) -> Vec<CalendarEvent> {
+    let data = CALENDAR_DATA.read().map(|d| d.clone()).unwrap_or_default();
+    let query = request.query.to_lowercase();
+    let mut results: Vec<CalendarEvent> = data
+        .into_iter()
+        .filter(|event| {
+            if let Some(after) = request.after {
+                if event.start.date() < after {
+                    return false;
+                }
+            }
+            if !request.tags.is_empty() {
+                let tags = event
+                    .tags
+                    .iter()
+                    .map(|t| t.to_lowercase())
+                    .collect::<Vec<_>>();
+                if !request.tags.iter().all(|t| tags.contains(t)) {
+                    return false;
+                }
+            }
+            if query.is_empty() {
+                return true;
+            }
+            let title = event.title.to_lowercase();
+            let notes = event.notes.as_deref().unwrap_or("").to_lowercase();
+            title.contains(&query) || notes.contains(&query)
+        })
+        .collect();
+    results.sort_by_key(|event| event.start);
+    results
+}
+
+fn parse_date_tokens(tokens: &[&str], now: NaiveDate) -> Option<(NaiveDate, usize)> {
+    if tokens.is_empty() {
+        return None;
+    }
+    if tokens[0].eq_ignore_ascii_case("next") {
+        if let Some(next) = tokens.get(1) {
+            if let Some(day) = parse_weekday(next) {
+                return Some((next_weekday(now, day), 2));
+            }
+        }
+    }
+    parse_date_reference(tokens[0], now).map(|date| (date, 1))
+}
+
+fn parse_weekday(token: &str) -> Option<Weekday> {
+    match token.to_lowercase().as_str() {
+        "mon" | "monday" => Some(Weekday::Mon),
+        "tue" | "tues" | "tuesday" => Some(Weekday::Tue),
+        "wed" | "wednesday" => Some(Weekday::Wed),
+        "thu" | "thurs" | "thursday" => Some(Weekday::Thu),
+        "fri" | "friday" => Some(Weekday::Fri),
+        "sat" | "saturday" => Some(Weekday::Sat),
+        "sun" | "sunday" => Some(Weekday::Sun),
+        _ => None,
+    }
+}
+
+fn next_weekday(date: NaiveDate, target: Weekday) -> NaiveDate {
+    let current = date.weekday().num_days_from_monday() as i64;
+    let target = target.num_days_from_monday() as i64;
+    let mut diff = (target - current + 7) % 7;
+    if diff == 0 {
+        diff = 7;
+    }
+    date + Duration::days(diff)
+}
+
+struct TimeSpec {
+    time: Option<NaiveTime>,
+    all_day: bool,
+}
+
+fn parse_time_spec(token: &str) -> Result<TimeSpec, String> {
+    let lower = token.trim().to_lowercase();
+    if lower == "all-day" || lower == "allday" {
+        return Ok(TimeSpec {
+            time: None,
+            all_day: true,
+        });
+    }
+    let time = parse_time_reference(&lower)
+        .ok_or_else(|| "Invalid time (use HH:MM, 9am, or all-day)".to_string())?;
+    Ok(TimeSpec {
+        time: Some(time),
+        all_day: false,
+    })
+}
+
+fn parse_time_reference(input: &str) -> Option<NaiveTime> {
+    let lower = input.trim().to_lowercase();
+    if lower == "noon" {
+        return NaiveTime::from_hms_opt(12, 0, 0);
+    }
+    if lower == "midnight" {
+        return NaiveTime::from_hms_opt(0, 0, 0);
+    }
+    let (time_part, meridiem) = if let Some(stripped) = lower.strip_suffix("am") {
+        (stripped.trim(), Some("am"))
+    } else if let Some(stripped) = lower.strip_suffix("pm") {
+        (stripped.trim(), Some("pm"))
+    } else {
+        (lower.as_str(), None)
+    };
+    let (mut hour, mut minute) = if let Some((h, m)) = time_part.split_once(':') {
+        (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?)
+    } else {
+        match time_part.len() {
+            0 => return None,
+            1 | 2 => (time_part.parse::<u32>().ok()?, 0),
+            3 => {
+                let (h, m) = time_part.split_at(1);
+                (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?)
+            }
+            _ => {
+                let (h, m) = time_part.split_at(2);
+                (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?)
+            }
+        }
+    };
+    if minute > 59 || hour > 23 {
+        return None;
+    }
+    if let Some(meridiem) = meridiem {
+        if hour == 12 {
+            hour = 0;
+        }
+        if meridiem == "pm" {
+            hour += 12;
+        }
+    }
+    NaiveTime::from_hms_opt(hour, minute, 0)
+}
+
+pub fn parse_duration_spec(input: &str) -> Option<Duration> {
+    let trimmed = input.trim().to_lowercase();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (value, unit) = trimmed
+        .chars()
+        .partition::<String, _>(|c| c.is_ascii_digit());
+    let amount = value.parse::<i64>().ok()?;
+    match unit.as_str() {
+        "m" | "min" | "mins" | "minute" | "minutes" => Some(Duration::minutes(amount)),
+        "h" | "hr" | "hrs" | "hour" | "hours" => Some(Duration::hours(amount)),
+        "d" | "day" | "days" => Some(Duration::days(amount)),
+        "w" | "wk" | "wks" | "week" | "weeks" => Some(Duration::weeks(amount)),
+        _ => None,
+    }
+}
+
+pub fn format_event_label(event: &CalendarEvent) -> String {
+    if event.all_day {
+        format!(
+            "{} ({} all-day)",
+            event.title,
+            event.start.format("%Y-%m-%d")
+        )
+    } else {
+        format!(
+            "{} ({} {})",
+            event.title,
+            event.start.format("%Y-%m-%d"),
+            event.start.format("%H:%M")
+        )
+    }
+}
+
+pub struct CalendarPlugin;
+
+impl Plugin for CalendarPlugin {
+    fn search(&self, query: &str) -> Vec<Action> {
+        let trimmed = query.trim();
+        let Some(rest) = strip_prefix_ci(trimmed, "cal") else {
+            return Vec::new();
+        };
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return vec![Action {
+                label: "Open calendar".into(),
+                desc: "Calendar".into(),
+                action: "calendar:open".into(),
+                args: None,
+            }];
+        }
+        let rest_lc = rest.to_lowercase();
+        if matches!(rest_lc.as_str(), "day" | "week" | "month") {
+            return vec![Action {
+                label: format!("Open calendar ({rest_lc} view)"),
+                desc: "Calendar".into(),
+                action: format!("calendar:open:{rest_lc}"),
+                args: None,
+            }];
+        }
+        if rest_lc == "upcoming" {
+            return vec![Action {
+                label: "Show upcoming events".into(),
+                desc: "Calendar".into(),
+                action: "calendar:upcoming".into(),
+                args: None,
+            }];
+        }
+        if let Some(find) = strip_prefix_ci(rest, "find") {
+            let query = find.trim();
+            if query.is_empty() {
+                return Vec::new();
+            }
+            return vec![Action {
+                label: format!("Search calendar for \"{query}\""),
+                desc: "Calendar".into(),
+                action: format!("calendar:search:{query}"),
+                args: None,
+            }];
+        }
+        if let Some(add) = strip_prefix_ci(rest, "add") {
+            let input = add.trim();
+            if input.is_empty() {
+                return Vec::new();
+            }
+            let label = match parse_calendar_add(input, chrono::Local::now().naive_local()) {
+                Ok(request) => {
+                    let time_label = if request.all_day {
+                        "all-day".to_string()
+                    } else {
+                        request
+                            .time
+                            .map(|t| t.format("%H:%M").to_string())
+                            .unwrap_or_else(|| "time".to_string())
+                    };
+                    format!(
+                        "Add {} on {} ({})",
+                        request.title,
+                        request.date.format("%Y-%m-%d"),
+                        time_label
+                    )
+                }
+                Err(_) => "Quick add calendar event".into(),
+            };
+            return vec![Action {
+                label,
+                desc: "Calendar".into(),
+                action: format!("calendar:add:{input}"),
+                args: None,
+            }];
+        }
+        if let Some(snooze) = strip_prefix_ci(rest, "snooze") {
+            let input = snooze.trim();
+            if input.is_empty() {
+                return Vec::new();
+            }
+            return vec![Action {
+                label: format!("Snooze calendar reminder ({input})"),
+                desc: "Calendar".into(),
+                action: format!("calendar:snooze:{input}"),
+                args: None,
+            }];
+        }
+        if let Some(date) = parse_date_reference(rest, chrono::Local::now().naive_local().date()) {
+            return vec![Action {
+                label: format!("Jump to {}", date.format("%Y-%m-%d")),
+                desc: "Calendar".into(),
+                action: format!("calendar:jump:{rest}"),
+                args: None,
+            }];
+        }
+        Vec::new()
+    }
+
+    fn name(&self) -> &str {
+        "calendar"
+    }
+
+    fn description(&self) -> &str {
+        "Calendar commands (prefix: `cal`)"
+    }
+
+    fn capabilities(&self) -> &[&str] {
+        &["search"]
+    }
+
+    fn commands(&self) -> Vec<Action> {
+        vec![
+            Action {
+                label: "cal".into(),
+                desc: "Calendar".into(),
+                action: "query:cal".into(),
+                args: None,
+            },
+            Action {
+                label: "cal day".into(),
+                desc: "Calendar".into(),
+                action: "query:cal day".into(),
+                args: None,
+            },
+            Action {
+                label: "cal week".into(),
+                desc: "Calendar".into(),
+                action: "query:cal week".into(),
+                args: None,
+            },
+            Action {
+                label: "cal month".into(),
+                desc: "Calendar".into(),
+                action: "query:cal month".into(),
+                args: None,
+            },
+            Action {
+                label: "cal today".into(),
+                desc: "Calendar".into(),
+                action: "query:cal today".into(),
+                args: None,
+            },
+            Action {
+                label: "cal tomorrow".into(),
+                desc: "Calendar".into(),
+                action: "query:cal tomorrow".into(),
+                args: None,
+            },
+            Action {
+                label: "cal next mon".into(),
+                desc: "Calendar".into(),
+                action: "query:cal next mon".into(),
+                args: None,
+            },
+            Action {
+                label: "cal add".into(),
+                desc: "Calendar".into(),
+                action: "query:cal add ".into(),
+                args: None,
+            },
+            Action {
+                label: "cal find".into(),
+                desc: "Calendar".into(),
+                action: "query:cal find ".into(),
+                args: None,
+            },
+            Action {
+                label: "cal upcoming".into(),
+                desc: "Calendar".into(),
+                action: "query:cal upcoming".into(),
+                args: None,
+            },
+            Action {
+                label: "cal snooze".into(),
+                desc: "Calendar".into(),
+                action: "query:cal snooze ".into(),
+                args: None,
+            },
+        ]
     }
 }

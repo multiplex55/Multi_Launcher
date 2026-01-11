@@ -4,6 +4,7 @@ use crate::plugins::emoji::EmojiPlugin;
 use crate::plugins::screenshot::ScreenshotPlugin;
 use crate::plugins::text_case::TextCasePlugin;
 use crate::plugins::bookmarks::BookmarksPlugin;
+use crate::plugins::calendar::CalendarPlugin;
 use crate::plugins::brightness::BrightnessPlugin;
 use crate::plugins::clipboard::ClipboardPlugin;
 use crate::plugins::dropcalc::DropCalcPlugin;
@@ -140,6 +141,7 @@ impl PluginManager {
         self.register_with_settings(HistoryPlugin, plugin_settings);
         self.register_with_settings(NotePlugin::default(), plugin_settings);
         self.register_with_settings(TodoPlugin::default(), plugin_settings);
+        self.register_with_settings(CalendarPlugin, plugin_settings);
         self.register_with_settings(SnippetsPlugin::default(), plugin_settings);
         self.register_with_settings(MacrosPlugin::default(), plugin_settings);
         self.register_with_settings(FavPlugin::default(), plugin_settings);
