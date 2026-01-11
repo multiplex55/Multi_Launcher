@@ -1941,7 +1941,7 @@ impl LauncherApp {
             let until = now + chrono::Duration::days(7);
             let instances = crate::plugins::calendar::expand_instances(&events, now, until, 50);
             let titles: std::collections::HashMap<_, _> =
-                events.into_iter().map(|e| (e.id, e.title)).collect();
+                events.iter().map(|e| (e.id.clone(), e.title.clone())).collect();
             let reminders = crate::plugins::calendar::reminder_triggers_for_range(
                 &events, &state, now, until, 50,
             );
