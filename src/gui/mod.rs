@@ -81,7 +81,7 @@ use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{append_toast_log, TOAST_LOG_FILE};
 use crate::usage::{self, USAGE_FILE};
 use crate::visibility::apply_visibility;
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveDateTime};
 use dashboard_editor_dialog::DashboardEditorDialog;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
@@ -111,6 +111,8 @@ const SUBCOMMANDS: &[&str] = &[
 
 /// Prefix used to search user saved applications.
 pub const APP_PREFIX: &str = "app";
+
+const CALENDAR_TOAST_KIND: u32 = 9001;
 
 fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
@@ -207,6 +209,104 @@ fn push_toast(toasts: &mut Toasts, toast: Toast) {
 }
 
 static APP_EVENT_TXS: Lazy<Mutex<Vec<Sender<WatchEvent>>>> = Lazy::new(|| Mutex::new(Vec::new()));
+static CALENDAR_TOAST_ACTIONS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CalendarToastPayload {
+    title: String,
+    instance_id: String,
+    start: String,
+    trigger_at: String,
+    all_day: bool,
+    reminder_minutes: Option<i64>,
+}
+
+fn encode_calendar_toast(payload: &CalendarToastPayload) -> String {
+    serde_json::to_string(payload).unwrap_or_else(|_| payload.title.clone())
+}
+
+fn decode_calendar_toast(payload: &str) -> Option<CalendarToastPayload> {
+    serde_json::from_str(payload).ok()
+}
+
+fn queue_calendar_toast_action(action: String) {
+    if let Ok(mut guard) = CALENDAR_TOAST_ACTIONS.lock() {
+        guard.push(action);
+    }
+}
+
+fn take_calendar_toast_actions() -> Vec<String> {
+    if let Ok(mut guard) = CALENDAR_TOAST_ACTIONS.lock() {
+        let actions = guard.clone();
+        guard.clear();
+        actions
+    } else {
+        Vec::new()
+    }
+}
+
+fn calendar_toast_contents(ui: &mut egui::Ui, toast: &mut Toast) -> egui::Response {
+    let payload = decode_calendar_toast(toast.text.text());
+    let Some(payload) = payload else {
+        return ui.label(toast.text.clone());
+    };
+
+    egui::Frame::none()
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.heading(&payload.title);
+                let time_label = if payload.all_day {
+                    format!("{} (all day)", payload.start)
+                } else {
+                    payload.start.clone()
+                };
+                ui.label(time_label);
+                if let Some(minutes) = payload.reminder_minutes {
+                    ui.label(format!("Reminder: {minutes}m before"));
+                } else {
+                    ui.label(format!("Reminder triggered at {}", payload.trigger_at));
+                }
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Open details").clicked() {
+                        queue_calendar_toast_action(format!(
+                            "calendar:details:{}",
+                            payload.instance_id
+                        ));
+                        toast.close();
+                    }
+                    if ui.button("Snooze 5m").clicked() {
+                        queue_calendar_toast_action(format!(
+                            "calendar:snooze:{}:5m",
+                            payload.instance_id
+                        ));
+                        toast.close();
+                    }
+                    if ui.button("Snooze 10m").clicked() {
+                        queue_calendar_toast_action(format!(
+                            "calendar:snooze:{}:10m",
+                            payload.instance_id
+                        ));
+                        toast.close();
+                    }
+                    if ui.button("Snooze 30m").clicked() {
+                        queue_calendar_toast_action(format!(
+                            "calendar:snooze:{}:30m",
+                            payload.instance_id
+                        ));
+                        toast.close();
+                    }
+                    if ui.button("Dismiss").clicked() {
+                        queue_calendar_toast_action(format!(
+                            "calendar:dismiss:{}",
+                            payload.instance_id
+                        ));
+                        toast.close();
+                    }
+                });
+            });
+        })
+        .response
+}
 
 pub fn register_event_sender(tx: Sender<WatchEvent>) {
     if let Ok(mut guard) = APP_EVENT_TXS.lock() {
@@ -447,6 +547,8 @@ pub struct LauncherApp {
     pub calendar_selected_date: Option<NaiveDate>,
     pub calendar_selected_event: Option<String>,
     last_timer_update: Instant,
+    last_calendar_update: Instant,
+    last_calendar_check: NaiveDateTime,
     last_net_update: Instant,
     last_stopwatch_update: Instant,
     last_search_query: String,
@@ -722,7 +824,12 @@ impl LauncherApp {
         let (tx, rx) = channel();
         register_event_sender(tx.clone());
         let mut watchers = Vec::new();
-        let mut toasts = Toasts::new().anchor(egui::Align2::RIGHT_TOP, [10.0, 10.0]);
+        let mut toasts = Toasts::new()
+            .anchor(egui::Align2::RIGHT_TOP, [10.0, 10.0])
+            .custom_contents(
+                ToastKind::Custom(CALENDAR_TOAST_KIND),
+                calendar_toast_contents,
+            );
         let enable_toasts = settings.enable_toasts;
         let toast_duration = settings.toast_duration;
         use std::path::Path;
@@ -1081,6 +1188,8 @@ impl LauncherApp {
             calendar_selected_date: None,
             calendar_selected_event: None,
             last_timer_update: Instant::now(),
+            last_calendar_update: Instant::now(),
+            last_calendar_check: chrono::Local::now().naive_local(),
             last_net_update: Instant::now(),
             last_stopwatch_update: Instant::now(),
             last_search_query: String::new(),
@@ -1393,6 +1502,64 @@ impl LauncherApp {
             self.last_results_valid = false;
             self.search();
             self.last_stopwatch_update = Instant::now();
+        }
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn maybe_trigger_calendar_reminders(&mut self) {
+        if self.last_calendar_update.elapsed() < Duration::from_secs(60) {
+            return;
+        }
+        let now = chrono::Local::now().naive_local();
+        if now < self.last_calendar_check {
+            self.last_calendar_check = now;
+        }
+        let start = self.last_calendar_check;
+        self.last_calendar_check = now;
+        self.last_calendar_update = Instant::now();
+
+        let events = crate::plugins::calendar::CALENDAR_DATA
+            .read()
+            .map(|d| d.clone())
+            .unwrap_or_default();
+        let state =
+            crate::plugins::calendar::load_state(crate::plugins::calendar::CALENDAR_STATE_FILE)
+                .unwrap_or_default();
+        let triggers =
+            crate::plugins::calendar::reminder_triggers_for_range(&events, &state, start, now, 64);
+        for trigger in triggers {
+            if !self.enable_toasts {
+                continue;
+            }
+            let payload = CalendarToastPayload {
+                title: trigger.title,
+                instance_id: trigger.instance_id,
+                start: trigger.start.format("%Y-%m-%d %H:%M").to_string(),
+                trigger_at: trigger.trigger_at.format("%Y-%m-%d %H:%M").to_string(),
+                all_day: trigger.all_day,
+                reminder_minutes: trigger.reminder_minutes,
+            };
+            push_toast(
+                &mut self.toasts,
+                Toast {
+                    text: encode_calendar_toast(&payload).into(),
+                    kind: ToastKind::Custom(CALENDAR_TOAST_KIND),
+                    options: ToastOptions::default()
+                        .duration_in_seconds(self.toast_duration as f64),
+                },
+            );
+        }
+    }
+
+    fn handle_calendar_toast_actions(&mut self) {
+        for action in take_calendar_toast_actions() {
+            let action = Action {
+                label: "Calendar reminder".into(),
+                desc: "Calendar".into(),
+                action,
+                args: None,
+            };
+            self.activate_action(action, None, ActivationSource::Click);
         }
     }
 
@@ -1768,76 +1935,194 @@ impl LauncherApp {
                 .read()
                 .map(|d| d.clone())
                 .unwrap_or_default();
+            let state =
+                crate::plugins::calendar::load_state(crate::plugins::calendar::CALENDAR_STATE_FILE)
+                    .unwrap_or_default();
             let until = now + chrono::Duration::days(7);
             let instances = crate::plugins::calendar::expand_instances(&events, now, until, 50);
             let titles: std::collections::HashMap<_, _> =
                 events.into_iter().map(|e| (e.id, e.title)).collect();
+            let reminders = crate::plugins::calendar::reminder_triggers_for_range(
+                &events, &state, now, until, 50,
+            );
             self.query = "cal upcoming".into();
-            self.results = instances
-                .into_iter()
-                .map(|instance| {
-                    let title = titles
-                        .get(&instance.source_event_id)
-                        .cloned()
-                        .unwrap_or_else(|| "Calendar event".to_string());
-                    let label = if instance.all_day {
-                        format!("{} ({} all-day)", title, instance.start.format("%Y-%m-%d"))
-                    } else {
-                        format!(
-                            "{} ({} {})",
-                            title,
-                            instance.start.format("%Y-%m-%d"),
-                            instance.start.format("%H:%M")
-                        )
-                    };
-                    Action {
-                        label,
-                        desc: "Calendar".into(),
-                        action: format!("calendar:jump:{}", instance.start.format("%Y-%m-%d")),
-                        args: None,
-                    }
-                })
-                .collect();
+            let mut actions = Vec::new();
+            for reminder in reminders {
+                let label = if reminder.all_day {
+                    format!(
+                        "Reminder: {} ({} all-day)",
+                        reminder.title,
+                        reminder.start.format("%Y-%m-%d")
+                    )
+                } else {
+                    format!(
+                        "Reminder: {} ({})",
+                        reminder.title,
+                        reminder.trigger_at.format("%Y-%m-%d %H:%M")
+                    )
+                };
+                actions.push(Action {
+                    label,
+                    desc: "Calendar reminder".into(),
+                    action: format!("calendar:details:{}", reminder.instance_id),
+                    args: None,
+                });
+                actions.push(Action {
+                    label: format!("Snooze 10m: {}", reminder.title),
+                    desc: "Calendar reminder".into(),
+                    action: format!("calendar:snooze:{}:10m", reminder.instance_id),
+                    args: None,
+                });
+            }
+            for instance in instances {
+                if state
+                    .reminder_overrides
+                    .get(&instance.instance_id)
+                    .map(|o| o.dismissed)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let title = titles
+                    .get(&instance.source_event_id)
+                    .cloned()
+                    .unwrap_or_else(|| "Calendar event".to_string());
+                let label = if instance.all_day {
+                    format!("{} ({} all-day)", title, instance.start.format("%Y-%m-%d"))
+                } else {
+                    format!(
+                        "{} ({} {})",
+                        title,
+                        instance.start.format("%Y-%m-%d"),
+                        instance.start.format("%H:%M")
+                    )
+                };
+                actions.push(Action {
+                    label,
+                    desc: "Calendar".into(),
+                    action: format!("calendar:details:{}", instance.instance_id),
+                    args: None,
+                });
+            }
+            self.results = actions;
             self.selected = None;
             self.last_search_query = self.query.clone();
             self.last_results_valid = true;
             self.update_suggestions();
             command_changed_query = true;
             set_focus = true;
+        } else if let Some(instance_id) = a.action.strip_prefix("calendar:details:") {
+            if let Some(instance) = crate::plugins::calendar::resolve_instance(instance_id) {
+                self.calendar_selected_event = Some(instance.source_event_id.clone());
+                self.calendar_selected_date = Some(instance.start.date());
+                self.calendar_event_details.open(instance);
+                self.calendar_details_open = true;
+            } else if self.enable_toasts {
+                push_toast(
+                    &mut self.toasts,
+                    Toast {
+                        text: format!("Calendar instance not found: {instance_id}").into(),
+                        kind: ToastKind::Error,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(self.toast_duration as f64),
+                    },
+                );
+            }
         } else if let Some(input) = a.action.strip_prefix("calendar:snooze:") {
-            let mut parts = input.split_whitespace();
-            if let (Some(duration_str), Some(event_id)) = (parts.next(), parts.next()) {
-                if let Some(duration) = crate::plugins::calendar::parse_duration_spec(duration_str)
-                {
-                    match crate::plugins::calendar::snooze_event(event_id, duration) {
-                        Ok(true) => {
-                            self.dashboard_data_cache.refresh_calendar();
-                            if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Snoozed event {event_id}").into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
+            if input.contains(' ') {
+                let mut parts = input.split_whitespace();
+                if let (Some(duration_str), Some(event_id)) = (parts.next(), parts.next()) {
+                    if let Some(duration) =
+                        crate::plugins::calendar::parse_duration_spec(duration_str)
+                    {
+                        match crate::plugins::calendar::snooze_event(event_id, duration) {
+                            Ok(true) => {
+                                self.dashboard_data_cache.refresh_calendar();
+                                if self.enable_toasts {
+                                    push_toast(
+                                        &mut self.toasts,
+                                        Toast {
+                                            text: format!("Snoozed event {event_id}").into(),
+                                            kind: ToastKind::Success,
+                                            options: ToastOptions::default()
+                                                .duration_in_seconds(self.toast_duration as f64),
+                                        },
+                                    );
+                                }
+                            }
+                            Ok(false) => {
+                                if self.enable_toasts {
+                                    push_toast(
+                                        &mut self.toasts,
+                                        Toast {
+                                            text: format!("Event not found: {event_id}").into(),
+                                            kind: ToastKind::Error,
+                                            options: ToastOptions::default()
+                                                .duration_in_seconds(self.toast_duration as f64),
+                                        },
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                if self.enable_toasts {
+                                    push_toast(
+                                        &mut self.toasts,
+                                        Toast {
+                                            text: format!("Snooze failed: {err}").into(),
+                                            kind: ToastKind::Error,
+                                            options: ToastOptions::default()
+                                                .duration_in_seconds(self.toast_duration as f64),
+                                        },
+                                    );
+                                }
                             }
                         }
-                        Ok(false) => {
-                            if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Event not found: {event_id}").into(),
-                                        kind: ToastKind::Error,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
-                            }
-                        }
-                        Err(err) => {
+                    } else if self.enable_toasts {
+                        push_toast(
+                            &mut self.toasts,
+                            Toast {
+                                text: "Invalid snooze duration (use 10m, 1h, 2d)".into(),
+                                kind: ToastKind::Error,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(self.toast_duration as f64),
+                            },
+                        );
+                    }
+                } else if self.enable_toasts {
+                    push_toast(
+                        &mut self.toasts,
+                        Toast {
+                            text: "Provide a duration and event id to snooze".into(),
+                            kind: ToastKind::Error,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(self.toast_duration as f64),
+                        },
+                    );
+                }
+            } else {
+                let mut parts = input.splitn(2, ':');
+                let instance_id = parts.next().unwrap_or("");
+                let duration_str = parts.next();
+                if instance_id.is_empty() {
+                    if self.enable_toasts {
+                        push_toast(
+                            &mut self.toasts,
+                            Toast {
+                                text: "Missing calendar instance id".into(),
+                                kind: ToastKind::Error,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(self.toast_duration as f64),
+                            },
+                        );
+                    }
+                } else if let Some(duration_str) = duration_str {
+                    if let Some(duration) =
+                        crate::plugins::calendar::parse_duration_spec(duration_str)
+                    {
+                        let now = chrono::Local::now().naive_local();
+                        if let Err(err) =
+                            crate::plugins::calendar::snooze_instance(instance_id, duration, now)
+                        {
                             if self.enable_toasts {
                                 push_toast(
                                     &mut self.toasts,
@@ -1849,29 +2134,69 @@ impl LauncherApp {
                                     },
                                 );
                             }
+                        } else {
+                            self.dashboard_data_cache.refresh_calendar();
+                            if self.enable_toasts {
+                                push_toast(
+                                    &mut self.toasts,
+                                    Toast {
+                                        text: format!("Snoozed reminder {instance_id}").into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(self.toast_duration as f64),
+                                    },
+                                );
+                            }
                         }
+                    } else if self.enable_toasts {
+                        push_toast(
+                            &mut self.toasts,
+                            Toast {
+                                text: "Invalid snooze duration (use 10m, 1h, 2d)".into(),
+                                kind: ToastKind::Error,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(self.toast_duration as f64),
+                            },
+                        );
                     }
                 } else if self.enable_toasts {
                     push_toast(
                         &mut self.toasts,
                         Toast {
-                            text: "Invalid snooze duration (use 10m, 1h, 2d)".into(),
+                            text: "Provide a duration to snooze".into(),
                             kind: ToastKind::Error,
                             options: ToastOptions::default()
                                 .duration_in_seconds(self.toast_duration as f64),
                         },
                     );
                 }
-            } else if self.enable_toasts {
-                push_toast(
-                    &mut self.toasts,
-                    Toast {
-                        text: "Provide a duration and event id to snooze".into(),
-                        kind: ToastKind::Error,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(self.toast_duration as f64),
-                    },
-                );
+            }
+        } else if let Some(instance_id) = a.action.strip_prefix("calendar:dismiss:") {
+            if let Err(err) = crate::plugins::calendar::dismiss_instance(instance_id) {
+                if self.enable_toasts {
+                    push_toast(
+                        &mut self.toasts,
+                        Toast {
+                            text: format!("Dismiss failed: {err}").into(),
+                            kind: ToastKind::Error,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(self.toast_duration as f64),
+                        },
+                    );
+                }
+            } else {
+                self.dashboard_data_cache.refresh_calendar();
+                if self.enable_toasts {
+                    push_toast(
+                        &mut self.toasts,
+                        Toast {
+                            text: format!("Dismissed reminder {instance_id}").into(),
+                            kind: ToastKind::Success,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(self.toast_duration as f64),
+                        },
+                    );
+                }
             }
         } else if a.action == "shell:dialog" {
             self.shell_cmd_dialog.open();
@@ -2825,6 +3150,7 @@ impl eframe::App for LauncherApp {
         if self.enable_toasts {
             self.toasts.show(ctx);
         }
+        self.handle_calendar_toast_actions();
         if let Some(pending) = self.pending_query.take() {
             self.query = pending;
             self.search();
@@ -3094,6 +3420,7 @@ impl eframe::App for LauncherApp {
         let use_dashboard = self.should_show_dashboard(trimmed.as_str());
         self.maybe_refresh_timer_list();
         self.maybe_refresh_stopwatch_list();
+        self.maybe_trigger_calendar_reminders();
         if trimmed.eq_ignore_ascii_case("net")
             && self.last_net_update.elapsed().as_secs_f32() >= self.net_refresh
         {

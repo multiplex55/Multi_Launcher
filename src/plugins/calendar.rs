@@ -183,12 +183,22 @@ pub struct EventInstance {
     pub recurrence: Option<RecurrenceMetadata>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ReminderOverride {
+    #[serde(default, with = "option_naive_datetime_serde")]
+    pub snoozed_until: Option<NaiveDateTime>,
+    #[serde(default)]
+    pub dismissed: bool,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CalendarState {
     #[serde(default, with = "option_naive_datetime_serde")]
     pub last_opened: Option<NaiveDateTime>,
     #[serde(default, with = "option_naive_date_serde")]
     pub last_viewed_day: Option<NaiveDate>,
+    #[serde(default)]
+    pub reminder_overrides: HashMap<String, ReminderOverride>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -199,6 +209,17 @@ pub struct CalendarSnapshot {
     pub next_trigger: Option<NaiveDateTime>,
     pub event_titles: HashMap<String, String>,
     pub event_tags: HashMap<String, Vec<String>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReminderTrigger {
+    pub instance_id: String,
+    pub source_event_id: String,
+    pub title: String,
+    pub start: NaiveDateTime,
+    pub trigger_at: NaiveDateTime,
+    pub all_day: bool,
+    pub reminder_minutes: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -619,14 +640,154 @@ fn instance_id(event_id: &str, start: NaiveDateTime) -> String {
     format!("{}-{}", event_id, start.format("%Y%m%dT%H%M%S"))
 }
 
+fn instance_id_split(instance_id: &str) -> Option<(String, NaiveDateTime)> {
+    if instance_id.len() <= 16 {
+        return None;
+    }
+    let (event_id, ts) = instance_id.split_at(instance_id.len() - 16);
+    let ts = ts.strip_prefix('-')?;
+    let start = NaiveDateTime::parse_from_str(ts, "%Y%m%dT%H%M%S").ok()?;
+    Some((event_id.to_string(), start))
+}
+
+pub fn resolve_instance(instance_id: &str) -> Option<EventInstance> {
+    let (event_id, start) = instance_id_split(instance_id)?;
+    let events = CALENDAR_DATA.read().map(|d| d.clone()).unwrap_or_default();
+    let event = events.iter().find(|e| e.id == event_id)?;
+    let range_start = start - Duration::days(1);
+    let range_end = start + Duration::days(1);
+    let mut instances = Vec::new();
+    expand_event_instances(event, range_start, range_end, 32, &mut instances);
+    instances
+        .into_iter()
+        .find(|instance| instance.instance_id == instance_id)
+}
+
+fn instance_is_dismissed(state: &CalendarState, instance_id: &str) -> bool {
+    state
+        .reminder_overrides
+        .get(instance_id)
+        .map(|o| o.dismissed)
+        .unwrap_or(false)
+}
+
+pub fn dismiss_instance(instance_id: &str) -> anyhow::Result<()> {
+    let mut state = load_state(CALENDAR_STATE_FILE).unwrap_or_default();
+    let override_state = state
+        .reminder_overrides
+        .entry(instance_id.to_string())
+        .or_default();
+    override_state.dismissed = true;
+    override_state.snoozed_until = None;
+    save_state(CALENDAR_STATE_FILE, &state)?;
+    Ok(())
+}
+
+pub fn snooze_instance(
+    instance_id: &str,
+    duration: Duration,
+    now: NaiveDateTime,
+) -> anyhow::Result<()> {
+    let mut state = load_state(CALENDAR_STATE_FILE).unwrap_or_default();
+    let override_state = state
+        .reminder_overrides
+        .entry(instance_id.to_string())
+        .or_default();
+    override_state.dismissed = false;
+    override_state.snoozed_until = Some(now + duration);
+    save_state(CALENDAR_STATE_FILE, &state)?;
+    Ok(())
+}
+
+pub fn reminder_triggers_for_range(
+    events: &[CalendarEvent],
+    state: &CalendarState,
+    range_start: NaiveDateTime,
+    range_end: NaiveDateTime,
+    limit: usize,
+) -> Vec<ReminderTrigger> {
+    if range_start >= range_end || limit == 0 {
+        return Vec::new();
+    }
+    let mut max_offset = 0i64;
+    let mut by_id: HashMap<String, &CalendarEvent> = HashMap::new();
+    for event in events {
+        by_id.insert(event.id.clone(), event);
+        for reminder in &event.reminders {
+            if reminder.minutes_before > max_offset {
+                max_offset = reminder.minutes_before;
+            }
+        }
+    }
+    let instance_start = range_start - Duration::minutes(max_offset.max(0));
+    let instance_limit = limit.saturating_mul(4).max(64);
+    let instances = expand_instances(events, instance_start, range_end, instance_limit);
+    let mut triggers = Vec::new();
+    for instance in instances {
+        if triggers.len() >= limit {
+            break;
+        }
+        if instance_is_dismissed(state, &instance.instance_id) {
+            continue;
+        }
+        let event = match by_id.get(&instance.source_event_id) {
+            Some(event) => *event,
+            None => continue,
+        };
+        if let Some(override_state) = state.reminder_overrides.get(&instance.instance_id) {
+            if let Some(snoozed_until) = override_state.snoozed_until {
+                if snoozed_until >= range_start && snoozed_until <= range_end {
+                    triggers.push(ReminderTrigger {
+                        instance_id: instance.instance_id.clone(),
+                        source_event_id: instance.source_event_id.clone(),
+                        title: event.title.clone(),
+                        start: instance.start,
+                        trigger_at: snoozed_until,
+                        all_day: instance.all_day,
+                        reminder_minutes: None,
+                    });
+                }
+                continue;
+            }
+        }
+        if event.reminders.is_empty() {
+            continue;
+        }
+        for reminder in &event.reminders {
+            let trigger_at = instance.start - Duration::minutes(reminder.minutes_before);
+            if trigger_at >= range_start && trigger_at <= range_end {
+                triggers.push(ReminderTrigger {
+                    instance_id: instance.instance_id.clone(),
+                    source_event_id: instance.source_event_id.clone(),
+                    title: event.title.clone(),
+                    start: instance.start,
+                    trigger_at,
+                    all_day: instance.all_day,
+                    reminder_minutes: Some(reminder.minutes_before),
+                });
+            }
+        }
+    }
+    triggers.sort_by_key(|trigger| trigger.trigger_at);
+    triggers.truncate(limit);
+    triggers
+}
+
 pub fn build_snapshot(now: NaiveDateTime) -> CalendarSnapshot {
     let events = CALENDAR_DATA.read().map(|d| d.clone()).unwrap_or_default();
+    let state = load_state(CALENDAR_STATE_FILE).unwrap_or_default();
     let today_start = NaiveDateTime::new(now.date(), NaiveTime::from_hms_opt(0, 0, 0).unwrap());
     let today_end = today_start + Duration::days(1);
     let week_end = now + Duration::days(7);
 
-    let events_today = expand_instances(&events, today_start, today_end, 128);
-    let events_next_7_days = expand_instances(&events, now, week_end, 256);
+    let events_today = expand_instances(&events, today_start, today_end, 128)
+        .into_iter()
+        .filter(|instance| !instance_is_dismissed(&state, &instance.instance_id))
+        .collect();
+    let events_next_7_days = expand_instances(&events, now, week_end, 256)
+        .into_iter()
+        .filter(|instance| !instance_is_dismissed(&state, &instance.instance_id))
+        .collect();
 
     let month_start = NaiveDate::from_ymd_opt(now.year(), now.month(), 1).unwrap_or(now.date());
     let next_month = add_months(month_start, 1);
@@ -636,15 +797,18 @@ pub fn build_snapshot(now: NaiveDateTime) -> CalendarSnapshot {
         NaiveDateTime::new(next_month, NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
         512,
     );
-    let mut markers: Vec<NaiveDate> = month_instances.iter().map(|i| i.start.date()).collect();
+    let mut markers: Vec<NaiveDate> = month_instances
+        .iter()
+        .filter(|instance| !instance_is_dismissed(&state, &instance.instance_id))
+        .map(|i| i.start.date())
+        .collect();
     markers.sort();
     markers.dedup();
 
-    let next_trigger = events_next_7_days
-        .iter()
-        .filter(|e| e.start >= now)
-        .map(|e| e.start)
-        .min();
+    let next_trigger =
+        reminder_triggers_for_range(&events, &state, now, now + Duration::days(7), 128)
+            .first()
+            .map(|trigger| trigger.trigger_at);
 
     let event_titles = events
         .iter()
