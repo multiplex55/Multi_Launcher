@@ -194,6 +194,7 @@ impl CalendarEventEditor {
             return;
         }
         let mut open = app.calendar_editor_open;
+        let mut close_requested = false;
         egui::Window::new("Calendar Event")
             .open(&mut open)
             .resizable(true)
@@ -399,15 +400,15 @@ impl CalendarEventEditor {
                         if let Err(err) = self.save(app) {
                             app.set_error(err);
                         } else {
-                            open = false;
+                            close_requested = true;
                         }
                     }
                     if ui.button("Cancel").clicked() {
-                        open = false;
+                        close_requested = true;
                     }
                 });
             });
-        app.calendar_editor_open = open;
+        app.calendar_editor_open = open && !close_requested;
     }
 
     fn save(&mut self, app: &mut LauncherApp) -> Result<(), String> {
