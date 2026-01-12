@@ -1,5 +1,7 @@
+use crate::actions::Action;
 use crate::gui::LauncherApp;
 use eframe::egui;
+use std::collections::HashSet;
 
 #[derive(Default)]
 pub struct HelpWindow {
@@ -70,12 +72,6 @@ impl HelpWindow {
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| ui.heading("Available commands"));
                 ui.separator();
-                ui.label(
-                    "Tip: Settings \u{2192} Dashboard \u{2192} Customize Dashboard... opens the \
-                     widget editor where you can configure plugin-aware defaults for notes, todos \
-                     or weather.",
-                );
-                ui.separator();
                 if ui
                     .checkbox(&mut self.show_examples, "Show examples")
                     .changed()
@@ -90,6 +86,10 @@ impl HelpWindow {
                     ui.text_edit_singleline(&mut self.filter);
                 });
                 ui.separator();
+                let mut command_map = std::collections::HashMap::new();
+                for plugin in app.plugins.iter() {
+                    command_map.insert(plugin.name().to_string(), plugin.commands());
+                }
                 let mut infos = app.plugins.plugin_infos();
                 infos.sort_by(|a, b| a.0.cmp(&b.0));
                 let area_height = ui.available_height();
@@ -97,20 +97,36 @@ impl HelpWindow {
                     .max_height(area_height)
                     .show(ui, |ui| {
                         let filt = self.filter.to_lowercase();
-                        for (name, desc, _) in infos {
-                            if !filt.is_empty()
-                                && !name.to_lowercase().contains(&filt)
-                                && !desc.to_lowercase().contains(&filt)
-                            {
+                        for (name, desc, capabilities) in infos {
+                            let commands = command_map.get(&name).cloned().unwrap_or_default();
+                            if !matches_filter(&filt, &name, &desc, &capabilities, &commands) {
                                 continue;
                             }
+                            let prefixes = command_prefixes(&commands);
                             ui.label(egui::RichText::new(&name).strong());
                             ui.label(desc);
-                            if self.show_examples {
-                                if let Some(examples) = example_queries(&name) {
-                                    for ex in examples {
-                                        ui.monospace(format!("  {ex}"));
-                                    }
+                            if capabilities.is_empty() {
+                                ui.label("Capabilities: none");
+                            } else {
+                                ui.label(format!("Capabilities: {}", capabilities.join(", ")));
+                            }
+                            if prefixes.is_empty() {
+                                ui.label("Prefixes: none");
+                            } else {
+                                ui.label(format!("Prefixes: {}", prefixes.join(", ")));
+                            }
+                            if commands.is_empty() {
+                                ui.label("Usage: none");
+                            } else {
+                                ui.label("Usage:");
+                                for command in &commands {
+                                    ui.monospace(format!("  {}", command.label));
+                                }
+                            }
+                            if self.show_examples && !commands.is_empty() {
+                                ui.label("Examples:");
+                                for command in &commands {
+                                    ui.monospace(format!("  {}", example_line(command)));
                                 }
                             }
                             ui.separator();
@@ -121,98 +137,49 @@ impl HelpWindow {
     }
 }
 
-fn example_queries(name: &str) -> Option<&'static [&'static str]> {
-    match name {
-        "web_search" => Some(&["g rust"]),
-        "runescape_search" => Some(&["rs dragon scimitar", "osrs agility guide"]),
-        "youtube" => Some(&["yt rust"]),
-        "reddit" => Some(&["red cats"]),
-        "calculator" => Some(&["= 1+2", "= history"]),
-        "unit_convert" => Some(&[
-            "conv 10 km to mi",
-            "conv 1 kwh to j",
-            "conv 8 bit to byte",
-            "conv 30 mpg to kpl",
-            "conv 180 deg to rad",
-        ]),
-        "base_convert" => Some(&[
-            "conv 1010 bin to hex",
-            "conv ff hex to bin",
-            "conv \"hello\" text to hex",
-            "conv 48656c6c6f hex to text",
-            "conv 42 dec to bin",
-        ]),
-        "clipboard" => Some(&["cb"]),
-        "bookmarks" => Some(&["bm add https://example.com", "bm rm", "bm list"]),
-        "folders" => Some(&["f add C:/path", "f rm docs"]),
-        "shell" => Some(&["sh", "sh echo hello"]),
-        "system" => Some(&["sys shutdown"]),
-        "sysinfo" => Some(&["info", "info cpu", "info cpu list 5"]),
-        "network" => Some(&["net"]),
-        "weather" => Some(&["weather Berlin"]),
-        "history" => Some(&["hi"]),
-        "timer" => Some(&[
-            "timer add <duration> [name]",
-            "timer add 10s tea",
-            "timer add 5m",
-            "timer add 1:30",
-            "durations: s/m/h or hh:mm:ss/mm:ss",
-            "alarm <HH:MM> [name]",
-            "alarm 07:30 wake up",
-            "timer list  # show active timers",
-            "alarm list  # show active alarms",
-            "timer pause <id>  # pause a timer",
-            "timer resume <id>  # resume a timer",
-            "timer cancel  # cancel timers/alarms",
-            "timer rm  # remove timers",
-        ]),
-        "notes" => Some(&[
-            "note",
-            "note add buy milk",
-            "note new buy milk",
-            "note create buy milk",
-            "note list",
-            "note rm groceries",
-            "notes unused",
-        ]),
-        "volume" => Some(&["vol 50"]),
-        "brightness" => Some(&["bright 50"]),
-        "asciiart" => Some(&["ascii hello"]),
-        "screenshot" => Some(&[
-            "ss",
-            "ss clip",
-            "Editor: drag to crop, Shift+drag to annotate, use slider to zoom, then Save or Copy",
-        ]),
-        "processes" => Some(&["ps", "ps firefox"]),
-        "dropcalc" => Some(&["drop 1/128 25"]),
-        "recycle" => Some(&["rec"]),
-        "tempfile" => Some(&["tmp new", "tmp create"]),
-        "timestamp" => Some(&[
-            "ts 0",
-            "ts 2024-05-01 12:00",
-            "tsm 3600000",
-            "tsm 01:00:00.500",
-        ]),
-        "snippets" => Some(&["cs hello"]),
-        "favorites" => Some(&["fav add mycmd", "fav list"]),
-        "browser_tabs" => Some(&["tab", "tab cache"]),
-        "emoji" => Some(&["emoji smile", "emoji list heart"]),
-        "ip" => Some(&["ip", "ip public"]),
-        "lorem" => Some(&["lorem w 5", "lorem s 2"]),
-        "macros" => Some(&["macro list", "macro mymacro"]),
-        "omni_search" => Some(&["o list", "o list docs"]),
-        "random" => Some(&["rand number 10", "rand dice", "rand pw 8"]),
-        "settings" => Some(&["settings"]),
-        "stopwatch" => Some(&["sw start", "sw list"]),
-        "task_manager" => Some(&["tm"]),
-        "text_case" => Some(&["case snake Hello World"]),
-        "todo" => Some(&[
-            "todo add buy milk @home",
-            "todo list",
-            "todo list @testing @ui",
-        ]),
-        "wikipedia" => Some(&["wiki rust"]),
-        "help" => Some(&["help"]),
-        _ => None,
+fn matches_filter(
+    filter: &str,
+    name: &str,
+    desc: &str,
+    capabilities: &[String],
+    commands: &[Action],
+) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    let filter = filter.to_lowercase();
+    if name.to_lowercase().contains(&filter) || desc.to_lowercase().contains(&filter) {
+        return true;
+    }
+    if capabilities
+        .iter()
+        .any(|cap| cap.to_lowercase().contains(&filter))
+    {
+        return true;
+    }
+    commands.iter().any(|command| {
+        command.label.to_lowercase().contains(&filter)
+            || command.desc.to_lowercase().contains(&filter)
+            || command.action.to_lowercase().contains(&filter)
+    })
+}
+
+fn command_prefixes(commands: &[Action]) -> Vec<String> {
+    let mut prefixes = HashSet::new();
+    for command in commands {
+        if let Some(prefix) = command.label.split_whitespace().next() {
+            prefixes.insert(prefix.to_string());
+        }
+    }
+    let mut out: Vec<String> = prefixes.into_iter().collect();
+    out.sort();
+    out
+}
+
+fn example_line(command: &Action) -> String {
+    if let Some(query) = command.action.strip_prefix("query:") {
+        query.trim().to_string()
+    } else {
+        command.label.clone()
     }
 }
