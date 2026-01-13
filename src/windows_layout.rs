@@ -52,6 +52,7 @@ struct EnumeratedWindow {
 }
 
 #[cfg(windows)]
+#[derive(Debug, Clone)]
 struct LayoutRestoreAction {
     hwnd: windows::Win32::Foundation::HWND,
     rect: windows::Win32::Foundation::RECT,
@@ -338,7 +339,7 @@ fn list_monitors() -> Vec<(String, windows::Win32::Graphics::Gdi::MONITORINFOEXW
         let monitors_ptr = &mut monitors as *mut _;
         let _ = EnumDisplayMonitors(
             HDC::default(),
-            std::ptr::null(),
+            None,
             Some(enum_monitor_cb),
             LPARAM(monitors_ptr as isize),
         );
@@ -467,7 +468,7 @@ pub fn plan_layout_restore(
             .map(|(name, info)| (name.to_lowercase(), info))
             .collect();
 
-    let mut candidates: Vec<EnumeratedWindow> = enumerated
+    let candidates: Vec<EnumeratedWindow> = enumerated
         .into_iter()
         .filter(|window| !layout.ignore.iter().any(|rule| is_rule_match(rule, &window.matcher)))
         .collect();
