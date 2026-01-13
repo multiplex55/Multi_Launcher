@@ -182,20 +182,20 @@ fn month_grid(
     markers: &HashSet<NaiveDate>,
     today: NaiveDate,
 ) {
-    let first_weekday = month.weekday().num_days_from_monday() as i32;
+    let first_weekday = month.weekday().num_days_from_sunday() as i32;
     let days = days_in_month(month);
     egui::Grid::new("calendar_month_grid")
         .num_columns(7)
         .spacing([4.0, 4.0])
         .show(ui, |ui| {
             for weekday in [
+                Weekday::Sun,
                 Weekday::Mon,
                 Weekday::Tue,
                 Weekday::Wed,
                 Weekday::Thu,
                 Weekday::Fri,
                 Weekday::Sat,
-                Weekday::Sun,
             ] {
                 ui.label(weekday.to_string());
             }

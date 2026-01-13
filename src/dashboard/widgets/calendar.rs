@@ -437,7 +437,7 @@ fn month_grid(
     compact: bool,
     mut on_select: impl FnMut(NaiveDate),
 ) {
-    let first_weekday = month.weekday().num_days_from_monday() as i32;
+    let first_weekday = month.weekday().num_days_from_sunday() as i32;
     let days = days_in_month(month);
     let spacing = if compact { [2.0, 2.0] } else { [4.0, 4.0] };
     egui::Grid::new("calendar_widget_month_grid")
@@ -445,13 +445,13 @@ fn month_grid(
         .spacing(spacing)
         .show(ui, |ui| {
             for weekday in [
+                chrono::Weekday::Sun,
                 chrono::Weekday::Mon,
                 chrono::Weekday::Tue,
                 chrono::Weekday::Wed,
                 chrono::Weekday::Thu,
                 chrono::Weekday::Fri,
                 chrono::Weekday::Sat,
-                chrono::Weekday::Sun,
             ] {
                 ui.label(weekday.to_string());
             }
