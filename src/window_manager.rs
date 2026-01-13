@@ -26,6 +26,16 @@ pub fn clear_mock_mouse_position() {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+pub fn mock_mouse_position_is_set() -> bool {
+    if let Ok(guard) = MOCK_MOUSE_POSITION.lock() {
+        guard.is_some()
+    } else {
+        tracing::error!("failed to lock MOCK_MOUSE_POSITION");
+        false
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn virtual_key_from_string(key: &str) -> Option<u32> {
     match key.to_uppercase().as_str() {
         "F1" => Some(0x70),

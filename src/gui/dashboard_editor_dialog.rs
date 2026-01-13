@@ -243,6 +243,7 @@ impl DashboardEditorDialog {
 
                     ui.separator();
                     let mut confirm_remove = None;
+                    let mut removed_once = false;
                     if let Some(idx) = self.confirm_remove_slot {
                         if let Some(slot) = self.config.slots.get(idx) {
                             let label = Self::slot_label(slot);
@@ -278,7 +279,7 @@ impl DashboardEditorDialog {
                     while idx < self.config.slots.len() {
                         let original_slot = self.config.slots[idx].clone();
                         let mut slot = original_slot.clone();
-                        let removed = confirm_remove == Some(idx);
+                        let removed = !removed_once && confirm_remove == Some(idx);
                         let mut edited = false;
                         let mut swapped = false;
                         ui.push_id(idx, |ui| {
@@ -462,6 +463,9 @@ impl DashboardEditorDialog {
                         });
                         if removed {
                             self.config.slots.remove(idx);
+                            removed_once = true;
+                            self.confirm_remove_slot = None;
+                            confirm_remove = None;
                             if let Some(sel) = self.selected_slot {
                                 if sel >= idx && !self.config.slots.is_empty() {
                                     let next =
@@ -480,6 +484,7 @@ impl DashboardEditorDialog {
                             }
                             self.ensure_selected_slot();
                             self.ensure_swap_anchor();
+                            idx += 1;
                         } else if swapped {
                             idx += 1;
                         } else if edited && slot != original_slot {
