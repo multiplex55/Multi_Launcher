@@ -1,4 +1,5 @@
 pub mod clipboard;
+pub mod layout;
 pub mod layouts_storage;
 pub mod shell;
 pub mod bookmarks;
