@@ -13,6 +13,7 @@ use crate::plugins::layouts_storage::{
     self, list_layouts as list_saved_layouts, remove_layout as remove_saved_layout, Layout,
     LayoutOptions, LAYOUTS_FILE,
 };
+use crate::windows_layout::{collect_layout_windows, LayoutWindowOptions};
 
 #[derive(Default)]
 struct LayoutFlags {
@@ -81,9 +82,14 @@ pub fn save_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
     }
 
     let mut store = layouts_storage::load_layouts(LAYOUTS_FILE)?;
+    let windows = collect_layout_windows(LayoutWindowOptions {
+        only_active_monitor: flags.only_active_monitor,
+        include_minimized: flags.include_minimized,
+        exclude_minimized: flags.exclude_minimized,
+    })?;
     let layout = Layout {
         name: name.to_string(),
-        windows: Vec::new(),
+        windows,
         launches: Vec::new(),
         created_at: Some(chrono::Utc::now().to_rfc3339()),
         notes: String::new(),
