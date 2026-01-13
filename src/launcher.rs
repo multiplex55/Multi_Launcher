@@ -412,6 +412,7 @@ enum ActionKind<'a> {
     LayoutList {
         flags: Option<&'a str>,
     },
+    LayoutEdit,
     NoteReload,
     ExecPath {
         path: &'a str,
@@ -788,6 +789,9 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
             };
         }
     }
+    if s == "layout:edit" {
+        return ActionKind::LayoutEdit;
+    }
     if let Some(name) = s.strip_prefix("macro:") {
         return ActionKind::Macro(name);
     }
@@ -980,6 +984,7 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         ActionKind::LayoutShow { name, flags } => layout::show_layout(name, flags),
         ActionKind::LayoutRemove { name, flags } => layout::remove_layout(name, flags),
         ActionKind::LayoutList { flags } => layout::list_layouts(flags),
+        ActionKind::LayoutEdit => layout::edit_layouts(),
         ActionKind::Macro(name) => {
             crate::plugins::macros::run_macro(name)?;
             Ok(())

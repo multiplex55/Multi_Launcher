@@ -152,6 +152,12 @@ impl Plugin for LayoutPlugin {
                     args: None,
                 },
                 Action {
+                    label: "layout edit".into(),
+                    desc: "Layout".into(),
+                    action: "layout:edit".into(),
+                    args: None,
+                },
+                Action {
                     label: "layout rm <name>".into(),
                     desc: "Layout".into(),
                     action: "query:layout rm ".into(),
@@ -248,7 +254,23 @@ impl Plugin for LayoutPlugin {
                         .collect();
                 }
             }
-            return Vec::new();
+            return vec![Action {
+                label: format!("Layout '{name}' not found (edit layouts.json)"),
+                desc: "Layout".into(),
+                action: "layout:edit".into(),
+                args: None,
+            }];
+        }
+
+        if let Some(rest) = crate::common::strip_prefix_ci(rest, "edit") {
+            if rest.trim().is_empty() {
+                return vec![Action {
+                    label: "Edit layouts.json".into(),
+                    desc: "Layout".into(),
+                    action: "layout:edit".into(),
+                    args: None,
+                }];
+            }
         }
 
         if let Some(rest) = crate::common::strip_prefix_ci(rest, "rm") {
