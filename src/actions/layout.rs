@@ -6,12 +6,13 @@
 //! - `layout:show:<name>|<flags>`
 //! - `layout:rm:<name>|<flags>`
 //! - `layout:list|<flags>`
+//! - `layout:edit`
 //!
 //! Flags are comma-separated (`,`) and values use `key=value`, for example:
 //! `layout:load:Work|dry_run,only_active_monitor,filter=chrome`.
 use crate::plugins::layouts_storage::{
     self, list_layouts as list_saved_layouts, remove_layout as remove_saved_layout, Layout,
-    LayoutOptions, LayoutWindowLaunch, LAYOUTS_FILE,
+    LayoutCoordMode, LayoutOptions, LayoutWindowLaunch, LAYOUTS_FILE,
 };
 use crate::windows_layout::{
     apply_layout_restore_plan, collect_layout_windows, plan_layout_restore, LayoutMatchResult,
@@ -188,6 +189,154 @@ fn format_restore_summary(
         };
         writeln!(&mut contents, "Launches: skipped ({reason})").ok();
     }
+    contents
+}
+
+fn format_layout_match_inline(matcher: &crate::plugins::layouts_storage::LayoutMatch) -> String {
+    let mut parts = Vec::new();
+    if let Some(app_id) = &matcher.app_id {
+        parts.push(format!("exe={app_id}"));
+    }
+    if let Some(class) = &matcher.class {
+        parts.push(format!("class={class}"));
+    }
+    if let Some(title) = &matcher.title {
+        parts.push(format!("title={title}"));
+    }
+    if let Some(process) = &matcher.process {
+        parts.push(format!("process={process}"));
+    }
+    if parts.is_empty() {
+        "any window".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+fn format_coord_mode(mode: &LayoutCoordMode) -> &'static str {
+    match mode {
+        LayoutCoordMode::MonitorWorkareaRelative => "monitor_workarea_relative",
+    }
+}
+
+fn format_layout_view(layout: &Layout) -> String {
+    use std::fmt::Write as _;
+
+    let mut contents = String::new();
+    writeln!(&mut contents, "Layout: {}", layout.name).ok();
+    if let Some(created_at) = &layout.created_at {
+        writeln!(&mut contents, "Created: {created_at}").ok();
+    }
+    if !layout.notes.trim().is_empty() {
+        writeln!(&mut contents, "Notes: {}", layout.notes.trim()).ok();
+    }
+    writeln!(&mut contents, "Options:").ok();
+    writeln!(
+        &mut contents,
+        "- launch_missing: {}",
+        layout.options.launch_missing
+    )
+    .ok();
+    writeln!(
+        &mut contents,
+        "- coord_mode: {}",
+        format_coord_mode(&layout.options.coord_mode)
+    )
+    .ok();
+
+    if layout.ignore.is_empty() {
+        writeln!(&mut contents, "Ignore rules: none").ok();
+    } else {
+        writeln!(&mut contents, "Ignore rules:").ok();
+        for (idx, rule) in layout.ignore.iter().enumerate() {
+            writeln!(
+                &mut contents,
+                "- Rule {}: {}",
+                idx + 1,
+                format_layout_match_inline(rule)
+            )
+            .ok();
+        }
+    }
+
+    if layout.launches.is_empty() {
+        writeln!(&mut contents, "Global launches: none").ok();
+    } else {
+        writeln!(&mut contents, "Global launches:").ok();
+        for launch in &layout.launches {
+            if launch.args.is_empty() {
+                writeln!(&mut contents, "- {}", launch.command).ok();
+            } else {
+                writeln!(
+                    &mut contents,
+                    "- {} {}",
+                    launch.command,
+                    launch.args.join(" ")
+                )
+                .ok();
+            }
+        }
+    }
+
+    if layout.windows.is_empty() {
+        writeln!(&mut contents, "Windows: none").ok();
+    } else {
+        writeln!(&mut contents, "Windows:").ok();
+        for (idx, window) in layout.windows.iter().enumerate() {
+            writeln!(&mut contents, "Window {}:", idx + 1).ok();
+            writeln!(&mut contents, "  Match:").ok();
+            writeln!(
+                &mut contents,
+                "    exe path: {}",
+                window.matcher.app_id.as_deref().unwrap_or("any")
+            )
+            .ok();
+            writeln!(
+                &mut contents,
+                "    class name: {}",
+                window.matcher.class.as_deref().unwrap_or("any")
+            )
+            .ok();
+            writeln!(
+                &mut contents,
+                "    title regex: {}",
+                window.matcher.title.as_deref().unwrap_or("any")
+            )
+            .ok();
+            if let Some(process) = &window.matcher.process {
+                writeln!(&mut contents, "    process name: {process}").ok();
+            }
+            writeln!(&mut contents, "  Placement:").ok();
+            writeln!(
+                &mut contents,
+                "    monitor: {}",
+                window.placement.monitor.as_deref().unwrap_or("any monitor")
+            )
+            .ok();
+            writeln!(
+                &mut contents,
+                "    rect: [{:.2}, {:.2}, {:.2}, {:.2}]",
+                window.placement.rect[0],
+                window.placement.rect[1],
+                window.placement.rect[2],
+                window.placement.rect[3]
+            )
+            .ok();
+            writeln!(&mut contents, "    state: {}", window.placement.state).ok();
+            if let Some(launch) = &window.launch {
+                writeln!(
+                    &mut contents,
+                    "  Launch: {}",
+                    layout_window_launch_label(launch)
+                )
+                .ok();
+                if let Some(cwd) = &launch.cwd {
+                    writeln!(&mut contents, "    cwd: {cwd}").ok();
+                }
+            }
+        }
+    }
+
     contents
 }
 
@@ -484,10 +633,15 @@ pub fn show_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
         open::that(&path)?;
         return Ok(());
     }
-    let contents = serde_json::to_string_pretty(layout)?;
-    let alias = sanitize_alias(&format!("layout_{name}"));
+    let contents = format_layout_view(layout);
+    let alias = sanitize_alias(&format!("layout_view_{name}"));
     let path = crate::plugins::tempfile::create_named_file(&alias, &contents)?;
     open::that(&path)?;
+    Ok(())
+}
+
+pub fn edit_layouts() -> anyhow::Result<()> {
+    open::that(LAYOUTS_FILE)?;
     Ok(())
 }
 
