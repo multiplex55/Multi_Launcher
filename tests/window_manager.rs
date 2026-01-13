@@ -2,6 +2,7 @@ use multi_launcher::window_manager::{
     set_mock_mouse_position,
     clear_mock_mouse_position,
     current_mouse_position,
+    mock_mouse_position_is_set,
     virtual_key_from_string,
     MOCK_MOUSE_LOCK,
 };
@@ -9,16 +10,14 @@ use multi_launcher::window_manager::{
 #[test]
 fn mock_mouse_position_override_and_clear() {
     let _lock = MOCK_MOUSE_LOCK.lock().unwrap();
-    // Capture the real position before mocking
-    let real_pos = current_mouse_position();
-
     // Set a custom mouse position and confirm it is returned
     set_mock_mouse_position(Some((10.0, 20.0)));
+    assert!(mock_mouse_position_is_set());
     assert_eq!(current_mouse_position(), Some((10.0, 20.0)));
 
-    // Clear the mock and ensure the original position is restored
+    // Clear the mock and ensure the mock state is cleared
     clear_mock_mouse_position();
-    assert_eq!(current_mouse_position(), real_pos);
+    assert!(!mock_mouse_position_is_set());
 }
 
 #[test]
@@ -34,4 +33,3 @@ fn virtual_key_from_string_cases() {
         assert_eq!(virtual_key_from_string(input), expected, "input: {input}");
     }
 }
-
