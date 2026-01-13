@@ -13,6 +13,7 @@ pub fn collect_layout_windows(options: LayoutWindowOptions) -> anyhow::Result<Ve
     use std::os::windows::ffi::OsStringExt;
     use std::path::Path;
 
+    use windows::core::PWSTR;
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
@@ -27,7 +28,6 @@ pub fn collect_layout_windows(options: LayoutWindowOptions) -> anyhow::Result<Ve
         IsWindowVisible, GWL_EXSTYLE, GW_OWNER, SW_MINIMIZE, SW_SHOWMINIMIZED, WINDOWPLACEMENT,
         WS_EX_TOOLWINDOW,
     };
-    use windows_core::PWSTR;
 
     struct Ctx {
         options: LayoutWindowOptions,
