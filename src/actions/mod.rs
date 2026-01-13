@@ -40,6 +40,7 @@ pub mod exec;
 pub mod fav;
 pub mod folders;
 pub mod history;
+pub mod layout;
 pub mod media;
 pub mod screenshot;
 pub mod shell;
