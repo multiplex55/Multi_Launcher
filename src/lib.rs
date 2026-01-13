@@ -22,6 +22,7 @@ pub mod visibility;
 
 pub mod global_hotkey;
 pub mod gui;
+pub mod windows_layout;
 pub mod window_manager;
 pub mod workspace;
 
