@@ -270,7 +270,7 @@ impl Widget for LayoutsWidget {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.label(&layout.name);
-                        if let Some(meta) = Self::metadata_text(layout) {
+                        if let Some(meta) = Self::metadata_text(&layout) {
                             ui.label(egui::RichText::new(meta).small());
                         }
                     });
