@@ -243,7 +243,7 @@ impl WidgetRegistry {
             WidgetFactory::new(QueryListWidget::new).with_settings_ui(QueryListWidget::settings_ui),
         );
         reg.register(
-            "active_timers",
+            "timers",
             WidgetFactory::new(ActiveTimersWidget::new)
                 .with_settings_ui(ActiveTimersWidget::settings_ui),
         );

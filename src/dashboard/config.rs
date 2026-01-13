@@ -122,7 +122,7 @@ impl Default for DashboardConfig {
                 SlotConfig::with_widget("recent_commands", 1, 0),
                 SlotConfig::with_widget("frequent_commands", 1, 1),
                 SlotConfig::with_widget("recent_notes", 1, 2),
-                SlotConfig::with_widget("active_timers", 2, 0),
+                SlotConfig::with_widget("timers", 2, 0),
                 SlotConfig::with_widget("clipboard_snippets", 2, 1),
             ],
         }
@@ -156,6 +156,7 @@ impl DashboardConfig {
     /// Remove unsupported widgets and normalize empty settings.
     pub fn sanitize(&mut self, registry: &WidgetRegistry) -> Vec<String> {
         let mut warnings = Vec::new();
+        self.migrate_active_timers_widgets(registry, &mut warnings);
         self.migrate_todo_widgets(registry, &mut warnings);
         self.slots.retain(|slot| {
             if slot.widget.is_empty() {
@@ -204,6 +205,23 @@ impl DashboardConfig {
                     ));
                 }
                 _ => {}
+            }
+        }
+    }
+
+    fn migrate_active_timers_widgets(
+        &mut self,
+        registry: &WidgetRegistry,
+        warnings: &mut Vec<String>,
+    ) {
+        for slot in &mut self.slots {
+            let Some(default_settings) = registry.default_settings("timers") else {
+                continue;
+            };
+            if slot.widget == "active_timers" {
+                slot.widget = "timers".into();
+                slot.settings = merge_json(&default_settings, &slot.settings);
+                warnings.push("dashboard widget 'active_timers' migrated to 'timers'".to_string());
             }
         }
     }
