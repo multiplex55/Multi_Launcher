@@ -25,7 +25,7 @@ pub fn clear_mock_mouse_position() {
     }
 }
 
-#[cfg(test)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn mock_mouse_position_is_set() -> bool {
     if let Ok(guard) = MOCK_MOUSE_POSITION.lock() {
         guard.is_some()
