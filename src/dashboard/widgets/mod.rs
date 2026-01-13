@@ -13,6 +13,7 @@ mod calendar;
 mod clipboard_recent;
 mod clipboard_snippets;
 mod frequent_commands;
+mod layouts;
 mod notes_recent;
 mod notes_tags;
 mod now_playing;
@@ -43,6 +44,7 @@ pub use calendar::CalendarWidget;
 pub use clipboard_recent::ClipboardRecentWidget;
 pub use clipboard_snippets::ClipboardSnippetsWidget;
 pub use frequent_commands::FrequentCommandsWidget;
+pub use layouts::LayoutsWidget;
 pub use notes_recent::NotesRecentWidget;
 pub use notes_tags::NotesTagsWidget;
 pub use now_playing::NowPlayingWidget;
@@ -222,6 +224,10 @@ impl WidgetRegistry {
         reg.register(
             "todo",
             WidgetFactory::new(TodoWidget::new).with_settings_ui(TodoWidget::settings_ui),
+        );
+        reg.register(
+            "layouts",
+            WidgetFactory::new(LayoutsWidget::new).with_settings_ui(LayoutsWidget::settings_ui),
         );
         reg.register(
             "recent_notes",
