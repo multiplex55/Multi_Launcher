@@ -16,11 +16,31 @@ pub struct LayoutRestoreSummaryEntry {
     pub target_monitor: Option<String>,
     pub target_rect: Option<[i32; 4]>,
     pub state: LayoutWindowState,
+    pub result: LayoutMatchResult,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutMatchResult {
+    Found,
+    Launched,
+    Missing,
+}
+
+impl std::fmt::Display for LayoutMatchResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LayoutMatchResult::Found => write!(f, "found"),
+            LayoutMatchResult::Launched => write!(f, "launched"),
+            LayoutMatchResult::Missing => write!(f, "missing"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct LayoutRestoreSummary {
     pub entries: Vec<LayoutRestoreSummaryEntry>,
+    pub found_windows: usize,
+    pub launched_windows: usize,
     pub missing_windows: usize,
 }
 
@@ -300,6 +320,7 @@ fn collect_layout_windows_from_enumerated(
             Some(LayoutWindow {
                 matcher: window.matcher,
                 placement,
+                launch: None,
             })
         })
         .collect()
@@ -477,6 +498,7 @@ pub fn plan_layout_restore(
     let mut summary = LayoutRestoreSummary::default();
     let mut actions = Vec::new();
     let mut missing = 0;
+    let mut found = 0;
 
     for saved in &layout.windows {
         let mut best_idx = None;
@@ -515,7 +537,9 @@ pub fn plan_layout_restore(
                 target_monitor: monitor_name.clone(),
                 target_rect: target_rect.map(|rect| [rect.left, rect.top, rect.right, rect.bottom]),
                 state: state.clone(),
+                result: LayoutMatchResult::Found,
             });
+            found += 1;
             if let Some(rect) = target_rect {
                 actions.push(LayoutRestoreAction {
                     hwnd: candidate.hwnd,
@@ -531,11 +555,13 @@ pub fn plan_layout_restore(
                 target_monitor: saved.placement.monitor.clone(),
                 target_rect: None,
                 state: saved.placement.state.clone(),
+                result: LayoutMatchResult::Missing,
             });
         }
     }
 
     summary.missing_windows = missing;
+    summary.found_windows = found;
     Ok(LayoutRestorePlan {
         summary,
         missing_windows: missing,
