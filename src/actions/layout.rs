@@ -10,7 +10,8 @@
 //! Flags are comma-separated (`,`) and values use `key=value`, for example:
 //! `layout:load:Work|dry_run,only_active_monitor,filter=chrome`.
 use crate::plugins::layouts_storage::{
-    self, list_layouts as list_saved_layouts, remove_layout, Layout, LayoutOptions, LAYOUTS_FILE,
+    self, list_layouts as list_saved_layouts, remove_layout as remove_saved_layout, Layout,
+    LayoutOptions, LAYOUTS_FILE,
 };
 
 #[derive(Default)]
@@ -148,7 +149,7 @@ pub fn remove_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
     if flags.dry_run {
         return Ok(());
     }
-    let _ = remove_layout(&mut store, name);
+    let _ = remove_saved_layout(&mut store, name);
     layouts_storage::save_layouts(LAYOUTS_FILE, &store)?;
     Ok(())
 }
