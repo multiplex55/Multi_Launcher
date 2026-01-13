@@ -10,6 +10,7 @@ struct LayoutFlags {
     include_minimized: bool,
     exclude_minimized: bool,
     filter: Option<String>,
+    only_groups: Vec<String>,
 }
 
 impl LayoutFlags {
@@ -20,6 +21,7 @@ impl LayoutFlags {
             && !self.include_minimized
             && !self.exclude_minimized
             && self.filter.is_none()
+            && self.only_groups.is_empty()
     }
 
     fn serialize(&self) -> String {
@@ -41,6 +43,9 @@ impl LayoutFlags {
         }
         if let Some(filter) = &self.filter {
             parts.push(format!("filter={filter}"));
+        }
+        for group in &self.only_groups {
+            parts.push(format!("only={group}"));
         }
         parts.join(",")
     }
@@ -81,6 +86,20 @@ fn parse_name_and_flags(input: &str) -> (String, LayoutFlags) {
             flags.filter = Some(value.to_string());
             continue;
         }
+        if token == "--only" {
+            if let Some(value) = iter.next() {
+                for entry in value.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+                    flags.only_groups.push(entry.to_string());
+                }
+            }
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("--only=") {
+            for entry in value.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+                flags.only_groups.push(entry.to_string());
+            }
+            continue;
+        }
         name_parts.push(token.to_string());
     }
     (name_parts.join(" "), flags)
@@ -113,6 +132,19 @@ fn format_match(matcher: &LayoutMatch) -> String {
     } else {
         parts.join(", ")
     }
+}
+
+fn matches_group_filter(window_group: Option<&str>, only_groups: &[String]) -> bool {
+    if only_groups.is_empty() {
+        return true;
+    }
+    let Some(window_group) = window_group else {
+        return false;
+    };
+    let window_group = window_group.to_lowercase();
+    only_groups
+        .iter()
+        .any(|group| window_group == group.to_lowercase())
 }
 
 pub struct LayoutPlugin;
@@ -226,6 +258,9 @@ impl Plugin for LayoutPlugin {
                     return layout
                         .windows
                         .iter()
+                        .filter(|window| {
+                            matches_group_filter(window.group.as_deref(), &flags.only_groups)
+                        })
                         .enumerate()
                         .map(|(idx, window)| {
                             let rect = window.placement.rect;
@@ -235,16 +270,18 @@ impl Plugin for LayoutPlugin {
                                 .as_deref()
                                 .unwrap_or("any monitor");
                             let match_label = format_match(&window.matcher);
+                            let group_label = window.group.as_deref().unwrap_or("ungrouped");
                             Action {
                                 label: format!(
-                                    "Window {}: {} @ {} [{:.2}, {:.2}, {:.2}, {:.2}]",
+                                    "Window {}: {} @ {} [{:.2}, {:.2}, {:.2}, {:.2}] ({})",
                                     idx + 1,
                                     match_label,
                                     monitor,
                                     rect[0],
                                     rect[1],
                                     rect[2],
-                                    rect[3]
+                                    rect[3],
+                                    group_label
                                 ),
                                 desc: format!("Layout preview: {name}"),
                                 action: action.clone(),

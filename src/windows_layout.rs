@@ -320,6 +320,7 @@ fn collect_layout_windows_from_enumerated(
             Some(LayoutWindow {
                 matcher: window.matcher,
                 placement,
+                group: None,
                 launch: None,
             })
         })
