@@ -204,22 +204,58 @@ impl CalendarWidget {
         instances
     }
 
+    fn date_range(&self, selected_date: NaiveDate) -> (NaiveDate, NaiveDate) {
+        let range_days = self.cfg.range_days.max(1) as i64;
+        match self.cfg.mode {
+            CalendarWidgetMode::Day => (selected_date, selected_date),
+            CalendarWidgetMode::Week => (
+                selected_date,
+                selected_date + Duration::days(range_days.saturating_sub(1)),
+            ),
+            CalendarWidgetMode::Month => {
+                let month_start =
+                    NaiveDate::from_ymd_opt(selected_date.year(), selected_date.month(), 1)
+                        .unwrap_or(selected_date);
+                let month_end = add_months(month_start, 1) - Duration::days(1);
+                (month_start, month_end)
+            }
+        }
+    }
+
     fn render_header(
         &mut self,
         ui: &mut egui::Ui,
         selected_date: NaiveDate,
     ) -> Option<WidgetAction> {
         let mut action = None;
+        let (start_date, end_date) = self.date_range(selected_date);
+        let range_label = format!(
+            "{} → {}",
+            start_date.format("%Y-%m-%d"),
+            end_date.format("%Y-%m-%d")
+        );
         ui.horizontal(|ui| {
             ui.label(match self.cfg.mode {
                 CalendarWidgetMode::Day => {
-                    format!("Day view • {}", selected_date.format("%Y-%m-%d"))
+                    format!(
+                        "Day view • {} • {}",
+                        selected_date.format("%Y-%m-%d"),
+                        range_label
+                    )
                 }
                 CalendarWidgetMode::Week => {
-                    format!("Week view • {}", selected_date.format("%Y-%m-%d"))
+                    format!(
+                        "Week view • {} • {}",
+                        selected_date.format("%Y-%m-%d"),
+                        range_label
+                    )
                 }
                 CalendarWidgetMode::Month => {
-                    format!("Month view • {}", selected_date.format("%B %Y"))
+                    format!(
+                        "Month view • {} • {}",
+                        selected_date.format("%B %Y"),
+                        range_label
+                    )
                 }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -297,20 +333,8 @@ impl CalendarWidget {
         today: NaiveDate,
     ) -> Option<WidgetAction> {
         let mut action = None;
-        let range_days = self.cfg.range_days.max(1) as i64;
-        let end_date = match self.cfg.mode {
-            CalendarWidgetMode::Day => selected_date,
-            CalendarWidgetMode::Week => {
-                selected_date + Duration::days(range_days.saturating_sub(1))
-            }
-            CalendarWidgetMode::Month => {
-                let month_start =
-                    NaiveDate::from_ymd_opt(selected_date.year(), selected_date.month(), 1)
-                        .unwrap_or(selected_date);
-                add_months(month_start, 1) - Duration::days(1)
-            }
-        };
-        let mut instances = self.collect_events(calendar, selected_date, end_date, today);
+        let (start_date, end_date) = self.date_range(selected_date);
+        let mut instances = self.collect_events(calendar, start_date, end_date, today);
         if !self.cfg.show_completed {
             instances.retain(|instance| !self.is_completed(now, instance));
         }
