@@ -393,6 +393,25 @@ enum ActionKind<'a> {
         path: &'a str,
         alias: &'a str,
     },
+    LayoutSave {
+        name: &'a str,
+        flags: Option<&'a str>,
+    },
+    LayoutLoad {
+        name: &'a str,
+        flags: Option<&'a str>,
+    },
+    LayoutShow {
+        name: &'a str,
+        flags: Option<&'a str>,
+    },
+    LayoutRemove {
+        name: &'a str,
+        flags: Option<&'a str>,
+    },
+    LayoutList {
+        flags: Option<&'a str>,
+    },
     NoteReload,
     ExecPath {
         path: &'a str,
@@ -731,6 +750,44 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
             return ActionKind::TempfileAlias { path, alias };
         }
     }
+    if let Some(rest) = s.strip_prefix("layout:save:") {
+        let (name, flags) = rest.split_once('|').unwrap_or((rest, ""));
+        return ActionKind::LayoutSave {
+            name,
+            flags: if flags.is_empty() { None } else { Some(flags) },
+        };
+    }
+    if let Some(rest) = s.strip_prefix("layout:load:") {
+        let (name, flags) = rest.split_once('|').unwrap_or((rest, ""));
+        return ActionKind::LayoutLoad {
+            name,
+            flags: if flags.is_empty() { None } else { Some(flags) },
+        };
+    }
+    if let Some(rest) = s.strip_prefix("layout:show:") {
+        let (name, flags) = rest.split_once('|').unwrap_or((rest, ""));
+        return ActionKind::LayoutShow {
+            name,
+            flags: if flags.is_empty() { None } else { Some(flags) },
+        };
+    }
+    if let Some(rest) = s.strip_prefix("layout:rm:") {
+        let (name, flags) = rest.split_once('|').unwrap_or((rest, ""));
+        return ActionKind::LayoutRemove {
+            name,
+            flags: if flags.is_empty() { None } else { Some(flags) },
+        };
+    }
+    if let Some(rest) = s.strip_prefix("layout:list") {
+        if rest.is_empty() {
+            return ActionKind::LayoutList { flags: None };
+        }
+        if let Some(flags) = rest.strip_prefix('|') {
+            return ActionKind::LayoutList {
+                flags: if flags.is_empty() { None } else { Some(flags) },
+            };
+        }
+    }
     if let Some(name) = s.strip_prefix("macro:") {
         return ActionKind::Macro(name);
     }
@@ -918,6 +975,11 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
         ActionKind::TempfileClear => tempfiles::clear(),
         ActionKind::TempfileRemove(path) => tempfiles::remove(path),
         ActionKind::TempfileAlias { path, alias } => tempfiles::set_alias(path, alias),
+        ActionKind::LayoutSave { name, flags } => layout::save_layout(name, flags),
+        ActionKind::LayoutLoad { name, flags } => layout::load_layout(name, flags),
+        ActionKind::LayoutShow { name, flags } => layout::show_layout(name, flags),
+        ActionKind::LayoutRemove { name, flags } => layout::remove_layout(name, flags),
+        ActionKind::LayoutList { flags } => layout::list_layouts(flags),
         ActionKind::Macro(name) => {
             crate::plugins::macros::run_macro(name)?;
             Ok(())
