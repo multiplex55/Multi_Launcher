@@ -46,6 +46,7 @@ use crate::plugins::random::RandomPlugin;
 use crate::plugins::lorem::LoremPlugin;
 use crate::plugins::convert_panel::ConvertPanelPlugin;
 use crate::plugins::color_picker::ColorPickerPlugin;
+use crate::plugins::layout::LayoutPlugin;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::NetUnit;
 use std::collections::HashSet;
@@ -166,6 +167,7 @@ impl PluginManager {
         self.register_with_settings(BrowserTabsPlugin::default(), plugin_settings);
         self.register_with_settings(SettingsPlugin, plugin_settings);
         self.register_with_settings(HelpPlugin, plugin_settings);
+        self.register_with_settings(LayoutPlugin, plugin_settings);
         self.register_with_settings(TimerPlugin, plugin_settings);
         self.register_with_settings(StopwatchPlugin::default(), plugin_settings);
         if reset_alarm {
