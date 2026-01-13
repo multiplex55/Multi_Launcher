@@ -325,7 +325,9 @@ impl Widget for LayoutsWidget {
                         ui.label("Rename to");
                         ui.text_edit_singleline(&mut self.rename_value);
                         if ui.button("Save").clicked() {
-                            match self.rename_layout(&layout.name, &self.rename_value) {
+                            let target = layout.name.clone();
+                            let rename_value = self.rename_value.clone();
+                            match self.rename_layout(&target, &rename_value) {
                                 Ok(()) => {
                                     self.error = None;
                                     self.refresh_pending = true;
