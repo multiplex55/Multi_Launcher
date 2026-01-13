@@ -45,12 +45,15 @@ impl std::fmt::Display for LayoutWindowState {
 pub struct LayoutOptions {
     #[serde(default)]
     pub coord_mode: LayoutCoordMode,
+    #[serde(default)]
+    pub launch_missing: bool,
 }
 
 impl Default for LayoutOptions {
     fn default() -> Self {
         Self {
             coord_mode: LayoutCoordMode::MonitorWorkareaRelative,
+            launch_missing: false,
         }
     }
 }
@@ -92,6 +95,8 @@ pub struct Layout {
 pub struct LayoutWindow {
     pub matcher: LayoutMatch,
     pub placement: LayoutPlacement,
+    #[serde(default)]
+    pub launch: Option<LayoutWindowLaunch>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -114,6 +119,19 @@ pub struct LayoutPlacement {
     pub monitor: Option<String>,
     #[serde(default)]
     pub state: LayoutWindowState,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct LayoutWindowLaunch {
+    pub kind: String,
+    #[serde(default, alias = "cmd")]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
