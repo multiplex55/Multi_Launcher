@@ -13,19 +13,21 @@ pub fn collect_layout_windows(options: LayoutWindowOptions) -> anyhow::Result<Ve
     use std::os::windows::ffi::OsStringExt;
     use std::path::Path;
 
-    use windows::Win32::Foundation::{BOOL, HMONITOR, HWND, LPARAM};
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromWindow, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
+        GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
     };
     use windows::Win32::System::Threading::{
-        GetWindowThreadProcessId, OpenProcess, QueryFullProcessImageNameW,
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
-        GetWindowPlacement, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible, GWL_EXSTYLE,
-        GW_OWNER, SW_MINIMIZE, SW_SHOWMINIMIZED, WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
+        GetWindowPlacement, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+        IsWindowVisible, GWL_EXSTYLE, GW_OWNER, SW_MINIMIZE, SW_SHOWMINIMIZED, WINDOWPLACEMENT,
+        WS_EX_TOOLWINDOW,
     };
+    use windows_core::PWSTR;
 
     struct Ctx {
         options: LayoutWindowOptions,
@@ -48,7 +50,13 @@ pub fn collect_layout_windows(options: LayoutWindowOptions) -> anyhow::Result<Ve
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
             let mut buffer = vec![0u16; 1024];
             let mut size = buffer.len() as u32;
-            let success = QueryFullProcessImageNameW(handle, 0, &mut buffer, &mut size).as_bool();
+            let success = QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_FORMAT(0),
+                PWSTR(buffer.as_mut_ptr()),
+                &mut size,
+            )
+            .is_ok();
             drop(handle);
             if !success || size == 0 {
                 return None;
@@ -118,10 +126,11 @@ pub fn collect_layout_windows(options: LayoutWindowOptions) -> anyhow::Result<Ve
 
         let mut placement = WINDOWPLACEMENT::default();
         placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
-        if !GetWindowPlacement(hwnd, &mut placement).as_bool() {
+        if GetWindowPlacement(hwnd, &mut placement).is_err() {
             return BOOL(1);
         }
-        let minimized = placement.showCmd == SW_SHOWMINIMIZED || placement.showCmd == SW_MINIMIZE;
+        let minimized = placement.showCmd == SW_SHOWMINIMIZED.0 as u32
+            || placement.showCmd == SW_MINIMIZE.0 as u32;
         let allow_minimized = if ctx.options.include_minimized {
             true
         } else if ctx.options.exclude_minimized {
