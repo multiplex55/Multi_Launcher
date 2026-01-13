@@ -18,6 +18,30 @@ impl Default for LayoutCoordMode {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutWindowState {
+    Normal,
+    Maximized,
+    Minimized,
+}
+
+impl Default for LayoutWindowState {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+impl std::fmt::Display for LayoutWindowState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LayoutWindowState::Normal => write!(f, "normal"),
+            LayoutWindowState::Maximized => write!(f, "maximized"),
+            LayoutWindowState::Minimized => write!(f, "minimized"),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct LayoutOptions {
     #[serde(default)]
     pub coord_mode: LayoutCoordMode,
@@ -88,6 +112,8 @@ pub struct LayoutPlacement {
     pub rect: [f32; 4],
     #[serde(default)]
     pub monitor: Option<String>,
+    #[serde(default)]
+    pub state: LayoutWindowState,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
