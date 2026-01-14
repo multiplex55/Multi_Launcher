@@ -365,10 +365,19 @@ impl Widget for LayoutsWidget {
             "Cached for {:.0}s. Refresh to rescan layouts.",
             self.cfg.refresh_interval_secs
         );
-        if ui.small_button("Refresh").on_hover_text(tooltip).clicked() {
-            self.refresh();
-        }
-        None
+        let mut action = None;
+        ui.horizontal(|ui| {
+            if ui.small_button("Refresh").on_hover_text(tooltip).clicked() {
+                self.refresh();
+            }
+            if ui.small_button("Create new").clicked() {
+                action = Some(Self::action(
+                    "layout save <name>".into(),
+                    "query:layout save ".into(),
+                ));
+            }
+        });
+        action
     }
 }
 
