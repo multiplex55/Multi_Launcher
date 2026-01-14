@@ -39,8 +39,6 @@ mod imp {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, RwLock};
     use std::time::{Duration, Instant};
-    #[cfg(test)]
-    use tracing::error;
     #[cfg(not(test))]
     use tracing::{error, warn};
 
@@ -55,6 +53,7 @@ mod imp {
     static LAST_REFRESH: Lazy<Mutex<Instant>> =
         Lazy::new(|| Mutex::new(Instant::now() - Duration::from_secs(60)));
     static REFRESHING: AtomicBool = AtomicBool::new(false);
+    #[cfg(not(test))]
     static LAST_ENUM_ERR: Lazy<Mutex<Instant>> =
         Lazy::new(|| Mutex::new(Instant::now() - Duration::from_secs(60)));
     static MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
@@ -75,6 +74,7 @@ mod imp {
         }
     }
 
+    #[cfg(not(test))]
     fn log_enum_error(msg: &str, err: windows::core::Error) {
         let mut last = LAST_ENUM_ERR.lock().unwrap();
         if last.elapsed() > Duration::from_secs(30) {

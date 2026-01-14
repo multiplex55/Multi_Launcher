@@ -40,7 +40,7 @@ enum RecurrenceEndMode {
 }
 
 #[derive(Clone, Debug)]
-struct SplitScope {
+pub struct SplitScope {
     event_id: String,
     occurrence_start: NaiveDateTime,
     scope: RecurrenceScope,

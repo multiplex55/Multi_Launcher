@@ -29,6 +29,7 @@ struct LayoutFlags {
     include_minimized: bool,
     exclude_minimized: bool,
     filter: Option<String>,
+    only_groups: Vec<String>,
 }
 
 fn parse_flags(raw: Option<&str>) -> LayoutFlags {
@@ -46,6 +47,11 @@ fn parse_flags(raw: Option<&str>) -> LayoutFlags {
             _ => {
                 if let Some(value) = flag.strip_prefix("filter=") {
                     flags.filter = Some(value.to_string());
+                } else if let Some(value) = flag.strip_prefix("only=") {
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        flags.only_groups.push(trimmed.to_string());
+                    }
                 }
             }
         }
@@ -223,6 +229,19 @@ fn format_layout_view(layout: &Layout) -> String {
     use std::fmt::Write as _;
 
     let mut contents = String::new();
+    let mut group_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut has_ungrouped = false;
+    for window in &layout.windows {
+        if let Some(group) = &window.group {
+            if !group.trim().is_empty() {
+                group_names.insert(group.trim().to_string());
+            } else {
+                has_ungrouped = true;
+            }
+        } else {
+            has_ungrouped = true;
+        }
+    }
     writeln!(&mut contents, "Layout: {}", layout.name).ok();
     if let Some(created_at) = &layout.created_at {
         writeln!(&mut contents, "Created: {created_at}").ok();
@@ -243,6 +262,15 @@ fn format_layout_view(layout: &Layout) -> String {
         format_coord_mode(&layout.options.coord_mode)
     )
     .ok();
+    if group_names.is_empty() && !has_ungrouped {
+        writeln!(&mut contents, "Groups: none").ok();
+    } else {
+        let mut groups: Vec<String> = group_names.into_iter().collect();
+        if has_ungrouped {
+            groups.push("ungrouped".to_string());
+        }
+        writeln!(&mut contents, "Groups: {}", groups.join(", ")).ok();
+    }
 
     if layout.ignore.is_empty() {
         writeln!(&mut contents, "Ignore rules: none").ok();
@@ -323,6 +351,12 @@ fn format_layout_view(layout: &Layout) -> String {
             )
             .ok();
             writeln!(&mut contents, "    state: {}", window.placement.state).ok();
+            writeln!(
+                &mut contents,
+                "  Group: {}",
+                window.group.as_deref().unwrap_or("ungrouped")
+            )
+            .ok();
             if let Some(launch) = &window.launch {
                 writeln!(
                     &mut contents,
@@ -483,6 +517,27 @@ fn collect_window_launches(
         .collect()
 }
 
+fn filter_layout_by_groups(layout: &Layout, only_groups: &[String]) -> Layout {
+    if only_groups.is_empty() {
+        return layout.clone();
+    }
+    let mut filtered = layout.clone();
+    filtered.windows = layout
+        .windows
+        .iter()
+        .filter(|window| {
+            window.group.as_deref().map_or(false, |group| {
+                let group_lower = group.to_lowercase();
+                only_groups
+                    .iter()
+                    .any(|needle| group_lower == needle.to_lowercase())
+            })
+        })
+        .cloned()
+        .collect();
+    filtered
+}
+
 pub fn save_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
     ensure_layout_name(name)?;
     let flags = parse_flags(flags);
@@ -516,8 +571,9 @@ pub fn load_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
     let store = layouts_storage::load_layouts(LAYOUTS_FILE)?;
     let layout = layouts_storage::get_layout(&store, name)
         .ok_or_else(|| anyhow::anyhow!("layout '{name}' not found"))?;
+    let layout = filter_layout_by_groups(layout, &flags.only_groups);
     let plan = plan_layout_restore(
-        layout,
+        &layout,
         LayoutWindowOptions {
             only_active_monitor: flags.only_active_monitor,
             include_minimized: flags.include_minimized,
@@ -531,7 +587,7 @@ pub fn load_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
     let will_launch = should_launch_missing || (should_launch_global && !layout.launches.is_empty());
     if flags.dry_run {
         let window_launches = if layout.options.launch_missing {
-            collect_window_launches(layout, &plan.summary, true)
+            collect_window_launches(&layout, &plan.summary, true)
         } else {
             Vec::new()
         };
@@ -580,7 +636,7 @@ pub fn load_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
     }
     if should_launch_missing && !launched_missing.is_empty() {
         let refreshed = rescan_layout_with_backoff(
-            layout,
+            &layout,
             LayoutWindowOptions {
                 only_active_monitor: flags.only_active_monitor,
                 include_minimized: flags.include_minimized,
@@ -601,9 +657,10 @@ pub fn show_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
     let store = layouts_storage::load_layouts(LAYOUTS_FILE)?;
     let layout = layouts_storage::get_layout(&store, name)
         .ok_or_else(|| anyhow::anyhow!("layout '{name}' not found"))?;
+    let layout = filter_layout_by_groups(layout, &flags.only_groups);
     if flags.dry_run {
         let plan = plan_layout_restore(
-            layout,
+            &layout,
             LayoutWindowOptions {
                 only_active_monitor: flags.only_active_monitor,
                 include_minimized: flags.include_minimized,
@@ -617,7 +674,7 @@ pub fn show_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
         let will_launch =
             should_launch_missing || (should_launch_global && !layout.launches.is_empty());
         let window_launches = if layout.options.launch_missing {
-            collect_window_launches(layout, &plan.summary, true)
+            collect_window_launches(&layout, &plan.summary, true)
         } else {
             Vec::new()
         };
@@ -633,7 +690,7 @@ pub fn show_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
         open::that(&path)?;
         return Ok(());
     }
-    let contents = format_layout_view(layout);
+    let contents = format_layout_view(&layout);
     let alias = sanitize_alias(&format!("layout_view_{name}"));
     let path = crate::plugins::tempfile::create_named_file(&alias, &contents)?;
     open::that(&path)?;

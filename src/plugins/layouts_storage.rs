@@ -96,6 +96,8 @@ pub struct LayoutWindow {
     pub matcher: LayoutMatch,
     pub placement: LayoutPlacement,
     #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
     pub launch: Option<LayoutWindowLaunch>,
 }
 
