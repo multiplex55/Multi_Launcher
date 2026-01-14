@@ -36,6 +36,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Variant",
     "Win32_System_Ole",
     "Win32_UI_Accessibility",
+    "Win32_UI_Shell_Common",
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_Graphics_Gdi",
