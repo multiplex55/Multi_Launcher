@@ -135,14 +135,19 @@ fn format_restore_summary(
                 .target_monitor
                 .clone()
                 .unwrap_or_else(|| "any monitor".to_string());
+            let desktop = entry
+                .target_desktop
+                .clone()
+                .unwrap_or_else(|| "any desktop".to_string());
             writeln!(
                 &mut contents,
-                "- Window {}: {} -> {} @ {} {} ({}, {})",
+                "- Window {}: {} -> {} @ {} {} on {} ({}, {})",
                 idx + 1,
                 saved,
                 matched_label,
                 monitor,
                 rect,
+                desktop,
                 entry.state,
                 entry.result
             )
@@ -339,6 +344,12 @@ fn format_layout_view(layout: &Layout) -> String {
                 &mut contents,
                 "    monitor: {}",
                 window.placement.monitor.as_deref().unwrap_or("any monitor")
+            )
+            .ok();
+            writeln!(
+                &mut contents,
+                "    desktop: {}",
+                window.desktop.as_deref().unwrap_or("any desktop")
             )
             .ok();
             writeln!(
