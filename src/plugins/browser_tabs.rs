@@ -39,8 +39,6 @@ mod imp {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, RwLock};
     use std::time::{Duration, Instant};
-    #[cfg(test)]
-    use tracing::error;
     #[cfg(not(test))]
     use tracing::{error, warn};
 
