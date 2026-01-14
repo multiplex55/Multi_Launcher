@@ -202,6 +202,7 @@ mod virtual_desktop {
     }
 
     #[repr(C)]
+    #[allow(non_snake_case)]
     pub struct IVirtualDesktop_Vtbl {
         pub base__: IUnknown_Vtbl,
         pub IsViewVisible:
@@ -238,6 +239,7 @@ mod virtual_desktop {
     }
 
     #[repr(C)]
+    #[allow(non_snake_case)]
     pub struct IVirtualDesktopManagerInternal_Vtbl {
         pub base__: IUnknown_Vtbl,
         pub GetCount: unsafe extern "system" fn(
