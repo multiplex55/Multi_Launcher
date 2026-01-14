@@ -130,7 +130,7 @@ fn enumerate_windows(options: LayoutWindowOptions) -> anyhow::Result<Vec<Enumera
                 &mut size,
             )
             .is_ok();
-            drop(handle);
+            let _ = windows::Win32::Foundation::CloseHandle(handle);
             if !success || size == 0 {
                 return None;
             }

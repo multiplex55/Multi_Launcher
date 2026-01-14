@@ -1064,7 +1064,7 @@ fn parse_time_reference(input: &str) -> Option<NaiveTime> {
     } else {
         (lower.as_str(), None)
     };
-    let (mut hour, mut minute) = if let Some((h, m)) = time_part.split_once(':') {
+    let (mut hour, minute) = if let Some((h, m)) = time_part.split_once(':') {
         (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?)
     } else {
         match time_part.len() {

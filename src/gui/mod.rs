@@ -2260,6 +2260,7 @@ impl LauncherApp {
             self.last_results_valid = false;
             self.search();
         }
+        let _ = command_changed_query;
         if set_focus {
             self.focus_input();
         } else if self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open() {

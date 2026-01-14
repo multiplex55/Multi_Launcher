@@ -396,7 +396,7 @@ impl TodoPlugin {
 
         const LIST_PREFIX: &str = "todo list";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
-            let mut filter = rest.trim();
+            let filter = rest.trim();
             let guard = match self.data.read() {
                 Ok(g) => g,
                 Err(_) => return Vec::new(),
