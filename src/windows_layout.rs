@@ -15,6 +15,7 @@ pub struct LayoutRestoreSummaryEntry {
     pub matched_matcher: Option<LayoutMatch>,
     pub target_monitor: Option<String>,
     pub target_rect: Option<[i32; 4]>,
+    pub target_desktop: Option<String>,
     pub state: LayoutWindowState,
     pub result: LayoutMatchResult,
 }
@@ -69,6 +70,7 @@ struct EnumeratedWindow {
     matcher: LayoutMatch,
     placement: windows::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT,
     monitor: windows::Win32::Graphics::Gdi::MONITORINFOEXW,
+    desktop: Option<String>,
 }
 
 #[cfg(windows)]
@@ -77,6 +79,7 @@ struct LayoutRestoreAction {
     hwnd: windows::Win32::Foundation::HWND,
     rect: windows::Win32::Foundation::RECT,
     show_cmd: windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD,
+    target_desktop: Option<String>,
 }
 
 #[cfg(windows)]
@@ -235,11 +238,13 @@ fn enumerate_windows(options: LayoutWindowOptions) -> anyhow::Result<Vec<Enumera
             class,
             process,
         };
+        let desktop = crate::window_manager::window_desktop_label(hwnd);
         ctx.windows.push(EnumeratedWindow {
             hwnd,
             matcher,
             placement,
             monitor: monitor_info,
+            desktop,
         });
         BOOL(1)
     }
@@ -320,6 +325,7 @@ fn collect_layout_windows_from_enumerated(
             Some(LayoutWindow {
                 matcher: window.matcher,
                 placement,
+                desktop: window.desktop,
                 group: None,
                 launch: None,
             })
@@ -532,11 +538,21 @@ pub fn plan_layout_restore(
                 None
             };
             let state = saved.placement.state.clone();
+            let target_desktop = match (&saved.desktop, &candidate.desktop) {
+                (Some(saved_desktop), Some(current_desktop))
+                    if saved_desktop.eq_ignore_ascii_case(current_desktop) =>
+                {
+                    None
+                }
+                (Some(saved_desktop), _) => Some(saved_desktop.clone()),
+                (None, _) => None,
+            };
             summary.entries.push(LayoutRestoreSummaryEntry {
                 saved_matcher: saved.matcher.clone(),
                 matched_matcher: Some(candidate.matcher.clone()),
                 target_monitor: monitor_name.clone(),
                 target_rect: target_rect.map(|rect| [rect.left, rect.top, rect.right, rect.bottom]),
+                target_desktop: saved.desktop.clone(),
                 state: state.clone(),
                 result: LayoutMatchResult::Found,
             });
@@ -546,6 +562,7 @@ pub fn plan_layout_restore(
                     hwnd: candidate.hwnd,
                     rect,
                     show_cmd: show_cmd_for_state(&state),
+                    target_desktop,
                 });
             }
         } else {
@@ -555,6 +572,7 @@ pub fn plan_layout_restore(
                 matched_matcher: None,
                 target_monitor: saved.placement.monitor.clone(),
                 target_rect: None,
+                target_desktop: saved.desktop.clone(),
                 state: saved.placement.state.clone(),
                 result: LayoutMatchResult::Missing,
             });
@@ -586,6 +604,9 @@ pub fn apply_layout_restore_plan(plan: &LayoutRestorePlan) -> anyhow::Result<()>
         let mut placement = WINDOWPLACEMENT::default();
         placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
         let _ = unsafe { GetWindowPlacement(action.hwnd, &mut placement) };
+        if let Some(target_desktop) = &action.target_desktop {
+            let _ = crate::window_manager::move_window_to_desktop(action.hwnd, target_desktop);
+        }
         placement.rcNormalPosition = action.rect;
         placement.showCmd = SW_SHOWNORMAL.0 as u32;
         unsafe {

@@ -269,14 +269,16 @@ impl Plugin for LayoutPlugin {
                                 .monitor
                                 .as_deref()
                                 .unwrap_or("any monitor");
+                            let desktop = window.desktop.as_deref().unwrap_or("any desktop");
                             let match_label = format_match(&window.matcher);
                             let group_label = window.group.as_deref().unwrap_or("ungrouped");
                             Action {
                                 label: format!(
-                                    "Window {}: {} @ {} [{:.2}, {:.2}, {:.2}, {:.2}] ({})",
+                                    "Window {}: {} @ {} [{}] [{:.2}, {:.2}, {:.2}, {:.2}] ({})",
                                     idx + 1,
                                     match_label,
                                     monitor,
+                                    desktop,
                                     rect[0],
                                     rect[1],
                                     rect[2],
