@@ -300,6 +300,7 @@ impl SettingsEditor {
                 },
                 show_when_query_empty: self.dashboard_show_when_empty,
             },
+            watchlist_path: current.watchlist_path.clone(),
         }
     }
 

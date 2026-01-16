@@ -197,6 +197,7 @@ pub struct Settings {
     pub pinned_panels: Vec<Panel>,
     #[serde(default)]
     pub dashboard: DashboardSettings,
+    pub watchlist_path: Option<String>,
 }
 
 fn default_toasts() -> bool {
@@ -345,6 +346,7 @@ impl Default for Settings {
             plugin_settings: std::collections::HashMap::new(),
             pinned_panels: Vec::new(),
             dashboard: DashboardSettings::default(),
+            watchlist_path: None,
         }
     }
 }

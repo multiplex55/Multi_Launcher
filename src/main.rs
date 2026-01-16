@@ -6,7 +6,7 @@ use multi_launcher::hotkey::HotkeyTrigger;
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
 use multi_launcher::visibility::handle_visibility_trigger;
-use multi_launcher::{indexer, logging};
+use multi_launcher::{indexer, logging, watchlist};
 
 use eframe::{egui, icon_data};
 use once_cell::sync::Lazy;
@@ -147,6 +147,7 @@ fn main() -> anyhow::Result<()> {
     let mut settings = Settings::load("settings.json").unwrap_or_default();
     logging::init(settings.debug_logging, settings.log_file_path());
     tracing::debug!(?settings, "settings loaded");
+    let _watchlist_watcher = watchlist::start_watchlist_watcher(&settings, "settings.json");
     let mut actions_vec = load_actions("actions.json").unwrap_or_default();
     let custom_len = actions_vec.len();
     tracing::debug!("{} actions loaded", actions_vec.len());
