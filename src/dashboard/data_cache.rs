@@ -9,6 +9,7 @@ use crate::plugins::note::{load_notes, Note};
 use crate::plugins::snippets::{load_snippets, SnippetEntry, SNIPPETS_FILE};
 use crate::plugins::todo::{load_todos, TodoEntry, TODO_FILE};
 use crate::{launcher, launcher::RecycleBinInfo};
+use crate::watchlist::{WatchItemSnapshot, WatchlistState};
 use chrono::Local;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -52,6 +53,7 @@ pub struct DashboardDataSnapshot {
     pub process_error: Option<String>,
     pub system_status: Option<SystemStatusSnapshot>,
     pub recycle_bin: Option<RecycleBinSnapshot>,
+    pub watchlist_snapshot: Arc<Vec<WatchItemSnapshot>>,
 }
 
 impl Default for DashboardDataSnapshot {
@@ -67,6 +69,7 @@ impl Default for DashboardDataSnapshot {
             process_error: None,
             system_status: None,
             recycle_bin: None,
+            watchlist_snapshot: Arc::new(Vec::new()),
         }
     }
 }
@@ -84,6 +87,7 @@ impl DashboardDataSnapshot {
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
             recycle_bin: self.recycle_bin.clone(),
+            watchlist_snapshot: Arc::clone(&self.watchlist_snapshot),
         }
     }
 
@@ -99,6 +103,7 @@ impl DashboardDataSnapshot {
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
             recycle_bin: self.recycle_bin.clone(),
+            watchlist_snapshot: Arc::clone(&self.watchlist_snapshot),
         }
     }
 
@@ -114,6 +119,7 @@ impl DashboardDataSnapshot {
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
             recycle_bin: self.recycle_bin.clone(),
+            watchlist_snapshot: Arc::clone(&self.watchlist_snapshot),
         }
     }
 
@@ -129,6 +135,7 @@ impl DashboardDataSnapshot {
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
             recycle_bin: self.recycle_bin.clone(),
+            watchlist_snapshot: Arc::clone(&self.watchlist_snapshot),
         }
     }
 
@@ -144,6 +151,7 @@ impl DashboardDataSnapshot {
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
             recycle_bin: self.recycle_bin.clone(),
+            watchlist_snapshot: Arc::clone(&self.watchlist_snapshot),
         }
     }
 
@@ -159,6 +167,7 @@ impl DashboardDataSnapshot {
             process_error,
             system_status: self.system_status.clone(),
             recycle_bin: self.recycle_bin.clone(),
+            watchlist_snapshot: Arc::clone(&self.watchlist_snapshot),
         }
     }
 
@@ -174,6 +183,7 @@ impl DashboardDataSnapshot {
             process_error: self.process_error.clone(),
             system_status,
             recycle_bin: self.recycle_bin.clone(),
+            watchlist_snapshot: Arc::clone(&self.watchlist_snapshot),
         }
     }
 
@@ -189,6 +199,7 @@ impl DashboardDataSnapshot {
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
             recycle_bin,
+            watchlist_snapshot: Arc::clone(&self.watchlist_snapshot),
         }
     }
 
@@ -204,6 +215,23 @@ impl DashboardDataSnapshot {
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
             recycle_bin: self.recycle_bin.clone(),
+            watchlist_snapshot: Arc::clone(&self.watchlist_snapshot),
+        }
+    }
+
+    fn with_watchlist_snapshot(&self, snapshot: Arc<Vec<WatchItemSnapshot>>) -> Self {
+        Self {
+            clipboard_history: Arc::clone(&self.clipboard_history),
+            snippets: Arc::clone(&self.snippets),
+            notes: Arc::clone(&self.notes),
+            todos: Arc::clone(&self.todos),
+            calendar: Arc::clone(&self.calendar),
+            processes: Arc::clone(&self.processes),
+            favorites: Arc::clone(&self.favorites),
+            process_error: self.process_error.clone(),
+            system_status: self.system_status.clone(),
+            recycle_bin: self.recycle_bin.clone(),
+            watchlist_snapshot: snapshot,
         }
     }
 }
@@ -215,6 +243,7 @@ struct DashboardDataState {
     last_recycle_refresh: Instant,
     last_network_totals: (u64, u64),
     last_network_time: Instant,
+    watchlist_state: WatchlistState,
 }
 
 pub struct DashboardDataCache {
@@ -231,6 +260,7 @@ impl DashboardDataCache {
                 last_recycle_refresh: Instant::now() - Duration::from_secs(60),
                 last_network_totals: (0, 0),
                 last_network_time: Instant::now() - Duration::from_secs(60),
+                watchlist_state: WatchlistState::new(),
             }),
         }
     }
@@ -252,6 +282,21 @@ impl DashboardDataCache {
         self.refresh_processes(plugins);
         self.refresh_system_status();
         self.refresh_recycle_bin();
+    }
+
+    pub fn watchlist_snapshot(&self) -> Arc<Vec<WatchItemSnapshot>> {
+        self.state
+            .lock()
+            .map(|state| Arc::clone(&state.snapshot.watchlist_snapshot))
+            .unwrap_or_else(|_| Arc::new(Vec::new()))
+    }
+
+    pub fn maybe_refresh_watchlist(&self, refresh_ms: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            state.watchlist_state.maybe_refresh(refresh_ms);
+            let snapshot = state.watchlist_state.snapshot();
+            state.snapshot = Arc::new(state.snapshot.with_watchlist_snapshot(snapshot));
+        }
     }
 
     pub fn refresh_clipboard(&self) {

@@ -13,6 +13,7 @@ fst = { version = "0.4", features = ["levenshtein"] }
 open = "5.0"                   # Open files/folders/apps cross-platform
 anyhow = "1.0"
 walkdir = "2.4"
+globset = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 tracing-appender = "0.2"
