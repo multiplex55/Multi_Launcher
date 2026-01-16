@@ -89,7 +89,7 @@ impl WatchlistWidget {
             ui.add(
                 egui::Label::new(egui::RichText::new(text).strong())
                     .wrap(false)
-                    .truncate(),
+                    .truncate(true),
             );
         }
         ui.end_row();
