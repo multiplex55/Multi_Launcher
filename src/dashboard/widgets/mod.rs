@@ -34,6 +34,7 @@ mod tempfiles;
 mod todo;
 mod todo_focus;
 mod volume;
+mod watchlist;
 mod weather_site;
 mod window_list;
 mod windows_overview;
@@ -65,6 +66,7 @@ pub use tempfiles::TempfilesWidget;
 pub use todo::TodoWidget;
 pub use todo_focus::TodoFocusWidget;
 pub use volume::VolumeWidget;
+pub use watchlist::WatchlistWidget;
 pub use weather_site::WeatherSiteWidget;
 pub use window_list::WindowsWidget;
 pub use windows_overview::WindowsOverviewWidget;
@@ -339,6 +341,7 @@ impl WidgetRegistry {
             "stopwatch",
             WidgetFactory::new(StopwatchWidget::new).with_settings_ui(StopwatchWidget::settings_ui),
         );
+        reg.register("watchlist", WidgetFactory::new(WatchlistWidget::new));
         reg
     }
 
