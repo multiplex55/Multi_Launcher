@@ -81,6 +81,7 @@ use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{append_toast_log, TOAST_LOG_FILE};
 use crate::usage::{self, USAGE_FILE};
 use crate::visibility::apply_visibility;
+use crate::watchlist;
 use chrono::NaiveDate;
 use dashboard_editor_dialog::DashboardEditorDialog;
 use eframe::egui;
@@ -3095,6 +3096,8 @@ impl eframe::App for LauncherApp {
         let use_dashboard = self.should_show_dashboard(trimmed.as_str());
         self.maybe_refresh_timer_list();
         self.maybe_refresh_stopwatch_list();
+        self.dashboard_data_cache
+            .maybe_refresh_watchlist(watchlist::watchlist_refresh_ms());
         if trimmed.eq_ignore_ascii_case("net")
             && self.last_net_update.elapsed().as_secs_f32() >= self.net_refresh
         {
