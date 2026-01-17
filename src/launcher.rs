@@ -757,6 +757,9 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if let Some(payload) = s.strip_prefix("watch:add:") {
         return ActionKind::WatchlistAdd(payload);
     }
+    if let Some(id) = s.strip_prefix("watch:rm:") {
+        return ActionKind::WatchlistRemove(id);
+    }
     if let Some(id) = s.strip_prefix("watch:remove:") {
         return ActionKind::WatchlistRemove(id);
     }
