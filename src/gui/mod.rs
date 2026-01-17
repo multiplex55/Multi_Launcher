@@ -472,6 +472,13 @@ pub struct LauncherApp {
 }
 
 impl LauncherApp {
+    fn has_diagnostics_widget(&self) -> bool {
+        self.dashboard
+            .slots
+            .iter()
+            .any(|slot| slot.widget == "diagnostics")
+    }
+
     pub fn update_action_cache(&mut self) {
         self.action_cache = self
             .actions
@@ -3559,7 +3566,10 @@ impl eframe::App for LauncherApp {
                 }
                 let dashboard_visible = self.visible_flag.load(Ordering::SeqCst);
                 let dashboard_focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
-                let diagnostics = if self.show_dashboard_diagnostics {
+                let has_diagnostics_widget = self.has_diagnostics_widget();
+                let show_diagnostics_widget =
+                    self.show_dashboard_diagnostics || has_diagnostics_widget;
+                let diagnostics = if show_diagnostics_widget {
                     Some(self.dashboard.diagnostics_snapshot())
                 } else {
                     None
@@ -3584,7 +3594,7 @@ impl eframe::App for LauncherApp {
                     reduce_dashboard_work_when_unfocused: self
                         .reduce_dashboard_work_when_unfocused,
                     diagnostics,
-                    show_diagnostics_widget: self.show_dashboard_diagnostics,
+                    show_diagnostics_widget,
                 };
                 ctx.request_repaint_after(Duration::from_millis(250));
                 if let Some(action) = self.dashboard.ui(ui, &dash_ctx, WidgetActivation::Click) {
@@ -4600,6 +4610,8 @@ mod tests {
     use super::*;
     use crate::{
         common::slug::reset_slug_lookup,
+        dashboard::config::OverflowMode,
+        dashboard::layout::NormalizedSlot,
         plugin::PluginManager,
         plugins::note::{append_note, load_notes, save_notes, NotePlugin},
         settings::Settings,
@@ -4608,6 +4620,7 @@ mod tests {
     use eframe::egui;
     use image::RgbaImage;
     use once_cell::sync::Lazy;
+    use serde_json::json;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -4712,6 +4725,26 @@ mod tests {
         app.update_panel_stack();
         assert!(app.close_front_dialog());
         assert!(!app.clipboard_dialog.open);
+    }
+
+    #[test]
+    fn diagnostics_widget_layout_enables_context_flag() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.show_dashboard_diagnostics = false;
+        app.dashboard.slots = vec![NormalizedSlot {
+            id: None,
+            widget: "diagnostics".to_string(),
+            row: 0,
+            col: 0,
+            row_span: 1,
+            col_span: 1,
+            settings: json!({}),
+            overflow: OverflowMode::Scroll,
+        }];
+
+        assert!(app.has_diagnostics_widget());
+        assert!(app.show_dashboard_diagnostics || app.has_diagnostics_widget());
     }
 
     #[test]
