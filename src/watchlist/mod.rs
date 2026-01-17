@@ -26,6 +26,8 @@ pub static WATCHLIST_DATA: Lazy<Arc<RwLock<WatchlistConfig>>> =
     Lazy::new(|| Arc::new(RwLock::new(WatchlistConfig::default())));
 pub static WATCHLIST_PATH: Lazy<RwLock<PathBuf>> =
     Lazy::new(|| RwLock::new(PathBuf::from(WATCHLIST_FILE)));
+pub static WATCHLIST_SNAPSHOT: Lazy<RwLock<Arc<Vec<WatchItemSnapshot>>>> =
+    Lazy::new(|| RwLock::new(Arc::new(Vec::new())));
 
 pub fn watchlist_refresh_ms() -> u64 {
     WATCHLIST_DATA
@@ -43,6 +45,13 @@ pub fn watchlist_path() -> PathBuf {
 
 pub fn watchlist_path_string() -> String {
     watchlist_path().to_string_lossy().to_string()
+}
+
+pub fn watchlist_snapshot() -> Arc<Vec<WatchItemSnapshot>> {
+    WATCHLIST_SNAPSHOT
+        .read()
+        .map(|snapshot| Arc::clone(&snapshot))
+        .unwrap_or_else(|_| Arc::new(Vec::new()))
 }
 
 fn default_watchlist_version() -> u32 {
@@ -174,8 +183,9 @@ impl WatchlistState {
             .map(|cfg| enabled_items(&cfg.items))
             .unwrap_or_default();
         let watchers = build_watchers(&items, Arc::clone(&dirty));
+        let snapshot = watchlist_snapshot();
         Self {
-            snapshot: Arc::new(Vec::new()),
+            snapshot,
             dirty,
             last_refresh: Instant::now() - Duration::from_secs(3600),
             watchers,
@@ -237,6 +247,7 @@ impl WatchlistState {
             });
         }
         self.snapshot = Arc::new(snapshot);
+        cache_watchlist_snapshot(&self.snapshot);
         self.last_refresh = Instant::now();
         self.dirty.store(false, Ordering::SeqCst);
     }
@@ -357,6 +368,12 @@ fn update_watchlist_cache(cfg: WatchlistConfig) {
         *lock = cfg;
     }
     bump_watchlist_version();
+}
+
+fn cache_watchlist_snapshot(snapshot: &Arc<Vec<WatchItemSnapshot>>) {
+    if let Ok(mut lock) = WATCHLIST_SNAPSHOT.write() {
+        *lock = Arc::clone(snapshot);
+    }
 }
 
 fn bump_watchlist_version() {
