@@ -28,6 +28,7 @@ mod recent_commands;
 mod recent_notes;
 mod recycle_bin;
 mod snippets_favorites;
+mod scratchpad;
 mod stopwatch;
 mod system_actions;
 mod system_controls;
@@ -61,6 +62,7 @@ pub use recent_commands::RecentCommandsWidget;
 pub use recent_notes::RecentNotesWidget;
 pub use recycle_bin::RecycleBinWidget;
 pub use snippets_favorites::SnippetsFavoritesWidget;
+pub use scratchpad::ScratchpadWidget;
 pub use stopwatch::StopwatchWidget;
 pub use system_actions::SystemWidget;
 pub use system_controls::SystemControlsWidget;
@@ -317,6 +319,11 @@ impl WidgetRegistry {
             "snippets_favorites",
             WidgetFactory::new(SnippetsFavoritesWidget::new)
                 .with_settings_ui(SnippetsFavoritesWidget::settings_ui),
+        );
+        reg.register(
+            "scratchpad",
+            WidgetFactory::new(ScratchpadWidget::new)
+                .with_settings_ui(ScratchpadWidget::settings_ui),
         );
         reg.register(
             "notes_recent",
