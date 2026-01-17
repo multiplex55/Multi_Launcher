@@ -17,7 +17,7 @@ pub struct HistoryEntry {
 const HISTORY_FILE: &str = "history.json";
 pub const HISTORY_PINS_FILE: &str = "history_pins.json";
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HistoryPin {
     pub action_id: String,
     pub label: String,
