@@ -10,10 +10,13 @@
 //!
 //! Flags are comma-separated (`,`) and values use `key=value`, for example:
 //! `layout:load:Work|dry_run,only_active_monitor,filter=chrome`.
+use crate::common::config_files::{ensure_config_file, ConfigFileResult};
 use crate::plugins::layouts_storage::{
-    self, list_layouts as list_saved_layouts, remove_layout as remove_saved_layout, Layout,
-    LayoutCoordMode, LayoutOptions, LayoutWindowLaunch, LAYOUTS_FILE,
+    self, layouts_config_path, list_layouts as list_saved_layouts,
+    remove_layout as remove_saved_layout, Layout, LayoutCoordMode, LayoutOptions,
+    LayoutWindowLaunch, LAYOUTS_CONFIG,
 };
+use crate::settings;
 use crate::windows_layout::{
     apply_layout_restore_plan, collect_layout_windows, plan_layout_restore, LayoutMatchResult,
     LayoutRestoreSummary, LayoutWindowOptions,
@@ -556,7 +559,7 @@ pub fn save_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut store = layouts_storage::load_layouts(LAYOUTS_FILE)?;
+    let mut store = layouts_storage::load_layouts(layouts_config_path())?;
     let windows = collect_layout_windows(LayoutWindowOptions {
         only_active_monitor: flags.only_active_monitor,
         include_minimized: flags.include_minimized,
@@ -572,14 +575,14 @@ pub fn save_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
         ignore: Vec::new(),
     };
     layouts_storage::upsert_layout(&mut store, layout);
-    layouts_storage::save_layouts(LAYOUTS_FILE, &store)?;
+    layouts_storage::save_layouts(layouts_config_path(), &store)?;
     Ok(())
 }
 
 pub fn load_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
     ensure_layout_name(name)?;
     let flags = parse_flags(flags);
-    let store = layouts_storage::load_layouts(LAYOUTS_FILE)?;
+    let store = layouts_storage::load_layouts(layouts_config_path())?;
     let layout = layouts_storage::get_layout(&store, name)
         .ok_or_else(|| anyhow::anyhow!("layout '{name}' not found"))?;
     let layout = filter_layout_by_groups(layout, &flags.only_groups);
@@ -665,7 +668,7 @@ pub fn load_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
 pub fn show_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
     ensure_layout_name(name)?;
     let flags = parse_flags(flags);
-    let store = layouts_storage::load_layouts(LAYOUTS_FILE)?;
+    let store = layouts_storage::load_layouts(layouts_config_path())?;
     let layout = layouts_storage::get_layout(&store, name)
         .ok_or_else(|| anyhow::anyhow!("layout '{name}' not found"))?;
     let layout = filter_layout_by_groups(layout, &flags.only_groups);
@@ -709,14 +712,20 @@ pub fn show_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
 }
 
 pub fn edit_layouts() -> anyhow::Result<()> {
-    open::that(LAYOUTS_FILE)?;
+    let settings_path = settings::settings_path();
+    let result = ensure_config_file(&settings_path, &LAYOUTS_CONFIG)?;
+    match &result {
+        ConfigFileResult::Opened { path } | ConfigFileResult::Created { path } => {
+            open::that(path)?;
+        }
+    }
     Ok(())
 }
 
 pub fn remove_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
     ensure_layout_name(name)?;
     let flags = parse_flags(flags);
-    let mut store = layouts_storage::load_layouts(LAYOUTS_FILE)?;
+    let mut store = layouts_storage::load_layouts(layouts_config_path())?;
     if layouts_storage::get_layout(&store, name).is_none() {
         anyhow::bail!("layout '{name}' not found");
     }
@@ -724,7 +733,7 @@ pub fn remove_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
         return Ok(());
     }
     let _ = remove_saved_layout(&mut store, name);
-    layouts_storage::save_layouts(LAYOUTS_FILE, &store)?;
+    layouts_storage::save_layouts(layouts_config_path(), &store)?;
     Ok(())
 }
 
@@ -732,7 +741,7 @@ pub fn list_layouts(flags: Option<&str>) -> anyhow::Result<()> {
     use std::fmt::Write as _;
 
     let flags = parse_flags(flags);
-    let store = layouts_storage::load_layouts(LAYOUTS_FILE)?;
+    let store = layouts_storage::load_layouts(layouts_config_path())?;
     let mut list = list_saved_layouts(&store);
     if let Some(filter) = flags.filter {
         let needle = filter.to_lowercase();

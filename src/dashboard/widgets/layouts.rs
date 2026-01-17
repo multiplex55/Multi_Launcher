@@ -5,7 +5,7 @@ use super::{
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
-use crate::plugins::layouts_storage::{self, Layout, LayoutMatch, LayoutStore, LAYOUTS_FILE};
+use crate::plugins::layouts_storage::{self, layouts_config_path, Layout, LayoutMatch, LayoutStore};
 use crate::windows_layout::{collect_layout_windows, LayoutWindowOptions};
 use chrono::Utc;
 use eframe::egui;
@@ -174,7 +174,7 @@ impl LayoutsWidget {
     }
 
     fn load_active_layout(&mut self, name: &str) -> Result<(), String> {
-        let store = layouts_storage::load_layouts(LAYOUTS_FILE)
+        let store = layouts_storage::load_layouts(layouts_config_path())
             .map_err(|err| format!("Failed to load layouts: {err}"))?;
         let layout = layouts_storage::get_layout(&store, name)
             .ok_or_else(|| "Layout not found.".to_string())?
@@ -187,10 +187,10 @@ impl LayoutsWidget {
     }
 
     fn save_layout(&mut self, layout: Layout) -> Result<(), String> {
-        let mut store = layouts_storage::load_layouts(LAYOUTS_FILE)
+        let mut store = layouts_storage::load_layouts(layouts_config_path())
             .map_err(|err| format!("Failed to load layouts: {err}"))?;
         layouts_storage::upsert_layout(&mut store, layout.clone());
-        layouts_storage::save_layouts(LAYOUTS_FILE, &store)
+        layouts_storage::save_layouts(layouts_config_path(), &store)
             .map_err(|err| format!("Failed to save layouts: {err}"))?;
         self.active_layout_name = Some(layout.name.clone());
         self.active_layout = Some(layout.clone());
@@ -234,14 +234,14 @@ impl LayoutsWidget {
         let Some(layout) = self.active_layout.clone() else {
             return Err("No active layout selected.".to_string());
         };
-        let mut store = layouts_storage::load_layouts(LAYOUTS_FILE)
+        let mut store = layouts_storage::load_layouts(layouts_config_path())
             .map_err(|err| format!("Failed to load layouts: {err}"))?;
         let new_name = Self::unique_layout_name(&layout.name, &store, " (copy)");
         let mut cloned = layout.clone();
         cloned.name = new_name.clone();
         cloned.created_at = Some(Utc::now().to_rfc3339());
         layouts_storage::upsert_layout(&mut store, cloned.clone());
-        layouts_storage::save_layouts(LAYOUTS_FILE, &store)
+        layouts_storage::save_layouts(layouts_config_path(), &store)
             .map_err(|err| format!("Failed to save layouts: {err}"))?;
         self.active_layout_name = Some(new_name.clone());
         self.active_layout = Some(cloned.clone());
@@ -321,7 +321,7 @@ impl LayoutsWidget {
     }
 
     fn load_layouts(cfg: &LayoutsConfig) -> (LayoutsData, Option<String>) {
-        let store = match layouts_storage::load_layouts(LAYOUTS_FILE) {
+        let store = match layouts_storage::load_layouts(layouts_config_path()) {
             Ok(store) => store,
             Err(err) => {
                 return (
@@ -407,7 +407,7 @@ impl LayoutsWidget {
         if new_name == from {
             return Ok(());
         }
-        let mut store = layouts_storage::load_layouts(LAYOUTS_FILE)
+        let mut store = layouts_storage::load_layouts(layouts_config_path())
             .map_err(|err| format!("Failed to load layouts: {err}"))?;
         if store.layouts.iter().any(|layout| layout.name == new_name) {
             return Err("A layout with that name already exists.".to_string());
@@ -416,7 +416,7 @@ impl LayoutsWidget {
             return Err("Layout not found.".to_string());
         };
         layout.name = new_name.to_string();
-        layouts_storage::save_layouts(LAYOUTS_FILE, &store)
+        layouts_storage::save_layouts(layouts_config_path(), &store)
             .map_err(|err| format!("Failed to save layouts: {err}"))?;
         if self.active_layout_name.as_deref() == Some(from) {
             if let Some(active) = self.active_layout.as_mut() {
@@ -602,7 +602,7 @@ impl Widget for LayoutsWidget {
                         self.pending_import = None;
                     }
                     if ui.button("Import as new").clicked() {
-                        let mut store = match layouts_storage::load_layouts(LAYOUTS_FILE) {
+                        let mut store = match layouts_storage::load_layouts(layouts_config_path()) {
                             Ok(store) => store,
                             Err(err) => {
                                 self.set_status(
@@ -618,7 +618,7 @@ impl Widget for LayoutsWidget {
                             Self::unique_layout_name(&imported.name, &store, " (imported)");
                         imported.name = new_name.clone();
                         layouts_storage::upsert_layout(&mut store, imported.clone());
-                        if let Err(err) = layouts_storage::save_layouts(LAYOUTS_FILE, &store) {
+                        if let Err(err) = layouts_storage::save_layouts(layouts_config_path(), &store) {
                             self.set_status(
                                 format!("Failed to save layouts: {err}"),
                                 egui::Color32::YELLOW,
@@ -670,10 +670,21 @@ impl Widget for LayoutsWidget {
                                 ));
                                 ui.close_menu();
                             }
-                            if ui.button("Edit JSON").clicked() {
+                            let layouts_path = layouts_config_path();
+                            let layouts_exists = layouts_path.exists();
+                            let layouts_label = if layouts_exists {
+                                "Edit layouts.json"
+                            } else {
+                                "Create layouts.json"
+                            };
+                            if ui.button(layouts_label).clicked() {
                                 selected = Some(Self::action(
-                                    "Open layouts.json".to_string(),
-                                    LAYOUTS_FILE.to_string(),
+                                    format!(
+                                        "{} ({})",
+                                        layouts_label,
+                                        layouts_path.to_string_lossy()
+                                    ),
+                                    "layout:edit".to_string(),
                                 ));
                                 ui.close_menu();
                             }

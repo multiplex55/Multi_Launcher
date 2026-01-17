@@ -145,6 +145,7 @@ fn spawn_gui(
 
 fn main() -> anyhow::Result<()> {
     let mut settings = Settings::load("settings.json").unwrap_or_default();
+    multi_launcher::settings::set_settings_path("settings.json");
     logging::init(settings.debug_logging, settings.log_file_path());
     tracing::debug!(?settings, "settings loaded");
     let mut actions_vec = load_actions("actions.json").unwrap_or_default();
