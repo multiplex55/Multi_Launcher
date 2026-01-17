@@ -135,6 +135,7 @@ impl PluginEditor {
                         Some(s.note_always_overwrite),
                         Some(s.note_images_as_links),
                         Some(s.note_more_limit),
+                        Some(s.show_dashboard_diagnostics),
                     );
                     let dirs = s.plugin_dirs.clone().unwrap_or_default();
                     let actions_arc = Arc::clone(&app.actions);

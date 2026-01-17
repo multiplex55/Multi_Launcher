@@ -201,6 +201,9 @@ pub struct Settings {
     /// Reduce dashboard refresh work when the launcher is not focused.
     #[serde(default = "default_true")]
     pub reduce_dashboard_work_when_unfocused: bool,
+    /// Show the dashboard diagnostics widget (developer option).
+    #[serde(default)]
+    pub show_dashboard_diagnostics: bool,
     #[serde(default)]
     pub dashboard: DashboardSettings,
 }
@@ -352,6 +355,7 @@ impl Default for Settings {
             plugin_settings: std::collections::HashMap::new(),
             pinned_panels: Vec::new(),
             reduce_dashboard_work_when_unfocused: true,
+            show_dashboard_diagnostics: false,
             dashboard: DashboardSettings::default(),
         }
     }

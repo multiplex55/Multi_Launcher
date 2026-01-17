@@ -13,6 +13,7 @@ mod calendar;
 mod clipboard_recent;
 mod clipboard_snippets;
 mod command_history;
+mod diagnostics;
 mod frequent_commands;
 mod layouts;
 mod notes_recent;
@@ -47,6 +48,7 @@ pub use calendar::CalendarWidget;
 pub use clipboard_recent::ClipboardRecentWidget;
 pub use clipboard_snippets::ClipboardSnippetsWidget;
 pub use command_history::CommandHistoryWidget;
+pub use diagnostics::DiagnosticsWidget;
 pub use frequent_commands::FrequentCommandsWidget;
 pub use layouts::LayoutsWidget;
 pub use notes_recent::NotesRecentWidget;
@@ -222,6 +224,7 @@ impl WidgetRegistry {
             WidgetFactory::new(CommandHistoryWidget::new)
                 .with_settings_ui(CommandHistoryWidget::settings_ui),
         );
+        reg.register("diagnostics", WidgetFactory::new(DiagnosticsWidget::new));
         reg.register(
             "recent_commands",
             WidgetFactory::new(RecentCommandsWidget::new)

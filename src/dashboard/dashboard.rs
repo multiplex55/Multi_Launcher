@@ -1,5 +1,6 @@
 use crate::dashboard::config::{DashboardConfig, OverflowMode};
 use crate::dashboard::data_cache::DashboardDataCache;
+use crate::dashboard::diagnostics::{DashboardDiagnostics, DashboardDiagnosticsSnapshot};
 use crate::dashboard::layout::{normalize_slots, NormalizedSlot};
 use crate::dashboard::widgets::{Widget, WidgetAction, WidgetRegistry};
 use crate::{actions::Action, common::json_watch::JsonWatcher};
@@ -12,6 +13,7 @@ use siphasher::sip::SipHasher24;
 use std::collections::HashMap;
 use std::hash::Hasher;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 #[cfg(test)]
 use std::sync::Mutex;
 
@@ -46,6 +48,8 @@ pub struct DashboardContext<'a> {
     pub dashboard_visible: bool,
     pub dashboard_focused: bool,
     pub reduce_dashboard_work_when_unfocused: bool,
+    pub diagnostics: Option<DashboardDiagnosticsSnapshot>,
+    pub show_diagnostics_widget: bool,
 }
 
 struct SlotRuntime {
@@ -107,6 +111,7 @@ pub struct Dashboard {
     watcher: Option<JsonWatcher>,
     pub warnings: Vec<String>,
     event_cb: Option<std::sync::Arc<dyn Fn(DashboardEvent) + Send + Sync>>,
+    diagnostics: DashboardDiagnostics,
 }
 
 impl Dashboard {
@@ -126,6 +131,7 @@ impl Dashboard {
             watcher: None,
             warnings,
             event_cb,
+            diagnostics: DashboardDiagnostics::new(),
         };
         dashboard.rebuild_runtime_slots(slots);
         dashboard
@@ -217,6 +223,9 @@ impl Dashboard {
 
         for slot in &mut self.runtime_slots {
             let normalized = &slot.slot;
+            if !ctx.show_diagnostics_widget && normalized.widget == "diagnostics" {
+                continue;
+            }
             let slot_rect = egui::Rect::from_min_size(
                 rect.min
                     + egui::vec2(
@@ -232,7 +241,15 @@ impl Dashboard {
             let response = child.allocate_ui_at_rect(slot_rect, |slot_ui| {
                 slot_ui.set_clip_rect(slot_clip);
                 slot_ui.set_min_size(slot_rect.size());
-                Self::render_slot(slot, slot_rect, slot_clip, slot_ui, ctx, activation)
+                Self::render_slot(
+                    slot,
+                    slot_rect,
+                    slot_clip,
+                    slot_ui,
+                    ctx,
+                    activation,
+                    &mut self.diagnostics,
+                )
             });
             clicked = clicked.or(response.inner);
         }
@@ -247,12 +264,9 @@ impl Dashboard {
         ui: &mut egui::Ui,
         ctx: &DashboardContext<'_>,
         activation: WidgetActivation,
+        diagnostics: &mut DashboardDiagnostics,
     ) -> Option<WidgetAction> {
-        let heading = slot
-            .slot
-            .id
-            .clone()
-            .unwrap_or_else(|| slot.slot.widget.clone());
+        let (heading, diag_key) = slot_diagnostics_label(&slot.slot);
 
         ui.set_clip_rect(slot_clip);
         ui.set_min_size(slot_rect.size());
@@ -282,7 +296,16 @@ impl Dashboard {
 
                     let action = match overflow {
                         OverflowPolicy::Clip => {
-                            Self::render_clipped_widget(slot, ui, ctx, activation, body_height)
+                            Self::render_clipped_widget(
+                                slot,
+                                ui,
+                                ctx,
+                                activation,
+                                body_height,
+                                diagnostics,
+                                &heading,
+                                &diag_key,
+                            )
                         }
                         OverflowPolicy::Scroll { visibility } => Self::render_scrollable_widget(
                             slot,
@@ -292,6 +315,9 @@ impl Dashboard {
                             body_height,
                             slot_clip,
                             visibility,
+                            diagnostics,
+                            &heading,
+                            &diag_key,
                         ),
                     };
 
@@ -308,10 +334,13 @@ impl Dashboard {
         ctx: &DashboardContext<'_>,
         activation: WidgetActivation,
         body_height: f32,
+        diagnostics: &mut DashboardDiagnostics,
+        heading: &str,
+        diag_key: &str,
     ) -> Option<WidgetAction> {
         ui.set_min_height(body_height);
         ui.set_max_height(body_height);
-        Self::render_widget_content(slot, ui, ctx, activation)
+        Self::render_widget_content(slot, ui, ctx, activation, diagnostics, heading, diag_key)
     }
 
     fn render_scrollable_widget(
@@ -322,6 +351,9 @@ impl Dashboard {
         body_height: f32,
         slot_clip: egui::Rect,
         visibility: ScrollBarVisibility,
+        diagnostics: &mut DashboardDiagnostics,
+        heading: &str,
+        diag_key: &str,
     ) -> Option<WidgetAction> {
         let scroll_id = egui::Id::new((
             "slot-scroll",
@@ -345,7 +377,7 @@ impl Dashboard {
                 let _ = viewport;
                 ui.set_clip_rect(ui.clip_rect().intersect(slot_clip));
                 ui.set_min_height(body_height);
-                Self::render_widget_content(slot, ui, ctx, activation)
+                Self::render_widget_content(slot, ui, ctx, activation, diagnostics, heading, diag_key)
             })
             .inner
     }
@@ -355,12 +387,40 @@ impl Dashboard {
         ui: &mut egui::Ui,
         ctx: &DashboardContext<'_>,
         activation: WidgetActivation,
+        diagnostics: &mut DashboardDiagnostics,
+        heading: &str,
+        diag_key: &str,
     ) -> Option<WidgetAction> {
-        slot.widget.render(ui, ctx, activation)
+        let start = Instant::now();
+        let response = slot.widget.render(ui, ctx, activation);
+        diagnostics.record_widget_refresh(
+            diag_key.to_string(),
+            heading.to_string(),
+            start.elapsed(),
+        );
+        response
     }
 
     pub fn registry(&self) -> &WidgetRegistry {
         &self.registry
+    }
+
+    pub fn update_frame_timing(&mut self, frame_time: Duration) {
+        self.diagnostics.update_frame_timing(frame_time);
+    }
+
+    pub fn diagnostics_snapshot(&self) -> DashboardDiagnosticsSnapshot {
+        self.diagnostics.snapshot()
+    }
+}
+
+fn slot_diagnostics_label(slot: &NormalizedSlot) -> (String, String) {
+    if let Some(id) = &slot.id {
+        (id.clone(), id.clone())
+    } else {
+        let label = format!("{} ({}, {})", slot.widget, slot.row, slot.col);
+        let key = format!("{}@{}x{}", slot.widget, slot.row, slot.col);
+        (label, key)
     }
 }
 
@@ -546,6 +606,8 @@ mod tests {
             dashboard_visible: true,
             dashboard_focused: true,
             reduce_dashboard_work_when_unfocused: false,
+            diagnostics: None,
+            show_diagnostics_widget: true,
         }
     }
 
