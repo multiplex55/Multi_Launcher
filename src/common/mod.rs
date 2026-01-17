@@ -6,6 +6,7 @@ pub fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     }
 }
 
+pub mod command;
 pub mod json_watch;
 pub mod slug;
 pub mod lru;

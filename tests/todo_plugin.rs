@@ -64,8 +64,9 @@ fn search_add_without_text_opens_dialog() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo add");
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].action, "todo:dialog");
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().any(|action| action.action == "todo:dialog"));
+    assert!(results.iter().any(|action| action.label.starts_with("Usage: todo add")));
 }
 
 #[test]
@@ -114,9 +115,18 @@ fn search_plain_todo_opens_dialog() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo");
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().any(|action| action.action == "todo:dialog"));
+    assert!(results.iter().any(|action| action.label.starts_with("Usage: todo")));
+}
+
+#[test]
+fn fuzzish_partial_todo_queries() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let plugin = TodoPlugin::default();
+    let results = plugin.search("todo !");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].action, "todo:dialog");
-    assert_eq!(results[0].label, "todo: edit todos");
+    assert!(results[0].label.starts_with("Usage: todo"));
 }
 
 #[test]

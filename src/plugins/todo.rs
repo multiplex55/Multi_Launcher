@@ -6,6 +6,7 @@
 //! tests synchronized with the latest on-disk data.
 
 use crate::actions::Action;
+use crate::common::command::{parse_args, ParseArgsResult};
 use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::common::lru::LruCache;
 use crate::common::query::parse_query_filters;
@@ -22,6 +23,25 @@ use std::sync::{
 pub const TODO_FILE: &str = "todo.json";
 
 static TODO_VERSION: AtomicU64 = AtomicU64::new(0);
+
+const TODO_USAGE: &str =
+    "Usage: todo <add|list|rm|clear|pset|tag|edit|view|export> ...";
+const TODO_ADD_USAGE: &str = "Usage: todo add <text> [p=<priority>] [#tag ...]";
+const TODO_RM_USAGE: &str = "Usage: todo rm <text>";
+const TODO_PSET_USAGE: &str = "Usage: todo pset <index> <priority>";
+const TODO_TAG_USAGE: &str = "Usage: todo tag <index> [#tag ...] | todo tag <tag>";
+const TODO_CLEAR_USAGE: &str = "Usage: todo clear";
+const TODO_VIEW_USAGE: &str = "Usage: todo view";
+const TODO_EXPORT_USAGE: &str = "Usage: todo export";
+
+fn usage_action(usage: &str, query: &str) -> Action {
+    Action {
+        label: usage.into(),
+        desc: "Todo".into(),
+        action: format!("query:{query}"),
+        args: None,
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TodoEntry {
@@ -197,13 +217,13 @@ impl TodoPlugin {
 
     fn search_internal(&self, trimmed: &str) -> Vec<Action> {
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "todo") {
-            if rest.is_empty() {
+            if rest.trim().is_empty() {
                 return vec![Action {
                     label: "todo: edit todos".into(),
                     desc: "Todo".into(),
                     action: "todo:dialog".into(),
                     args: None,
-                }];
+                }, usage_action(TODO_USAGE, "todo ")];
             }
         }
 
@@ -239,50 +259,63 @@ impl TodoPlugin {
                 .collect();
         }
 
-        if trimmed.eq_ignore_ascii_case("todo view") {
-            return vec![Action {
-                label: "todo: view list".into(),
-                desc: "Todo".into(),
-                action: "todo:view".into(),
-                args: None,
-            }];
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "todo view") {
+            if rest.trim().is_empty() {
+                return vec![Action {
+                    label: "todo: view list".into(),
+                    desc: "Todo".into(),
+                    action: "todo:view".into(),
+                    args: None,
+                }];
+            }
+            return vec![usage_action(TODO_VIEW_USAGE, "todo view")];
         }
 
-        if trimmed.eq_ignore_ascii_case("todo export") {
-            return vec![Action {
-                label: "Export todo list".into(),
-                desc: "Todo".into(),
-                action: "todo:export".into(),
-                args: None,
-            }];
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "todo export") {
+            if rest.trim().is_empty() {
+                return vec![Action {
+                    label: "Export todo list".into(),
+                    desc: "Todo".into(),
+                    action: "todo:export".into(),
+                    args: None,
+                }];
+            }
+            return vec![usage_action(TODO_EXPORT_USAGE, "todo export")];
         }
 
-        if trimmed.eq_ignore_ascii_case("todo clear") {
-            return vec![Action {
-                label: "Clear completed todos".into(),
-                desc: "Todo".into(),
-                action: "todo:clear".into(),
-                args: None,
-            }];
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "todo clear") {
+            if rest.trim().is_empty() {
+                return vec![Action {
+                    label: "Clear completed todos".into(),
+                    desc: "Todo".into(),
+                    action: "todo:clear".into(),
+                    args: None,
+                }];
+            }
+            return vec![usage_action(TODO_CLEAR_USAGE, "todo clear")];
         }
 
         if trimmed.eq_ignore_ascii_case("todo add") {
-            return vec![Action {
-                label: "todo: edit todos".into(),
-                desc: "Todo".into(),
-                action: "todo:dialog".into(),
-                args: None,
-            }];
+            return vec![
+                Action {
+                    label: "todo: edit todos".into(),
+                    desc: "Todo".into(),
+                    action: "todo:dialog".into(),
+                    args: None,
+                },
+                usage_action(TODO_ADD_USAGE, "todo add "),
+            ];
         }
 
         const ADD_PREFIX: &str = "todo add ";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, ADD_PREFIX) {
             let rest = rest.trim();
-            if !rest.is_empty() {
+            let args: Vec<&str> = rest.split_whitespace().collect();
+            match parse_args(&args, TODO_ADD_USAGE, |args| {
                 let mut priority: u8 = 0;
                 let mut tags: Vec<String> = Vec::new();
                 let mut words: Vec<String> = Vec::new();
-                for part in rest.split_whitespace() {
+                for part in args {
                     if let Some(p) = part.strip_prefix("p=") {
                         if let Ok(n) = p.parse::<u8>() {
                             priority = n;
@@ -293,11 +326,16 @@ impl TodoPlugin {
                             tags.push(tag.to_string());
                         }
                     } else {
-                        words.push(part.to_string());
+                        words.push((*part).to_string());
                     }
                 }
                 let text = words.join(" ");
-                if !text.is_empty() {
+                if text.is_empty() {
+                    return None;
+                }
+                Some((text, priority, tags))
+            }) {
+                ParseArgsResult::Parsed((text, priority, tags)) => {
                     let tag_str = tags.join(",");
                     return vec![Action {
                         label: format!("Add todo {text}"),
@@ -306,17 +344,23 @@ impl TodoPlugin {
                         args: None,
                     }];
                 }
+                ParseArgsResult::Usage(usage) => {
+                    return vec![usage_action(&usage, "todo add ")];
+                }
             }
         }
 
         const PSET_PREFIX: &str = "todo pset ";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, PSET_PREFIX) {
             let rest = rest.trim();
-            let mut parts = rest.split_whitespace();
-            if let (Some(idx_str), Some(priority_str)) = (parts.next(), parts.next()) {
-                if let (Ok(idx), Ok(priority)) =
-                    (idx_str.parse::<usize>(), priority_str.parse::<u8>())
-                {
+            let args: Vec<&str> = rest.split_whitespace().collect();
+            match parse_args(&args, TODO_PSET_USAGE, |args| {
+                let (idx_str, priority_str) = (args.get(0)?, args.get(1)?);
+                let idx = idx_str.parse::<usize>().ok()?;
+                let priority = priority_str.parse::<u8>().ok()?;
+                Some((idx, priority))
+            }) {
+                ParseArgsResult::Parsed((idx, priority)) => {
                     return vec![Action {
                         label: format!("Set priority {priority} for todo {idx}"),
                         desc: "Todo".into(),
@@ -324,60 +368,73 @@ impl TodoPlugin {
                         args: None,
                     }];
                 }
+                ParseArgsResult::Usage(usage) => {
+                    return vec![usage_action(&usage, "todo pset ")];
+                }
             }
         }
 
         const TAG_PREFIX: &str = "todo tag ";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, TAG_PREFIX) {
             let rest = rest.trim();
-            let mut parts = rest.split_whitespace();
-            if let Some(first) = parts.next() {
-                if let Ok(idx) = first.parse::<usize>() {
+            let args: Vec<&str> = rest.split_whitespace().collect();
+            if let ParseArgsResult::Parsed((idx, tags)) =
+                parse_args(&args, TODO_TAG_USAGE, |args| {
+                    let first = args.get(0)?;
+                    let idx = first.parse::<usize>().ok()?;
                     let mut tags: Vec<String> = Vec::new();
-                    for t in parts {
+                    for t in args.iter().skip(1) {
                         if let Some(tag) = t.strip_prefix('#') {
                             if !tag.is_empty() {
                                 tags.push(tag.to_string());
                             }
                         }
                     }
-                    let tag_str = tags.join(",");
-                    return vec![Action {
-                        label: format!("Set tags for todo {idx}"),
-                        desc: "Todo".into(),
-                        action: format!("todo:tag:{idx}|{tag_str}"),
-                        args: None,
-                    }];
-                } else {
-                    let filter = rest;
-                    let guard = match self.data.read() {
-                        Ok(g) => g,
-                        Err(_) => return Vec::new(),
-                    };
-                    let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
-                    entries
-                        .retain(|(_, t)| t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(filter)));
-                    entries.sort_by(|a, b| b.1.priority.cmp(&a.1.priority));
-                    return entries
-                        .into_iter()
-                        .map(|(idx, t)| Action {
-                            label: format!(
-                                "{} {}",
-                                if t.done { "[x]" } else { "[ ]" },
-                                t.text.clone()
-                            ),
-                            desc: "Todo".into(),
-                            action: format!("query:todo tag {idx} "),
-                            args: None,
-                        })
-                        .collect();
-                }
+                    Some((idx, tags))
+                })
+            {
+                let tag_str = tags.join(",");
+                return vec![Action {
+                    label: format!("Set tags for todo {idx}"),
+                    desc: "Todo".into(),
+                    action: format!("todo:tag:{idx}|{tag_str}"),
+                    args: None,
+                }];
             }
+
+            if rest.is_empty() {
+                return vec![usage_action(TODO_TAG_USAGE, "todo tag ")];
+            }
+
+            let filter = rest;
+            let guard = match self.data.read() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+            let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
+            entries.retain(|(_, t)| t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(filter)));
+            entries.sort_by(|a, b| b.1.priority.cmp(&a.1.priority));
+            return entries
+                .into_iter()
+                .map(|(idx, t)| Action {
+                    label: format!(
+                        "{} {}",
+                        if t.done { "[x]" } else { "[ ]" },
+                        t.text.clone()
+                    ),
+                    desc: "Todo".into(),
+                    action: format!("query:todo tag {idx} "),
+                    args: None,
+                })
+                .collect();
         }
 
         const RM_PREFIX: &str = "todo rm ";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, RM_PREFIX) {
             let filter = rest.trim();
+            if filter.is_empty() {
+                return vec![usage_action(TODO_RM_USAGE, "todo rm ")];
+            }
             let guard = match self.data.read() {
                 Ok(g) => g,
                 Err(_) => return Vec::new(),
@@ -453,6 +510,10 @@ impl TodoPlugin {
                     args: None,
                 })
                 .collect();
+        }
+
+        if crate::common::strip_prefix_ci(trimmed, "todo").is_some() {
+            return vec![usage_action(TODO_USAGE, "todo ")];
         }
 
         Vec::new()
