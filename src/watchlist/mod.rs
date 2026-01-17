@@ -1,4 +1,7 @@
+mod commands;
 mod evaluator;
+
+pub use commands::*;
 
 use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::settings::Settings;
@@ -48,6 +51,10 @@ fn default_watchlist_version() -> u32 {
 
 fn default_refresh_ms() -> u64 {
     2000
+}
+
+fn default_watch_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +114,8 @@ pub struct WatchItemConfig {
     #[serde(default)]
     pub label: Option<String>,
     pub kind: WatchItemKind,
+    #[serde(default = "default_watch_enabled")]
+    pub enabled: bool,
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default)]
@@ -162,7 +171,7 @@ impl WatchlistState {
         let dirty = Arc::new(AtomicBool::new(true));
         let items = WATCHLIST_DATA
             .read()
-            .map(|cfg| cfg.items.clone())
+            .map(|cfg| enabled_items(&cfg.items))
             .unwrap_or_default();
         let watchers = build_watchers(&items, Arc::clone(&dirty));
         Self {
@@ -207,11 +216,7 @@ impl WatchlistState {
                     let status = evaluate_status(&item, value.raw_value.as_ref());
                     (value.value_text, value.raw_value, status)
                 }
-                Err(err) => (
-                    format!("Error: {err}"),
-                    None,
-                    WatchStatus::Critical,
-                ),
+                Err(err) => (format!("Error: {err}"), None, WatchStatus::Critical),
             };
             let delta_text = match (raw_value.as_ref(), prev_raw.as_ref()) {
                 (Some(current), Some(previous)) => compute_delta_text(current, previous),
@@ -239,7 +244,7 @@ impl WatchlistState {
     fn load_items(&self) -> Vec<WatchItemConfig> {
         WATCHLIST_DATA
             .read()
-            .map(|cfg| cfg.items.clone())
+            .map(|cfg| enabled_items(&cfg.items))
             .unwrap_or_default()
     }
 }
@@ -319,7 +324,7 @@ pub fn watchlist_version() -> u64 {
     WATCHLIST_VERSION.load(Ordering::SeqCst)
 }
 
-fn write_watchlist_config(path: &str, cfg: &mut WatchlistConfig) -> Result<()> {
+pub(crate) fn write_watchlist_config(path: &str, cfg: &mut WatchlistConfig) -> Result<()> {
     normalize_watchlist_config(cfg);
     validate_watchlist(cfg)?;
     let json = serde_json::to_string_pretty(cfg)?;
@@ -339,11 +344,9 @@ pub fn start_watchlist_watcher(settings: &Settings, settings_path: &str) -> Opti
     let watch_path = path_string.clone();
     watch_json(&watch_path, {
         let watch_path = path_string.clone();
-        move || {
-            match load_watchlist(&watch_path) {
-                Ok(cfg) => update_watchlist_cache(cfg),
-                Err(err) => tracing::warn!("failed to reload watchlist config: {err}"),
-            }
+        move || match load_watchlist(&watch_path) {
+            Ok(cfg) => update_watchlist_cache(cfg),
+            Err(err) => tracing::warn!("failed to reload watchlist config: {err}"),
         }
     })
     .ok()
@@ -388,7 +391,11 @@ fn validate_watchlist(cfg: &WatchlistConfig) -> Result<()> {
     Ok(())
 }
 
-fn normalize_extensions(extensions: &mut Vec<String>) {
+fn enabled_items(items: &[WatchItemConfig]) -> Vec<WatchItemConfig> {
+    items.iter().filter(|item| item.enabled).cloned().collect()
+}
+
+pub(crate) fn normalize_extensions(extensions: &mut Vec<String>) {
     let mut seen = HashSet::new();
     let mut normalized = Vec::new();
     for ext in extensions.iter() {
@@ -457,10 +464,7 @@ fn expand_env_vars(input: &str) -> String {
     out
 }
 
-fn build_watchers(
-    items: &[WatchItemConfig],
-    dirty: Arc<AtomicBool>,
-) -> Vec<RecommendedWatcher> {
+fn build_watchers(items: &[WatchItemConfig], dirty: Arc<AtomicBool>) -> Vec<RecommendedWatcher> {
     let mut watchers = Vec::new();
     for item in items {
         let Some(path) = item.path.as_deref() else {
@@ -491,15 +495,9 @@ fn watch_path(path: &Path, dirty: Arc<AtomicBool>) -> Option<RecommendedWatcher>
     )
     .ok()?;
 
-    if watcher
-        .watch(path, RecursiveMode::NonRecursive)
-        .is_err()
-    {
+    if watcher.watch(path, RecursiveMode::NonRecursive).is_err() {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        if watcher
-            .watch(parent, RecursiveMode::NonRecursive)
-            .is_err()
-        {
+        if watcher.watch(parent, RecursiveMode::NonRecursive).is_err() {
             return None;
         }
     }
@@ -552,9 +550,7 @@ fn numeric_thresholds(value: f64, thresholds: &serde_json::Value) -> WatchStatus
     {
         return WatchStatus::Critical;
     }
-    if warn_gt.map(|t| value > t).unwrap_or(false)
-        || warn_lt.map(|t| value < t).unwrap_or(false)
-    {
+    if warn_gt.map(|t| value > t).unwrap_or(false) || warn_lt.map(|t| value < t).unwrap_or(false) {
         return WatchStatus::Warn;
     }
     WatchStatus::Ok

@@ -1,6 +1,9 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
-use crate::watchlist::{self, watchlist_path_string, WatchItemConfig, WATCHLIST_DATA};
+use crate::watchlist::{
+    self, parse_move_direction, parse_watch_add_input, preview_watch_add_item,
+    watchlist_path_string, WatchItemConfig, WATCHLIST_DATA,
+};
 use std::io::ErrorKind;
 
 pub struct WatchlistPlugin;
@@ -126,12 +129,110 @@ impl WatchlistPlugin {
     fn watch_validate_actions() -> Vec<Action> {
         let path = watchlist_path_string();
         match watchlist::load_watchlist(&path) {
-            Ok(_) => vec![Self::watchlist_action("Watchlist is valid (open config)", path)],
+            Ok(_) => vec![Self::watchlist_action(
+                "Watchlist is valid (open config)",
+                path,
+            )],
             Err(err) => vec![Self::watchlist_action(
                 format!("Watchlist invalid: {err} (open config)"),
                 path,
             )],
         }
+    }
+
+    fn parse_add_action(input: &str) -> Vec<Action> {
+        let Ok(req) = parse_watch_add_input(input) else {
+            return Vec::new();
+        };
+        let preview = WATCHLIST_DATA
+            .read()
+            .ok()
+            .and_then(|cfg| preview_watch_add_item(&cfg, &req).ok());
+        let payload = match serde_json::to_string(&req) {
+            Ok(payload) => payload,
+            Err(_) => return Vec::new(),
+        };
+        let label = preview
+            .map(|item| item.label.unwrap_or(item.id))
+            .unwrap_or_else(|| "watch item".into());
+        vec![Self::watchlist_action(
+            format!("Add watch {label}"),
+            format!("watch:add:{payload}"),
+        )]
+    }
+
+    fn match_actions(filter: &str) -> Vec<WatchItemConfig> {
+        Self::filter_items(Self::collect_items(), filter)
+    }
+
+    fn remove_actions(filter: &str) -> Vec<Action> {
+        Self::match_actions(filter)
+            .into_iter()
+            .map(|item| {
+                let label = Self::item_label(&item);
+                Self::watchlist_action(
+                    format!("Remove {label}"),
+                    format!("watch:remove:{}", item.id),
+                )
+            })
+            .collect()
+    }
+
+    fn enable_actions(filter: &str, enabled: bool) -> Vec<Action> {
+        Self::match_actions(filter)
+            .into_iter()
+            .filter(|item| item.enabled != enabled)
+            .map(|item| {
+                let label = Self::item_label(&item);
+                let verb = if enabled { "Enable" } else { "Disable" };
+                Self::watchlist_action(
+                    format!("{verb} {label}"),
+                    format!(
+                        "watch:{}:{}",
+                        if enabled { "enable" } else { "disable" },
+                        item.id
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    fn set_refresh_actions(value: &str) -> Vec<Action> {
+        let Ok(refresh_ms) = value.trim().parse::<u64>() else {
+            return Vec::new();
+        };
+        vec![Self::watchlist_action(
+            format!("Set watch refresh to {refresh_ms}ms"),
+            format!("watch:set_refresh:{refresh_ms}"),
+        )]
+    }
+
+    fn move_actions(id: &str, direction: &str) -> Vec<Action> {
+        let Some(direction) = parse_move_direction(direction) else {
+            return Vec::new();
+        };
+        let items = Self::collect_items();
+        let Some(idx) = items
+            .iter()
+            .position(|item| item.id.eq_ignore_ascii_case(id))
+        else {
+            return Vec::new();
+        };
+        let can_move = match direction {
+            watchlist::MoveDirection::Up => idx > 0,
+            watchlist::MoveDirection::Down => idx + 1 < items.len(),
+        };
+        if !can_move {
+            return Vec::new();
+        }
+        let verb = match direction {
+            watchlist::MoveDirection::Up => "up",
+            watchlist::MoveDirection::Down => "down",
+        };
+        vec![Self::watchlist_action(
+            format!("Move {id} {verb}"),
+            format!("watch:move:{id}|{verb}"),
+        )]
     }
 }
 
@@ -183,6 +284,31 @@ impl Plugin for WatchlistPlugin {
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch open") {
             return Self::open_actions(rest);
         }
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch add") {
+            let input = rest.trim();
+            if input.is_empty() {
+                return Vec::new();
+            }
+            return Self::parse_add_action(input);
+        }
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch rm") {
+            return Self::remove_actions(rest.trim());
+        }
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch enable") {
+            return Self::enable_actions(rest.trim(), true);
+        }
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch disable") {
+            return Self::enable_actions(rest.trim(), false);
+        }
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch set refresh") {
+            return Self::set_refresh_actions(rest.trim());
+        }
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch mv") {
+            let mut parts = rest.trim().split_whitespace();
+            if let (Some(id), Some(direction)) = (parts.next(), parts.next()) {
+                return Self::move_actions(id, direction);
+            }
+        }
         Vec::new()
     }
 
@@ -207,6 +333,12 @@ impl Plugin for WatchlistPlugin {
             Self::watchlist_action("watch path", "query:watch path"),
             Self::watchlist_action("watch init", "query:watch init"),
             Self::watchlist_action("watch validate", "query:watch validate"),
+            Self::watchlist_action("watch add", "query:watch add "),
+            Self::watchlist_action("watch rm", "query:watch rm "),
+            Self::watchlist_action("watch enable", "query:watch enable "),
+            Self::watchlist_action("watch disable", "query:watch disable "),
+            Self::watchlist_action("watch set refresh", "query:watch set refresh "),
+            Self::watchlist_action("watch mv", "query:watch mv "),
             Self::watch_edit_action(),
         ]
     }
