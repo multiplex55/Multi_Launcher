@@ -1,7 +1,17 @@
+use crate::common::config_files::{resolve_config_path, ConfigFileSpec};
+use crate::settings;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const LAYOUTS_FILE: &str = "layouts.json";
+pub const DEFAULT_LAYOUTS_TEMPLATE: &str = r#"{
+  "version": 1,
+  "layouts": []
+}
+"#;
+pub const LAYOUTS_CONFIG: ConfigFileSpec<'static> =
+    ConfigFileSpec::new("layouts", LAYOUTS_FILE, DEFAULT_LAYOUTS_TEMPLATE);
 
 static LAYOUTS_VERSION: AtomicU64 = AtomicU64::new(0);
 
@@ -155,7 +165,11 @@ pub fn bump_layouts_version() {
     LAYOUTS_VERSION.fetch_add(1, Ordering::SeqCst);
 }
 
-pub fn load_layouts(path: &str) -> anyhow::Result<LayoutStore> {
+pub fn layouts_config_path() -> PathBuf {
+    resolve_config_path(&settings::settings_path(), &LAYOUTS_CONFIG)
+}
+
+pub fn load_layouts(path: impl AsRef<Path>) -> anyhow::Result<LayoutStore> {
     let content = std::fs::read_to_string(path).unwrap_or_default();
     if content.trim().is_empty() {
         return Ok(LayoutStore::default());
@@ -167,8 +181,12 @@ pub fn load_layouts(path: &str) -> anyhow::Result<LayoutStore> {
     Ok(store)
 }
 
-pub fn save_layouts(path: &str, store: &LayoutStore) -> anyhow::Result<()> {
+pub fn save_layouts(path: impl AsRef<Path>, store: &LayoutStore) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(store)?;
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     std::fs::write(path, json)?;
     bump_layouts_version();
     Ok(())

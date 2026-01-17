@@ -1,6 +1,8 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
-use crate::plugins::layouts_storage::{get_layout, load_layouts, LayoutMatch, LAYOUTS_FILE};
+use crate::plugins::layouts_storage::{
+    get_layout, layouts_config_path, load_layouts, LayoutMatch,
+};
 
 #[derive(Default, Debug, Clone)]
 struct LayoutFlags {
@@ -151,6 +153,14 @@ pub struct LayoutPlugin;
 
 impl Plugin for LayoutPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
+        let config_path = layouts_config_path();
+        let config_exists = config_path.exists();
+        let config_label = if config_exists {
+            "Edit layouts.json"
+        } else {
+            "Create layouts.json"
+        };
+        let config_desc = config_path.to_string_lossy();
         let trimmed = query.trim();
         let rest = match crate::common::strip_prefix_ci(trimmed, "layout") {
             Some(rest) => rest.trim(),
@@ -184,8 +194,8 @@ impl Plugin for LayoutPlugin {
                     args: None,
                 },
                 Action {
-                    label: "layout edit".into(),
-                    desc: "Layout".into(),
+                    label: format!("{config_label} ({config_desc})"),
+                    desc: "Layout config".into(),
                     action: "layout:edit".into(),
                     args: None,
                 },
@@ -200,7 +210,7 @@ impl Plugin for LayoutPlugin {
 
         if let Some(rest) = crate::common::strip_prefix_ci(rest, "list") {
             let filter = rest.trim().to_lowercase();
-            if let Ok(store) = load_layouts(LAYOUTS_FILE) {
+            if let Ok(store) = load_layouts(layouts_config_path()) {
                 return store
                     .layouts
                     .iter()
@@ -249,7 +259,7 @@ impl Plugin for LayoutPlugin {
 
         if let Some(rest) = crate::common::strip_prefix_ci(rest, "show") {
             let (name, flags) = parse_name_and_flags(rest.trim());
-            if let Ok(store) = load_layouts(LAYOUTS_FILE) {
+            if let Ok(store) = load_layouts(layouts_config_path()) {
                 if !name.is_empty() {
                     if let Some(layout) = get_layout(&store, &name) {
                         let action = build_action(format!("layout:show:{}", layout.name), &flags);
@@ -314,8 +324,8 @@ impl Plugin for LayoutPlugin {
         if let Some(rest) = crate::common::strip_prefix_ci(rest, "edit") {
             if rest.trim().is_empty() {
                 return vec![Action {
-                    label: "Edit layouts.json".into(),
-                    desc: "Layout".into(),
+                    label: format!("{config_label} ({config_desc})"),
+                    desc: "Layout config".into(),
                     action: "layout:edit".into(),
                     args: None,
                 }];
