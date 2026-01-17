@@ -70,7 +70,7 @@ impl DashboardDiagnostics {
         };
         if update_due || duration >= self.warning_threshold {
             let entry = self.widget_states.entry(key).or_insert(WidgetRefreshState {
-                label,
+                label: label.clone(),
                 last_refresh_at: now,
                 last_duration: duration,
                 last_sample: now,
