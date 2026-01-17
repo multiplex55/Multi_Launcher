@@ -39,13 +39,36 @@ impl HistoryPin {
             timestamp: entry.timestamp,
         }
     }
+
+    pub fn matches_action(&self, action: &Action) -> bool {
+        self.matches_id(&action.action, action.args.as_deref())
+    }
+
+    pub fn matches_id(&self, action_id: &str, args: Option<&str>) -> bool {
+        self.action_id == action_id && self.args.as_deref() == args
+    }
+
+    pub fn update_from_action(&mut self, action: &Action) -> bool {
+        let mut changed = false;
+        if self.label != action.label {
+            self.label = action.label.clone();
+            changed = true;
+        }
+        if self.desc != action.desc {
+            self.desc = action.desc.clone();
+            changed = true;
+        }
+        if self.args != action.args {
+            self.args = action.args.clone();
+            changed = true;
+        }
+        changed
+    }
 }
 
 impl PartialEq for HistoryPin {
     fn eq(&self, other: &Self) -> bool {
-        self.action_id == other.action_id
-            && self.query == other.query
-            && self.timestamp == other.timestamp
+        self.action_id == other.action_id && self.args == other.args
     }
 }
 
@@ -163,9 +186,75 @@ pub fn toggle_pin(path: &str, pin: &HistoryPin) -> anyhow::Result<bool> {
     }
 }
 
+pub fn upsert_pin(path: &str, pin: &HistoryPin) -> anyhow::Result<bool> {
+    let mut pins = load_pins(path).unwrap_or_default();
+    if let Some(existing) = pins
+        .iter_mut()
+        .find(|p| p.matches_id(&pin.action_id, pin.args.as_deref()))
+    {
+        existing.label = pin.label.clone();
+        existing.desc = pin.desc.clone();
+        existing.args = pin.args.clone();
+        existing.query = pin.query.clone();
+        existing.timestamp = pin.timestamp;
+        save_pins(path, &pins)?;
+        Ok(false)
+    } else {
+        pins.push(pin.clone());
+        save_pins(path, &pins)?;
+        Ok(true)
+    }
+}
+
+pub fn remove_pin(path: &str, action_id: &str, args: Option<&str>) -> anyhow::Result<bool> {
+    let mut pins = load_pins(path).unwrap_or_default();
+    if let Some(idx) = pins
+        .iter()
+        .position(|p| p.matches_id(action_id, args))
+    {
+        pins.remove(idx);
+        save_pins(path, &pins)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PinRecomputeReport {
+    pub updated: usize,
+    pub missing: usize,
+}
+
+pub fn recompute_pins<F>(path: &str, mut resolve: F) -> anyhow::Result<PinRecomputeReport>
+where
+    F: FnMut(&HistoryPin) -> Option<Action>,
+{
+    let mut pins = load_pins(path).unwrap_or_default();
+    let mut report = PinRecomputeReport::default();
+    let mut changed = false;
+    for pin in &mut pins {
+        if let Some(action) = resolve(pin) {
+            if pin.update_from_action(&action) {
+                report.updated += 1;
+                changed = true;
+            }
+        } else {
+            report.missing += 1;
+        }
+    }
+    if changed {
+        save_pins(path, &pins)?;
+    }
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{load_pins, save_pins, toggle_pin, HistoryPin};
+    use super::{
+        load_pins, recompute_pins, remove_pin, save_pins, toggle_pin, upsert_pin, HistoryPin,
+    };
+    use crate::actions::Action;
     use tempfile::tempdir;
 
     #[test]
@@ -194,5 +283,88 @@ mod tests {
         assert!(now_pinned);
         let reloaded = load_pins(path.to_str().unwrap()).expect("load after add");
         assert_eq!(reloaded, vec![pin]);
+    }
+
+    #[test]
+    fn pin_identity_uses_action_id_and_args() {
+        let pin = HistoryPin {
+            action_id: "action:one".into(),
+            label: "One".into(),
+            desc: "Test".into(),
+            args: Some("--flag".into()),
+            query: "one".into(),
+            timestamp: 1,
+        };
+        let same_action = HistoryPin {
+            action_id: "action:one".into(),
+            label: "One Updated".into(),
+            desc: "Other".into(),
+            args: Some("--flag".into()),
+            query: "two".into(),
+            timestamp: 2,
+        };
+        let different_args = HistoryPin {
+            action_id: "action:one".into(),
+            label: "One".into(),
+            desc: "Test".into(),
+            args: Some("--other".into()),
+            query: "one".into(),
+            timestamp: 1,
+        };
+        assert_eq!(pin, same_action);
+        assert_ne!(pin, different_args);
+    }
+
+    #[test]
+    fn upsert_and_recompute_pins() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("pins.json");
+        let pin = HistoryPin {
+            action_id: "action:one".into(),
+            label: "One".into(),
+            desc: "Old".into(),
+            args: None,
+            query: "one".into(),
+            timestamp: 10,
+        };
+        let added = upsert_pin(path.to_str().unwrap(), &pin).expect("upsert add");
+        assert!(added);
+
+        let updated_pin = HistoryPin {
+            action_id: "action:one".into(),
+            label: "One Updated".into(),
+            desc: "New".into(),
+            args: None,
+            query: "two".into(),
+            timestamp: 11,
+        };
+        let added = upsert_pin(path.to_str().unwrap(), &updated_pin).expect("upsert update");
+        assert!(!added);
+
+        let report = recompute_pins(path.to_str().unwrap(), |pin| {
+            if pin.action_id == "action:one" {
+                Some(Action {
+                    label: "One Fresh".into(),
+                    desc: "Fresh".into(),
+                    action: pin.action_id.clone(),
+                    args: None,
+                })
+            } else {
+                None
+            }
+        })
+        .expect("recompute");
+        assert_eq!(report.updated, 1);
+        assert_eq!(report.missing, 0);
+
+        let pins = load_pins(path.to_str().unwrap()).expect("reload pins");
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].label, "One Fresh");
+        assert_eq!(pins[0].desc, "Fresh");
+
+        let removed = remove_pin(path.to_str().unwrap(), "action:one", None).expect("remove pin");
+        assert!(removed);
+        let pins = load_pins(path.to_str().unwrap()).expect("reload pins");
+        assert!(pins.is_empty());
     }
 }

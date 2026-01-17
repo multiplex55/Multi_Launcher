@@ -42,6 +42,7 @@ struct DisplayEntry {
     query: String,
     timestamp: i64,
     pinned: bool,
+    missing: bool,
 }
 
 pub struct CommandHistoryWidget {
@@ -114,21 +115,162 @@ impl CommandHistoryWidget {
             || entry.query.to_lowercase().contains(&filter)
     }
 
-    fn resolve_action(ctx: &DashboardContext<'_>, action_id: &str, fallback: &Action) -> Action {
-        ctx.actions_by_id
-            .get(action_id)
-            .cloned()
-            .unwrap_or_else(|| fallback.clone())
+    fn resolve_action(
+        ctx: &DashboardContext<'_>,
+        action_id: &str,
+        args: Option<&str>,
+    ) -> Option<Action> {
+        if let Some(action) = ctx.actions_by_id.get(action_id) {
+            return Some(action.clone());
+        }
+
+        let commands = ctx.plugins.commands_filtered(ctx.enabled_plugins);
+        if let Some(action) = commands
+            .into_iter()
+            .find(|action| action.action == action_id && action.args.as_deref() == args)
+        {
+            return Some(action);
+        }
+
+        let snapshot = ctx.data_cache.snapshot();
+        if let Some(action) = snapshot
+            .processes
+            .iter()
+            .find(|action| action.action == action_id && action.args.as_deref() == args)
+        {
+            return Some(action.clone());
+        }
+
+        if let Some(fav) = snapshot
+            .favorites
+            .iter()
+            .find(|fav| fav.action == action_id && fav.args.as_deref() == args)
+        {
+            return Some(Action {
+                label: fav.label.clone(),
+                desc: "Fav".into(),
+                action: fav.action.clone(),
+                args: fav.args.clone(),
+            });
+        }
+
+        if let Some(slug) = action_id.strip_prefix("note:open:") {
+            if let Some(note) = snapshot.notes.iter().find(|note| note.slug == slug) {
+                return Some(Action {
+                    label: note.alias.as_ref().unwrap_or(&note.title).clone(),
+                    desc: "Note".into(),
+                    action: action_id.to_string(),
+                    args: None,
+                });
+            }
+        }
+
+        if let Some(idx) = action_id
+            .strip_prefix("clipboard:copy:")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            if let Some(entry) = snapshot.clipboard_history.get(idx) {
+                return Some(Action {
+                    label: entry.clone(),
+                    desc: "Clipboard".into(),
+                    action: action_id.to_string(),
+                    args: None,
+                });
+            }
+        }
+
+        if let Some(idx) = action_id
+            .strip_prefix("todo:done:")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            if let Some(todo) = snapshot.todos.get(idx) {
+                return Some(Action {
+                    label: format!("{} {}", if todo.done { "[x]" } else { "[ ]" }, todo.text),
+                    desc: "Todo".into(),
+                    action: action_id.to_string(),
+                    args: None,
+                });
+            }
+        }
+
+        if let Some(idx) = action_id
+            .strip_prefix("todo:edit:")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            if let Some(todo) = snapshot.todos.get(idx) {
+                return Some(Action {
+                    label: format!("{} {}", if todo.done { "[x]" } else { "[ ]" }, todo.text),
+                    desc: "Todo".into(),
+                    action: action_id.to_string(),
+                    args: None,
+                });
+            }
+        }
+
+        if let Some(idx) = action_id
+            .strip_prefix("todo:remove:")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            if let Some(todo) = snapshot.todos.get(idx) {
+                return Some(Action {
+                    label: format!("Remove todo {}", todo.text),
+                    desc: "Todo".into(),
+                    action: action_id.to_string(),
+                    args: None,
+                });
+            }
+        }
+
+        for snippet in snapshot.snippets.iter() {
+            if action_id == format!("clipboard:{}", snippet.text) {
+                return Some(Action {
+                    label: snippet.alias.clone(),
+                    desc: "Snippet".into(),
+                    action: action_id.to_string(),
+                    args: None,
+                });
+            }
+        }
+
+        if let Some(alias) = action_id.strip_prefix("snippet:edit:") {
+            if snapshot.snippets.iter().any(|s| s.alias == alias) {
+                return Some(Action {
+                    label: format!("Edit snippet {alias}"),
+                    desc: "Snippet".into(),
+                    action: action_id.to_string(),
+                    args: None,
+                });
+            }
+        }
+
+        if let Some(alias) = action_id.strip_prefix("snippet:remove:") {
+            if snapshot.snippets.iter().any(|s| s.alias == alias) {
+                return Some(Action {
+                    label: format!("Remove snippet {alias}"),
+                    desc: "Snippet".into(),
+                    action: action_id.to_string(),
+                    args: None,
+                });
+            }
+        }
+
+        None
     }
 
     fn entry_from_history(ctx: &DashboardContext<'_>, entry: &HistoryEntry) -> DisplayEntry {
-        let action = Self::resolve_action(ctx, &entry.action.action, &entry.action);
+        let resolved = Self::resolve_action(
+            ctx,
+            &entry.action.action,
+            entry.action.args.as_deref(),
+        );
+        let action = resolved.unwrap_or_else(|| entry.action.clone());
         DisplayEntry {
             action_id: entry.action.action.clone(),
             action,
             query: entry.query.clone(),
             timestamp: entry.timestamp,
             pinned: false,
+            missing: false,
         }
     }
 
@@ -139,13 +281,15 @@ impl CommandHistoryWidget {
             action: pin.action_id.clone(),
             args: pin.args.clone(),
         };
-        let action = Self::resolve_action(ctx, &pin.action_id, &fallback);
+        let resolved = Self::resolve_action(ctx, &pin.action_id, pin.args.as_deref());
+        let action = resolved.clone().unwrap_or(fallback);
         DisplayEntry {
             action_id: pin.action_id.clone(),
             action,
             query: pin.query.clone(),
             timestamp: pin.timestamp,
             pinned: true,
+            missing: resolved.is_none(),
         }
     }
 
@@ -238,11 +382,27 @@ impl Widget for CommandHistoryWidget {
                     }
                 }
 
-                if ui.button(&entry.action.label).clicked() {
+                let action_label = if entry.missing {
+                    format!("{} (missing)", entry.action.label)
+                } else {
+                    entry.action.label.clone()
+                };
+                if entry.missing {
+                    ui.colored_label(egui::Color32::YELLOW, action_label);
+                } else if ui.button(&action_label).clicked() {
                     clicked = Some(WidgetAction {
                         action: entry.action.clone(),
                         query_override: Some(entry.query.clone()),
                     });
+                }
+                if entry.missing && ui.button("Unpin").clicked() {
+                    let _ = crate::history::remove_pin(
+                        HISTORY_PINS_FILE,
+                        &entry.action_id,
+                        entry.action.args.as_deref(),
+                    );
+                    self.cached_pins
+                        .retain(|p| p.action_id != entry.action_id || p.args != entry.action.args);
                 }
                 ui.label(timestamp);
             });

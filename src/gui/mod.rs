@@ -70,7 +70,7 @@ use crate::dashboard::{
     Dashboard, DashboardContext, DashboardDataCache, DashboardEvent, WidgetActivation,
 };
 use crate::help_window::HelpWindow;
-use crate::history::{self, HistoryEntry};
+use crate::history::{self, HistoryEntry, HistoryPin, HISTORY_PINS_FILE};
 use crate::indexer;
 use crate::launcher::launch_action;
 use crate::plugin::PluginManager;
@@ -1503,6 +1503,261 @@ impl LauncherApp {
 
     pub fn focus_input(&mut self) {
         self.focus_query = true;
+    }
+
+    fn resolve_pin_action(&self, pin: &HistoryPin) -> Option<Action> {
+        if let Some(action) = self.actions_by_id.get(&pin.action_id) {
+            return Some(action.clone());
+        }
+
+        let commands = self.plugins.commands_filtered(self.enabled_plugins.as_ref());
+        if let Some(action) = commands.into_iter().find(|action| {
+            action.action == pin.action_id && action.args.as_deref() == pin.args.as_deref()
+        }) {
+            return Some(action);
+        }
+
+        let snapshot = self.dashboard_data_cache.snapshot();
+        if let Some(action) = snapshot.processes.iter().find(|action| {
+            action.action == pin.action_id && action.args.as_deref() == pin.args.as_deref()
+        }) {
+            return Some(action.clone());
+        }
+
+        if let Some(fav) = snapshot.favorites.iter().find(|fav| {
+            fav.action == pin.action_id && fav.args.as_deref() == pin.args.as_deref()
+        }) {
+            return Some(Action {
+                label: fav.label.clone(),
+                desc: "Fav".into(),
+                action: fav.action.clone(),
+                args: fav.args.clone(),
+            });
+        }
+
+        if let Some(slug) = pin.action_id.strip_prefix("note:open:") {
+            if let Some(note) = snapshot.notes.iter().find(|note| note.slug == slug) {
+                return Some(Action {
+                    label: note.alias.as_ref().unwrap_or(&note.title).clone(),
+                    desc: "Note".into(),
+                    action: pin.action_id.clone(),
+                    args: None,
+                });
+            }
+        }
+
+        if let Some(idx) = pin
+            .action_id
+            .strip_prefix("clipboard:copy:")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            if let Some(entry) = snapshot.clipboard_history.get(idx) {
+                return Some(Action {
+                    label: entry.clone(),
+                    desc: "Clipboard".into(),
+                    action: pin.action_id.clone(),
+                    args: None,
+                });
+            }
+        }
+
+        if let Some(idx) = pin
+            .action_id
+            .strip_prefix("todo:done:")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            if let Some(todo) = snapshot.todos.get(idx) {
+                return Some(Action {
+                    label: format!("{} {}", if todo.done { "[x]" } else { "[ ]" }, todo.text),
+                    desc: "Todo".into(),
+                    action: pin.action_id.clone(),
+                    args: None,
+                });
+            }
+        }
+
+        if let Some(idx) = pin
+            .action_id
+            .strip_prefix("todo:edit:")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            if let Some(todo) = snapshot.todos.get(idx) {
+                return Some(Action {
+                    label: format!("{} {}", if todo.done { "[x]" } else { "[ ]" }, todo.text),
+                    desc: "Todo".into(),
+                    action: pin.action_id.clone(),
+                    args: None,
+                });
+            }
+        }
+
+        if let Some(idx) = pin
+            .action_id
+            .strip_prefix("todo:remove:")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            if let Some(todo) = snapshot.todos.get(idx) {
+                return Some(Action {
+                    label: format!("Remove todo {}", todo.text),
+                    desc: "Todo".into(),
+                    action: pin.action_id.clone(),
+                    args: None,
+                });
+            }
+        }
+
+        for snippet in snapshot.snippets.iter() {
+            if pin.action_id == format!("clipboard:{}", snippet.text) {
+                return Some(Action {
+                    label: snippet.alias.clone(),
+                    desc: "Snippet".into(),
+                    action: pin.action_id.clone(),
+                    args: None,
+                });
+            }
+        }
+
+        if let Some(alias) = pin.action_id.strip_prefix("snippet:edit:") {
+            if snapshot.snippets.iter().any(|s| s.alias == alias) {
+                return Some(Action {
+                    label: format!("Edit snippet {alias}"),
+                    desc: "Snippet".into(),
+                    action: pin.action_id.clone(),
+                    args: None,
+                });
+            }
+        }
+
+        if let Some(alias) = pin.action_id.strip_prefix("snippet:remove:") {
+            if snapshot.snippets.iter().any(|s| s.alias == alias) {
+                return Some(Action {
+                    label: format!("Remove snippet {alias}"),
+                    desc: "Snippet".into(),
+                    action: pin.action_id.clone(),
+                    args: None,
+                });
+            }
+        }
+
+        None
+    }
+
+    fn pin_result_menu(&mut self, ui: &mut egui::Ui, action: &Action) {
+        ui.separator();
+        let pins = history::load_pins(HISTORY_PINS_FILE).unwrap_or_default();
+        let is_pinned = pins.iter().any(|pin| pin.matches_action(action));
+        let pin = HistoryPin {
+            action_id: action.action.clone(),
+            label: action.label.clone(),
+            desc: action.desc.clone(),
+            args: action.args.clone(),
+            query: self.query.clone(),
+            timestamp: chrono::Utc::now().timestamp(),
+        };
+
+        if !is_pinned {
+            if ui.button("Pin current query result").clicked() {
+                match history::upsert_pin(HISTORY_PINS_FILE, &pin) {
+                    Ok(_) => {
+                        if self.enable_toasts {
+                            push_toast(
+                                &mut self.toasts,
+                                Toast {
+                                    text: format!("Pinned {}", action.label).into(),
+                                    kind: ToastKind::Success,
+                                    options: ToastOptions::default()
+                                        .duration_in_seconds(self.toast_duration as f64),
+                                },
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        self.error = Some(format!("Failed to pin result: {e}"));
+                    }
+                }
+                ui.close_menu();
+            }
+        } else {
+            if ui.button("Unpin result").clicked() {
+                if let Err(e) = history::remove_pin(
+                    HISTORY_PINS_FILE,
+                    &action.action,
+                    action.args.as_deref(),
+                ) {
+                    self.error = Some(format!("Failed to unpin result: {e}"));
+                } else if self.enable_toasts {
+                    push_toast(
+                        &mut self.toasts,
+                        Toast {
+                            text: format!("Unpinned {}", action.label).into(),
+                            kind: ToastKind::Success,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(self.toast_duration as f64),
+                        },
+                    );
+                }
+                ui.close_menu();
+            }
+            if ui.button("Replace pin with current result").clicked() {
+                match history::upsert_pin(HISTORY_PINS_FILE, &pin) {
+                    Ok(_) => {
+                        if self.enable_toasts {
+                            push_toast(
+                                &mut self.toasts,
+                                Toast {
+                                    text: format!("Updated pin for {}", action.label).into(),
+                                    kind: ToastKind::Success,
+                                    options: ToastOptions::default()
+                                        .duration_in_seconds(self.toast_duration as f64),
+                                },
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        self.error = Some(format!("Failed to update pin: {e}"));
+                    }
+                }
+                ui.close_menu();
+            }
+        }
+
+        if ui.button("Recompute pinned results").clicked() {
+            match history::recompute_pins(HISTORY_PINS_FILE, |pin| self.resolve_pin_action(pin)) {
+                Ok(report) => {
+                    if self.enable_toasts {
+                        let text = if report.updated == 0 && report.missing == 0 {
+                            "Pinned results are up to date.".to_string()
+                        } else if report.updated > 0 && report.missing > 0 {
+                            format!(
+                                "Updated {} pinned results ({} missing).",
+                                report.updated, report.missing
+                            )
+                        } else if report.updated > 0 {
+                            format!("Updated {} pinned results.", report.updated)
+                        } else {
+                            format!("{} pinned results missing.", report.missing)
+                        };
+                        push_toast(
+                            &mut self.toasts,
+                            Toast {
+                                text: text.into(),
+                                kind: if report.missing > 0 {
+                                    ToastKind::Warning
+                                } else {
+                                    ToastKind::Success
+                                },
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(self.toast_duration as f64),
+                            },
+                        );
+                    }
+                }
+                Err(e) => {
+                    self.error = Some(format!("Failed to recompute pins: {e}"));
+                }
+            }
+            ui.close_menu();
+        }
     }
 
     pub fn set_last_search_query(&mut self, s: String) {
@@ -3369,6 +3624,7 @@ impl eframe::App for LauncherApp {
                                     .iter()
                                     .take(self.custom_len)
                                     .position(|act| act.action == a.action && act.label == a.label);
+                                let mut menu_added = false;
                                 if self.folder_aliases.contains_key(&a.action)
                                     && !a.action.starts_with("folder:")
                                 {
@@ -3399,7 +3655,17 @@ impl eframe::App for LauncherApp {
                                             }
                                             ui.close_menu();
                                         }
+                                        if let Some(idx_act) = custom_idx {
+                                            if ui.button("Edit App").clicked() {
+                                                self.editor
+                                                    .open_edit(idx_act, &self.actions[idx_act]);
+                                                self.show_editor = true;
+                                                ui.close_menu();
+                                            }
+                                        }
+                                        self.pin_result_menu(ui, &a);
                                     });
+                                    menu_added = true;
                                 } else if self.bookmark_aliases.contains_key(&a.action) {
                                     menu_resp.clone().context_menu(|ui| {
                                         if ui.button("Set Alias").clicked() {
@@ -3428,7 +3694,17 @@ impl eframe::App for LauncherApp {
                                             }
                                             ui.close_menu();
                                         }
+                                        if let Some(idx_act) = custom_idx {
+                                            if ui.button("Edit App").clicked() {
+                                                self.editor
+                                                    .open_edit(idx_act, &self.actions[idx_act]);
+                                                self.show_editor = true;
+                                                ui.close_menu();
+                                            }
+                                        }
+                                        self.pin_result_menu(ui, &a);
                                     });
+                                    menu_added = true;
                                 } else if a.desc == "Timer" && a.action.starts_with("timer:show:") {
                                     if let Ok(id) = a.action[11..].parse::<u64>() {
                                         let query = self.query.trim().to_string();
@@ -3467,7 +3743,17 @@ impl eframe::App for LauncherApp {
                                                 }
                                                 ui.close_menu();
                                             }
+                                            if let Some(idx_act) = custom_idx {
+                                                if ui.button("Edit App").clicked() {
+                                                    self.editor
+                                                        .open_edit(idx_act, &self.actions[idx_act]);
+                                                    self.show_editor = true;
+                                                    ui.close_menu();
+                                                }
+                                            }
+                                            self.pin_result_menu(ui, &a);
                                         });
+                                        menu_added = true;
                                     }
                                 } else if a.desc == "Stopwatch" && a.action.starts_with("stopwatch:show:") {
                                     if let Ok(id) = a.action["stopwatch:show:".len()..].parse::<u64>() {
@@ -3541,7 +3827,17 @@ impl eframe::App for LauncherApp {
                                                 }
                                                 ui.close_menu();
                                             }
+                                            if let Some(idx_act) = custom_idx {
+                                                if ui.button("Edit App").clicked() {
+                                                    self.editor
+                                                        .open_edit(idx_act, &self.actions[idx_act]);
+                                                    self.show_editor = true;
+                                                    ui.close_menu();
+                                                }
+                                            }
+                                            self.pin_result_menu(ui, &a);
                                         });
+                                        menu_added = true;
                                     }
                                 } else if a.desc == "Snippet" {
                                     menu_resp.clone().context_menu(|ui| {
@@ -3568,7 +3864,17 @@ impl eframe::App for LauncherApp {
                                             }
                                             ui.close_menu();
                                         }
+                                        if let Some(idx_act) = custom_idx {
+                                            if ui.button("Edit App").clicked() {
+                                                self.editor
+                                                    .open_edit(idx_act, &self.actions[idx_act]);
+                                                self.show_editor = true;
+                                                ui.close_menu();
+                                            }
+                                        }
+                                        self.pin_result_menu(ui, &a);
                                     });
+                                    menu_added = true;
                                 } else if a.desc == "Tempfile" && !a.action.starts_with("tempfile:") {
                                     let file_path = a.action.clone();
                                     menu_resp.clone().context_menu(|ui| {
@@ -3597,7 +3903,17 @@ impl eframe::App for LauncherApp {
                                             }
                                             ui.close_menu();
                                         }
+                                        if let Some(idx_act) = custom_idx {
+                                            if ui.button("Edit App").clicked() {
+                                                self.editor
+                                                    .open_edit(idx_act, &self.actions[idx_act]);
+                                                self.show_editor = true;
+                                                ui.close_menu();
+                                            }
+                                        }
+                                        self.pin_result_menu(ui, &a);
                                     });
+                                    menu_added = true;
                                 } else if a.desc == "Note"
                                     && a.action.starts_with("note:open:")
                                 {
@@ -3647,7 +3963,17 @@ impl eframe::App for LauncherApp {
                                             set_focus = true;
                                             ui.close_menu();
                                         }
+                                        if let Some(idx_act) = custom_idx {
+                                            if ui.button("Edit App").clicked() {
+                                                self.editor
+                                                    .open_edit(idx_act, &self.actions[idx_act]);
+                                                self.show_editor = true;
+                                                ui.close_menu();
+                                            }
+                                        }
+                                        self.pin_result_menu(ui, &a);
                                     });
+                                    menu_added = true;
                                 } else if a.desc == "Clipboard"
                                     && a.action.starts_with("clipboard:copy:")
                                 {
@@ -3681,7 +4007,17 @@ impl eframe::App for LauncherApp {
                                                 }
                                                 ui.close_menu();
                                             }
+                                            if let Some(idx_act) = custom_idx {
+                                                if ui.button("Edit App").clicked() {
+                                                    self.editor
+                                                        .open_edit(idx_act, &self.actions[idx_act]);
+                                                    self.show_editor = true;
+                                                    ui.close_menu();
+                                                }
+                                            }
+                                            self.pin_result_menu(ui, &a);
                                         });
+                                        menu_added = true;
                                     }
                                 } else if a.desc == "Todo" && a.action.starts_with("todo:done:") {
                                     let idx_str = a.action.rsplit(':').next().unwrap_or("");
@@ -3691,16 +4027,30 @@ impl eframe::App for LauncherApp {
                                                 self.todo_view_dialog.open_edit(todo_idx);
                                                 ui.close_menu();
                                             }
+                                            if let Some(idx_act) = custom_idx {
+                                                if ui.button("Edit App").clicked() {
+                                                    self.editor
+                                                        .open_edit(idx_act, &self.actions[idx_act]);
+                                                    self.show_editor = true;
+                                                    ui.close_menu();
+                                                }
+                                            }
+                                            self.pin_result_menu(ui, &a);
                                         });
+                                        menu_added = true;
                                     }
                                 }
-                                if let Some(idx_act) = custom_idx {
+                                if !menu_added {
                                     menu_resp.clone().context_menu(|ui| {
-                                        if ui.button("Edit App").clicked() {
-                                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                                            self.show_editor = true;
-                                            ui.close_menu();
+                                        if let Some(idx_act) = custom_idx {
+                                            if ui.button("Edit App").clicked() {
+                                                self.editor
+                                                    .open_edit(idx_act, &self.actions[idx_act]);
+                                                self.show_editor = true;
+                                                ui.close_menu();
+                                            }
                                         }
+                                        self.pin_result_menu(ui, &a);
                                     });
                                 }
                                 resp = menu_resp;
