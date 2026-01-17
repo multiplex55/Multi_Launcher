@@ -15,8 +15,9 @@ fn search_set_numeric() {
 fn search_plain_bright() {
     let plugin = BrightnessPlugin;
     let results = plugin.search("bright");
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].action, "brightness:dialog");
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().any(|action| action.action == "brightness:dialog"));
+    assert!(results.iter().any(|action| action.label.starts_with("Usage: bright")));
 }
 
 #[test]
@@ -25,4 +26,12 @@ fn search_bright_no_hardware_calls() {
     let plugin = BrightnessPlugin;
     let _ = plugin.search("bright");
     assert_eq!(BRIGHTNESS_QUERIES.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn fuzzish_partial_inputs_are_helpful() {
+    let plugin = BrightnessPlugin;
+    let results = plugin.search("br");
+    assert_eq!(results.len(), 1);
+    assert!(results[0].label.starts_with("Usage: bright"));
 }
