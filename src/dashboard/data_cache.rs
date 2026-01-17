@@ -8,8 +8,8 @@ use crate::plugins::fav::{load_favs, FavEntry, FAV_FILE};
 use crate::plugins::note::{load_notes, Note};
 use crate::plugins::snippets::{load_snippets, SnippetEntry, SNIPPETS_FILE};
 use crate::plugins::todo::{load_todos, TodoEntry, TODO_FILE};
+use crate::watchlist::{watchlist_snapshot, WatchItemSnapshot};
 use crate::{launcher, launcher::RecycleBinInfo};
-use crate::watchlist::{WatchItemSnapshot, WatchlistState};
 use chrono::Local;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -243,7 +243,6 @@ struct DashboardDataState {
     last_recycle_refresh: Instant,
     last_network_totals: (u64, u64),
     last_network_time: Instant,
-    watchlist_state: WatchlistState,
 }
 
 pub struct DashboardDataCache {
@@ -260,7 +259,6 @@ impl DashboardDataCache {
                 last_recycle_refresh: Instant::now() - Duration::from_secs(60),
                 last_network_totals: (0, 0),
                 last_network_time: Instant::now() - Duration::from_secs(60),
-                watchlist_state: WatchlistState::new(),
             }),
         }
     }
@@ -291,10 +289,9 @@ impl DashboardDataCache {
             .unwrap_or_else(|_| Arc::new(Vec::new()))
     }
 
-    pub fn maybe_refresh_watchlist(&self, refresh_ms: u64) {
+    pub fn maybe_refresh_watchlist(&self, _refresh_ms: u64) {
         if let Ok(mut state) = self.state.lock() {
-            state.watchlist_state.maybe_refresh(refresh_ms);
-            let snapshot = state.watchlist_state.snapshot();
+            let snapshot = watchlist_snapshot();
             state.snapshot = Arc::new(state.snapshot.with_watchlist_snapshot(snapshot));
         }
     }

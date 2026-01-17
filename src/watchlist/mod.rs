@@ -14,8 +14,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, RwLock,
+    Arc, Condvar, Mutex, RwLock,
 };
+use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 pub const WATCHLIST_FILE: &str = "watchlist.json";
@@ -28,6 +29,14 @@ pub static WATCHLIST_PATH: Lazy<RwLock<PathBuf>> =
     Lazy::new(|| RwLock::new(PathBuf::from(WATCHLIST_FILE)));
 pub static WATCHLIST_SNAPSHOT: Lazy<RwLock<Arc<Vec<WatchItemSnapshot>>>> =
     Lazy::new(|| RwLock::new(Arc::new(Vec::new())));
+static WATCHLIST_REFRESH_REQUESTED: AtomicBool = AtomicBool::new(false);
+static WATCHLIST_REFRESH_NOTIFY: Lazy<(Mutex<()>, Condvar)> =
+    Lazy::new(|| (Mutex::new(()), Condvar::new()));
+static WATCHLIST_WORKER_INIT: Lazy<()> = Lazy::new(|| {
+    let _ = thread::Builder::new()
+        .name("watchlist-worker".into())
+        .spawn(watchlist_worker_loop);
+});
 
 pub fn watchlist_refresh_ms() -> u64 {
     WATCHLIST_DATA
@@ -48,10 +57,20 @@ pub fn watchlist_path_string() -> String {
 }
 
 pub fn watchlist_snapshot() -> Arc<Vec<WatchItemSnapshot>> {
+    ensure_watchlist_worker_started();
     WATCHLIST_SNAPSHOT
         .read()
         .map(|snapshot| Arc::clone(&snapshot))
         .unwrap_or_else(|_| Arc::new(Vec::new()))
+}
+
+pub fn request_watchlist_refresh() {
+    ensure_watchlist_worker_started();
+    WATCHLIST_REFRESH_REQUESTED.store(true, Ordering::SeqCst);
+    let (lock, condvar) = &*WATCHLIST_REFRESH_NOTIFY;
+    if let Ok(_guard) = lock.lock() {
+        condvar.notify_one();
+    }
 }
 
 fn default_watchlist_version() -> u32 {
@@ -196,6 +215,10 @@ impl WatchlistState {
 
     pub fn snapshot(&self) -> Arc<Vec<WatchItemSnapshot>> {
         Arc::clone(&self.snapshot)
+    }
+
+    pub fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::SeqCst);
     }
 
     pub fn maybe_refresh(&mut self, refresh_ms: u64) {
@@ -344,6 +367,7 @@ pub(crate) fn write_watchlist_config(path: &str, cfg: &mut WatchlistConfig) -> R
 }
 
 pub fn start_watchlist_watcher(settings: &Settings, settings_path: &str) -> Option<JsonWatcher> {
+    ensure_watchlist_worker_started();
     let path = resolve_watchlist_path(settings, settings_path);
     if let Ok(mut lock) = WATCHLIST_PATH.write() {
         *lock = path.clone();
@@ -368,6 +392,7 @@ fn update_watchlist_cache(cfg: WatchlistConfig) {
         *lock = cfg;
     }
     bump_watchlist_version();
+    request_watchlist_refresh();
 }
 
 fn cache_watchlist_snapshot(snapshot: &Arc<Vec<WatchItemSnapshot>>) {
@@ -504,6 +529,7 @@ fn watch_path(path: &Path, dirty: Arc<AtomicBool>) -> Option<RecommendedWatcher>
                     EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
                 ) {
                     dirty.store(true, Ordering::SeqCst);
+                    request_watchlist_refresh();
                 }
             }
             Err(err) => tracing::error!("watchlist watch error: {err:?}"),
@@ -684,5 +710,25 @@ fn format_delta_duration(secs: u64) -> String {
         format!("{}h", secs / 3600)
     } else {
         format!("{}d", secs / 86_400)
+    }
+}
+
+fn ensure_watchlist_worker_started() {
+    Lazy::force(&WATCHLIST_WORKER_INIT);
+}
+
+fn watchlist_worker_loop() {
+    let mut state = WatchlistState::new();
+    loop {
+        if WATCHLIST_REFRESH_REQUESTED.swap(false, Ordering::SeqCst) {
+            state.mark_dirty();
+        }
+        let refresh_ms = watchlist_refresh_ms();
+        state.maybe_refresh(refresh_ms);
+        let wait_ms = refresh_ms.max(250);
+        let (lock, condvar) = &*WATCHLIST_REFRESH_NOTIFY;
+        if let Ok(guard) = lock.lock() {
+            let _ = condvar.wait_timeout(guard, Duration::from_millis(wait_ms));
+        }
     }
 }

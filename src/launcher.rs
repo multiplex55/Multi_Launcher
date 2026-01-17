@@ -1028,6 +1028,7 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
             let _ = crate::watchlist::refresh_watchlist_cache(
                 &crate::watchlist::watchlist_path_string(),
             );
+            crate::watchlist::request_watchlist_refresh();
             Ok(())
         }
         ActionKind::WatchlistInit { force } => {

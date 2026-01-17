@@ -6,20 +6,21 @@ use crate::{watchlist, watchlist::WatchItemConfig};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WatchlistWidgetConfig {}
 
 pub struct WatchlistWidget {
-    refresh_pending: bool,
     error: Option<String>,
+    filter: WatchlistQuickFilter,
 }
 
 impl WatchlistWidget {
     pub fn new(_cfg: WatchlistWidgetConfig) -> Self {
         Self {
-            refresh_pending: false,
             error: None,
+            filter: WatchlistQuickFilter::All,
         }
     }
 
@@ -68,19 +69,20 @@ impl WatchlistWidget {
             .map(|path| (item.id.clone(), path.clone()))
     }
 
-    fn invalidate_watchlist_cache(&mut self) {
+    fn request_watchlist_refresh(&mut self) {
         if let Err(err) = watchlist::refresh_watchlist_cache(&watchlist_path_string()) {
             self.error = Some(format!("Failed to refresh watchlist: {err}"));
         } else {
             self.error = None;
         }
+        watchlist::request_watchlist_refresh();
     }
 
-    fn refresh_if_needed(&mut self, ctx: &DashboardContext<'_>) {
-        if self.refresh_pending {
-            ctx.data_cache.maybe_refresh_watchlist(0);
-            self.refresh_pending = false;
-        }
+    fn watchlist_config_empty() -> bool {
+        WATCHLIST_DATA
+            .read()
+            .map(|cfg| cfg.items.is_empty())
+            .unwrap_or(true)
     }
 
     fn render_header(ui: &mut egui::Ui) {
@@ -168,8 +170,7 @@ impl WatchlistWidget {
                 ui.close_menu();
             }
             if ui.button("Refresh now").clicked() {
-                self.invalidate_watchlist_cache();
-                self.refresh_pending = true;
+                self.request_watchlist_refresh();
                 ui.close_menu();
             }
         });
@@ -206,14 +207,37 @@ impl Widget for WatchlistWidget {
         ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        self.refresh_if_needed(ctx);
-
         if let Some(err) = &self.error {
             ui.colored_label(egui::Color32::YELLOW, err);
         }
 
         let snapshot = ctx.data_cache.watchlist_snapshot();
+        let watchlist_path = watchlist_path_string();
+        let config_empty = !Path::new(&watchlist_path).exists() || Self::watchlist_config_empty();
         if snapshot.is_empty() {
+            if config_empty {
+                ui.label("No watchlist configured.");
+                if ui.button("Create watchlist").clicked() {
+                    let action = Self::action("Initialize watchlist", "watch:init");
+                    return Some(WidgetAction {
+                        query_override: Some(action.label.clone()),
+                        action,
+                    });
+                }
+            } else {
+                ui.label("No watchlist items.");
+            }
+            return None;
+        }
+
+        let filtered: Vec<&WatchItemSnapshot> = snapshot
+            .iter()
+            .filter(|entry| match self.filter {
+                WatchlistQuickFilter::All => true,
+                WatchlistQuickFilter::WarnPlus => entry.status != WatchStatus::Ok,
+            })
+            .collect();
+        if filtered.is_empty() {
             ui.label("No watchlist items.");
             return None;
         }
@@ -231,7 +255,7 @@ impl Widget for WatchlistWidget {
                     .min_col_width(60.0)
                     .show(ui, |ui| {
                         Self::render_header(ui);
-                        for entry in snapshot.iter() {
+                        for entry in filtered {
                             let path = paths.get(&entry.id).map(String::as_str);
                             if clicked.is_none() {
                                 clicked = self.render_row(ui, entry, path);
@@ -250,14 +274,35 @@ impl Widget for WatchlistWidget {
         ui: &mut egui::Ui,
         _ctx: &DashboardContext<'_>,
     ) -> Option<WidgetAction> {
+        let mut action = None;
+        if ui
+            .small_button("Open config")
+            .on_hover_text("Open watchlist.json.")
+            .clicked()
+        {
+            let action_item = Self::action("Open watchlist.json", watchlist_path_string());
+            action = Some(WidgetAction {
+                query_override: Some(action_item.label.clone()),
+                action: action_item,
+            });
+        }
         if ui
             .small_button("Refresh")
             .on_hover_text("Refresh watchlist data now.")
             .clicked()
         {
-            self.invalidate_watchlist_cache();
-            self.refresh_pending = true;
+            self.request_watchlist_refresh();
         }
-        None
+        ui.separator();
+        ui.label("Filter:");
+        ui.selectable_value(&mut self.filter, WatchlistQuickFilter::All, "All");
+        ui.selectable_value(&mut self.filter, WatchlistQuickFilter::WarnPlus, "Warn+");
+        action
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchlistQuickFilter {
+    All,
+    WarnPlus,
 }
