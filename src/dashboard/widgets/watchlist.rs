@@ -1,7 +1,7 @@
 use super::{Widget, WidgetAction};
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
-use crate::watchlist::{WatchItemSnapshot, WatchStatus, WATCHLIST_DATA, WATCHLIST_FILE};
+use crate::watchlist::{watchlist_path_string, WatchItemSnapshot, WatchStatus, WATCHLIST_DATA};
 use crate::{watchlist, watchlist::WatchItemConfig};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -69,7 +69,7 @@ impl WatchlistWidget {
     }
 
     fn invalidate_watchlist_cache(&mut self) {
-        if let Err(err) = watchlist::refresh_watchlist_cache(WATCHLIST_FILE) {
+        if let Err(err) = watchlist::refresh_watchlist_cache(&watchlist_path_string()) {
             self.error = Some(format!("Failed to refresh watchlist: {err}"));
         } else {
             self.error = None;
@@ -160,7 +160,7 @@ impl WatchlistWidget {
                 }
             }
             if ui.button("Edit watchlist.json").clicked() {
-                let action = Self::action("Open watchlist.json", WATCHLIST_FILE.to_string());
+                let action = Self::action("Open watchlist.json", watchlist_path_string());
                 menu_action = Some(WidgetAction {
                     query_override: Some(action.label.clone()),
                     action,

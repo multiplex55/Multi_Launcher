@@ -415,6 +415,9 @@ enum ActionKind<'a> {
     LayoutEdit,
     NoteReload,
     WatchlistRefresh,
+    WatchlistInit {
+        force: bool,
+    },
     ExecPath {
         path: &'a str,
         args: Option<&'a str>,
@@ -732,6 +735,12 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if s == "watch:refresh" {
         return ActionKind::WatchlistRefresh;
     }
+    if s == "watch:init" {
+        return ActionKind::WatchlistInit { force: false };
+    }
+    if s == "watch:init:force" {
+        return ActionKind::WatchlistInit { force: true };
+    }
     if let Some(alias) = s.strip_prefix("tempfile:new:") {
         return ActionKind::TempfileNew(Some(alias));
     }
@@ -978,7 +987,12 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
             Ok(())
         }
         ActionKind::WatchlistRefresh => {
-            let _ = crate::watchlist::refresh_watchlist_cache(crate::watchlist::WATCHLIST_FILE);
+            let _ =
+                crate::watchlist::refresh_watchlist_cache(&crate::watchlist::watchlist_path_string());
+            Ok(())
+        }
+        ActionKind::WatchlistInit { force } => {
+            crate::watchlist::init_watchlist(&crate::watchlist::watchlist_path_string(), force)?;
             Ok(())
         }
         ActionKind::TempfileNew(alias) => tempfiles::new(alias),

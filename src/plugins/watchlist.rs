@@ -1,6 +1,7 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
-use crate::watchlist::{WatchItemConfig, WATCHLIST_DATA, WATCHLIST_FILE};
+use crate::watchlist::{self, watchlist_path_string, WatchItemConfig, WATCHLIST_DATA};
+use std::io::ErrorKind;
 
 pub struct WatchlistPlugin;
 
@@ -64,6 +65,74 @@ impl WatchlistPlugin {
             })
             .collect()
     }
+
+    fn watchlist_action(label: impl Into<String>, action: impl Into<String>) -> Action {
+        Action {
+            label: label.into(),
+            desc: "Watchlist".into(),
+            action: action.into(),
+            args: None,
+        }
+    }
+
+    fn watch_path_action() -> Action {
+        let path = watchlist_path_string();
+        Action {
+            label: path.clone(),
+            desc: "Watchlist path".into(),
+            action: format!("clipboard:{path}"),
+            args: None,
+        }
+    }
+
+    fn watch_edit_action() -> Action {
+        Self::watchlist_action("Edit watchlist", watchlist_path_string())
+    }
+
+    fn watch_init_actions(force: bool) -> Vec<Action> {
+        let path = watchlist_path_string();
+        if force {
+            return vec![Self::watchlist_action(
+                "Initialize watchlist (--force)",
+                "watch:init:force",
+            )];
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                if content.trim().is_empty() {
+                    return vec![Self::watchlist_action(
+                        "Watchlist is empty. Overwrite with watch init --force",
+                        "watch:init:force",
+                    )];
+                }
+                if let Err(err) = watchlist::load_watchlist(&path) {
+                    return vec![Self::watchlist_action(
+                        format!("Watchlist invalid ({err}). Overwrite with watch init --force"),
+                        "watch:init:force",
+                    )];
+                }
+                vec![Self::watchlist_action("Watchlist already exists", path)]
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                vec![Self::watchlist_action("Initialize watchlist", "watch:init")]
+            }
+            Err(err) => vec![Self::watchlist_action(
+                format!("Failed to read watchlist ({err}). Initialize watchlist"),
+                "watch:init",
+            )],
+        }
+    }
+
+    fn watch_validate_actions() -> Vec<Action> {
+        let path = watchlist_path_string();
+        match watchlist::load_watchlist(&path) {
+            Ok(_) => vec![Self::watchlist_action("Watchlist is valid (open config)", path)],
+            Err(err) => vec![Self::watchlist_action(
+                format!("Watchlist invalid: {err} (open config)"),
+                path,
+            )],
+        }
+    }
 }
 
 impl Plugin for WatchlistPlugin {
@@ -72,24 +141,12 @@ impl Plugin for WatchlistPlugin {
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch") {
             if rest.is_empty() {
                 return vec![
-                    Action {
-                        label: "Open watchlist".into(),
-                        desc: "Watchlist".into(),
-                        action: "query:watch list".into(),
-                        args: None,
-                    },
-                    Action {
-                        label: "Refresh watchlist".into(),
-                        desc: "Watchlist".into(),
-                        action: "watch:refresh".into(),
-                        args: None,
-                    },
-                    Action {
-                        label: "Edit watchlist.json".into(),
-                        desc: "Watchlist".into(),
-                        action: WATCHLIST_FILE.into(),
-                        args: None,
-                    },
+                    Self::watchlist_action("Open watchlist", "query:watch list"),
+                    Self::watchlist_action("Refresh watchlist", "watch:refresh"),
+                    Self::watchlist_action("watch path", "query:watch path"),
+                    Self::watchlist_action("watch init", "query:watch init"),
+                    Self::watchlist_action("watch validate", "query:watch validate"),
+                    Self::watch_edit_action(),
                 ];
             }
         }
@@ -98,22 +155,29 @@ impl Plugin for WatchlistPlugin {
         }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch refresh") {
             if rest.trim().is_empty() {
-                return vec![Action {
-                    label: "Refresh watchlist".into(),
-                    desc: "Watchlist".into(),
-                    action: "watch:refresh".into(),
-                    args: None,
-                }];
+                return vec![Self::watchlist_action("Refresh watchlist", "watch:refresh")];
+            }
+        }
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch init") {
+            let args = rest.trim();
+            let force = args.eq_ignore_ascii_case("--force");
+            if args.is_empty() || force {
+                return Self::watch_init_actions(force);
+            }
+        }
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch validate") {
+            if rest.trim().is_empty() {
+                return Self::watch_validate_actions();
             }
         }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch edit") {
             if rest.trim().is_empty() {
-                return vec![Action {
-                    label: "Edit watchlist.json".into(),
-                    desc: "Watchlist".into(),
-                    action: WATCHLIST_FILE.into(),
-                    args: None,
-                }];
+                return vec![Self::watch_edit_action()];
+            }
+        }
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch path") {
+            if rest.trim().is_empty() {
+                return vec![Self::watch_path_action()];
             }
         }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch open") {
@@ -136,36 +200,14 @@ impl Plugin for WatchlistPlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![
-            Action {
-                label: "watch".into(),
-                desc: "Watchlist".into(),
-                action: "query:watch ".into(),
-                args: None,
-            },
-            Action {
-                label: "watch list".into(),
-                desc: "List watchlist items".into(),
-                action: "query:watch list".into(),
-                args: None,
-            },
-            Action {
-                label: "watch open".into(),
-                desc: "Open a watchlist path".into(),
-                action: "query:watch open ".into(),
-                args: None,
-            },
-            Action {
-                label: "watch refresh".into(),
-                desc: "Refresh watchlist cache".into(),
-                action: "watch:refresh".into(),
-                args: None,
-            },
-            Action {
-                label: "watch edit".into(),
-                desc: "Edit watchlist.json".into(),
-                action: WATCHLIST_FILE.into(),
-                args: None,
-            },
+            Self::watchlist_action("watch", "query:watch "),
+            Self::watchlist_action("watch list", "query:watch list"),
+            Self::watchlist_action("watch open", "query:watch open "),
+            Self::watchlist_action("watch refresh", "watch:refresh"),
+            Self::watchlist_action("watch path", "query:watch path"),
+            Self::watchlist_action("watch init", "query:watch init"),
+            Self::watchlist_action("watch validate", "query:watch validate"),
+            Self::watch_edit_action(),
         ]
     }
 }
