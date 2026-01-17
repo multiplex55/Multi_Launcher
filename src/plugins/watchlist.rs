@@ -16,6 +16,16 @@ impl WatchlistPlugin {
             .unwrap_or_default()
     }
 
+    fn matches_watch_filter(item: &WatchItemConfig, filter: &str) -> bool {
+        let id_match = item.id.to_lowercase().contains(filter);
+        let label_match = item
+            .label
+            .as_ref()
+            .map(|label| label.to_lowercase().contains(filter))
+            .unwrap_or(false);
+        id_match || label_match
+    }
+
     fn filter_items(items: Vec<WatchItemConfig>, filter: &str) -> Vec<WatchItemConfig> {
         let filter = filter.trim().to_lowercase();
         if filter.is_empty() {
@@ -23,20 +33,26 @@ impl WatchlistPlugin {
         }
         items
             .into_iter()
-            .filter(|item| {
-                let id_match = item.id.to_lowercase().contains(&filter);
-                let label_match = item
-                    .label
-                    .as_ref()
-                    .map(|label| label.to_lowercase().contains(&filter))
-                    .unwrap_or(false);
-                id_match || label_match
-            })
+            .filter(|item| Self::matches_watch_filter(item, &filter))
             .collect()
     }
 
     fn item_label(item: &WatchItemConfig) -> String {
         item.label.clone().unwrap_or_else(|| item.id.clone())
+    }
+
+    fn item_action_label(item: &WatchItemConfig) -> String {
+        let label = item
+            .label
+            .as_ref()
+            .map(|label| label.trim())
+            .filter(|label| !label.is_empty());
+        match label {
+            Some(label) if !label.eq_ignore_ascii_case(&item.id) => {
+                format!("{label} ({})", item.id)
+            }
+            _ => item.id.clone(),
+        }
     }
 
     fn list_actions(filter: &str) -> Vec<Action> {
@@ -169,10 +185,10 @@ impl WatchlistPlugin {
         Self::match_actions(filter)
             .into_iter()
             .map(|item| {
-                let label = Self::item_label(&item);
+                let label = Self::item_action_label(&item);
                 Self::watchlist_action(
                     format!("Remove {label}"),
-                    format!("watch:remove:{}", item.id),
+                    format!("watch:rm:{}", item.id),
                 )
             })
             .collect()
@@ -183,7 +199,7 @@ impl WatchlistPlugin {
             .into_iter()
             .filter(|item| item.enabled != enabled)
             .map(|item| {
-                let label = Self::item_label(&item);
+                let label = Self::item_action_label(&item);
                 let verb = if enabled { "Enable" } else { "Disable" };
                 Self::watchlist_action(
                     format!("{verb} {label}"),
