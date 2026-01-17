@@ -418,6 +418,19 @@ enum ActionKind<'a> {
     WatchlistInit {
         force: bool,
     },
+    WatchlistAdd(&'a str),
+    WatchlistRemove(&'a str),
+    WatchlistSetEnabled {
+        id: &'a str,
+        enabled: bool,
+    },
+    WatchlistSetRefresh {
+        refresh_ms: u64,
+    },
+    WatchlistMove {
+        id: &'a str,
+        direction: &'a str,
+    },
     ExecPath {
         path: &'a str,
         args: Option<&'a str>,
@@ -741,6 +754,28 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if s == "watch:init:force" {
         return ActionKind::WatchlistInit { force: true };
     }
+    if let Some(payload) = s.strip_prefix("watch:add:") {
+        return ActionKind::WatchlistAdd(payload);
+    }
+    if let Some(id) = s.strip_prefix("watch:remove:") {
+        return ActionKind::WatchlistRemove(id);
+    }
+    if let Some(id) = s.strip_prefix("watch:enable:") {
+        return ActionKind::WatchlistSetEnabled { id, enabled: true };
+    }
+    if let Some(id) = s.strip_prefix("watch:disable:") {
+        return ActionKind::WatchlistSetEnabled { id, enabled: false };
+    }
+    if let Some(value) = s.strip_prefix("watch:set_refresh:") {
+        if let Ok(refresh_ms) = value.parse::<u64>() {
+            return ActionKind::WatchlistSetRefresh { refresh_ms };
+        }
+    }
+    if let Some(rest) = s.strip_prefix("watch:move:") {
+        if let Some((id, direction)) = rest.split_once('|') {
+            return ActionKind::WatchlistMove { id, direction };
+        }
+    }
     if let Some(alias) = s.strip_prefix("tempfile:new:") {
         return ActionKind::TempfileNew(Some(alias));
     }
@@ -987,12 +1022,50 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
             Ok(())
         }
         ActionKind::WatchlistRefresh => {
-            let _ =
-                crate::watchlist::refresh_watchlist_cache(&crate::watchlist::watchlist_path_string());
+            let _ = crate::watchlist::refresh_watchlist_cache(
+                &crate::watchlist::watchlist_path_string(),
+            );
             Ok(())
         }
         ActionKind::WatchlistInit { force } => {
             crate::watchlist::init_watchlist(&crate::watchlist::watchlist_path_string(), force)?;
+            Ok(())
+        }
+        ActionKind::WatchlistAdd(payload) => {
+            crate::watchlist::apply_watch_add_payload(
+                &crate::watchlist::watchlist_path_string(),
+                payload,
+            )?;
+            Ok(())
+        }
+        ActionKind::WatchlistRemove(id) => {
+            crate::watchlist::remove_watch_item(&crate::watchlist::watchlist_path_string(), id)?;
+            Ok(())
+        }
+        ActionKind::WatchlistSetEnabled { id, enabled } => {
+            crate::watchlist::set_watch_item_enabled(
+                &crate::watchlist::watchlist_path_string(),
+                id,
+                enabled,
+            )?;
+            Ok(())
+        }
+        ActionKind::WatchlistSetRefresh { refresh_ms } => {
+            crate::watchlist::set_watchlist_refresh_ms(
+                &crate::watchlist::watchlist_path_string(),
+                refresh_ms,
+            )?;
+            Ok(())
+        }
+        ActionKind::WatchlistMove { id, direction } => {
+            let Some(direction) = crate::watchlist::parse_move_direction(direction) else {
+                return Ok(());
+            };
+            crate::watchlist::move_watch_item(
+                &crate::watchlist::watchlist_path_string(),
+                id,
+                direction,
+            )?;
             Ok(())
         }
         ActionKind::TempfileNew(alias) => tempfiles::new(alias),
