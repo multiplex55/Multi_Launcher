@@ -175,6 +175,9 @@ pub struct Settings {
     /// Clear the search query after successfully running an action.
     #[serde(default)]
     pub clear_query_after_run: bool,
+    /// Require confirmation before destructive actions.
+    #[serde(default = "default_true")]
+    pub require_confirm_destructive: bool,
     #[serde(default = "default_net_refresh")]
     pub net_refresh: f32,
     #[serde(default)]
@@ -331,6 +334,7 @@ impl Default for Settings {
             disable_timer_updates: false,
             preserve_command: false,
             clear_query_after_run: false,
+            require_confirm_destructive: true,
             show_examples: false,
             screenshot_dir: Some(
                 std::env::current_dir()
