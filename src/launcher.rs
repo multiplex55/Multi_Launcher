@@ -26,6 +26,32 @@ pub(crate) fn set_system_volume(percent: u32) {
     }
 }
 
+pub(crate) fn toggle_system_mute() {
+    use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+    use windows::Win32::Media::Audio::{
+        eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
+    };
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+    };
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        if let Ok(enm) =
+            CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+        {
+            if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
+                if let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
+                    if let Ok(val) = vol.GetMute() {
+                        let _ = vol.SetMute(!val.as_bool(), std::ptr::null());
+                    }
+                }
+            }
+        }
+        CoUninitialize();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41,6 +67,31 @@ mod tests {
         assert_eq!(
             parse_action_kind(&action),
             ActionKind::VolumeToggleMuteProcess { pid: 42 }
+        );
+    }
+
+    #[test]
+    fn parse_volume_toggle_mute() {
+        let action = Action {
+            label: String::new(),
+            desc: String::new(),
+            action: "volume:toggle_mute".into(),
+            args: None,
+        };
+        assert_eq!(parse_action_kind(&action), ActionKind::VolumeToggleMute);
+    }
+
+    #[test]
+    fn parse_power_plan_set() {
+        let action = Action {
+            label: String::new(),
+            desc: String::new(),
+            action: "power:plan:set:balanced".into(),
+            args: None,
+        };
+        assert_eq!(
+            parse_action_kind(&action),
+            ActionKind::PowerPlanSet { guid: "balanced" }
         );
     }
 }
@@ -370,6 +421,10 @@ enum ActionKind<'a> {
         pid: u32,
     },
     VolumeMuteActive,
+    VolumeToggleMute,
+    PowerPlanSet {
+        guid: &'a str,
+    },
     Screenshot {
         mode: crate::actions::screenshot::Mode,
         clip: bool,
@@ -677,6 +732,12 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if s == "volume:mute_active" {
         return ActionKind::VolumeMuteActive;
     }
+    if s == "volume:toggle_mute" {
+        return ActionKind::VolumeToggleMute;
+    }
+    if let Some(guid) = s.strip_prefix("power:plan:set:") {
+        return ActionKind::PowerPlanSet { guid };
+    }
     if let Some(mode) = s.strip_prefix("screenshot:") {
         use crate::actions::screenshot::Mode as ScreenshotMode;
         return match mode {
@@ -944,6 +1005,10 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
             system::mute_active_window();
             Ok(())
         }
+        ActionKind::VolumeToggleMute => {
+            system::toggle_system_mute();
+            Ok(())
+        }
         ActionKind::Screenshot { mode, clip } => {
             crate::actions::screenshot::capture(mode, clip)?;
             Ok(())
@@ -989,6 +1054,7 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
             crate::plugins::macros::run_macro(name)?;
             Ok(())
         }
+        ActionKind::PowerPlanSet { guid } => system::set_power_plan(guid),
         ActionKind::ExecPath { path, args } => exec::launch(path, args),
     }
 }

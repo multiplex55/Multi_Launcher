@@ -1,5 +1,12 @@
 use sysinfo::System;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PowerPlan {
+    pub guid: String,
+    pub name: String,
+    pub active: bool,
+}
+
 pub fn run_system(cmd: &str) -> anyhow::Result<()> {
     if let Some(mut command) = super::super::launcher::system_command(cmd) {
         command.spawn().map(|_| ()).map_err(|e| e.into())
@@ -40,6 +47,10 @@ pub fn set_volume(v: u32) {
     super::super::launcher::set_system_volume(v);
 }
 
+pub fn toggle_system_mute() {
+    super::super::launcher::toggle_system_mute();
+}
+
 pub fn mute_active_window() {
     super::super::launcher::mute_active_window();
 }
@@ -50,6 +61,235 @@ pub fn set_process_volume(pid: u32, level: u32) {
 
 pub fn toggle_process_mute(pid: u32) {
     super::super::launcher::toggle_process_mute(pid);
+}
+
+pub fn get_system_volume() -> Option<u8> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+        use windows::Win32::Media::Audio::{
+            eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
+        };
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        };
+
+        unsafe {
+            let mut percent = None;
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if let Ok(enm) =
+                CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+            {
+                if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
+                    if let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
+                        if let Ok(val) = vol.GetMasterVolumeLevelScalar() {
+                            percent = Some((val * 100.0).round() as u8);
+                        }
+                    }
+                }
+            }
+            CoUninitialize();
+            percent
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+pub fn get_system_mute() -> Option<bool> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+        use windows::Win32::Media::Audio::{
+            eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
+        };
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        };
+
+        unsafe {
+            let mut muted = None;
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if let Ok(enm) =
+                CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+            {
+                if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
+                    if let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
+                        if let Ok(val) = vol.GetMute() {
+                            muted = Some(val.as_bool());
+                        }
+                    }
+                }
+            }
+            CoUninitialize();
+            muted
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+pub fn get_main_display_brightness() -> Option<u8> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Devices::Display::{
+            DestroyPhysicalMonitors, GetMonitorBrightness, GetNumberOfPhysicalMonitorsFromHMONITOR,
+            GetPhysicalMonitorsFromHMONITOR, PHYSICAL_MONITOR,
+        };
+        use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
+        use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
+
+        unsafe extern "system" fn enum_monitors(
+            hmonitor: HMONITOR,
+            _hdc: HDC,
+            _rect: *mut RECT,
+            lparam: LPARAM,
+        ) -> BOOL {
+            let percent_ptr = lparam.0 as *mut u32;
+            let mut count: u32 = 0;
+            if GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count).is_ok() {
+                let mut monitors = vec![PHYSICAL_MONITOR::default(); count as usize];
+                if GetPhysicalMonitorsFromHMONITOR(hmonitor, &mut monitors).is_ok() {
+                    if let Some(m) = monitors.first() {
+                        let mut min = 0u32;
+                        let mut cur = 0u32;
+                        let mut max = 0u32;
+                        if GetMonitorBrightness(m.hPhysicalMonitor, &mut min, &mut cur, &mut max)
+                            != 0
+                        {
+                            if max > min {
+                                *percent_ptr = ((cur - min) * 100 / (max - min)) as u32;
+                            } else {
+                                *percent_ptr = 0;
+                            }
+                        }
+                    }
+                    let _ = DestroyPhysicalMonitors(&monitors);
+                }
+            }
+            false.into()
+        }
+
+        let mut percent: u32 = 50;
+        unsafe {
+            let _ = EnumDisplayMonitors(
+                HDC(std::ptr::null_mut()),
+                None,
+                Some(enum_monitors),
+                LPARAM(&mut percent as *mut u32 as isize),
+            );
+        }
+        Some(percent as u8)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+pub fn get_power_plans() -> Result<Vec<PowerPlan>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+
+        let output = Command::new("powercfg")
+            .arg("/L")
+            .output()
+            .map_err(|err| format!("Failed to query power plans: {err}"))?;
+        if !output.status.success() {
+            return Err("Failed to query power plans.".into());
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let plans = parse_powercfg_list(&stdout);
+        if plans.is_empty() {
+            Err("No power plans detected.".into())
+        } else {
+            Ok(plans)
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Power plans are not supported on this OS.".into())
+    }
+}
+
+pub fn set_power_plan(guid: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+
+        Command::new("powercfg").arg("/S").arg(guid).status()?;
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = guid;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn parse_powercfg_list(output: &str) -> Vec<PowerPlan> {
+    let mut plans = Vec::new();
+    for line in output.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("Power Scheme GUID:") else {
+            continue;
+        };
+        let rest = rest.trim();
+        let mut parts = rest.splitn(2, ' ');
+        let guid = parts.next().unwrap_or("").trim();
+        let details = parts.next().unwrap_or("").trim();
+        if guid.is_empty() {
+            continue;
+        }
+        let name = if let Some(start) = details.find('(') {
+            if let Some(end) = details[start + 1..].find(')') {
+                details[start + 1..start + 1 + end].trim()
+            } else {
+                details
+            }
+        } else {
+            details
+        };
+        let active = details.contains('*');
+        plans.push(PowerPlan {
+            guid: guid.to_string(),
+            name: name.to_string(),
+            active,
+        });
+    }
+    plans
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn parse_powercfg_output() {
+        let sample = r#"
+Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced) *
+Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)
+Power Scheme GUID: a1841308-3541-4fab-bc81-f71556f20b4a  (Power saver)
+"#;
+        let plans = parse_powercfg_list(sample);
+        assert_eq!(plans.len(), 3);
+        assert_eq!(plans[0].name, "Balanced");
+        assert!(plans[0].active);
+        assert_eq!(plans[1].guid, "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c");
+        assert!(!plans[1].active);
+    }
 }
 
 pub fn recycle_clean() {
