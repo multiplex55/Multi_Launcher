@@ -1,5 +1,6 @@
 use super::{
-    edit_typed_settings, refresh_interval_setting, Widget, WidgetAction, WidgetSettingsContext,
+    default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
+    run_refresh_schedule, RefreshMode, Widget, WidgetAction, WidgetSettingsContext,
     WidgetSettingsUiResult,
 };
 use crate::actions::Action;
@@ -21,6 +22,10 @@ pub struct ProcessesConfig {
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval_secs: f32,
     #[serde(default)]
+    pub refresh_mode: RefreshMode,
+    #[serde(default = "default_refresh_throttle_secs")]
+    pub refresh_throttle_secs: f32,
+    #[serde(default)]
     pub manual_refresh_only: bool,
     #[serde(default = "default_limit")]
     pub limit: usize,
@@ -30,6 +35,8 @@ impl Default for ProcessesConfig {
     fn default() -> Self {
         Self {
             refresh_interval_secs: default_refresh_interval(),
+            refresh_mode: RefreshMode::Auto,
+            refresh_throttle_secs: default_refresh_throttle_secs(),
             manual_refresh_only: false,
             limit: default_limit(),
         }
@@ -39,13 +46,16 @@ impl Default for ProcessesConfig {
 pub struct ProcessesWidget {
     cfg: ProcessesConfig,
     refresh_pending: bool,
+    last_refresh: std::time::Instant,
 }
 
 impl ProcessesWidget {
     pub fn new(cfg: ProcessesConfig) -> Self {
+        let interval = Duration::from_secs_f32(cfg.refresh_interval_secs.max(1.0));
         Self {
             cfg,
             refresh_pending: false,
+            last_refresh: std::time::Instant::now() - interval,
         }
     }
 
@@ -63,10 +73,12 @@ impl ProcessesWidget {
                     .changed();
                 ui.label("processes");
             });
-            changed |= refresh_interval_setting(
+            changed |= refresh_settings_ui(
                 ui,
                 &mut cfg.refresh_interval_secs,
-                &mut cfg.manual_refresh_only,
+                &mut cfg.refresh_mode,
+                &mut cfg.refresh_throttle_secs,
+                Some(&mut cfg.manual_refresh_only),
                 "Process enumeration is cached. The widget will skip refreshing until this many seconds have passed. Use Refresh to update immediately.",
             );
             changed
@@ -113,13 +125,19 @@ impl Widget for ProcessesWidget {
         ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        if self.refresh_pending {
-            ctx.data_cache.refresh_processes(ctx.plugins);
-            self.refresh_pending = false;
-        } else if !self.cfg.manual_refresh_only {
-            ctx.data_cache
-                .maybe_refresh_processes(ctx.plugins, self.refresh_interval());
-        }
+        let schedule = refresh_schedule(
+            self.refresh_interval(),
+            self.cfg.refresh_mode,
+            self.cfg.manual_refresh_only,
+            self.cfg.refresh_throttle_secs,
+        );
+        run_refresh_schedule(
+            ctx,
+            schedule,
+            &mut self.refresh_pending,
+            &mut self.last_refresh,
+            || ctx.data_cache.refresh_processes(ctx.plugins),
+        );
         let snapshot = ctx.data_cache.snapshot();
 
         if let Some(err) = &snapshot.process_error {
@@ -143,7 +161,10 @@ impl Widget for ProcessesWidget {
                 for (desc, switch, kill) in &grouped[range] {
                     ui.horizontal(|ui| {
                         if let Some(action) = switch {
-                            if ui.add(egui::Button::new(&action.label).wrap(false)).clicked() {
+                            if ui
+                                .add(egui::Button::new(&action.label).wrap(false))
+                                .clicked()
+                            {
                                 clicked = Some(action.clone());
                             }
                         }
@@ -170,13 +191,32 @@ impl Widget for ProcessesWidget {
         }
     }
 
-    fn header_ui(&mut self, ui: &mut egui::Ui, ctx: &DashboardContext<'_>) -> Option<WidgetAction> {
-        let tooltip = format!(
-            "Cached for {:.0}s. Refresh to enumerate processes immediately.",
-            self.cfg.refresh_interval_secs
+    fn header_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        _ctx: &DashboardContext<'_>,
+    ) -> Option<WidgetAction> {
+        let schedule = refresh_schedule(
+            self.refresh_interval(),
+            self.cfg.refresh_mode,
+            self.cfg.manual_refresh_only,
+            self.cfg.refresh_throttle_secs,
         );
+        let tooltip = match schedule.mode {
+            RefreshMode::Manual => "Manual refresh only.".to_string(),
+            RefreshMode::Throttled => {
+                format!(
+                    "Minimum refresh interval {:.0}s.",
+                    schedule.throttle.as_secs_f32()
+                )
+            }
+            RefreshMode::Auto => format!(
+                "Cached for {:.0}s. Refresh to enumerate processes immediately.",
+                self.cfg.refresh_interval_secs
+            ),
+        };
         if ui.small_button("Refresh").on_hover_text(tooltip).clicked() {
-            ctx.data_cache.refresh_processes(ctx.plugins);
+            self.refresh_pending = true;
         }
         None
     }

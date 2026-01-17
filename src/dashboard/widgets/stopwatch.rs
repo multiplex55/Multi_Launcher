@@ -1,6 +1,7 @@
 use super::{
-    edit_typed_settings, refresh_interval_setting, TimedCache, Widget, WidgetAction,
-    WidgetSettingsContext, WidgetSettingsUiResult,
+    default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
+    run_refresh_schedule, RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext,
+    WidgetSettingsUiResult,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -18,6 +19,10 @@ pub struct StopwatchConfig {
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval_secs: f32,
     #[serde(default)]
+    pub refresh_mode: RefreshMode,
+    #[serde(default = "default_refresh_throttle_secs")]
+    pub refresh_throttle_secs: f32,
+    #[serde(default)]
     pub manual_refresh_only: bool,
 }
 
@@ -25,6 +30,8 @@ impl Default for StopwatchConfig {
     fn default() -> Self {
         Self {
             refresh_interval_secs: default_refresh_interval(),
+            refresh_mode: RefreshMode::Auto,
+            refresh_throttle_secs: default_refresh_throttle_secs(),
             manual_refresh_only: false,
         }
     }
@@ -59,10 +66,12 @@ impl StopwatchWidget {
         ctx: &WidgetSettingsContext<'_>,
     ) -> WidgetSettingsUiResult {
         edit_typed_settings(ui, value, ctx, |ui, cfg: &mut StopwatchConfig, _ctx| {
-            refresh_interval_setting(
+            refresh_settings_ui(
                 ui,
                 &mut cfg.refresh_interval_secs,
-                &mut cfg.manual_refresh_only,
+                &mut cfg.refresh_mode,
+                &mut cfg.refresh_throttle_secs,
+                Some(&mut cfg.manual_refresh_only),
                 "Stopwatch list refreshes on this interval unless manual refresh is enabled.",
             )
         })
@@ -84,13 +93,20 @@ impl StopwatchWidget {
         });
     }
 
-    fn maybe_refresh(&mut self) {
-        if self.refresh_pending {
-            self.refresh_pending = false;
-            self.refresh();
-        } else if !self.cfg.manual_refresh_only && self.cache.should_refresh() {
-            self.refresh();
-        }
+    fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
+        let schedule = refresh_schedule(
+            self.refresh_interval(),
+            self.cfg.refresh_mode,
+            self.cfg.manual_refresh_only,
+            self.cfg.refresh_throttle_secs,
+        );
+        run_refresh_schedule(
+            ctx,
+            schedule,
+            &mut self.refresh_pending,
+            &mut self.cache.last_refresh,
+            || self.refresh(),
+        );
     }
 
     fn action_for(id: u64, label: &str, action: &str, query: &str) -> WidgetAction {
@@ -116,10 +132,10 @@ impl Widget for StopwatchWidget {
     fn render(
         &mut self,
         ui: &mut egui::Ui,
-        _ctx: &DashboardContext<'_>,
+        ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        self.maybe_refresh();
+        self.maybe_refresh(ctx);
 
         let mut clicked = None;
 
@@ -173,14 +189,29 @@ impl Widget for StopwatchWidget {
         }
     }
 
-    fn header_ui(&mut self, ui: &mut egui::Ui, _ctx: &DashboardContext<'_>) -> Option<WidgetAction> {
-        let tooltip = if self.cfg.manual_refresh_only {
-            "Manual refresh only.".to_string()
-        } else {
-            format!(
+    fn header_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        _ctx: &DashboardContext<'_>,
+    ) -> Option<WidgetAction> {
+        let schedule = refresh_schedule(
+            self.refresh_interval(),
+            self.cfg.refresh_mode,
+            self.cfg.manual_refresh_only,
+            self.cfg.refresh_throttle_secs,
+        );
+        let tooltip = match schedule.mode {
+            RefreshMode::Manual => "Manual refresh only.".to_string(),
+            RefreshMode::Throttled => {
+                format!(
+                    "Minimum refresh interval {:.0}s.",
+                    schedule.throttle.as_secs_f32()
+                )
+            }
+            RefreshMode::Auto => format!(
                 "Refreshes every {:.0}s unless you refresh manually.",
                 self.cfg.refresh_interval_secs
-            )
+            ),
         };
         if ui.small_button("Refresh").on_hover_text(tooltip).clicked() {
             self.refresh_pending = true;

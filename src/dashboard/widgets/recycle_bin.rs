@@ -1,5 +1,6 @@
 use super::{
-    edit_typed_settings, refresh_interval_setting, Widget, WidgetAction, WidgetSettingsContext,
+    default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
+    run_refresh_schedule, RefreshMode, Widget, WidgetAction, WidgetSettingsContext,
     WidgetSettingsUiResult,
 };
 use crate::actions::Action;
@@ -17,6 +18,10 @@ pub struct RecycleBinConfig {
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval_secs: f32,
     #[serde(default)]
+    pub refresh_mode: RefreshMode,
+    #[serde(default = "default_refresh_throttle_secs")]
+    pub refresh_throttle_secs: f32,
+    #[serde(default)]
     pub manual_refresh_only: bool,
 }
 
@@ -24,6 +29,8 @@ impl Default for RecycleBinConfig {
     fn default() -> Self {
         Self {
             refresh_interval_secs: default_refresh_interval(),
+            refresh_mode: RefreshMode::Auto,
+            refresh_throttle_secs: default_refresh_throttle_secs(),
             manual_refresh_only: false,
         }
     }
@@ -32,13 +39,16 @@ impl Default for RecycleBinConfig {
 pub struct RecycleBinWidget {
     cfg: RecycleBinConfig,
     refresh_pending: bool,
+    last_refresh: std::time::Instant,
 }
 
 impl RecycleBinWidget {
     pub fn new(cfg: RecycleBinConfig) -> Self {
+        let interval = Duration::from_secs_f32(cfg.refresh_interval_secs.max(1.0));
         Self {
             cfg,
             refresh_pending: false,
+            last_refresh: std::time::Instant::now() - interval,
         }
     }
 
@@ -48,10 +58,12 @@ impl RecycleBinWidget {
         ctx: &WidgetSettingsContext<'_>,
     ) -> WidgetSettingsUiResult {
         edit_typed_settings(ui, value, ctx, |ui, cfg: &mut RecycleBinConfig, _ctx| {
-            refresh_interval_setting(
+            refresh_settings_ui(
                 ui,
                 &mut cfg.refresh_interval_secs,
-                &mut cfg.manual_refresh_only,
+                &mut cfg.refresh_mode,
+                &mut cfg.refresh_throttle_secs,
+                Some(&mut cfg.manual_refresh_only),
                 "Recycle bin data is cached between refreshes.",
             )
         })
@@ -103,13 +115,19 @@ impl Widget for RecycleBinWidget {
         ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        if self.refresh_pending {
-            ctx.data_cache.refresh_recycle_bin();
-            self.refresh_pending = false;
-        } else if !self.cfg.manual_refresh_only {
-            ctx.data_cache
-                .maybe_refresh_recycle_bin(self.refresh_interval());
-        }
+        let schedule = refresh_schedule(
+            self.refresh_interval(),
+            self.cfg.refresh_mode,
+            self.cfg.manual_refresh_only,
+            self.cfg.refresh_throttle_secs,
+        );
+        run_refresh_schedule(
+            ctx,
+            schedule,
+            &mut self.refresh_pending,
+            &mut self.last_refresh,
+            || ctx.data_cache.refresh_recycle_bin(),
+        );
 
         let snapshot = ctx.data_cache.snapshot();
         let Some(info) = snapshot.recycle_bin.as_ref() else {
@@ -138,17 +156,32 @@ impl Widget for RecycleBinWidget {
         }
     }
 
-    fn header_ui(&mut self, ui: &mut egui::Ui, ctx: &DashboardContext<'_>) -> Option<WidgetAction> {
-        let tooltip = if self.cfg.manual_refresh_only {
-            "Manual refresh only.".to_string()
-        } else {
-            format!(
+    fn header_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        _ctx: &DashboardContext<'_>,
+    ) -> Option<WidgetAction> {
+        let schedule = refresh_schedule(
+            self.refresh_interval(),
+            self.cfg.refresh_mode,
+            self.cfg.manual_refresh_only,
+            self.cfg.refresh_throttle_secs,
+        );
+        let tooltip = match schedule.mode {
+            RefreshMode::Manual => "Manual refresh only.".to_string(),
+            RefreshMode::Throttled => {
+                format!(
+                    "Minimum refresh interval {:.0}s.",
+                    schedule.throttle.as_secs_f32()
+                )
+            }
+            RefreshMode::Auto => format!(
                 "Cached for {:.0}s. Refresh to update recycle bin stats immediately.",
                 self.cfg.refresh_interval_secs
-            )
+            ),
         };
         if ui.small_button("Refresh").on_hover_text(tooltip).clicked() {
-            ctx.data_cache.refresh_recycle_bin();
+            self.refresh_pending = true;
         }
         None
     }

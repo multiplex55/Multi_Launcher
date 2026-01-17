@@ -61,6 +61,7 @@ pub struct SettingsEditor {
     screenshot_save_file: bool,
     screenshot_auto_save: bool,
     screenshot_use_editor: bool,
+    reduce_dashboard_work_when_unfocused: bool,
     dashboard_enabled: bool,
     dashboard_path: String,
     dashboard_default_location: String,
@@ -156,6 +157,7 @@ impl SettingsEditor {
             screenshot_save_file: settings.screenshot_save_file,
             screenshot_auto_save: settings.screenshot_auto_save,
             screenshot_use_editor: settings.screenshot_use_editor,
+            reduce_dashboard_work_when_unfocused: settings.reduce_dashboard_work_when_unfocused,
             dashboard_enabled: settings.dashboard.enabled,
             dashboard_path: settings
                 .dashboard
@@ -289,6 +291,7 @@ impl SettingsEditor {
             plugin_settings: self.plugin_settings.clone(),
             show_examples: current.show_examples,
             pinned_panels: current.pinned_panels.clone(),
+            reduce_dashboard_work_when_unfocused: self.reduce_dashboard_work_when_unfocused,
             dashboard: crate::settings::DashboardSettings {
                 enabled: self.dashboard_enabled,
                 config_path: if self.dashboard_path.trim().is_empty() {
@@ -503,6 +506,10 @@ impl SettingsEditor {
                         ui.checkbox(
                             &mut self.dashboard_show_when_empty,
                             "Show dashboard when the search box is blank",
+                        );
+                        ui.checkbox(
+                            &mut self.reduce_dashboard_work_when_unfocused,
+                            "Reduce dashboard work when not focused",
                         );
                         if ui.button("Customize Dashboard...").clicked() {
                             app.show_dashboard_editor = true;
@@ -767,6 +774,8 @@ impl SettingsEditor {
                                                 new_settings.screenshot_auto_save;
                                             app.screenshot_use_editor =
                                                 new_settings.screenshot_use_editor;
+                                            app.reduce_dashboard_work_when_unfocused =
+                                                new_settings.reduce_dashboard_work_when_unfocused;
                                             app.dashboard_enabled = new_settings.dashboard.enabled;
                                             app.dashboard_show_when_empty =
                                                 new_settings.dashboard.show_when_query_empty;

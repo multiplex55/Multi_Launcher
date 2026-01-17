@@ -576,10 +576,107 @@ impl<T> TimedCache<T> {
     }
 }
 
-pub(crate) fn refresh_interval_setting(
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RefreshMode {
+    Auto,
+    Manual,
+    Throttled,
+}
+
+impl Default for RefreshMode {
+    fn default() -> Self {
+        RefreshMode::Auto
+    }
+}
+
+impl std::fmt::Display for RefreshMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RefreshMode::Auto => write!(f, "Auto"),
+            RefreshMode::Manual => write!(f, "Manual"),
+            RefreshMode::Throttled => write!(f, "Throttled"),
+        }
+    }
+}
+
+pub(crate) fn default_refresh_throttle_secs() -> f32 {
+    5.0
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RefreshSchedule {
+    pub interval: Duration,
+    pub mode: RefreshMode,
+    pub throttle: Duration,
+}
+
+impl RefreshSchedule {
+    pub fn effective_interval(&self) -> Duration {
+        match self.mode {
+            RefreshMode::Throttled => self.interval.max(self.throttle),
+            _ => self.interval,
+        }
+    }
+}
+
+pub(crate) fn refresh_schedule(
+    interval: Duration,
+    refresh_mode: RefreshMode,
+    manual_refresh_only: bool,
+    throttle_secs: f32,
+) -> RefreshSchedule {
+    let mode = if manual_refresh_only && refresh_mode == RefreshMode::Auto {
+        RefreshMode::Manual
+    } else {
+        refresh_mode
+    };
+    RefreshSchedule {
+        interval,
+        mode,
+        throttle: Duration::from_secs_f32(throttle_secs.max(0.0)),
+    }
+}
+
+pub(crate) fn run_refresh_schedule(
+    ctx: &DashboardContext<'_>,
+    schedule: RefreshSchedule,
+    refresh_pending: &mut bool,
+    last_refresh: &mut Instant,
+    refresh: impl FnOnce(),
+) -> bool {
+    if ctx.reduce_dashboard_work_when_unfocused
+        && (!ctx.dashboard_visible || !ctx.dashboard_focused)
+    {
+        *last_refresh = Instant::now();
+        return false;
+    }
+
+    let elapsed = last_refresh.elapsed();
+    let should_auto = match schedule.mode {
+        RefreshMode::Auto => elapsed >= schedule.interval,
+        RefreshMode::Manual => false,
+        RefreshMode::Throttled => elapsed >= schedule.effective_interval(),
+    };
+    let should_refresh = *refresh_pending || should_auto;
+    if !should_refresh {
+        return false;
+    }
+    if schedule.mode == RefreshMode::Throttled && elapsed < schedule.throttle {
+        return false;
+    }
+    *refresh_pending = false;
+    refresh();
+    *last_refresh = Instant::now();
+    true
+}
+
+pub(crate) fn refresh_settings_ui(
     ui: &mut egui::Ui,
     seconds: &mut f32,
-    manual_refresh_only: &mut bool,
+    refresh_mode: &mut RefreshMode,
+    throttle_secs: &mut f32,
+    manual_refresh_only: Option<&mut bool>,
     tooltip: &str,
 ) -> bool {
     let mut changed = false;
@@ -595,10 +692,46 @@ pub(crate) fn refresh_interval_setting(
         changed |= resp.changed();
         ui.label("seconds");
     });
-    changed |= ui
-        .checkbox(manual_refresh_only, "Only manual refresh")
-        .on_hover_text("Disable automatic refreshes. Use the Refresh button or update settings to fetch new data.")
-        .changed();
+    ui.horizontal(|ui| {
+        ui.label("Refresh mode");
+        let selected = refresh_mode.to_string();
+        egui::ComboBox::from_id_source(ui.id().with("refresh_mode"))
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(refresh_mode, RefreshMode::Auto, "Auto")
+                    .changed();
+                changed |= ui
+                    .selectable_value(refresh_mode, RefreshMode::Manual, "Manual")
+                    .changed();
+                changed |= ui
+                    .selectable_value(refresh_mode, RefreshMode::Throttled, "Throttled")
+                    .changed();
+            });
+    });
+    if *refresh_mode == RefreshMode::Throttled {
+        ui.horizontal(|ui| {
+            ui.label("Minimum interval");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(throttle_secs)
+                        .clamp_range(1.0..=300.0)
+                        .speed(0.5),
+                )
+                .changed();
+            ui.label("seconds");
+        });
+    }
+    if let Some(manual_refresh_only) = manual_refresh_only {
+        if *manual_refresh_only && *refresh_mode == RefreshMode::Auto {
+            *refresh_mode = RefreshMode::Manual;
+            changed = true;
+        }
+        if *manual_refresh_only != (*refresh_mode == RefreshMode::Manual) {
+            *manual_refresh_only = *refresh_mode == RefreshMode::Manual;
+            changed = true;
+        }
+    }
     changed
 }
 

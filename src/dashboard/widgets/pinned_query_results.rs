@@ -1,5 +1,6 @@
 use super::{
-    edit_typed_settings, find_plugin, plugin_names, query_suggestions, refresh_interval_setting,
+    default_refresh_throttle_secs, edit_typed_settings, find_plugin, plugin_names,
+    query_suggestions, refresh_schedule, refresh_settings_ui, run_refresh_schedule, RefreshMode,
     TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
 };
 use crate::actions::Action;
@@ -49,6 +50,10 @@ pub struct PinnedQueryResultsConfig {
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval_secs: f32,
     #[serde(default)]
+    pub refresh_mode: RefreshMode,
+    #[serde(default = "default_refresh_throttle_secs")]
+    pub refresh_throttle_secs: f32,
+    #[serde(default)]
     pub manual_refresh_only: bool,
     #[serde(default)]
     pub click_behavior: ClickBehavior,
@@ -61,6 +66,8 @@ impl Default for PinnedQueryResultsConfig {
             query: default_query(),
             limit: default_limit(),
             refresh_interval_secs: default_refresh_interval(),
+            refresh_mode: RefreshMode::Auto,
+            refresh_throttle_secs: default_refresh_throttle_secs(),
             manual_refresh_only: false,
             click_behavior: ClickBehavior::default(),
         }
@@ -148,10 +155,7 @@ impl PinnedQueryResultsWidget {
                 }
 
                 if engines.is_empty() {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        "No enabled engines available.",
-                    );
+                    ui.colored_label(egui::Color32::YELLOW, "No enabled engines available.");
                 } else {
                     egui::ComboBox::from_label("Engine")
                         .selected_text(&cfg.engine)
@@ -211,10 +215,12 @@ impl PinnedQueryResultsWidget {
                     changed |= resp.changed();
                 });
 
-                changed |= refresh_interval_setting(
+                changed |= refresh_settings_ui(
                     ui,
                     &mut cfg.refresh_interval_secs,
-                    &mut cfg.manual_refresh_only,
+                    &mut cfg.refresh_mode,
+                    &mut cfg.refresh_throttle_secs,
+                    Some(&mut cfg.manual_refresh_only),
                     "Query results are cached. The widget refreshes after this many seconds unless you click Refresh.",
                 );
 
@@ -262,12 +268,19 @@ impl PinnedQueryResultsWidget {
 
     fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
         self.update_interval();
-        if self.refresh_pending {
-            self.refresh_pending = false;
-            self.refresh(ctx);
-        } else if !self.cfg.manual_refresh_only && self.cache.should_refresh() {
-            self.refresh(ctx);
-        }
+        let schedule = refresh_schedule(
+            self.refresh_interval(),
+            self.cfg.refresh_mode,
+            self.cfg.manual_refresh_only,
+            self.cfg.refresh_throttle_secs,
+        );
+        run_refresh_schedule(
+            ctx,
+            schedule,
+            &mut self.refresh_pending,
+            &mut self.cache.last_refresh,
+            || self.refresh(ctx),
+        );
     }
 
     fn run_query(&self, ctx: &DashboardContext<'_>) -> (Vec<Action>, Option<String>) {
@@ -391,13 +404,32 @@ impl Widget for PinnedQueryResultsWidget {
         }
     }
 
-    fn header_ui(&mut self, ui: &mut egui::Ui, ctx: &DashboardContext<'_>) -> Option<WidgetAction> {
-        let tooltip = format!(
-            "Cached for {:.0}s. Refresh to update pinned results immediately.",
-            self.cfg.refresh_interval_secs
+    fn header_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        _ctx: &DashboardContext<'_>,
+    ) -> Option<WidgetAction> {
+        let schedule = refresh_schedule(
+            self.refresh_interval(),
+            self.cfg.refresh_mode,
+            self.cfg.manual_refresh_only,
+            self.cfg.refresh_throttle_secs,
         );
+        let tooltip = match schedule.mode {
+            RefreshMode::Manual => "Manual refresh only.".to_string(),
+            RefreshMode::Throttled => {
+                format!(
+                    "Minimum refresh interval {:.0}s.",
+                    schedule.throttle.as_secs_f32()
+                )
+            }
+            RefreshMode::Auto => format!(
+                "Cached for {:.0}s. Refresh to update pinned results immediately.",
+                self.cfg.refresh_interval_secs
+            ),
+        };
         if ui.small_button("Refresh").on_hover_text(tooltip).clicked() {
-            self.refresh(ctx);
+            self.refresh_pending = true;
         }
         None
     }
