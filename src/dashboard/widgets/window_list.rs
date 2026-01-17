@@ -110,13 +110,14 @@ impl WindowsWidget {
             self.cfg.manual_refresh_only,
             self.cfg.refresh_throttle_secs,
         );
-        run_refresh_schedule(
+        if run_refresh_schedule(
             ctx,
             schedule,
             &mut self.refresh_pending,
             &mut self.cache.last_refresh,
-            || self.refresh(ctx),
-        );
+        ) {
+            self.refresh(ctx);
+        }
     }
 
     fn load_windows(ctx: &DashboardContext<'_>) -> (Vec<Action>, Option<String>) {

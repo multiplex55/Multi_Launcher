@@ -110,13 +110,14 @@ impl BrowserTabsWidget {
             self.cfg.manual_refresh_only,
             self.cfg.refresh_throttle_secs,
         );
-        run_refresh_schedule(
+        if run_refresh_schedule(
             ctx,
             schedule,
             &mut self.refresh_pending,
             &mut self.cache.last_refresh,
-            || self.refresh(ctx),
-        );
+        ) {
+            self.refresh(ctx);
+        }
     }
 
     fn load_tabs(ctx: &DashboardContext<'_>, limit: usize) -> (Vec<Action>, Option<String>) {

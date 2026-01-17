@@ -310,13 +310,14 @@ impl LayoutsWidget {
             false,
             self.cfg.refresh_throttle_secs,
         );
-        run_refresh_schedule(
+        if run_refresh_schedule(
             ctx,
             schedule,
             &mut self.refresh_pending,
             &mut self.cache.last_refresh,
-            || self.refresh(),
-        );
+        ) {
+            self.refresh();
+        }
     }
 
     fn load_layouts(cfg: &LayoutsConfig) -> (LayoutsData, Option<String>) {
@@ -452,7 +453,7 @@ impl Widget for LayoutsWidget {
     fn render(
         &mut self,
         ui: &mut egui::Ui,
-        _ctx: &DashboardContext<'_>,
+        ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
         let visible = ui.is_rect_visible(ui.available_rect_before_wrap());

@@ -2,7 +2,7 @@ use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use crate::plugin::PluginManager;
 use eframe::egui;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -643,7 +643,6 @@ pub(crate) fn run_refresh_schedule(
     schedule: RefreshSchedule,
     refresh_pending: &mut bool,
     last_refresh: &mut Instant,
-    refresh: impl FnOnce(),
 ) -> bool {
     if ctx.reduce_dashboard_work_when_unfocused
         && (!ctx.dashboard_visible || !ctx.dashboard_focused)
@@ -666,8 +665,6 @@ pub(crate) fn run_refresh_schedule(
         return false;
     }
     *refresh_pending = false;
-    refresh();
-    *last_refresh = Instant::now();
     true
 }
 

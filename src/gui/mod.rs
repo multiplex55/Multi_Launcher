@@ -3290,7 +3290,7 @@ impl eframe::App for LauncherApp {
                     self.suggestions.clear();
                 }
                 let dashboard_visible = self.visible_flag.load(Ordering::SeqCst);
-                let dashboard_focused = ctx.input(|i| i.viewport().focused);
+                let dashboard_focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
                 let dash_ctx = DashboardContext {
                     actions: &self.actions,
                     actions_by_id: &self.actions_by_id,

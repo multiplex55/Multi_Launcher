@@ -131,13 +131,15 @@ impl Widget for ProcessesWidget {
             self.cfg.manual_refresh_only,
             self.cfg.refresh_throttle_secs,
         );
-        run_refresh_schedule(
+        if run_refresh_schedule(
             ctx,
             schedule,
             &mut self.refresh_pending,
             &mut self.last_refresh,
-            || ctx.data_cache.refresh_processes(ctx.plugins),
-        );
+        ) {
+            ctx.data_cache.refresh_processes(ctx.plugins);
+            self.last_refresh = std::time::Instant::now();
+        }
         let snapshot = ctx.data_cache.snapshot();
 
         if let Some(err) = &snapshot.process_error {

@@ -140,13 +140,15 @@ impl Widget for SystemStatusWidget {
             self.cfg.manual_refresh_only,
             self.cfg.refresh_throttle_secs,
         );
-        run_refresh_schedule(
+        if run_refresh_schedule(
             ctx,
             schedule,
             &mut self.refresh_pending,
             &mut self.last_refresh,
-            || ctx.data_cache.refresh_system_status(),
-        );
+        ) {
+            ctx.data_cache.refresh_system_status();
+            self.last_refresh = std::time::Instant::now();
+        }
         let snapshot = ctx.data_cache.snapshot();
         let Some(status) = snapshot.system_status.as_ref() else {
             ui.label("System data unavailable.");
