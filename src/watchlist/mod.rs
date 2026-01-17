@@ -21,12 +21,25 @@ static WATCHLIST_VERSION: AtomicU64 = AtomicU64::new(0);
 
 pub static WATCHLIST_DATA: Lazy<Arc<RwLock<WatchlistConfig>>> =
     Lazy::new(|| Arc::new(RwLock::new(WatchlistConfig::default())));
+pub static WATCHLIST_PATH: Lazy<RwLock<PathBuf>> =
+    Lazy::new(|| RwLock::new(PathBuf::from(WATCHLIST_FILE)));
 
 pub fn watchlist_refresh_ms() -> u64 {
     WATCHLIST_DATA
         .read()
         .map(|cfg| cfg.refresh_ms)
         .unwrap_or_else(|_| default_refresh_ms())
+}
+
+pub fn watchlist_path() -> PathBuf {
+    WATCHLIST_PATH
+        .read()
+        .map(|path| path.clone())
+        .unwrap_or_else(|_| PathBuf::from(WATCHLIST_FILE))
+}
+
+pub fn watchlist_path_string() -> String {
+    watchlist_path().to_string_lossy().to_string()
 }
 
 fn default_watchlist_version() -> u32 {
@@ -245,12 +258,53 @@ pub fn resolve_watchlist_path(settings: &Settings, settings_path: &str) -> PathB
     }
 }
 
+pub fn normalize_watchlist_config(cfg: &mut WatchlistConfig) {
+    for item in &mut cfg.items {
+        item.id = item.id.trim().to_string();
+        if let Some(path) = item.path.as_ref() {
+            let normalized = normalize_watchlist_path(path);
+            if normalized.is_empty() {
+                item.path = None;
+            } else {
+                item.path = Some(normalized);
+            }
+        }
+        normalize_extensions(&mut item.filter.extensions);
+    }
+}
+
+pub fn init_watchlist(path: &str, force: bool) -> Result<()> {
+    let path_buf = Path::new(path);
+    if path_buf.exists() && !force {
+        let content = std::fs::read_to_string(path)?;
+        if content.trim().is_empty() {
+            bail!("watchlist file is empty; run watch init --force to overwrite");
+        }
+        if let Err(err) = load_watchlist(path) {
+            bail!("watchlist file is invalid: {err}; run watch init --force to overwrite");
+        }
+        bail!("watchlist file already exists");
+    }
+
+    if let Some(parent) = path_buf.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let mut cfg = WatchlistConfig::default();
+    write_watchlist_config(path, &mut cfg)?;
+    let _ = refresh_watchlist_cache(path);
+    Ok(())
+}
+
 pub fn load_watchlist(path: &str) -> Result<WatchlistConfig> {
     let content = std::fs::read_to_string(path).unwrap_or_default();
     if content.trim().is_empty() {
         return Ok(WatchlistConfig::default());
     }
-    let cfg: WatchlistConfig = serde_json::from_str(&content)?;
+    let mut cfg: WatchlistConfig = serde_json::from_str(&content)?;
+    normalize_watchlist_config(&mut cfg);
     validate_watchlist(&cfg)?;
     Ok(cfg)
 }
@@ -265,8 +319,19 @@ pub fn watchlist_version() -> u64 {
     WATCHLIST_VERSION.load(Ordering::SeqCst)
 }
 
+fn write_watchlist_config(path: &str, cfg: &mut WatchlistConfig) -> Result<()> {
+    normalize_watchlist_config(cfg);
+    validate_watchlist(cfg)?;
+    let json = serde_json::to_string_pretty(cfg)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
 pub fn start_watchlist_watcher(settings: &Settings, settings_path: &str) -> Option<JsonWatcher> {
     let path = resolve_watchlist_path(settings, settings_path);
+    if let Ok(mut lock) = WATCHLIST_PATH.write() {
+        *lock = path.clone();
+    }
     let path_string = path.to_string_lossy().to_string();
     if let Err(err) = refresh_watchlist_cache(&path_string) {
         tracing::warn!("failed to load watchlist config: {err}");
@@ -302,6 +367,9 @@ fn validate_watchlist(cfg: &WatchlistConfig) -> Result<()> {
         if id.is_empty() {
             bail!("watchlist item id cannot be empty");
         }
+        if id.chars().any(char::is_whitespace) {
+            bail!("watchlist item id '{id}' cannot contain whitespace");
+        }
         let id_key = id.to_ascii_lowercase();
         if !ids.insert(id_key) {
             bail!("duplicate watchlist item id '{id}'");
@@ -318,6 +386,75 @@ fn validate_watchlist(cfg: &WatchlistConfig) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn normalize_extensions(extensions: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for ext in extensions.iter() {
+        let ext = ext.trim().trim_start_matches('.').to_ascii_lowercase();
+        if ext.is_empty() {
+            continue;
+        }
+        if seen.insert(ext.clone()) {
+            normalized.push(ext);
+        }
+    }
+    *extensions = normalized;
+}
+
+fn normalize_watchlist_path(path: &str) -> String {
+    let trimmed = path.trim();
+    let stripped = strip_wrapping_quotes(trimmed).trim();
+    expand_env_vars(stripped)
+}
+
+fn strip_wrapping_quotes(value: &str) -> &str {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+
+fn expand_env_vars(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            let mut name = String::new();
+            let mut found = false;
+            while let Some(next) = chars.next() {
+                if next == '%' {
+                    found = true;
+                    break;
+                }
+                name.push(next);
+            }
+            if found {
+                if name.is_empty() {
+                    out.push('%');
+                    out.push('%');
+                } else if let Ok(value) = std::env::var(&name) {
+                    out.push_str(&value);
+                } else {
+                    out.push('%');
+                    out.push_str(&name);
+                    out.push('%');
+                }
+            } else {
+                out.push('%');
+                out.push_str(&name);
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn build_watchers(
