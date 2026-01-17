@@ -2,6 +2,7 @@ use super::{
     edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
 };
 use crate::actions::Action;
+use crate::common::query::{apply_action_filters, split_action_filters};
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -175,7 +176,9 @@ impl Widget for PluginHomeWidget {
                     ui.label("Set a query to preview search results.");
                     Vec::new()
                 } else {
-                    plugin.search(&query)
+                    let (filtered_query, filters) = split_action_filters(&query);
+                    let actions = plugin.search(filtered_query.trim());
+                    apply_action_filters(actions, &filters)
                 }
             }
         };

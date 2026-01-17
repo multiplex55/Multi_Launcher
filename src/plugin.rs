@@ -47,6 +47,7 @@ use crate::plugins::lorem::LoremPlugin;
 use crate::plugins::convert_panel::ConvertPanelPlugin;
 use crate::plugins::color_picker::ColorPickerPlugin;
 use crate::plugins::layout::LayoutPlugin;
+use crate::common::query::{apply_action_filters, split_action_filters};
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::NetUnit;
 use std::collections::HashSet;
@@ -287,6 +288,7 @@ impl PluginManager {
         enabled_plugins: Option<&HashSet<String>>,
         enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
     ) -> Vec<Action> {
+        let (filtered_query, filters) = split_action_filters(query);
         let mut actions = Vec::new();
         for p in &self.plugins {
             let name = p.name();
@@ -302,8 +304,16 @@ impl PluginManager {
                     }
                 }
             }
-            actions.extend(p.search(query));
+            actions.extend(p.search(&filtered_query));
         }
-        actions
+        if filters.include_kinds.is_empty()
+            && filters.exclude_kinds.is_empty()
+            && filters.include_ids.is_empty()
+            && filters.exclude_ids.is_empty()
+        {
+            actions
+        } else {
+            apply_action_filters(actions, &filters)
+        }
     }
 }

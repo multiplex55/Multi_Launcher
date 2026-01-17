@@ -86,6 +86,12 @@ impl HelpWindow {
                     ui.text_edit_singleline(&mut self.filter);
                 });
                 ui.separator();
+                ui.label(egui::RichText::new("Query filters").strong());
+                ui.label("Use filters to narrow results across plugins and widgets:");
+                ui.monospace("  tag:<label>   !tag:<label>");
+                ui.monospace("  kind:<kind>   id:<action_id>");
+                ui.monospace("  Quotes for spaces: tag:\"high priority\"");
+                ui.separator();
                 let mut command_map = std::collections::HashMap::new();
                 for plugin in app.plugins.iter() {
                     command_map.insert(plugin.name().to_string(), plugin.commands());

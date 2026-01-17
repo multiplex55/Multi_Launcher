@@ -1,4 +1,5 @@
 use crate::actions::Action;
+use crate::common::query::parse_query_filters;
 use crate::common::slug::{register_slug, reset_slug_lookup, slugify, unique_slug};
 use crate::plugin::Plugin;
 use chrono::Local;
@@ -675,36 +676,38 @@ impl Plugin for NotePlugin {
                         .collect();
                 }
                 "list" => {
-                    let mut tags = Vec::new();
-                    let mut terms = Vec::new();
-                    for token in args.split_whitespace() {
-                        if let Some(t) = token.strip_prefix('#') {
-                            tags.push(t.to_lowercase());
-                        } else if !token.is_empty() {
-                            terms.push(token);
-                        }
-                    }
-                    let text_filter = terms.join(" ");
+                    let filters = parse_query_filters(args, &["#", "tag:"]);
+                    let text_filter = filters.remaining_tokens.join(" ");
                     return guard
                         .notes
                         .iter()
                         .filter(|n| {
-                            let tag_ok = if tags.is_empty() {
+                            let tag_ok = if filters.include_tags.is_empty() {
                                 true
                             } else {
-                                tags.iter()
+                                filters
+                                    .include_tags
+                                    .iter()
                                     .all(|tag| n.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
                             };
+                            let exclude_ok = !filters.exclude_tags.iter().any(|tag| {
+                                n.tags.iter().any(|t| t.eq_ignore_ascii_case(tag))
+                            });
                             let text_ok = if text_filter.is_empty() {
                                 true
                             } else {
-                                self.matcher.fuzzy_match(&n.title, &text_filter).is_some()
+                                let matches = self.matcher.fuzzy_match(&n.title, &text_filter).is_some()
                                     || n.alias
                                         .as_ref()
                                         .and_then(|a| self.matcher.fuzzy_match(a, &text_filter))
-                                        .is_some()
+                                        .is_some();
+                                if filters.negate_text {
+                                    !matches
+                                } else {
+                                    matches
+                                }
                             };
-                            tag_ok && text_ok
+                            tag_ok && exclude_ok && text_ok
                         })
                         .map(|n| Action {
                             label: n.alias.as_ref().unwrap_or(&n.title).clone(),

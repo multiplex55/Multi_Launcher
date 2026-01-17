@@ -164,6 +164,9 @@ fn note_tags_parses_edge_cases() {
     let list_results = plugin.search("note list #bar");
     assert_eq!(list_results.len(), 1);
     assert_eq!(list_results[0].action, "note:open:alpha");
+
+    let exclude_results = plugin.search("note list !tag:bar");
+    assert!(exclude_results.is_empty());
 }
 
 #[test]
