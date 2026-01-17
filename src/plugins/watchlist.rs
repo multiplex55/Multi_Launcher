@@ -2,8 +2,11 @@ use crate::actions::Action;
 use crate::plugin::Plugin;
 use crate::watchlist::{
     self, parse_move_direction, parse_watch_add_input, preview_watch_add_item,
-    watchlist_path_string, WatchItemConfig, WATCHLIST_DATA,
+    watchlist_path_string, watchlist_snapshot, WatchItemConfig, WatchItemSnapshot, WatchStatus,
+    WATCHLIST_DATA,
 };
+use chrono::Local;
+use std::collections::HashMap;
 use std::io::ErrorKind;
 
 pub struct WatchlistPlugin;
@@ -56,13 +59,23 @@ impl WatchlistPlugin {
     }
 
     fn list_actions(filter: &str) -> Vec<Action> {
-        Self::filter_items(Self::collect_items(), filter)
+        let items = Self::collect_items();
+        let snapshot = watchlist_snapshot();
+        if let Some(actions) = Self::refresh_action_if_needed(&items, &snapshot) {
+            return actions;
+        }
+        let snapshot_map = Self::snapshot_map(&snapshot);
+        Self::filter_items(items, filter)
             .into_iter()
             .filter_map(|item| {
                 let path = item.path.as_ref()?;
+                let desc = snapshot_map
+                    .get(item.id.as_str())
+                    .map(|snapshot| Self::compact_desc(snapshot))
+                    .unwrap_or_else(|| format!("Open {}", Self::item_label(&item)));
                 Some(Action {
                     label: item.id.clone(),
-                    desc: format!("Open {}", Self::item_label(&item)),
+                    desc,
                     action: path.clone(),
                     args: None,
                 })
@@ -250,6 +263,145 @@ impl WatchlistPlugin {
             format!("watch:move:{id}|{verb}"),
         )]
     }
+
+    fn refresh_action_if_needed(
+        items: &[WatchItemConfig],
+        snapshot: &std::sync::Arc<Vec<WatchItemSnapshot>>,
+    ) -> Option<Vec<Action>> {
+        if snapshot.is_empty() && !items.is_empty() {
+            return Some(vec![Self::watchlist_action(
+                "Refresh watchlist",
+                "watch:refresh",
+            )]);
+        }
+        None
+    }
+
+    fn snapshot_map<'a>(
+        snapshot: &'a std::sync::Arc<Vec<WatchItemSnapshot>>,
+    ) -> HashMap<&'a str, &'a WatchItemSnapshot> {
+        snapshot
+            .iter()
+            .map(|item| (item.id.as_str(), item))
+            .collect()
+    }
+
+    fn config_map<'a>(items: &'a [WatchItemConfig]) -> HashMap<&'a str, &'a WatchItemConfig> {
+        items
+            .iter()
+            .map(|item| (item.id.as_str(), item))
+            .collect()
+    }
+
+    fn matches_snapshot_filter(item: &WatchItemSnapshot, filter: &str) -> bool {
+        let filter = filter.trim().to_lowercase();
+        if filter.is_empty() {
+            return true;
+        }
+        item.id.to_lowercase().contains(&filter) || item.label.to_lowercase().contains(&filter)
+    }
+
+    fn status_text(status: WatchStatus) -> &'static str {
+        match status {
+            WatchStatus::Ok => "OK",
+            WatchStatus::Warn => "WARN",
+            WatchStatus::Critical => "CRITICAL",
+        }
+    }
+
+    fn age_text(snapshot: &WatchItemSnapshot) -> String {
+        let now = Local::now();
+        let age = now
+            .signed_duration_since(snapshot.last_updated)
+            .num_seconds()
+            .max(0) as u64;
+        format!("{} ago", Self::format_age_duration(age))
+    }
+
+    fn format_age_duration(secs: u64) -> String {
+        if secs < 60 {
+            format!("{secs}s")
+        } else if secs < 3600 {
+            format!("{}m", secs / 60)
+        } else if secs < 86_400 {
+            format!("{}h", secs / 3600)
+        } else {
+            format!("{}d", secs / 86_400)
+        }
+    }
+
+    fn compact_label(snapshot: &WatchItemSnapshot) -> String {
+        let label = snapshot.label.clone();
+        if snapshot.last_updated.date_naive() == Local::now().date_naive() {
+            format!("{label} (today)")
+        } else {
+            label
+        }
+    }
+
+    fn compact_desc(snapshot: &WatchItemSnapshot) -> String {
+        let delta = snapshot.delta_text.clone().unwrap_or_else(|| "—".into());
+        format!(
+            "latest: {} ({}) | {} | Δ {}",
+            snapshot.value_text,
+            Self::age_text(snapshot),
+            Self::status_text(snapshot.status),
+            delta
+        )
+    }
+
+    fn snapshot_action(snapshot: &WatchItemSnapshot, path: &str) -> Action {
+        Action {
+            label: Self::compact_label(snapshot),
+            desc: Self::compact_desc(snapshot),
+            action: path.to_string(),
+            args: None,
+        }
+    }
+
+    fn ls_actions(filter: &str) -> Vec<Action> {
+        let items = Self::collect_items();
+        let snapshot = watchlist_snapshot();
+        if let Some(actions) = Self::refresh_action_if_needed(&items, &snapshot) {
+            return actions;
+        }
+        let config_map = Self::config_map(&items);
+        let filter = filter.trim().to_lowercase();
+        snapshot
+            .iter()
+            .filter(|item| Self::matches_snapshot_filter(item, &filter))
+            .filter_map(|snapshot| {
+                let item = config_map.get(snapshot.id.as_str())?;
+                let path = item.path.as_ref()?;
+                Some(Self::snapshot_action(snapshot, path))
+            })
+            .collect()
+    }
+
+    fn status_actions(level: Option<WatchStatus>, filter: &str) -> Vec<Action> {
+        let items = Self::collect_items();
+        let snapshot = watchlist_snapshot();
+        if let Some(actions) = Self::refresh_action_if_needed(&items, &snapshot) {
+            return actions;
+        }
+        let config_map = Self::config_map(&items);
+        let filter = filter.trim().to_lowercase();
+        snapshot
+            .iter()
+            .filter(|item| Self::matches_snapshot_filter(item, &filter))
+            .filter(|item| match level {
+                Some(WatchStatus::Warn) => item.status == WatchStatus::Warn,
+                Some(WatchStatus::Critical) => item.status == WatchStatus::Critical,
+                None => matches!(item.status, WatchStatus::Warn | WatchStatus::Critical),
+                Some(WatchStatus::Ok) => false,
+            })
+            .filter_map(|snapshot| {
+                let item = config_map.get(snapshot.id.as_str())?;
+                let path = item.path.as_ref()?;
+                Some(Self::snapshot_action(snapshot, path))
+            })
+            .collect()
+    }
 }
 
 impl Plugin for WatchlistPlugin {
@@ -259,6 +411,8 @@ impl Plugin for WatchlistPlugin {
             if rest.is_empty() {
                 return vec![
                     Self::watchlist_action("Open watchlist", "query:watch list"),
+                    Self::watchlist_action("watch ls", "query:watch ls"),
+                    Self::watchlist_action("watch status", "query:watch status"),
                     Self::watchlist_action("Refresh watchlist", "watch:refresh"),
                     Self::watchlist_action("watch path", "query:watch path"),
                     Self::watchlist_action("watch init", "query:watch init"),
@@ -267,8 +421,26 @@ impl Plugin for WatchlistPlugin {
                 ];
             }
         }
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch ls") {
+            return Self::ls_actions(rest);
+        }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch list") {
             return Self::list_actions(rest);
+        }
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch status") {
+            let mut parts = rest.trim().split_whitespace();
+            let first = parts.next().unwrap_or("");
+            let (level, filter) = if first.eq_ignore_ascii_case("warn") {
+                (Some(WatchStatus::Warn), parts.collect::<Vec<_>>().join(" "))
+            } else if first.eq_ignore_ascii_case("critical") {
+                (
+                    Some(WatchStatus::Critical),
+                    parts.collect::<Vec<_>>().join(" "),
+                )
+            } else {
+                (None, rest.to_string())
+            };
+            return Self::status_actions(level, &filter);
         }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "watch refresh") {
             if rest.trim().is_empty() {
@@ -344,6 +516,8 @@ impl Plugin for WatchlistPlugin {
         vec![
             Self::watchlist_action("watch", "query:watch "),
             Self::watchlist_action("watch list", "query:watch list"),
+            Self::watchlist_action("watch ls", "query:watch ls"),
+            Self::watchlist_action("watch status", "query:watch status"),
             Self::watchlist_action("watch open", "query:watch open "),
             Self::watchlist_action("watch refresh", "watch:refresh"),
             Self::watchlist_action("watch path", "query:watch path"),
