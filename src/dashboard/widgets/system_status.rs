@@ -146,7 +146,7 @@ impl Widget for SystemStatusWidget {
             &mut self.refresh_pending,
             &mut self.last_refresh,
         ) {
-            ctx.data_cache.refresh_system_status();
+            ctx.data_cache.request_refresh_system_status();
             self.last_refresh = std::time::Instant::now();
         }
         let snapshot = ctx.data_cache.snapshot();

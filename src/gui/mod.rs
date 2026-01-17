@@ -3551,6 +3551,8 @@ impl eframe::App for LauncherApp {
             });
 
             if use_dashboard {
+                self.dashboard_data_cache
+                    .flush_refresh_requests(&self.plugins);
                 if !self.suggestions.is_empty() {
                     self.autocomplete_index = 0;
                     self.suggestions.clear();

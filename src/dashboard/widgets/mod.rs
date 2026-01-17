@@ -128,6 +128,10 @@ pub struct WidgetMetadata {
 }
 
 /// Widget trait implemented by all dashboard widgets.
+/// Checklist:
+/// - Render reads from snapshots/caches only (no IO, no plugin queries, no locks with IO).
+/// - Schedule heavy refresh work via timers/background jobs and swap in new snapshots.
+/// - Keep render deterministic and fast; use diagnostics to flag slow refreshes.
 pub trait Widget: Send {
     fn render(
         &mut self,

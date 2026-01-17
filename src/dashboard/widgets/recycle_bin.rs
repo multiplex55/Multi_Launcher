@@ -127,7 +127,7 @@ impl Widget for RecycleBinWidget {
             &mut self.refresh_pending,
             &mut self.last_refresh,
         ) {
-            ctx.data_cache.refresh_recycle_bin();
+            ctx.data_cache.request_refresh_recycle_bin();
             self.last_refresh = std::time::Instant::now();
         }
 

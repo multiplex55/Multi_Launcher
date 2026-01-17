@@ -5,7 +5,6 @@ use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
-use sysinfo::{Disks, System};
 
 fn default_clipboard_count() -> usize {
     5
@@ -84,33 +83,16 @@ impl ClipboardSnippetsWidget {
         }
     }
 
-    fn system_snapshot() -> Option<(f32, f32, f32)> {
-        let mut system = System::new_all();
-        system.refresh_cpu_usage();
-        system.refresh_memory();
-        let disks = Disks::new_with_refreshed_list();
-
-        let cpu = system.global_cpu_usage();
-        let total_mem = system.total_memory() as f32;
-        let used_mem = system.used_memory() as f32;
-        let mem = if total_mem > 0.0 {
-            used_mem / total_mem * 100.0
-        } else {
-            0.0
+    fn render_system_snapshot(ui: &mut egui::Ui, ctx: &DashboardContext<'_>) {
+        ctx.data_cache.request_refresh_system_status();
+        let snapshot = ctx.data_cache.snapshot();
+        let Some(status) = snapshot.system_status.as_ref() else {
+            ui.label("System data unavailable.");
+            return;
         };
-
-        let mut total_disk = 0u64;
-        let mut avail_disk = 0u64;
-        for d in disks.list() {
-            total_disk += d.total_space();
-            avail_disk += d.available_space();
-        }
-        let disk = if total_disk > 0 {
-            (total_disk.saturating_sub(avail_disk)) as f32 / total_disk as f32 * 100.0
-        } else {
-            0.0
-        };
-        Some((cpu, mem, disk))
+        ui.label(format!("CPU: {:.0}%", status.cpu_percent));
+        ui.label(format!("Mem: {:.0}%", status.mem_percent));
+        ui.label(format!("Disk: {:.0}%", status.disk_percent));
     }
 }
 
@@ -191,13 +173,9 @@ impl Widget for ClipboardSnippetsWidget {
         }
 
         if self.cfg.show_system {
-            if let Some((cpu, mem, disk)) = Self::system_snapshot() {
-                ui.separator();
-                ui.label("System snapshot");
-                ui.label(format!("CPU: {:.0}%", cpu));
-                ui.label(format!("Mem: {:.0}%", mem));
-                ui.label(format!("Disk: {:.0}%", disk));
-            }
+            ui.separator();
+            ui.label("System snapshot");
+            Self::render_system_snapshot(ui, ctx);
         }
 
         clicked
