@@ -12,6 +12,7 @@ mod browser_tabs;
 mod calendar;
 mod clipboard_recent;
 mod clipboard_snippets;
+mod command_history;
 mod frequent_commands;
 mod layouts;
 mod notes_recent;
@@ -43,6 +44,7 @@ pub use browser_tabs::BrowserTabsWidget;
 pub use calendar::CalendarWidget;
 pub use clipboard_recent::ClipboardRecentWidget;
 pub use clipboard_snippets::ClipboardSnippetsWidget;
+pub use command_history::CommandHistoryWidget;
 pub use frequent_commands::FrequentCommandsWidget;
 pub use layouts::LayoutsWidget;
 pub use notes_recent::NotesRecentWidget;
@@ -210,6 +212,11 @@ impl WidgetRegistry {
             "plugin_home",
             WidgetFactory::new(PluginHomeWidget::new)
                 .with_settings_ui(PluginHomeWidget::settings_ui),
+        );
+        reg.register(
+            "command_history",
+            WidgetFactory::new(CommandHistoryWidget::new)
+                .with_settings_ui(CommandHistoryWidget::settings_ui),
         );
         reg.register(
             "recent_commands",

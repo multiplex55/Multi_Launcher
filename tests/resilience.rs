@@ -46,6 +46,7 @@ fn history_poisoned_lock_does_not_panic() {
         query: "q".into(),
         query_lc: String::new(),
         action,
+        timestamp: 0,
     };
     assert!(std::panic::catch_unwind(|| {
         let _ = append_history(entry.clone(), 10);
