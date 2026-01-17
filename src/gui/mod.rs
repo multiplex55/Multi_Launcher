@@ -3569,7 +3569,7 @@ impl eframe::App for LauncherApp {
                 let has_diagnostics_widget = self.has_diagnostics_widget();
                 let show_diagnostics_widget =
                     self.show_dashboard_diagnostics || has_diagnostics_widget;
-                let diagnostics = if show_diagnostics_widget {
+                let diagnostics = if self.show_dashboard_diagnostics || has_diagnostics_widget {
                     Some(self.dashboard.diagnostics_snapshot())
                 } else {
                     None
@@ -4745,6 +4745,62 @@ mod tests {
 
         assert!(app.has_diagnostics_widget());
         assert!(app.show_dashboard_diagnostics || app.has_diagnostics_widget());
+    }
+
+    #[test]
+    fn diagnostics_context_includes_snapshot_when_widget_present() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.show_dashboard_diagnostics = false;
+        app.dashboard.slots = vec![NormalizedSlot {
+            id: None,
+            widget: "diagnostics".to_string(),
+            row: 0,
+            col: 0,
+            row_span: 1,
+            col_span: 1,
+            settings: json!({}),
+            overflow: OverflowMode::Scroll,
+        }];
+
+        let has_diagnostics_widget = app.has_diagnostics_widget();
+        let show_diagnostics_widget = app.show_dashboard_diagnostics || has_diagnostics_widget;
+        let diagnostics = if app.show_dashboard_diagnostics || has_diagnostics_widget {
+            Some(app.dashboard.diagnostics_snapshot())
+        } else {
+            None
+        };
+
+        assert!(show_diagnostics_widget);
+        assert!(diagnostics.is_some());
+    }
+
+    #[test]
+    fn diagnostics_context_omits_snapshot_when_disabled_and_missing_widget() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.show_dashboard_diagnostics = false;
+        app.dashboard.slots = vec![NormalizedSlot {
+            id: None,
+            widget: "notes".to_string(),
+            row: 0,
+            col: 0,
+            row_span: 1,
+            col_span: 1,
+            settings: json!({}),
+            overflow: OverflowMode::Scroll,
+        }];
+
+        let has_diagnostics_widget = app.has_diagnostics_widget();
+        let show_diagnostics_widget = app.show_dashboard_diagnostics || has_diagnostics_widget;
+        let diagnostics = if app.show_dashboard_diagnostics || has_diagnostics_widget {
+            Some(app.dashboard.diagnostics_snapshot())
+        } else {
+            None
+        };
+
+        assert!(!show_diagnostics_widget);
+        assert!(diagnostics.is_none());
     }
 
     #[test]
