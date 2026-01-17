@@ -10,9 +10,46 @@ pub struct HistoryEntry {
     #[serde(skip)]
     pub query_lc: String,
     pub action: Action,
+    #[serde(default)]
+    pub timestamp: i64,
 }
 
 const HISTORY_FILE: &str = "history.json";
+pub const HISTORY_PINS_FILE: &str = "history_pins.json";
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct HistoryPin {
+    pub action_id: String,
+    pub label: String,
+    pub desc: String,
+    pub args: Option<String>,
+    pub query: String,
+    #[serde(default)]
+    pub timestamp: i64,
+}
+
+impl HistoryPin {
+    pub fn from_history(entry: &HistoryEntry) -> Self {
+        Self {
+            action_id: entry.action.action.clone(),
+            label: entry.action.label.clone(),
+            desc: entry.action.desc.clone(),
+            args: entry.action.args.clone(),
+            query: entry.query.clone(),
+            timestamp: entry.timestamp,
+        }
+    }
+}
+
+impl PartialEq for HistoryPin {
+    fn eq(&self, other: &Self) -> bool {
+        self.action_id == other.action_id
+            && self.query == other.query
+            && self.timestamp == other.timestamp
+    }
+}
+
+impl Eq for HistoryPin {}
 
 static HISTORY: Lazy<RwLock<VecDeque<HistoryEntry>>> = Lazy::new(|| {
     let hist = load_history_internal().unwrap_or_else(|e| {
@@ -57,6 +94,9 @@ pub fn save_history() -> anyhow::Result<()> {
 /// specifies the maximum number of entries kept.
 pub fn append_history(mut entry: HistoryEntry, limit: usize) -> anyhow::Result<()> {
     entry.query_lc = entry.query.to_lowercase();
+    if entry.timestamp == 0 {
+        entry.timestamp = chrono::Utc::now().timestamp();
+    }
     {
         let Some(mut h) = HISTORY.write().ok() else {
             return Ok(());
@@ -93,4 +133,66 @@ pub fn clear_history() -> anyhow::Result<()> {
         h.clear();
     }
     save_history()
+}
+
+pub fn load_pins(path: &str) -> anyhow::Result<Vec<HistoryPin>> {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    if content.is_empty() {
+        return Ok(Vec::new());
+    }
+    let list: Vec<HistoryPin> = serde_json::from_str(&content)?;
+    Ok(list)
+}
+
+pub fn save_pins(path: &str, pins: &[HistoryPin]) -> anyhow::Result<()> {
+    let json = serde_json::to_string_pretty(pins)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
+pub fn toggle_pin(path: &str, pin: &HistoryPin) -> anyhow::Result<bool> {
+    let mut pins = load_pins(path).unwrap_or_default();
+    if let Some(idx) = pins.iter().position(|p| p == pin) {
+        pins.remove(idx);
+        save_pins(path, &pins)?;
+        Ok(false)
+    } else {
+        pins.push(pin.clone());
+        save_pins(path, &pins)?;
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{load_pins, save_pins, toggle_pin, HistoryPin};
+    use tempfile::tempdir;
+
+    #[test]
+    fn pin_roundtrip_and_toggle() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("pins.json");
+        let pin = HistoryPin {
+            action_id: "action:one".into(),
+            label: "One".into(),
+            desc: "Test".into(),
+            args: Some("--flag".into()),
+            query: "one".into(),
+            timestamp: 123,
+        };
+
+        save_pins(path.to_str().unwrap(), &[pin.clone()]).expect("save pins");
+        let loaded = load_pins(path.to_str().unwrap()).expect("load pins");
+        assert_eq!(loaded, vec![pin.clone()]);
+
+        let now_pinned = toggle_pin(path.to_str().unwrap(), &pin).expect("toggle off");
+        assert!(!now_pinned);
+        let cleared = load_pins(path.to_str().unwrap()).expect("load after clear");
+        assert!(cleared.is_empty());
+
+        let now_pinned = toggle_pin(path.to_str().unwrap(), &pin).expect("toggle on");
+        assert!(now_pinned);
+        let reloaded = load_pins(path.to_str().unwrap()).expect("load after add");
+        assert_eq!(reloaded, vec![pin]);
+    }
 }

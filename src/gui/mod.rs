@@ -2014,6 +2014,7 @@ impl LauncherApp {
                         query: current.clone(),
                         query_lc: String::new(),
                         action: a.clone(),
+                        timestamp: 0,
                     },
                     self.history_limit,
                 );
@@ -2039,6 +2040,7 @@ impl LauncherApp {
                         query: current.clone(),
                         query_lc: String::new(),
                         action: a.clone(),
+                        timestamp: 0,
                     },
                     self.history_limit,
                 );
@@ -2087,6 +2089,7 @@ impl LauncherApp {
                         query: current.clone(),
                         query_lc: String::new(),
                         action: a.clone(),
+                        timestamp: 0,
                     },
                     self.history_limit,
                 );
