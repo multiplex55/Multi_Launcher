@@ -53,6 +53,7 @@ pub struct SettingsEditor {
     disable_timer_updates: bool,
     preserve_command: bool,
     clear_query_after_run: bool,
+    require_confirm_destructive: bool,
     query_autocomplete: bool,
     net_refresh: f32,
     net_unit: crate::settings::NetUnit,
@@ -147,6 +148,7 @@ impl SettingsEditor {
             disable_timer_updates: settings.disable_timer_updates,
             preserve_command: settings.preserve_command,
             clear_query_after_run: settings.clear_query_after_run,
+            require_confirm_destructive: settings.require_confirm_destructive,
             query_autocomplete: settings.query_autocomplete,
             net_refresh: settings.net_refresh,
             net_unit: settings.net_unit,
@@ -272,6 +274,7 @@ impl SettingsEditor {
             disable_timer_updates: self.disable_timer_updates,
             preserve_command: self.preserve_command,
             clear_query_after_run: self.clear_query_after_run,
+            require_confirm_destructive: self.require_confirm_destructive,
             query_autocomplete: self.query_autocomplete,
             net_refresh: self.net_refresh,
             net_unit: self.net_unit,
@@ -398,6 +401,10 @@ impl SettingsEditor {
                             );
                             ui.checkbox(&mut self.preserve_command, "Preserve command after run");
                             ui.checkbox(&mut self.clear_query_after_run, "Clear query after run");
+                            ui.checkbox(
+                                &mut self.require_confirm_destructive,
+                                "Require confirm for destructive actions",
+                            );
                         });
                         ui.checkbox(&mut self.always_on_top, "Always on top");
                         ui.checkbox(&mut self.query_autocomplete, "Enable query autocomplete");
@@ -705,6 +712,7 @@ impl SettingsEditor {
                                                 new_settings.static_size,
                                                 Some(new_settings.hide_after_run),
                                                 Some(new_settings.clear_query_after_run),
+                                                Some(new_settings.require_confirm_destructive),
                                                 Some(new_settings.timer_refresh),
                                                 Some(new_settings.disable_timer_updates),
                                                 Some(new_settings.preserve_command),
@@ -745,6 +753,8 @@ impl SettingsEditor {
                                             app.preserve_command = new_settings.preserve_command;
                                             app.clear_query_after_run =
                                                 new_settings.clear_query_after_run;
+                                            app.require_confirm_destructive =
+                                                new_settings.require_confirm_destructive;
                                             app.query_autocomplete =
                                                 new_settings.query_autocomplete;
                                             app.net_refresh = new_settings.net_refresh;

@@ -1,5 +1,6 @@
 use crate::dashboard::config::{DashboardConfig, OverflowMode, SlotConfig};
 use crate::dashboard::widgets::{WidgetRegistry, WidgetSettingsContext};
+use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use eframe::egui;
 use eframe::egui::collapsing_header::CollapsingState;
 use serde_json::Value;
@@ -40,6 +41,8 @@ pub struct DashboardEditorDialog {
     show_swap_buttons: bool,
     show_remove_buttons: bool,
     confirm_remove_slot: Option<usize>,
+    confirm_modal: ConfirmationModal,
+    pending_reset: Option<(usize, Value)>,
 }
 
 impl Default for DashboardEditorDialog {
@@ -61,6 +64,8 @@ impl Default for DashboardEditorDialog {
             show_swap_buttons: true,
             show_remove_buttons: true,
             confirm_remove_slot: None,
+            confirm_modal: ConfirmationModal::default(),
+            pending_reset: None,
         }
     }
 }
@@ -103,6 +108,7 @@ impl DashboardEditorDialog {
         ctx: &egui::Context,
         registry: &WidgetRegistry,
         settings_ctx: WidgetSettingsContext<'_>,
+        require_confirm_destructive: bool,
     ) -> bool {
         if !self.open {
             return false;
@@ -499,7 +505,12 @@ impl DashboardEditorDialog {
                         }
                     }
                     ui.separator();
-                    self.render_selected_settings(ui, registry, &settings_ctx);
+                    self.render_selected_settings(
+                        ui,
+                        registry,
+                        &settings_ctx,
+                        require_confirm_destructive,
+                    );
                     // Reset batch flags after applying once
                     self.slot_expand_all = false;
                     self.slot_collapse_all = false;
@@ -572,6 +583,7 @@ impl DashboardEditorDialog {
         ui: &mut egui::Ui,
         registry: &WidgetRegistry,
         settings_ctx: &WidgetSettingsContext<'_>,
+        require_confirm_destructive: bool,
     ) {
         ui.heading("Settings");
         if self.config.slots.is_empty() {
@@ -607,8 +619,14 @@ impl DashboardEditorDialog {
                 }
             }
             if ui.button("Reset to defaults").clicked() {
-                slot.settings = default_settings.clone();
-                settings_changed = true;
+                if require_confirm_destructive {
+                    self.pending_reset = Some((selected_idx, default_settings.clone()));
+                    self.confirm_modal
+                        .open_for(DestructiveAction::ResetWidgetSettings);
+                } else {
+                    slot.settings = default_settings.clone();
+                    settings_changed = true;
+                }
             }
         });
 
@@ -626,6 +644,21 @@ impl DashboardEditorDialog {
             }
         } else {
             ui.label("No settings available for this widget.");
+        }
+
+        match self.confirm_modal.ui(ui.ctx()) {
+            ConfirmationResult::Confirmed => {
+                if let Some((idx, settings)) = self.pending_reset.take() {
+                    if let Some(slot) = self.config.slots.get_mut(idx) {
+                        slot.settings = settings;
+                        settings_changed = true;
+                    }
+                }
+            }
+            ConfirmationResult::Cancelled => {
+                self.pending_reset = None;
+            }
+            ConfirmationResult::None => {}
         }
 
         if settings_changed {

@@ -7,6 +7,7 @@ mod calendar_event_details;
 mod calendar_event_editor;
 mod calendar_popover;
 mod clipboard_dialog;
+mod confirmation_modal;
 mod convert_panel;
 mod cpu_list_dialog;
 mod dashboard_editor_dialog;
@@ -83,6 +84,7 @@ use crate::usage::{self, USAGE_FILE};
 use crate::visibility::apply_visibility;
 use chrono::NaiveDate;
 use dashboard_editor_dialog::DashboardEditorDialog;
+use confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
 use fst::{IntoStreamer, Map, MapBuilder, Streamer};
@@ -147,6 +149,13 @@ pub enum ActivationSource {
     Enter,
     Click,
     Dashboard,
+}
+
+#[derive(Clone)]
+struct PendingConfirmAction {
+    action: Action,
+    query_override: Option<String>,
+    source: ActivationSource,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -434,6 +443,7 @@ pub struct LauncherApp {
     pub disable_timer_updates: bool,
     pub preserve_command: bool,
     pub clear_query_after_run: bool,
+    pub require_confirm_destructive: bool,
     pub query_autocomplete: bool,
     pub net_refresh: f32,
     pub net_unit: crate::settings::NetUnit,
@@ -454,6 +464,8 @@ pub struct LauncherApp {
     last_timer_query: bool,
     last_stopwatch_query: bool,
     pending_query: Option<String>,
+    confirm_modal: ConfirmationModal,
+    pending_confirm: Option<PendingConfirmAction>,
     pub vim_mode: bool,
 }
 
@@ -587,6 +599,7 @@ impl LauncherApp {
         static_size: Option<(i32, i32)>,
         hide_after_run: Option<bool>,
         clear_query_after_run: Option<bool>,
+        require_confirm_destructive: Option<bool>,
         timer_refresh: Option<f32>,
         disable_timer_updates: Option<bool>,
         preserve_command: Option<bool>,
@@ -644,6 +657,9 @@ impl LauncherApp {
         }
         if let Some(v) = clear_query_after_run {
             self.clear_query_after_run = v;
+        }
+        if let Some(v) = require_confirm_destructive {
+            self.require_confirm_destructive = v;
         }
         if let Some(v) = timer_refresh {
             self.timer_refresh = v;
@@ -1068,6 +1084,7 @@ impl LauncherApp {
             disable_timer_updates: settings.disable_timer_updates,
             preserve_command: settings.preserve_command,
             clear_query_after_run: settings.clear_query_after_run,
+            require_confirm_destructive: settings.require_confirm_destructive,
             query_autocomplete: settings.query_autocomplete,
             net_refresh: settings.net_refresh,
             net_unit: settings.net_unit,
@@ -1088,6 +1105,8 @@ impl LauncherApp {
             last_timer_query: false,
             last_stopwatch_query: false,
             pending_query: None,
+            confirm_modal: ConfirmationModal::default(),
+            pending_confirm: None,
             action_cache: Vec::new(),
             actions_by_id,
             command_cache: Vec::new(),
@@ -1527,6 +1546,39 @@ impl LauncherApp {
     }
 
     pub fn activate_action(
+        &mut self,
+        a: Action,
+        query_override: Option<String>,
+        source: ActivationSource,
+    ) {
+        if self.maybe_confirm_destructive_action(&a, query_override.clone(), source) {
+            return;
+        }
+        self.activate_action_confirmed(a, query_override, source);
+    }
+
+    fn maybe_confirm_destructive_action(
+        &mut self,
+        a: &Action,
+        query_override: Option<String>,
+        source: ActivationSource,
+    ) -> bool {
+        if !self.require_confirm_destructive {
+            return false;
+        }
+        if let Some(kind) = DestructiveAction::from_action(a) {
+            self.pending_confirm = Some(PendingConfirmAction {
+                action: a.clone(),
+                query_override,
+                source,
+            });
+            self.confirm_modal.open_for(kind);
+            return true;
+        }
+        false
+    }
+
+    fn activate_action_confirmed(
         &mut self,
         a: Action,
         query_override: Option<String>,
@@ -3699,7 +3751,7 @@ impl eframe::App for LauncherApp {
                 default_location: self.dashboard_default_location.as_deref(),
                 enabled_plugins: self.enabled_plugins.as_ref(),
             };
-            let reload = dlg.ui(ctx, &registry, settings_ctx);
+            let reload = dlg.ui(ctx, &registry, settings_ctx, self.require_confirm_destructive);
             self.show_dashboard_editor = dlg.open;
             self.dashboard_editor = dlg;
             if reload {
@@ -3808,6 +3860,21 @@ impl eframe::App for LauncherApp {
         let mut calendar_details = std::mem::take(&mut self.calendar_event_details);
         calendar_details.ui(ctx, self);
         self.calendar_event_details = calendar_details;
+        match self.confirm_modal.ui(ctx) {
+            ConfirmationResult::Confirmed => {
+                if let Some(pending) = self.pending_confirm.take() {
+                    self.activate_action_confirmed(
+                        pending.action,
+                        pending.query_override,
+                        pending.source,
+                    );
+                }
+            }
+            ConfirmationResult::Cancelled => {
+                self.pending_confirm = None;
+            }
+            ConfirmationResult::None => {}
+        }
         self.enforce_pinned();
         self.update_panel_stack();
     }
