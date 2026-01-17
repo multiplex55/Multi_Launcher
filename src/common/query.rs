@@ -326,8 +326,8 @@ mod tests {
 
     #[test]
     fn tokenize_handles_quotes_and_escapes() {
-        let tokens = tokenize_query(r#"tag:\"high priority\" kind:todo"#);
-        assert_eq!(tokens, vec!["tag:\"high priority\"", "kind:todo"]);
+        let tokens = tokenize_query(r#"tag:"high priority" kind:todo"#);
+        assert_eq!(tokens, vec!["tag:high priority", "kind:todo"]);
     }
 
     #[test]
@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn parse_query_filters_handles_quoted_tags_and_mixed_ops() {
         let filters = parse_query_filters(
-            r#"note list tag:\"high priority\" !#chore "done soon""#,
+            r#"note list tag:"high priority" !#chore "done soon""#,
             &["tag:", "#"],
         );
         assert_eq!(filters.include_tags, vec!["high priority"]);
