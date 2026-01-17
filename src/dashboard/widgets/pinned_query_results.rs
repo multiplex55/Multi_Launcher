@@ -3,6 +3,7 @@ use super::{
     TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
 };
 use crate::actions::Action;
+use crate::common::query::{apply_action_filters, split_action_filters};
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -296,7 +297,9 @@ impl PinnedQueryResultsWidget {
             );
         };
 
-        let mut actions = plugin.search(query);
+        let (filtered_query, filters) = split_action_filters(query);
+        let mut actions = plugin.search(filtered_query.trim());
+        actions = apply_action_filters(actions, &filters);
         let limit = self.cfg.limit.max(1);
         if actions.len() > limit {
             actions.truncate(limit);

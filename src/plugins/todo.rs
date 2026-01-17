@@ -8,6 +8,7 @@
 use crate::actions::Action;
 use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::common::lru::LruCache;
+use crate::common::query::parse_query_filters;
 use crate::plugin::Plugin;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -403,42 +404,14 @@ impl TodoPlugin {
             };
             let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
 
-            let mut requested_tags: Vec<&str> = Vec::new();
-            let mut excluded_tags: Vec<&str> = Vec::new();
-            let mut text_tokens: Vec<&str> = Vec::new();
-            let mut negative = false;
-            for token in filter.split_whitespace() {
-                let (token, token_negated) = token
-                    .strip_prefix('!')
-                    .map(|stripped| (stripped, true))
-                    .unwrap_or((token, false));
-
-                if let Some(tag) = token.strip_prefix('@').or_else(|| token.strip_prefix('#')) {
-                    if !tag.is_empty() {
-                        if token_negated {
-                            excluded_tags.push(tag);
-                        } else {
-                            requested_tags.push(tag);
-                        }
-                    }
-                    continue;
-                }
-
-                if !token.is_empty() {
-                    if token_negated && !negative && text_tokens.is_empty() {
-                        negative = true;
-                    }
-                    text_tokens.push(token);
-                }
-            }
-
-            let text_filter = text_tokens.join(" ");
-            let has_tag_filter = !requested_tags.is_empty() || !excluded_tags.is_empty();
+            let filters = parse_query_filters(filter, &["@", "#", "tag:"]);
+            let text_filter = filters.remaining_tokens.join(" ");
+            let has_tag_filter = !filters.include_tags.is_empty() || !filters.exclude_tags.is_empty();
 
             // Tag filters run first, then text filters apply fuzzy matching against remaining text.
-            if !requested_tags.is_empty() {
+            if !filters.include_tags.is_empty() {
                 entries.retain(|(_, t)| {
-                    requested_tags.iter().all(|requested| {
+                    filters.include_tags.iter().all(|requested| {
                         t.tags
                             .iter()
                             .any(|tag| tag.eq_ignore_ascii_case(requested))
@@ -446,9 +419,9 @@ impl TodoPlugin {
                 });
             }
 
-            if !excluded_tags.is_empty() {
+            if !filters.exclude_tags.is_empty() {
                 entries.retain(|(_, t)| {
-                    !excluded_tags.iter().any(|excluded| {
+                    !filters.exclude_tags.iter().any(|excluded| {
                         t.tags
                             .iter()
                             .any(|tag| tag.eq_ignore_ascii_case(excluded))
@@ -459,7 +432,7 @@ impl TodoPlugin {
             if !text_filter.is_empty() {
                 entries.retain(|(_, t)| {
                     let text_match = self.matcher.fuzzy_match(&t.text, &text_filter).is_some();
-                    if negative {
+                    if filters.negate_text {
                         !text_match
                     } else {
                         text_match
@@ -621,6 +594,12 @@ mod tests {
                 priority: 2,
                 tags: vec!["ui".into()],
             },
+            TodoEntry {
+                text: "urgent delta".into(),
+                done: false,
+                priority: 4,
+                tags: vec!["high priority".into(), "chore".into()],
+            },
         ]);
 
         let plugin = TodoPlugin {
@@ -642,6 +621,14 @@ mod tests {
         let list_negated = plugin.search_internal("todo list !foo @testing");
         let labels_negated: Vec<&str> = list_negated.iter().map(|a| a.label.as_str()).collect();
         assert_eq!(labels_negated, vec!["[ ] bar beta"]);
+
+        let list_quoted_tag = plugin.search_internal("todo list tag:\"high priority\"");
+        let labels_quoted: Vec<&str> = list_quoted_tag.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_quoted, vec!["[ ] urgent delta"]);
+
+        let list_exclude_tag = plugin.search_internal("todo list !tag:ui");
+        let labels_exclude: Vec<&str> = list_exclude_tag.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_exclude, vec!["[ ] urgent delta", "[ ] bar beta"]);
 
         if let Ok(mut guard) = TODO_DATA.write() {
             *guard = original;

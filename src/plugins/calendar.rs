@@ -1,6 +1,7 @@
 //! Calendar data models and utilities.
 use crate::actions::Action;
 use crate::common::json_watch::{watch_json, JsonWatcher};
+use crate::common::query::parse_query_filters;
 use crate::common::strip_prefix_ci;
 use crate::plugin::Plugin;
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
@@ -829,6 +830,7 @@ pub struct CalendarAddRequest {
 pub struct CalendarSearchRequest {
     pub query: String,
     pub tags: Vec<String>,
+    pub exclude_tags: Vec<String>,
     pub after: Option<NaiveDate>,
 }
 
@@ -888,15 +890,11 @@ pub fn parse_calendar_add(input: &str, now: NaiveDateTime) -> Result<CalendarAdd
 }
 
 pub fn parse_calendar_search(input: &str) -> Result<CalendarSearchRequest, String> {
-    let mut tags = Vec::new();
+    let filters = parse_query_filters(input, &["tag:"]);
     let mut query_parts = Vec::new();
     let mut after = None;
-    for token in input.split_whitespace() {
-        if let Some(tag) = token.strip_prefix("tag:") {
-            if !tag.trim().is_empty() {
-                tags.push(tag.trim().to_lowercase());
-            }
-        } else if let Some(date) = token.strip_prefix("after:") {
+    for token in filters.remaining_tokens {
+        if let Some(date) = token.strip_prefix("after:") {
             let parsed = NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d")
                 .map_err(|_| "Invalid after: date (use YYYY-MM-DD)".to_string())?;
             after = Some(parsed);
@@ -906,7 +904,8 @@ pub fn parse_calendar_search(input: &str) -> Result<CalendarSearchRequest, Strin
     }
     Ok(CalendarSearchRequest {
         query: query_parts.join(" "),
-        tags,
+        tags: filters.include_tags,
+        exclude_tags: filters.exclude_tags,
         after,
     })
 }
@@ -969,13 +968,16 @@ pub fn search_events(request: &CalendarSearchRequest) -> Vec<CalendarEvent> {
                     return false;
                 }
             }
-            if !request.tags.is_empty() {
+            if !request.tags.is_empty() || !request.exclude_tags.is_empty() {
                 let tags = event
                     .tags
                     .iter()
                     .map(|t| t.to_lowercase())
                     .collect::<Vec<_>>();
-                if !request.tags.iter().all(|t| tags.contains(t)) {
+                if !request.tags.is_empty() && !request.tags.iter().all(|t| tags.contains(t)) {
+                    return false;
+                }
+                if request.exclude_tags.iter().any(|t| tags.contains(t)) {
                     return false;
                 }
             }
