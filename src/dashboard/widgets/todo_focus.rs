@@ -95,7 +95,7 @@ impl Widget for TodoFocusWidget {
                 if let Err(err) = mark_done(TODO_FILE, idx) {
                     tracing::error!("Failed to toggle todo #{idx}: {err}");
                 } else {
-                    ctx.data_cache.refresh_todos();
+                    ctx.data_cache.request_refresh_todos();
                 }
             }
             let mut label = entry.text.clone();

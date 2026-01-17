@@ -215,6 +215,15 @@ struct DashboardDataState {
     last_recycle_refresh: Instant,
     last_network_totals: (u64, u64),
     last_network_time: Instant,
+    refresh_requests: RefreshRequests,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RefreshRequests {
+    todos: bool,
+    processes: bool,
+    system_status: bool,
+    recycle_bin: bool,
 }
 
 pub struct DashboardDataCache {
@@ -231,6 +240,7 @@ impl DashboardDataCache {
                 last_recycle_refresh: Instant::now() - Duration::from_secs(60),
                 last_network_totals: (0, 0),
                 last_network_time: Instant::now() - Duration::from_secs(60),
+                refresh_requests: RefreshRequests::default(),
             }),
         }
     }
@@ -285,6 +295,12 @@ impl DashboardDataCache {
         }
     }
 
+    pub fn request_refresh_todos(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.refresh_requests.todos = true;
+        }
+    }
+
     pub fn refresh_calendar(&self) {
         let _ = refresh_events_from_disk(CALENDAR_EVENTS_FILE);
         let snapshot = build_snapshot(Local::now().naive_local());
@@ -316,6 +332,12 @@ impl DashboardDataCache {
         if let Ok(mut state) = self.state.lock() {
             state.snapshot = Arc::new(state.snapshot.with_processes(processes, error));
             state.last_process_refresh = Instant::now();
+        }
+    }
+
+    pub fn request_refresh_processes(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.refresh_requests.processes = true;
         }
     }
 
@@ -394,6 +416,12 @@ impl DashboardDataCache {
         }
     }
 
+    pub fn request_refresh_system_status(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.refresh_requests.system_status = true;
+        }
+    }
+
     pub fn maybe_refresh_recycle_bin(&self, interval: Duration) {
         let should_refresh = self
             .state
@@ -410,6 +438,35 @@ impl DashboardDataCache {
         if let Ok(mut state) = self.state.lock() {
             state.snapshot = Arc::new(state.snapshot.with_recycle_bin(snapshot));
             state.last_recycle_refresh = Instant::now();
+        }
+    }
+
+    pub fn request_refresh_recycle_bin(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.refresh_requests.recycle_bin = true;
+        }
+    }
+
+    pub fn flush_refresh_requests(&self, plugins: &PluginManager) {
+        let requests = if let Ok(mut state) = self.state.lock() {
+            let requests = state.refresh_requests;
+            state.refresh_requests = RefreshRequests::default();
+            requests
+        } else {
+            RefreshRequests::default()
+        };
+
+        if requests.todos {
+            self.refresh_todos();
+        }
+        if requests.processes {
+            self.refresh_processes(plugins);
+        }
+        if requests.system_status {
+            self.refresh_system_status();
+        }
+        if requests.recycle_bin {
+            self.refresh_recycle_bin();
         }
     }
 

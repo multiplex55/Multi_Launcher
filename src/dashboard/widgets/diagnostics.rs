@@ -68,6 +68,9 @@ impl Widget for DiagnosticsWidget {
                     ui.label("Widget");
                     ui.label("Last refresh");
                     ui.label("Duration");
+                    ui.label("Start");
+                    ui.label("End");
+                    ui.label("Mode");
                     ui.end_row();
 
                     let now = Instant::now();
@@ -80,6 +83,13 @@ impl Widget for DiagnosticsWidget {
                                 ui.colored_label(egui::Color32::YELLOW, "⚠");
                             }
                         });
+                        ui.label(Self::format_elapsed(now, stat.last_refresh_start));
+                        ui.label(Self::format_elapsed(now, stat.last_refresh_end));
+                        if stat.throttled {
+                            ui.colored_label(egui::Color32::YELLOW, "Throttled");
+                        } else {
+                            ui.label("Normal");
+                        }
                         ui.end_row();
                     }
                 });

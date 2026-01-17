@@ -393,10 +393,12 @@ impl Dashboard {
     ) -> Option<WidgetAction> {
         let start = Instant::now();
         let response = slot.widget.render(ui, ctx, activation);
+        let end = Instant::now();
         diagnostics.record_widget_refresh(
             diag_key.to_string(),
             heading.to_string(),
-            start.elapsed(),
+            start,
+            end,
         );
         response
     }
