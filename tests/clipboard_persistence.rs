@@ -23,6 +23,7 @@ fn history_survives_instances() {
         let _ = clipboard.set_text("first".to_string());
     }
 
+    std::env::set_var("ML_SKIP_CLIPBOARD_SYNC", "1");
     let plugin1 = ClipboardPlugin::new(20);
     let results1 = plugin1.search("cb first");
     assert_eq!(results1.len(), 1);
@@ -32,6 +33,7 @@ fn history_survives_instances() {
     let results2 = plugin2.search("cb first");
     assert_eq!(results2.len(), 1);
     assert_eq!(results2[0].label, "first");
+    std::env::remove_var("ML_SKIP_CLIPBOARD_SYNC");
 }
 
 #[test]
@@ -50,9 +52,11 @@ fn cb_list_returns_all_entries() {
         let _ = clipboard.set_text("alpha".to_string());
     }
 
+    std::env::set_var("ML_SKIP_CLIPBOARD_SYNC", "1");
     let plugin = ClipboardPlugin::new(20);
     let results = plugin.search("cb list");
     assert_eq!(results.len(), 2);
     assert!(results[0].action.starts_with("clipboard:copy:"));
     assert!(results[1].action.starts_with("clipboard:copy:"));
+    std::env::remove_var("ML_SKIP_CLIPBOARD_SYNC");
 }

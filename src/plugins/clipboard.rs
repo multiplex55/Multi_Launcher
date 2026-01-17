@@ -112,6 +112,9 @@ impl ClipboardPlugin {
             Some(h) => h,
             None => return VecDeque::new(),
         };
+        if std::env::var("ML_SKIP_CLIPBOARD_SYNC").is_ok() {
+            return history.clone();
+        }
         let mut cb_lock = match self.clipboard.lock().ok() {
             Some(c) => c,
             None => return history.clone(),
