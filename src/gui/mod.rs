@@ -83,8 +83,8 @@ use crate::toast_log::{append_toast_log, TOAST_LOG_FILE};
 use crate::usage::{self, USAGE_FILE};
 use crate::visibility::apply_visibility;
 use chrono::NaiveDate;
-use dashboard_editor_dialog::DashboardEditorDialog;
 use confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
+use dashboard_editor_dialog::DashboardEditorDialog;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
 use fst::{IntoStreamer, Map, MapBuilder, Streamer};
@@ -362,6 +362,7 @@ pub struct LauncherApp {
     pub dashboard_show_when_empty: bool,
     pub dashboard_path: String,
     pub dashboard_default_location: Option<String>,
+    pub reduce_dashboard_work_when_unfocused: bool,
     pub dashboard_editor: DashboardEditorDialog,
     pub show_dashboard_editor: bool,
     rx: Receiver<WatchEvent>,
@@ -1001,6 +1002,7 @@ impl LauncherApp {
             dashboard_show_when_empty: settings.dashboard.show_when_query_empty,
             dashboard_path: dashboard_path.to_string_lossy().to_string(),
             dashboard_default_location: settings.dashboard.default_location.clone(),
+            reduce_dashboard_work_when_unfocused: settings.reduce_dashboard_work_when_unfocused,
             dashboard_editor: DashboardEditorDialog::default(),
             show_dashboard_editor: false,
             rx,
@@ -3287,6 +3289,8 @@ impl eframe::App for LauncherApp {
                     self.autocomplete_index = 0;
                     self.suggestions.clear();
                 }
+                let dashboard_visible = self.visible_flag.load(Ordering::SeqCst);
+                let dashboard_focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
                 let dash_ctx = DashboardContext {
                     actions: &self.actions,
                     actions_by_id: &self.actions_by_id,
@@ -3302,6 +3306,10 @@ impl eframe::App for LauncherApp {
                     calendar_version: crate::plugins::calendar::calendar_version(),
                     clipboard_version: crate::plugins::clipboard::clipboard_version(),
                     snippets_version: crate::plugins::snippets::snippets_version(),
+                    dashboard_visible,
+                    dashboard_focused,
+                    reduce_dashboard_work_when_unfocused: self
+                        .reduce_dashboard_work_when_unfocused,
                 };
                 ctx.request_repaint_after(Duration::from_millis(250));
                 if let Some(action) = self.dashboard.ui(ui, &dash_ctx, WidgetActivation::Click) {
@@ -3751,7 +3759,12 @@ impl eframe::App for LauncherApp {
                 default_location: self.dashboard_default_location.as_deref(),
                 enabled_plugins: self.enabled_plugins.as_ref(),
             };
-            let reload = dlg.ui(ctx, &registry, settings_ctx, self.require_confirm_destructive);
+            let reload = dlg.ui(
+                ctx,
+                &registry,
+                settings_ctx,
+                self.require_confirm_destructive,
+            );
             self.show_dashboard_editor = dlg.open;
             self.dashboard_editor = dlg;
             if reload {

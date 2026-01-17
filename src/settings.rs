@@ -198,6 +198,9 @@ pub struct Settings {
     pub plugin_settings: std::collections::HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub pinned_panels: Vec<Panel>,
+    /// Reduce dashboard refresh work when the launcher is not focused.
+    #[serde(default = "default_true")]
+    pub reduce_dashboard_work_when_unfocused: bool,
     #[serde(default)]
     pub dashboard: DashboardSettings,
 }
@@ -348,6 +351,7 @@ impl Default for Settings {
             screenshot_use_editor: true,
             plugin_settings: std::collections::HashMap::new(),
             pinned_panels: Vec::new(),
+            reduce_dashboard_work_when_unfocused: true,
             dashboard: DashboardSettings::default(),
         }
     }

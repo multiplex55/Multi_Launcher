@@ -1,4 +1,8 @@
-use super::{edit_typed_settings, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult};
+use super::{
+    default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
+    run_refresh_schedule, RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext,
+    WidgetSettingsUiResult,
+};
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use crate::plugins::layouts_storage::{self, Layout, LayoutMatch, LayoutStore, LAYOUTS_FILE};
@@ -26,6 +30,10 @@ fn default_autosave_on_change() -> bool {
 pub struct LayoutsConfig {
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval_secs: f32,
+    #[serde(default)]
+    pub refresh_mode: RefreshMode,
+    #[serde(default = "default_refresh_throttle_secs")]
+    pub refresh_throttle_secs: f32,
     #[serde(default = "default_show_health_indicator")]
     pub show_health_indicator: bool,
     #[serde(default = "default_autosave_on_change")]
@@ -36,6 +44,8 @@ impl Default for LayoutsConfig {
     fn default() -> Self {
         Self {
             refresh_interval_secs: default_refresh_interval(),
+            refresh_mode: RefreshMode::Auto,
+            refresh_throttle_secs: default_refresh_throttle_secs(),
             show_health_indicator: default_show_health_indicator(),
             autosave_on_change: default_autosave_on_change(),
         }
@@ -93,7 +103,12 @@ impl LayoutsWidget {
         let interval = Duration::from_secs_f32(cfg.refresh_interval_secs.max(1.0));
         Self {
             cfg,
-            cache: TimedCache::new(LayoutsData { layouts: Vec::new() }, interval),
+            cache: TimedCache::new(
+                LayoutsData {
+                    layouts: Vec::new(),
+                },
+                interval,
+            ),
             error: None,
             refresh_pending: false,
             rename_target: None,
@@ -114,17 +129,14 @@ impl LayoutsWidget {
     ) -> WidgetSettingsUiResult {
         edit_typed_settings(ui, value, ctx, |ui, cfg: &mut LayoutsConfig, _ctx| {
             let mut changed = false;
-            ui.horizontal(|ui| {
-                ui.label("Refresh every");
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut cfg.refresh_interval_secs)
-                            .clamp_range(1.0..=300.0)
-                            .speed(0.5),
-                    )
-                    .changed();
-                ui.label("seconds");
-            });
+            changed |= refresh_settings_ui(
+                ui,
+                &mut cfg.refresh_interval_secs,
+                &mut cfg.refresh_mode,
+                &mut cfg.refresh_throttle_secs,
+                None,
+                "Layouts are cached between refreshes.",
+            );
             changed |= ui
                 .checkbox(&mut cfg.show_health_indicator, "Show health indicator")
                 .changed();
@@ -258,10 +270,9 @@ impl LayoutsWidget {
         else {
             return Ok(());
         };
-        let json =
-            serde_json::to_string_pretty(&layout).map_err(|err| format!("Serialize failed: {err}"))?;
-        std::fs::write(&path, json)
-            .map_err(|err| format!("Failed to write layout: {err}"))?;
+        let json = serde_json::to_string_pretty(&layout)
+            .map_err(|err| format!("Serialize failed: {err}"))?;
+        std::fs::write(&path, json).map_err(|err| format!("Failed to write layout: {err}"))?;
         Ok(())
     }
 
@@ -281,19 +292,30 @@ impl LayoutsWidget {
         let contents =
             std::fs::read_to_string(&path).map_err(|err| format!("Failed to read file: {err}"))?;
         let layout = Self::parse_layout_json(&contents)?;
-        self.pending_import = Some(PendingImport { layout, source: path });
+        self.pending_import = Some(PendingImport {
+            layout,
+            source: path,
+        });
         Ok(())
     }
 
-    fn maybe_refresh(&mut self, visible: bool) {
+    fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>, visible: bool) {
         if !visible {
             return;
         }
         self.update_interval();
-        if self.refresh_pending {
-            self.refresh_pending = false;
-            self.refresh();
-        } else if self.cache.should_refresh() {
+        let schedule = refresh_schedule(
+            self.refresh_interval(),
+            self.cfg.refresh_mode,
+            false,
+            self.cfg.refresh_throttle_secs,
+        );
+        if run_refresh_schedule(
+            ctx,
+            schedule,
+            &mut self.refresh_pending,
+            &mut self.cache.last_refresh,
+        ) {
             self.refresh();
         }
     }
@@ -303,7 +325,9 @@ impl LayoutsWidget {
             Ok(store) => store,
             Err(err) => {
                 return (
-                    LayoutsData { layouts: Vec::new() },
+                    LayoutsData {
+                        layouts: Vec::new(),
+                    },
                     Some(format!("Failed to load layouts: {err}")),
                 );
             }
@@ -336,7 +360,8 @@ impl LayoutsWidget {
             return Vec::new();
         }
         let windows = collect_layout_windows(LayoutWindowOptions::default()).unwrap_or_default();
-        let candidates: Vec<LayoutMatch> = windows.into_iter().map(|window| window.matcher).collect();
+        let candidates: Vec<LayoutMatch> =
+            windows.into_iter().map(|window| window.matcher).collect();
         layouts
             .iter()
             .map(|layout| Self::layout_health(layout, &candidates))
@@ -428,11 +453,11 @@ impl Widget for LayoutsWidget {
     fn render(
         &mut self,
         ui: &mut egui::Ui,
-        _ctx: &DashboardContext<'_>,
+        ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
         let visible = ui.is_rect_visible(ui.available_rect_before_wrap());
-        self.maybe_refresh(visible);
+        self.maybe_refresh(ctx, visible);
 
         if let Some(err) = &self.error {
             ui.colored_label(egui::Color32::YELLOW, err);
@@ -715,15 +740,34 @@ impl Widget for LayoutsWidget {
         }
     }
 
-    fn header_ui(&mut self, ui: &mut egui::Ui, _ctx: &DashboardContext<'_>) -> Option<WidgetAction> {
-        let tooltip = format!(
-            "Cached for {:.0}s. Refresh to rescan layouts.",
-            self.cfg.refresh_interval_secs
+    fn header_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        _ctx: &DashboardContext<'_>,
+    ) -> Option<WidgetAction> {
+        let schedule = refresh_schedule(
+            self.refresh_interval(),
+            self.cfg.refresh_mode,
+            false,
+            self.cfg.refresh_throttle_secs,
         );
+        let tooltip = match schedule.mode {
+            RefreshMode::Manual => "Manual refresh only.".to_string(),
+            RefreshMode::Throttled => {
+                format!(
+                    "Minimum refresh interval {:.0}s.",
+                    schedule.throttle.as_secs_f32()
+                )
+            }
+            RefreshMode::Auto => format!(
+                "Cached for {:.0}s. Refresh to rescan layouts.",
+                self.cfg.refresh_interval_secs
+            ),
+        };
         let mut action = None;
         ui.horizontal(|ui| {
             if ui.small_button("Refresh").on_hover_text(tooltip).clicked() {
-                self.refresh();
+                self.refresh_pending = true;
             }
             if ui.small_button("Create new").clicked() {
                 action = Some(Self::action(
@@ -813,7 +857,12 @@ fn match_score(saved: &LayoutMatch, candidate: &LayoutMatch) -> Option<u8> {
 fn layout_health(layout: &Layout, candidates: &[LayoutMatch]) -> Option<LayoutHealth> {
     let available: Vec<LayoutMatch> = candidates
         .iter()
-        .filter(|candidate| !layout.ignore.iter().any(|rule| is_rule_match(rule, candidate)))
+        .filter(|candidate| {
+            !layout
+                .ignore
+                .iter()
+                .any(|rule| is_rule_match(rule, candidate))
+        })
         .cloned()
         .collect();
     let mut used = vec![false; available.len()];

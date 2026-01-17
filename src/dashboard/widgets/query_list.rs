@@ -1,6 +1,7 @@
 use super::{
-    edit_typed_settings, refresh_interval_setting, TimedCache, Widget, WidgetAction,
-    WidgetSettingsContext, WidgetSettingsUiResult,
+    default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
+    run_refresh_schedule, RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext,
+    WidgetSettingsUiResult,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -25,6 +26,10 @@ pub struct QueryListConfig {
     #[serde(default = "default_refresh_ms")]
     pub refresh_ms: u64,
     #[serde(default)]
+    pub refresh_mode: RefreshMode,
+    #[serde(default = "default_refresh_throttle_secs")]
+    pub refresh_throttle_secs: f32,
+    #[serde(default)]
     pub manual_refresh_only: bool,
     #[serde(default = "default_count")]
     pub count: usize,
@@ -38,6 +43,8 @@ impl Default for QueryListConfig {
     fn default() -> Self {
         Self {
             refresh_ms: default_refresh_ms(),
+            refresh_mode: RefreshMode::Auto,
+            refresh_throttle_secs: default_refresh_throttle_secs(),
             manual_refresh_only: false,
             count: default_count(),
             show_desc: true,
@@ -84,14 +91,18 @@ impl QueryListWidget {
                 ui.label("results");
             });
             let mut refresh_secs = cfg.refresh_ms as f32 / 1000.0;
-            changed |= refresh_interval_setting(
+            changed |= refresh_settings_ui(
                 ui,
                 &mut refresh_secs,
-                &mut cfg.manual_refresh_only,
+                &mut cfg.refresh_mode,
+                &mut cfg.refresh_throttle_secs,
+                Some(&mut cfg.manual_refresh_only),
                 "Results are cached between refreshes.",
             );
             cfg.refresh_ms = (refresh_secs * 1000.0) as u64;
-            changed |= ui.checkbox(&mut cfg.show_desc, "Show descriptions").changed();
+            changed |= ui
+                .checkbox(&mut cfg.show_desc, "Show descriptions")
+                .changed();
             changed
         })
     }
@@ -116,10 +127,18 @@ impl QueryListWidget {
             self.last_query = self.cfg.query.clone();
             self.refresh_pending = true;
         }
-        if self.refresh_pending {
-            self.refresh_pending = false;
-            self.refresh(ctx);
-        } else if !self.cfg.manual_refresh_only && self.cache.should_refresh() {
+        let schedule = refresh_schedule(
+            self.refresh_interval(),
+            self.cfg.refresh_mode,
+            self.cfg.manual_refresh_only,
+            self.cfg.refresh_throttle_secs,
+        );
+        if run_refresh_schedule(
+            ctx,
+            schedule,
+            &mut self.refresh_pending,
+            &mut self.cache.last_refresh,
+        ) {
             self.refresh(ctx);
         }
     }
@@ -161,7 +180,10 @@ impl Widget for QueryListWidget {
             .show_rows(ui, row_height, max_rows, |ui, range| {
                 for action in &self.cache.data[range] {
                     ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new(&action.label).wrap(false)).clicked() {
+                        if ui
+                            .add(egui::Button::new(&action.label).wrap(false))
+                            .clicked()
+                        {
                             clicked = Some(action.clone());
                         }
                         if self.cfg.show_desc {
@@ -189,13 +211,32 @@ impl Widget for QueryListWidget {
         }
     }
 
-    fn header_ui(&mut self, ui: &mut egui::Ui, ctx: &DashboardContext<'_>) -> Option<WidgetAction> {
-        let tooltip = format!(
-            "Cached for {:.1}s. Refresh to query immediately.",
-            self.refresh_interval().as_secs_f32()
+    fn header_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        _ctx: &DashboardContext<'_>,
+    ) -> Option<WidgetAction> {
+        let schedule = refresh_schedule(
+            self.refresh_interval(),
+            self.cfg.refresh_mode,
+            self.cfg.manual_refresh_only,
+            self.cfg.refresh_throttle_secs,
         );
+        let tooltip = match schedule.mode {
+            RefreshMode::Manual => "Manual refresh only.".to_string(),
+            RefreshMode::Throttled => {
+                format!(
+                    "Minimum refresh interval {:.0}s.",
+                    schedule.throttle.as_secs_f32()
+                )
+            }
+            RefreshMode::Auto => format!(
+                "Cached for {:.1}s. Refresh to query immediately.",
+                self.refresh_interval().as_secs_f32()
+            ),
+        };
         if ui.small_button("Refresh").on_hover_text(tooltip).clicked() {
-            self.refresh(ctx);
+            self.refresh_pending = true;
         }
         None
     }

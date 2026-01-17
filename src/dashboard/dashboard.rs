@@ -43,6 +43,9 @@ pub struct DashboardContext<'a> {
     pub calendar_version: u64,
     pub clipboard_version: u64,
     pub snippets_version: u64,
+    pub dashboard_visible: bool,
+    pub dashboard_focused: bool,
+    pub reduce_dashboard_work_when_unfocused: bool,
 }
 
 struct SlotRuntime {
@@ -540,6 +543,9 @@ mod tests {
             calendar_version: 0,
             clipboard_version: 0,
             snippets_version: 0,
+            dashboard_visible: true,
+            dashboard_focused: true,
+            reduce_dashboard_work_when_unfocused: false,
         }
     }
 
