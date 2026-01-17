@@ -363,6 +363,7 @@ pub struct LauncherApp {
     pub dashboard_path: String,
     pub dashboard_default_location: Option<String>,
     pub reduce_dashboard_work_when_unfocused: bool,
+    pub show_dashboard_diagnostics: bool,
     pub dashboard_editor: DashboardEditorDialog,
     pub show_dashboard_editor: bool,
     rx: Receiver<WatchEvent>,
@@ -618,6 +619,7 @@ impl LauncherApp {
         note_always_overwrite: Option<bool>,
         note_images_as_links: Option<bool>,
         note_more_limit: Option<usize>,
+        show_dashboard_diagnostics: Option<bool>,
     ) {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
@@ -717,6 +719,9 @@ impl LauncherApp {
         }
         if let Some(v) = note_more_limit {
             self.note_more_limit = v;
+        }
+        if let Some(v) = show_dashboard_diagnostics {
+            self.show_dashboard_diagnostics = v;
         }
     }
 
@@ -1003,6 +1008,7 @@ impl LauncherApp {
             dashboard_path: dashboard_path.to_string_lossy().to_string(),
             dashboard_default_location: settings.dashboard.default_location.clone(),
             reduce_dashboard_work_when_unfocused: settings.reduce_dashboard_work_when_unfocused,
+            show_dashboard_diagnostics: settings.show_dashboard_diagnostics,
             dashboard_editor: DashboardEditorDialog::default(),
             show_dashboard_editor: false,
             rx,
@@ -3138,6 +3144,8 @@ impl eframe::App for LauncherApp {
         if self.enable_toasts {
             self.toasts.show(ctx);
         }
+        let frame_time = Duration::from_secs_f32(ctx.input(|i| i.unstable_dt).max(0.0));
+        self.dashboard.update_frame_timing(frame_time);
         if let Some(pending) = self.pending_query.take() {
             self.query = pending;
             self.search();
@@ -3549,6 +3557,11 @@ impl eframe::App for LauncherApp {
                 }
                 let dashboard_visible = self.visible_flag.load(Ordering::SeqCst);
                 let dashboard_focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
+                let diagnostics = if self.show_dashboard_diagnostics {
+                    Some(self.dashboard.diagnostics_snapshot())
+                } else {
+                    None
+                };
                 let dash_ctx = DashboardContext {
                     actions: &self.actions,
                     actions_by_id: &self.actions_by_id,
@@ -3568,6 +3581,8 @@ impl eframe::App for LauncherApp {
                     dashboard_focused,
                     reduce_dashboard_work_when_unfocused: self
                         .reduce_dashboard_work_when_unfocused,
+                    diagnostics,
+                    show_diagnostics_widget: self.show_dashboard_diagnostics,
                 };
                 ctx.request_repaint_after(Duration::from_millis(250));
                 if let Some(action) = self.dashboard.ui(ui, &dash_ctx, WidgetActivation::Click) {
