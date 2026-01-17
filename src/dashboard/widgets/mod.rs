@@ -30,6 +30,7 @@ mod recycle_bin;
 mod snippets_favorites;
 mod stopwatch;
 mod system_actions;
+mod system_controls;
 mod system_status;
 mod tempfiles;
 mod todo;
@@ -62,6 +63,7 @@ pub use recycle_bin::RecycleBinWidget;
 pub use snippets_favorites::SnippetsFavoritesWidget;
 pub use stopwatch::StopwatchWidget;
 pub use system_actions::SystemWidget;
+pub use system_controls::SystemControlsWidget;
 pub use system_status::SystemStatusWidget;
 pub use tempfiles::TempfilesWidget;
 pub use todo::TodoWidget;
@@ -295,6 +297,11 @@ impl WidgetRegistry {
         reg.register(
             "system",
             WidgetFactory::new(SystemWidget::new).with_settings_ui(SystemWidget::settings_ui),
+        );
+        reg.register(
+            "system_controls",
+            WidgetFactory::new(SystemControlsWidget::new)
+                .with_settings_ui(SystemControlsWidget::settings_ui),
         );
         reg.register(
             "system_status",
