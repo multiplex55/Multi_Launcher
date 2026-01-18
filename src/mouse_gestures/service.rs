@@ -12,8 +12,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-const DEFAULT_DIRECTION_SEGMENT: f32 = 6.0;
-
 #[cfg(windows)]
 pub const MG_PASSTHROUGH_MARK: usize = 0x4D475054;
 
@@ -90,11 +88,12 @@ impl MouseGestureRuntime {
         if snapshots.settings.max_track_len > 0.0 && length > snapshots.settings.max_track_len {
             return None;
         }
-        let track_dirs = direction_sequence(points, DEFAULT_DIRECTION_SEGMENT);
+        let track_dirs = direction_sequence(points, snapshots.settings.min_point_distance);
         if track_dirs.is_empty() {
             return None;
         }
-        let gesture_templates = build_gesture_templates(&snapshots.db);
+        let gesture_templates =
+            build_gesture_templates(&snapshots.db, snapshots.settings.min_point_distance);
         let mut distances = HashMap::new();
         for (gesture_id, template) in &gesture_templates {
             let similarity = direction_similarity(&track_dirs, &template.directions);
@@ -165,7 +164,7 @@ impl MouseGestureRuntime {
             };
         }
 
-        let track_dirs = direction_sequence(points, DEFAULT_DIRECTION_SEGMENT);
+        let track_dirs = direction_sequence(points, snapshots.settings.min_point_distance);
         if track_dirs.is_empty() {
             return if passthrough_on_no_match {
                 TrackOutcome::passthrough()
@@ -174,7 +173,8 @@ impl MouseGestureRuntime {
             };
         }
 
-        let gesture_templates = build_gesture_templates(&snapshots.db);
+        let gesture_templates =
+            build_gesture_templates(&snapshots.db, snapshots.settings.min_point_distance);
         if gesture_templates.is_empty() {
             return if passthrough_on_no_match {
                 TrackOutcome::passthrough()
@@ -239,14 +239,17 @@ struct GestureTemplate {
     directions: Vec<GestureDirection>,
 }
 
-fn build_gesture_templates(db: &MouseGestureDb) -> HashMap<String, GestureTemplate> {
+fn build_gesture_templates(
+    db: &MouseGestureDb,
+    min_point_distance: f32,
+) -> HashMap<String, GestureTemplate> {
     let mut templates = HashMap::new();
     for (gesture_id, serialized) in &db.bindings {
         let parsed = match parse_gesture(serialized) {
             Ok(def) => def,
             Err(_) => continue,
         };
-        let directions = direction_sequence(&parsed.points, DEFAULT_DIRECTION_SEGMENT);
+        let directions = direction_sequence(&parsed.points, min_point_distance);
         if directions.is_empty() {
             continue;
         }
