@@ -251,8 +251,10 @@ fn current_foreground_window() -> ForegroundWindowInfo {
                 if !success || size == 0 {
                     return None;
                 }
-                let path = OsString::from_wide(&buffer[..size as usize]).to_string_lossy();
-                Path::new(path.as_ref())
+                let path = OsString::from_wide(&buffer[..size as usize])
+                    .to_string_lossy()
+                    .to_string();
+                Path::new(path.as_str())
                     .file_name()
                     .map(|name| name.to_string_lossy().to_string())
             }
@@ -440,12 +442,11 @@ impl MouseHookBackend for WindowsMouseHookBackend {
         let thread_id = Arc::clone(&self.thread_id);
         let handle = std::thread::spawn(move || {
             use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-            use windows::Win32::UI::Input::KeyboardAndMouse::MSLLHOOKSTRUCT;
             use windows::Win32::UI::WindowsAndMessaging::{
                 CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
-                TranslateMessage, UnhookWindowsHookEx, HC_ACTION, MSG, WH_MOUSE_LL, WM_LBUTTONDOWN,
-                WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDOWN,
-                WM_RBUTTONUP,
+                TranslateMessage, UnhookWindowsHookEx, HC_ACTION, MSG, MSLLHOOKSTRUCT, WH_MOUSE_LL,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_QUIT,
+                WM_RBUTTONDOWN, WM_RBUTTONUP,
             };
 
             unsafe extern "system" fn hook_proc(
@@ -534,7 +535,7 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                     TriggerButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
                     TriggerButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
                 };
-                let mut down_input = INPUT {
+                let down_input = INPUT {
                     r#type: INPUT_MOUSE,
                     Anonymous: INPUT_0 {
                         mi: MOUSEINPUT {
@@ -552,12 +553,13 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                 let _ = SendInput(&[down_input, up_input], std::mem::size_of::<INPUT>() as i32);
             }
 
-            let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(hook_proc), None, 0) };
+            let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(hook_proc), None, 0).ok() };
             let thread = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
             thread_id.store(thread as usize, Ordering::SeqCst);
             let mut msg = MSG::default();
             loop {
-                let result = unsafe { GetMessageW(&mut msg, HWND(0), 0, 0) };
+                let result =
+                    unsafe { GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0) };
                 if result.0 == -1 {
                     break;
                 }
@@ -574,8 +576,10 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                     }
                 }
             }
-            unsafe {
-                let _ = UnhookWindowsHookEx(hook);
+            if let Some(hook) = hook {
+                unsafe {
+                    let _ = UnhookWindowsHookEx(hook);
+                }
             }
         });
 
@@ -679,6 +683,6 @@ impl MouseHookBackend for MockMouseHookBackend {
     }
 
     fn is_running(&self) -> bool {
-        self.runtime.lock().ok().and_then(|guard| guard.as_ref()).is_some()
+        self.runtime.lock().map(|guard| guard.is_some()).unwrap_or(false)
     }
 }
