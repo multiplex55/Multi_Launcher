@@ -141,8 +141,7 @@ impl GdiOverlayWindow {
                                     hdc,
                                     point.x as i32 + 12,
                                     point.y as i32 + 12,
-                                    PCWSTR(text_w.as_ptr()),
-                                    (text_w.len().saturating_sub(1)) as i32,
+                                    &text_w,
                                 );
                             }
                         }
