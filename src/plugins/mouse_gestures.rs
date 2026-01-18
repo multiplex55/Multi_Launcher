@@ -4,9 +4,10 @@ pub mod settings;
 
 use crate::actions::Action;
 use crate::common::json_watch::{watch_json, JsonWatcher};
-use crate::plugin::Plugin;
 use crate::mouse_gestures::mouse_gesture_service;
+use crate::plugin::Plugin;
 use crate::plugins::mouse_gestures::db::{load_gestures, MOUSE_GESTURES_FILE};
+use crate::plugins::mouse_gestures::engine::parse_gesture;
 use crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
 
 pub struct MouseGesturesPlugin {
@@ -58,9 +59,21 @@ impl MouseGesturesPlugin {
                 args: None,
             },
             Action {
-                label: "Add mouse gesture binding".into(),
+                label: "Edit mouse gestures".into(),
                 desc: "Mouse Gestures".into(),
-                action: "mg:add_binding".into(),
+                action: "mg:edit".into(),
+                args: None,
+            },
+            Action {
+                label: "List mouse gestures".into(),
+                desc: "Mouse Gestures".into(),
+                action: "mg:list".into(),
+                args: None,
+            },
+            Action {
+                label: "Remove mouse gesture".into(),
+                desc: "Mouse Gestures".into(),
+                action: "mg:rm".into(),
                 args: None,
             },
         ]
@@ -85,15 +98,68 @@ impl MouseGesturesPlugin {
                 args: None,
             });
         }
-        if crate::common::strip_prefix_ci(query, "add").is_some() {
+        if crate::common::strip_prefix_ci(query, "edit").is_some()
+            || crate::common::strip_prefix_ci(query, "binding").is_some()
+            || crate::common::strip_prefix_ci(query, "add").is_some()
+        {
             return Some(Action {
-                label: "Add mouse gesture binding".into(),
+                label: "Edit mouse gestures".into(),
                 desc: "Mouse Gestures".into(),
-                action: "mg:add_binding".into(),
+                action: "mg:edit".into(),
                 args: None,
             });
         }
         None
+    }
+
+    fn gesture_list_actions() -> Vec<Action> {
+        let db = load_gestures(MOUSE_GESTURES_FILE).unwrap_or_default();
+        let mut items: Vec<(String, String)> = db
+            .bindings
+            .iter()
+            .map(|(id, serialized)| {
+                let label = parse_gesture(serialized)
+                    .ok()
+                    .and_then(|g| g.name)
+                    .unwrap_or_else(|| "(unnamed)".to_string());
+                (id.clone(), label)
+            })
+            .collect();
+        items.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+        items
+            .into_iter()
+            .map(|(id, label)| Action {
+                label: format!("{label} ({id})"),
+                desc: "Mouse Gesture".into(),
+                action: format!("mg:open:{id}"),
+                args: None,
+            })
+            .collect()
+    }
+
+    fn gesture_remove_actions() -> Vec<Action> {
+        let db = load_gestures(MOUSE_GESTURES_FILE).unwrap_or_default();
+        let mut items: Vec<(String, String)> = db
+            .bindings
+            .iter()
+            .map(|(id, serialized)| {
+                let label = parse_gesture(serialized)
+                    .ok()
+                    .and_then(|g| g.name)
+                    .unwrap_or_else(|| "(unnamed)".to_string());
+                (id.clone(), label)
+            })
+            .collect();
+        items.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+        items
+            .into_iter()
+            .map(|(id, label)| Action {
+                label: format!("Remove {label} ({id})"),
+                desc: "Mouse Gesture".into(),
+                action: format!("mg:remove:{id}"),
+                args: None,
+            })
+            .collect()
     }
 }
 
@@ -105,12 +171,28 @@ impl Plugin for MouseGesturesPlugin {
             if rest.is_empty() {
                 return Self::base_actions();
             }
+            if crate::common::strip_prefix_ci(rest, "list").is_some() {
+                return Self::gesture_list_actions();
+            }
+            if crate::common::strip_prefix_ci(rest, "rm").is_some()
+                || crate::common::strip_prefix_ci(rest, "remove").is_some()
+            {
+                return Self::gesture_remove_actions();
+            }
             return Self::action_for(rest).into_iter().collect();
         }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "mouse") {
             let rest = rest.trim();
             if rest.is_empty() {
                 return Self::base_actions();
+            }
+            if crate::common::strip_prefix_ci(rest, "list").is_some() {
+                return Self::gesture_list_actions();
+            }
+            if crate::common::strip_prefix_ci(rest, "rm").is_some()
+                || crate::common::strip_prefix_ci(rest, "remove").is_some()
+            {
+                return Self::gesture_remove_actions();
             }
             return Self::action_for(rest).into_iter().collect();
         }

@@ -13,10 +13,8 @@ pub struct MouseGesturesAddDialog {
     pub open: bool,
     loaded: bool,
     db: MouseGestureDb,
-    selected_profile: Option<usize>,
     selected_gesture: Option<String>,
-    new_profile_label: String,
-    new_profile_id: String,
+    binding_label: String,
     binding_priority: i32,
     add_plugin: String,
     category_filter: String,
@@ -85,8 +83,8 @@ impl MouseGesturesAddDialog {
 
     fn load_db(&mut self) {
         self.db = load_gestures(MOUSE_GESTURES_FILE).unwrap_or_default();
-        if self.selected_profile.is_none() && !self.db.profiles.is_empty() {
-            self.selected_profile = Some(0);
+        if self.db.profiles.is_empty() {
+            self.db.profiles.push(default_profile());
         }
         self.loaded = true;
     }
@@ -135,63 +133,57 @@ impl MouseGesturesAddDialog {
         }
 
         let mut open = self.open;
-        egui::Window::new("Add Mouse Gesture Binding")
+        egui::Window::new("Edit Mouse Gestures")
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.label("Profile");
+                let gestures = gesture_labels(&self.db);
+                let profile = ensure_default_profile(&mut self.db);
+                ui.label("Bindings");
                 egui::ScrollArea::vertical()
-                    .id_source("mg_add_profile_list")
-                    .max_height(120.0)
+                    .id_source("mg_add_binding_list")
+                    .max_height(160.0)
                     .show(ui, |ui| {
-                        for (idx, profile) in self.db.profiles.iter().enumerate() {
-                            let selected = self.selected_profile == Some(idx);
-                            if ui
-                                .selectable_label(
-                                    selected,
-                                    format!("{} ({})", profile.label, profile.id),
-                                )
-                                .clicked()
-                            {
-                                self.selected_profile = Some(idx);
-                            }
+                        let mut remove_index: Option<usize> = None;
+                        for (idx, binding) in profile.bindings.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut binding.enabled, "");
+                                ui.text_edit_singleline(&mut binding.label);
+                                let selected_text =
+                                    gesture_label_for(&gestures, &binding.gesture_id)
+                                        .unwrap_or_else(|| binding.gesture_id.clone());
+                                egui::ComboBox::from_id_source(format!("mg_binding_gesture_{idx}"))
+                                    .selected_text(selected_text)
+                                    .show_ui(ui, |ui| {
+                                        for (gesture_id, label) in &gestures {
+                                            ui.selectable_value(
+                                                &mut binding.gesture_id,
+                                                gesture_id.clone(),
+                                                format!("{label} ({gesture_id})"),
+                                            );
+                                        }
+                                    });
+                                ui.label(&binding.action);
+                                if ui.button("Remove").clicked() {
+                                    remove_index = Some(idx);
+                                }
+                            });
+                        }
+                        if let Some(idx) = remove_index {
+                            profile.bindings.remove(idx);
+                            self.persist_db(app);
                         }
                     });
-                ui.horizontal(|ui| {
-                    ui.label("New profile label");
-                    ui.text_edit_singleline(&mut self.new_profile_label);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("New profile id");
-                    ui.text_edit_singleline(&mut self.new_profile_id);
-                });
-                if ui.button("Add profile").clicked() {
-                    let label = self.new_profile_label.trim();
-                    if label.is_empty() {
-                        self.status = Some("Profile label is required".to_string());
-                    } else {
-                        let id = if self.new_profile_id.trim().is_empty() {
-                            make_profile_id(label)
-                        } else {
-                            self.new_profile_id.trim().to_string()
-                        };
-                        let profile = MouseGestureProfile {
-                            id: id.clone(),
-                            label: label.to_string(),
-                            enabled: true,
-                            priority: 0,
-                            rules: Vec::new(),
-                            bindings: Vec::new(),
-                        };
-                        self.db.profiles.push(profile);
-                        self.selected_profile = Some(self.db.profiles.len() - 1);
-                        self.new_profile_label.clear();
-                        self.new_profile_id.clear();
-                        self.persist_db(app);
-                        self.status = Some("Profile added".to_string());
-                    }
+                if ui.button("Save changes").clicked() {
+                    self.persist_db(app);
+                    self.status = Some("Bindings saved.".to_string());
                 }
 
                 ui.separator();
+                ui.label("New binding");
+                ui.horizontal(|ui| {
+                    ui.label("Binding name");
+                    ui.text_edit_singleline(&mut self.binding_label);
+                });
                 ui.label("Gesture");
                 if ui.button("Open recorder").clicked() {
                     app.mouse_gestures_gesture_dialog.open();
@@ -200,7 +192,7 @@ impl MouseGesturesAddDialog {
                     .id_source("mg_add_gesture_list")
                     .max_height(120.0)
                     .show(ui, |ui| {
-                        for (gesture_id, label) in gesture_labels(&self.db) {
+                        for (gesture_id, label) in &gestures {
                             let selected = self
                                 .selected_gesture
                                 .as_deref()
@@ -210,7 +202,7 @@ impl MouseGesturesAddDialog {
                                 .selectable_label(selected, format!("{label} ({gesture_id})"))
                                 .clicked()
                             {
-                                self.selected_gesture = Some(gesture_id);
+                                self.selected_gesture = Some(gesture_id.clone());
                             }
                         }
                     });
@@ -353,10 +345,6 @@ impl MouseGesturesAddDialog {
     }
 
     fn handle_add_binding(&mut self, app: &mut crate::gui::LauncherApp) {
-        let Some(profile_index) = self.selected_profile else {
-            self.status = Some("Select a profile first".to_string());
-            return;
-        };
         let Some(gesture_id) = self.selected_gesture.clone() else {
             self.status = Some("Select a gesture first".to_string());
             return;
@@ -365,37 +353,49 @@ impl MouseGesturesAddDialog {
             self.status = Some("Select an action first".to_string());
             return;
         };
-
-        if let Some(profile) = self.db.profiles.get_mut(profile_index) {
-            profile.bindings.push(MouseGestureBinding {
-                gesture_id,
-                action: choice.action,
-                args: choice.args,
-                priority: self.binding_priority,
-            });
-            self.persist_db(app);
-            self.status = Some("Binding added".to_string());
-        } else {
-            self.status = Some("Selected profile not found".to_string());
+        if self.binding_label.trim().is_empty() {
+            self.status = Some("Binding name is required".to_string());
+            return;
         }
+
+        let profile = ensure_default_profile(&mut self.db);
+        profile.bindings.push(MouseGestureBinding {
+            gesture_id,
+            label: self.binding_label.trim().to_string(),
+            action: choice.action,
+            args: choice.args,
+            priority: self.binding_priority,
+            enabled: true,
+        });
+        self.persist_db(app);
+        self.binding_label.clear();
+        self.selected_action = None;
+        self.status = Some("Binding added".to_string());
     }
 }
 
-fn make_profile_id(label: &str) -> String {
-    let mut id = label
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    while id.contains("__") {
-        id = id.replace("__", "_");
+fn default_profile() -> MouseGestureProfile {
+    MouseGestureProfile {
+        id: "default".to_string(),
+        label: "Default".to_string(),
+        enabled: true,
+        priority: 0,
+        rules: Vec::new(),
+        bindings: Vec::new(),
     }
-    id.trim_matches('_').to_string()
+}
+
+fn ensure_default_profile(db: &mut MouseGestureDb) -> &mut MouseGestureProfile {
+    if db.profiles.is_empty() {
+        db.profiles.push(default_profile());
+    }
+    db.profiles
+        .iter_mut()
+        .find(|profile| profile.id == "default")
+        .unwrap_or_else(|| {
+            db.profiles.push(default_profile());
+            db.profiles.last_mut().expect("default profile")
+        })
 }
 
 fn gesture_labels(db: &MouseGestureDb) -> Vec<(String, String)> {
@@ -412,4 +412,11 @@ fn gesture_labels(db: &MouseGestureDb) -> Vec<(String, String)> {
         .collect();
     items.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
     items
+}
+
+fn gesture_label_for(gestures: &[(String, String)], gesture_id: &str) -> Option<String> {
+    gestures
+        .iter()
+        .find(|(id, _)| id == gesture_id)
+        .map(|(_, label)| label.clone())
 }

@@ -160,11 +160,18 @@ fn overlay_settings_ui(
 ) {
     ui.horizontal(|ui| {
         ui.label("Color");
-        let response = ui.text_edit_singleline(&mut overlay.color);
-        *changed |= response.changed();
-        if let Some(color) = MouseGesturesSettingsDialog::overlay_preview_color(&overlay.color) {
-            ui.colored_label(color, "■■");
+        let mut color = MouseGesturesSettingsDialog::overlay_preview_color(&overlay.color)
+            .unwrap_or(egui::Color32::from_rgb(0xff, 0x66, 0xcc));
+        let response = egui::color_picker::color_edit_button_srgba(
+            ui,
+            &mut color,
+            egui::color_picker::Alpha::Opaque,
+        );
+        if response.changed() {
+            overlay.color = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
+            *changed = true;
         }
+        ui.label(&overlay.color);
     });
     ui.horizontal(|ui| {
         ui.label("Thickness");

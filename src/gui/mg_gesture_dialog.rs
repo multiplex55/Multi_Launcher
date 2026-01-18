@@ -14,6 +14,7 @@ pub struct MouseGesturesGestureDialog {
     loaded: bool,
     db: MouseGestureDb,
     selected_gesture: Option<String>,
+    pending_select: Option<String>,
     gesture_name: String,
     gesture_text: String,
     points: Vec<Point>,
@@ -50,10 +51,20 @@ impl MouseGesturesGestureDialog {
     pub fn open(&mut self) {
         self.open = true;
         self.loaded = false;
+        self.pending_select = None;
+    }
+
+    pub fn open_select(&mut self, gesture_id: &str) {
+        self.open = true;
+        self.loaded = false;
+        self.pending_select = Some(gesture_id.to_string());
     }
 
     fn load_db(&mut self) {
         self.db = load_gestures(MOUSE_GESTURES_FILE).unwrap_or_default();
+        if let Some(id) = self.pending_select.take() {
+            self.selected_gesture = Some(id);
+        }
         self.loaded = true;
     }
 
@@ -89,6 +100,9 @@ impl MouseGesturesGestureDialog {
         }
         if !self.loaded {
             self.load_db();
+            if let Some(id) = self.selected_gesture.clone() {
+                self.load_selected(&id);
+            }
         }
 
         let mut open = self.open;

@@ -348,6 +348,9 @@ impl MouseGestureService {
         }
         if let Ok(mut overlay) = mouse_gesture_overlay().lock() {
             overlay.update_settings(&settings);
+            if !settings.enabled {
+                overlay.end_stroke();
+            }
         }
         if settings.enabled {
             self.start();
