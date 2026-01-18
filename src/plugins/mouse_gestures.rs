@@ -5,38 +5,33 @@ pub mod settings;
 use crate::actions::Action;
 use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::plugin::Plugin;
-use crate::plugins::mouse_gestures::db::{load_gestures, MouseGestureDb, MOUSE_GESTURES_FILE};
+use crate::mouse_gestures::mouse_gesture_service;
+use crate::plugins::mouse_gestures::db::{load_gestures, MOUSE_GESTURES_FILE};
 use crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
-use std::sync::{Arc, Mutex};
 
 pub struct MouseGesturesPlugin {
     settings: MouseGesturePluginSettings,
     #[allow(dead_code)]
     watcher: Option<JsonWatcher>,
-    #[allow(dead_code)]
-    db_cache: Arc<Mutex<MouseGestureDb>>,
 }
 
 impl MouseGesturesPlugin {
     pub fn new() -> Self {
-        let db_cache = Arc::new(Mutex::new(
-            load_gestures(MOUSE_GESTURES_FILE).unwrap_or_default(),
-        ));
-        let data_clone = db_cache.clone();
+        let db = load_gestures(MOUSE_GESTURES_FILE).unwrap_or_default();
+        let service = mouse_gesture_service();
+        service.update_db(db.clone());
+        service.update_settings(MouseGesturePluginSettings::default());
         let watch_path = MOUSE_GESTURES_FILE.to_string();
         let watch_path_clone = watch_path.clone();
         let watcher = watch_json(&watch_path, move || {
             if let Ok(db) = load_gestures(&watch_path_clone) {
-                if let Ok(mut lock) = data_clone.lock() {
-                    *lock = db;
-                }
+                mouse_gesture_service().update_db(db);
             }
         })
         .ok();
         Self {
             settings: MouseGesturePluginSettings::default(),
             watcher,
-            db_cache,
         }
     }
 }
@@ -158,6 +153,7 @@ impl Plugin for MouseGesturesPlugin {
     fn apply_settings(&mut self, value: &serde_json::Value) {
         if let Ok(cfg) = serde_json::from_value::<MouseGesturePluginSettings>(value.clone()) {
             self.settings = cfg;
+            mouse_gesture_service().update_settings(self.settings.clone());
         }
     }
 }

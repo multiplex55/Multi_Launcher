@@ -146,8 +146,20 @@ pub enum WatchEvent {
     Notes,
     Todos,
     Favorites,
+    MouseGesture(MouseGestureEvent),
     Dashboard(DashboardEvent),
     Recycle(Result<(), String>),
+}
+
+#[derive(Clone, Debug)]
+pub struct MouseGestureEvent {
+    pub gesture_id: String,
+    pub gesture_name: Option<String>,
+    pub profile_id: String,
+    pub profile_label: String,
+    pub action_payload: String,
+    pub action_args: Option<String>,
+    pub distance: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,6 +194,7 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::Notes => TestWatchEvent::Actions,
             WatchEvent::Todos => TestWatchEvent::Actions,
             WatchEvent::Favorites => TestWatchEvent::Actions,
+            WatchEvent::MouseGesture(_) => TestWatchEvent::Actions,
             WatchEvent::Dashboard(_) => TestWatchEvent::Actions,
             WatchEvent::Recycle(_) => unreachable!(),
         }
@@ -3437,6 +3450,45 @@ impl eframe::App for LauncherApp {
                 WatchEvent::Favorites => {
                     self.dashboard_data_cache.refresh_favorites();
                 }
+                WatchEvent::MouseGesture(event) => {
+                    let label = event
+                        .gesture_name
+                        .clone()
+                        .unwrap_or_else(|| event.gesture_id.clone());
+                    let desc = format!("Mouse Gestures ({})", event.profile_label);
+                    let action = Action {
+                        label,
+                        desc,
+                        action: event.action_payload.clone(),
+                        args: event.action_args.clone(),
+                    };
+                    if let Err(e) = launch_action(&action) {
+                        tracing::error!(?e, "failed to run mouse gesture");
+                        if self.enable_toasts {
+                            push_toast(
+                                &mut self.toasts,
+                                Toast {
+                                    text: format!("Failed: {e}").into(),
+                                    kind: ToastKind::Error,
+                                    options: ToastOptions::default()
+                                        .duration_in_seconds(self.toast_duration as f64),
+                                },
+                            );
+                        }
+                    } else {
+                        let _ = history::append_history(
+                            HistoryEntry {
+                                query: format!("gesture:{}", event.gesture_id),
+                                query_lc: String::new(),
+                                action: action.clone(),
+                                timestamp: 0,
+                            },
+                            self.history_limit,
+                        );
+                        let count = self.usage.entry(action.action.clone()).or_insert(0);
+                        *count += 1;
+                    }
+                }
                 WatchEvent::Dashboard(_) => {
                     self.dashboard.reload();
                     for warn in &self.dashboard.warnings {
@@ -4674,7 +4726,8 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
             | WatchEvent::Snippets
             | WatchEvent::Notes
             | WatchEvent::Todos
-            | WatchEvent::Favorites => {
+            | WatchEvent::Favorites
+            | WatchEvent::MouseGesture(_) => {
                 continue;
             }
             WatchEvent::Recycle(_) => return Some(ev.into()),
