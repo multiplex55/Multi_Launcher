@@ -19,10 +19,8 @@ pub const MG_PASSTHROUGH_MARK: usize = 0x4D475054;
 
 #[cfg(windows)]
 pub fn should_ignore_event(flags: u32, extra_info: usize) -> bool {
-    const LLMHF_INJECTED: u32 = 0x00000001;
-    const LLMHF_LOWER_IL_INJECTED: u32 = 0x00000002;
-
-    flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED) != 0 || extra_info == MG_PASSTHROUGH_MARK
+    let _ = flags;
+    extra_info == MG_PASSTHROUGH_MARK
 }
 
 #[derive(Clone, Debug)]
