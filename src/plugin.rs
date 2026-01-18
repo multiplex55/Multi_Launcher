@@ -22,6 +22,7 @@ use crate::plugins::shell::ShellPlugin;
 use crate::plugins::snippets::SnippetsPlugin;
 use crate::plugins::fav::FavPlugin;
 use crate::plugins::macros::MacrosPlugin;
+use crate::plugins::mouse_gestures::MouseGesturesPlugin;
 use crate::plugins::omni_search::OmniSearchPlugin;
 use crate::plugins::sysinfo::SysInfoPlugin;
 use crate::plugins::system::SystemPlugin;
@@ -166,6 +167,7 @@ impl PluginManager {
         self.register_with_settings(TaskManagerPlugin, plugin_settings);
         self.register_with_settings(WindowsPlugin, plugin_settings);
         self.register_with_settings(BrowserTabsPlugin::default(), plugin_settings);
+        self.register_with_settings(MouseGesturesPlugin, plugin_settings);
         self.register_with_settings(SettingsPlugin, plugin_settings);
         self.register_with_settings(HelpPlugin, plugin_settings);
         self.register_with_settings(LayoutPlugin, plugin_settings);
