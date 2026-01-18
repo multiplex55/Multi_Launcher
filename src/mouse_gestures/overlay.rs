@@ -146,7 +146,7 @@ impl GdiOverlayWindow {
                 let wc = WNDCLASSW {
                     style: CS_HREDRAW | CS_VREDRAW,
                     lpfnWndProc: Some(wndproc),
-                    hInstance: hinstance,
+                    hInstance: hinstance.into(),
                     lpszClassName: class_name,
                     ..Default::default()
                 };
