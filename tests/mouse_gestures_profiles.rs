@@ -5,11 +5,7 @@ use multi_launcher::plugins::mouse_gestures::db::{
     MouseGestureProfile, MouseGestureProfileRule, MouseGestureRuleField, MouseGestureRuleType,
 };
 
-fn profile(
-    id: &str,
-    priority: i32,
-    rules: Vec<MouseGestureProfileRule>,
-) -> MouseGestureProfile {
+fn profile(id: &str, priority: i32, rules: Vec<MouseGestureProfileRule>) -> MouseGestureProfile {
     MouseGestureProfile {
         id: id.to_string(),
         label: id.to_string(),
@@ -83,21 +79,27 @@ fn selects_binding_with_threshold_and_tiebreaks() {
         bindings: vec![
             MouseGestureBinding {
                 gesture_id: "one".to_string(),
+                label: "One".to_string(),
                 action: "action:one".to_string(),
                 args: None,
                 priority: 0,
+                enabled: true,
             },
             MouseGestureBinding {
                 gesture_id: "two".to_string(),
+                label: "Two".to_string(),
                 action: "action:two".to_string(),
                 args: None,
                 priority: 1,
+                enabled: true,
             },
             MouseGestureBinding {
                 gesture_id: "three".to_string(),
+                label: "Three".to_string(),
                 action: "action:three".to_string(),
                 args: None,
                 priority: 1,
+                enabled: true,
             },
         ],
     };

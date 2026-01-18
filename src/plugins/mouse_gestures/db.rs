@@ -8,11 +8,19 @@ const CURRENT_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MouseGestureBinding {
     pub gesture_id: String,
+    #[serde(default)]
+    pub label: String,
     pub action: String,
     #[serde(default)]
     pub args: Option<String>,
     #[serde(default)]
     pub priority: i32,
+    #[serde(default = "default_binding_enabled")]
+    pub enabled: bool,
+}
+
+fn default_binding_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -168,6 +176,9 @@ pub fn select_binding<'a>(
 ) -> Option<BindingMatch<'a>> {
     let mut best: Option<BindingMatch<'a>> = None;
     for (index, binding) in profile.bindings.iter().enumerate() {
+        if !binding.enabled {
+            continue;
+        }
         let Some(&distance) = gesture_distances.get(&binding.gesture_id) else {
             continue;
         };

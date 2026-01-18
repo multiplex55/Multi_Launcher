@@ -1,9 +1,10 @@
 use crate::gui::{send_event, MouseGestureEvent, WatchEvent};
+use crate::mouse_gestures::mouse_gesture_overlay;
 use crate::plugins::mouse_gestures::db::{
     select_binding, select_profile, ForegroundWindowInfo, MouseGestureDb,
 };
 use crate::plugins::mouse_gestures::engine::{
-    dtw_distance, parse_gesture, preprocess_points, track_length, Point, PreprocessConfig,
+    direction_sequence, direction_similarity, parse_gesture, track_length, GestureDirection, Point,
 };
 use crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
 use once_cell::sync::OnceCell;
@@ -11,8 +12,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-const DEFAULT_SAMPLE_COUNT: usize = 64;
-const DEFAULT_SMOOTHING_WINDOW: usize = 5;
+const DEFAULT_DIRECTION_SEGMENT: f32 = 6.0;
 
 #[derive(Clone, Debug)]
 pub struct TrackOutcome {
@@ -65,12 +65,82 @@ pub struct MouseGestureRuntime {
 }
 
 impl MouseGestureRuntime {
+    fn best_match(&self, points: &[Point]) -> Option<(String, f32)> {
+        let snapshots = self
+            .snapshots
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        if points.len() < 2 {
+            return None;
+        }
+        let length = track_length(points);
+        if length < snapshots.settings.min_track_len {
+            return None;
+        }
+        if snapshots.settings.max_track_len > 0.0 && length > snapshots.settings.max_track_len {
+            return None;
+        }
+        let track_dirs = direction_sequence(points, DEFAULT_DIRECTION_SEGMENT);
+        if track_dirs.is_empty() {
+            return None;
+        }
+        let gesture_templates = build_gesture_templates(&snapshots.db);
+        let mut distances = HashMap::new();
+        for (gesture_id, template) in &gesture_templates {
+            let similarity = direction_similarity(&track_dirs, &template.directions);
+            if similarity < snapshots.settings.match_threshold {
+                continue;
+            }
+            distances.insert(gesture_id.clone(), 1.0 - similarity);
+        }
+        if distances.is_empty() {
+            return None;
+        }
+        let window_info = current_foreground_window();
+        let profile = select_profile(&snapshots.db, &window_info)?;
+        let binding = select_binding(profile, &distances, 1.0)?;
+        let similarity = 1.0 - binding.distance;
+        let label = if binding.binding.label.trim().is_empty() {
+            binding.binding.action.clone()
+        } else {
+            binding.binding.label.clone()
+        };
+        Some((label, similarity))
+    }
+
+    fn preview_text(&self, points: &[Point]) -> Option<String> {
+        let snapshots = self
+            .snapshots
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        if points.len() < 2 {
+            return None;
+        }
+        let length = track_length(points);
+        if length < snapshots.settings.min_track_len {
+            return Some("Keep drawing".to_string());
+        }
+        if snapshots.settings.max_track_len > 0.0 && length > snapshots.settings.max_track_len {
+            return Some("Too long".to_string());
+        }
+        let Some((label, similarity)) = self.best_match(points) else {
+            return Some("No match".to_string());
+        };
+        Some(format!(
+            "Will trigger: {label} ({:.0}%)",
+            similarity * 100.0
+        ))
+    }
+
     fn evaluate_track(&self, points: &[Point]) -> TrackOutcome {
         let snapshots = self
             .snapshots
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default();
+        let passthrough_on_no_match = snapshots.settings.passthrough_on_no_match;
         if points.len() < 2 {
             return TrackOutcome::passthrough();
         }
@@ -78,55 +148,63 @@ impl MouseGestureRuntime {
         if length < snapshots.settings.min_track_len {
             return TrackOutcome::passthrough();
         }
+        if snapshots.settings.max_track_len > 0.0 && length > snapshots.settings.max_track_len {
+            return if passthrough_on_no_match {
+                TrackOutcome::passthrough()
+            } else {
+                TrackOutcome::no_match()
+            };
+        }
 
-        let sample_count = if snapshots.settings.sampling_enabled {
-            DEFAULT_SAMPLE_COUNT
-        } else {
-            points.len().max(2)
-        };
-        let smoothing_window = if snapshots.settings.smoothing_enabled {
-            DEFAULT_SMOOTHING_WINDOW
-        } else {
-            1
-        };
+        let track_dirs = direction_sequence(points, DEFAULT_DIRECTION_SEGMENT);
+        if track_dirs.is_empty() {
+            return if passthrough_on_no_match {
+                TrackOutcome::passthrough()
+            } else {
+                TrackOutcome::no_match()
+            };
+        }
 
-        let track_config = PreprocessConfig {
-            sample_count,
-            smoothing_window,
-            min_track_len: snapshots.settings.min_track_len,
-        };
-        let track_vectors = match preprocess_points(points, &track_config) {
-            Ok(vectors) => vectors,
-            Err(crate::plugins::mouse_gestures::engine::PreprocessError::TooShort { .. }) => {
-                return TrackOutcome::passthrough()
-            }
-            Err(_) => return TrackOutcome::no_match(),
-        };
-
-        let gesture_config = PreprocessConfig {
-            sample_count,
-            smoothing_window,
-            min_track_len: 0.0,
-        };
-        let gesture_templates = build_gesture_templates(&snapshots.db, &gesture_config);
+        let gesture_templates = build_gesture_templates(&snapshots.db);
         if gesture_templates.is_empty() {
-            return TrackOutcome::no_match();
+            return if passthrough_on_no_match {
+                TrackOutcome::passthrough()
+            } else {
+                TrackOutcome::no_match()
+            };
         }
 
         let mut distances = HashMap::new();
         for (gesture_id, template) in &gesture_templates {
-            let distance = dtw_distance(&track_vectors, &template.vectors);
+            let similarity = direction_similarity(&track_dirs, &template.directions);
+            if similarity < snapshots.settings.match_threshold {
+                continue;
+            }
+            let distance = 1.0 - similarity;
             distances.insert(gesture_id.clone(), distance);
+        }
+        if distances.is_empty() {
+            return if passthrough_on_no_match {
+                TrackOutcome::passthrough()
+            } else {
+                TrackOutcome::no_match()
+            };
         }
 
         let window_info = current_foreground_window();
         let Some(profile) = select_profile(&snapshots.db, &window_info) else {
-            return TrackOutcome::no_match();
+            return if passthrough_on_no_match {
+                TrackOutcome::passthrough()
+            } else {
+                TrackOutcome::no_match()
+            };
         };
-        let Some(binding_match) =
-            select_binding(profile, &distances, snapshots.settings.max_distance)
-        else {
-            return TrackOutcome::no_match();
+        let Some(binding_match) = select_binding(profile, &distances, 1.0) else {
+            return if passthrough_on_no_match {
+                TrackOutcome::passthrough()
+            } else {
+                TrackOutcome::no_match()
+            };
         };
 
         let template = gesture_templates
@@ -149,28 +227,25 @@ impl MouseGestureRuntime {
 #[derive(Clone)]
 struct GestureTemplate {
     name: Option<String>,
-    vectors: Vec<crate::plugins::mouse_gestures::engine::Vector>,
+    directions: Vec<GestureDirection>,
 }
 
-fn build_gesture_templates(
-    db: &MouseGestureDb,
-    config: &PreprocessConfig,
-) -> HashMap<String, GestureTemplate> {
+fn build_gesture_templates(db: &MouseGestureDb) -> HashMap<String, GestureTemplate> {
     let mut templates = HashMap::new();
     for (gesture_id, serialized) in &db.bindings {
         let parsed = match parse_gesture(serialized) {
             Ok(def) => def,
             Err(_) => continue,
         };
-        let vectors = match preprocess_points(&parsed.points, config) {
-            Ok(vectors) => vectors,
-            Err(_) => continue,
-        };
+        let directions = direction_sequence(&parsed.points, DEFAULT_DIRECTION_SEGMENT);
+        if directions.is_empty() {
+            continue;
+        }
         templates.insert(
             gesture_id.clone(),
             GestureTemplate {
                 name: parsed.name,
-                vectors,
+                directions,
             },
         );
     }
@@ -332,6 +407,13 @@ impl MouseGestureService {
         if let Ok(mut guard) = self.snapshots.write() {
             guard.settings = settings.clone();
         }
+        if let Ok(mut overlay) = mouse_gesture_overlay().lock() {
+            overlay.update_settings(&settings);
+            if !settings.enabled {
+                overlay.end_stroke();
+                overlay.update_preview(None, None);
+            }
+        }
         if settings.enabled {
             self.start();
         } else {
@@ -371,9 +453,11 @@ static MOUSE_GESTURE_SERVICE: OnceCell<Arc<MouseGestureService>> = OnceCell::new
 
 pub fn mouse_gesture_service() -> Arc<MouseGestureService> {
     MOUSE_GESTURE_SERVICE
-        .get_or_init(|| Arc::new(MouseGestureService::new_with_backend(Arc::new(
-            WindowsMouseHookBackend::default(),
-        ))))
+        .get_or_init(|| {
+            Arc::new(MouseGestureService::new_with_backend(Arc::new(
+                WindowsMouseHookBackend::default(),
+            )))
+        })
         .clone()
 }
 
@@ -443,10 +527,10 @@ impl MouseHookBackend for WindowsMouseHookBackend {
         let handle = std::thread::spawn(move || {
             use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
             use windows::Win32::UI::WindowsAndMessaging::{
-                CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
-                TranslateMessage, UnhookWindowsHookEx, HC_ACTION, MSG, MSLLHOOKSTRUCT, WH_MOUSE_LL,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_QUIT,
-                WM_RBUTTONDOWN, WM_RBUTTONUP,
+                CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW,
+                SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HC_ACTION, MSG,
+                MSLLHOOKSTRUCT, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+                WM_MBUTTONUP, WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
             };
 
             unsafe extern "system" fn hook_proc(
@@ -466,12 +550,10 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                     x: data.pt.x as f32,
                     y: data.pt.y as f32,
                 };
-                let trigger_button = state
-                    .runtime
-                    .snapshots
-                    .read()
-                    .ok()
-                    .and_then(|snap| TriggerButton::from_setting(&snap.settings.trigger_button));
+                let trigger_button =
+                    state.runtime.snapshots.read().ok().and_then(|snap| {
+                        TriggerButton::from_setting(&snap.settings.trigger_button)
+                    });
 
                 let mut tracking = match state.tracking.lock() {
                     Ok(guard) => guard,
@@ -492,6 +574,10 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                     tracking.points.clear();
                     tracking.last_point = Some(point);
                     tracking.points.push(point);
+                    if let Ok(mut overlay) = mouse_gesture_overlay().lock() {
+                        overlay.begin_stroke(point);
+                        overlay.update_preview(None, None);
+                    }
                     return LRESULT(1);
                 }
 
@@ -499,6 +585,22 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                     if tracking.last_point.map(|p| p != point).unwrap_or(true) {
                         tracking.points.push(point);
                         tracking.last_point = Some(point);
+                        if let Ok(mut overlay) = mouse_gesture_overlay().lock() {
+                            overlay.push_point(point);
+                            let preview_enabled = state
+                                .runtime
+                                .snapshots
+                                .read()
+                                .ok()
+                                .map(|snap| snap.settings.preview_enabled)
+                                .unwrap_or(false);
+                            if preview_enabled {
+                                let text = state.runtime.preview_text(&tracking.points);
+                                overlay.update_preview(text, Some(point));
+                            } else {
+                                overlay.update_preview(None, None);
+                            }
+                        }
                     }
                     return CallNextHookEx(None, code, wparam, lparam);
                 }
@@ -511,6 +613,11 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                     let button = tracking.active_button.take();
                     tracking.last_point = None;
                     drop(tracking);
+
+                    if let Ok(mut overlay) = mouse_gesture_overlay().lock() {
+                        overlay.end_stroke();
+                        overlay.update_preview(None, None);
+                    }
 
                     let outcome = state.runtime.evaluate_track(&points);
                     if outcome.passthrough_click {
@@ -558,8 +665,7 @@ impl MouseHookBackend for WindowsMouseHookBackend {
             thread_id.store(thread as usize, Ordering::SeqCst);
             let mut msg = MSG::default();
             loop {
-                let result =
-                    unsafe { GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0) };
+                let result = unsafe { GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0) };
                 if result.0 == -1 {
                     break;
                 }
@@ -683,6 +789,9 @@ impl MouseHookBackend for MockMouseHookBackend {
     }
 
     fn is_running(&self) -> bool {
-        self.runtime.lock().map(|guard| guard.is_some()).unwrap_or(false)
+        self.runtime
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
     }
 }

@@ -1,6 +1,6 @@
 use multi_launcher::gui::MouseGestureEvent;
 use multi_launcher::mouse_gestures::{
-    MouseGestureEventSink, MouseGestureService, MockMouseHookBackend,
+    MockMouseHookBackend, MouseGestureEventSink, MouseGestureService,
 };
 use multi_launcher::plugins::mouse_gestures::db::{
     MouseGestureBinding, MouseGestureDb, MouseGestureProfile,
@@ -71,10 +71,7 @@ fn mouse_gesture_service_dispatches_event_on_match() {
     let service = MouseGestureService::new_with_backend_and_sink(backend.clone(), sink.clone());
 
     let mut db = MouseGestureDb::default();
-    db.bindings = HashMap::from([(
-        "gesture-1".to_string(),
-        "SwipeRight:0,0|100,0".to_string(),
-    )]);
+    db.bindings = HashMap::from([("gesture-1".to_string(), "SwipeRight:0,0|100,0".to_string())]);
     db.profiles.push(MouseGestureProfile {
         id: "default".to_string(),
         label: "Default".to_string(),
@@ -83,9 +80,11 @@ fn mouse_gesture_service_dispatches_event_on_match() {
         rules: Vec::new(),
         bindings: vec![MouseGestureBinding {
             gesture_id: "gesture-1".to_string(),
+            label: "Calc".to_string(),
             action: "query:calc".to_string(),
             args: Some("1+1".to_string()),
             priority: 0,
+            enabled: true,
         }],
     });
     service.update_db(db);

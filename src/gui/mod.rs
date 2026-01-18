@@ -14,9 +14,9 @@ mod dashboard_editor_dialog;
 mod fav_dialog;
 mod image_panel;
 mod macro_dialog;
-mod mouse_gestures_add_dialog;
-mod mouse_gestures_gesture_dialog;
-mod mouse_gestures_settings_dialog;
+mod mg_add_dialog;
+mod mg_gesture_dialog;
+mod mg_settings_dialog;
 mod note_panel;
 mod notes_dialog;
 mod screenshot_editor;
@@ -47,9 +47,9 @@ pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
 pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
-pub use mouse_gestures_add_dialog::MouseGesturesAddDialog;
-pub use mouse_gestures_gesture_dialog::MouseGesturesGestureDialog;
-pub use mouse_gestures_settings_dialog::MouseGesturesSettingsDialog;
+pub use mg_add_dialog::MouseGesturesAddDialog;
+pub use mg_gesture_dialog::MouseGesturesGestureDialog;
+pub use mg_settings_dialog::MouseGesturesSettingsDialog;
 pub use note_panel::{
     build_nvim_command, build_wezterm_command, extract_links, show_wiki_link, spawn_external,
     NotePanel,
@@ -1554,7 +1554,9 @@ impl LauncherApp {
             return Some(action.clone());
         }
 
-        let commands = self.plugins.commands_filtered(self.enabled_plugins.as_ref());
+        let commands = self
+            .plugins
+            .commands_filtered(self.enabled_plugins.as_ref());
         if let Some(action) = commands.into_iter().find(|action| {
             action.action == pin.action_id && action.args.as_deref() == pin.args.as_deref()
         }) {
@@ -1568,9 +1570,11 @@ impl LauncherApp {
             return Some(action.clone());
         }
 
-        if let Some(fav) = snapshot.favorites.iter().find(|fav| {
-            fav.action == pin.action_id && fav.args.as_deref() == pin.args.as_deref()
-        }) {
+        if let Some(fav) = snapshot
+            .favorites
+            .iter()
+            .find(|fav| fav.action == pin.action_id && fav.args.as_deref() == pin.args.as_deref())
+        {
             return Some(Action {
                 label: fav.label.clone(),
                 desc: "Fav".into(),
@@ -1723,11 +1727,9 @@ impl LauncherApp {
             }
         } else {
             if ui.button("Unpin result").clicked() {
-                if let Err(e) = history::remove_pin(
-                    HISTORY_PINS_FILE,
-                    &action.action,
-                    action.args.as_deref(),
-                ) {
+                if let Err(e) =
+                    history::remove_pin(HISTORY_PINS_FILE, &action.action, action.args.as_deref())
+                {
                     self.error = Some(format!("Failed to unpin result: {e}"));
                 } else if self.enable_toasts {
                     push_toast(
@@ -2244,8 +2246,31 @@ impl LauncherApp {
             self.mouse_gestures_settings_dialog.open();
         } else if a.action == "mg:gesture_recorder" {
             self.mouse_gestures_gesture_dialog.open();
-        } else if a.action == "mg:add_binding" {
+        } else if a.action == "mg:edit" || a.action == "mg:add_binding" {
             self.mouse_gestures_add_dialog.open();
+        } else if let Some(id) = a.action.strip_prefix("mg:open:") {
+            self.mouse_gestures_gesture_dialog.open_select(id);
+        } else if let Some(id) = a.action.strip_prefix("mg:remove:") {
+            if let Ok(mut db) = crate::plugins::mouse_gestures::db::load_gestures(
+                crate::plugins::mouse_gestures::db::MOUSE_GESTURES_FILE,
+            ) {
+                db.bindings.remove(id);
+                db.gestures.retain(|g| g != id);
+                for profile in &mut db.profiles {
+                    profile.bindings.retain(|binding| binding.gesture_id != id);
+                }
+                if let Err(e) = crate::plugins::mouse_gestures::db::save_gestures(
+                    crate::plugins::mouse_gestures::db::MOUSE_GESTURES_FILE,
+                    &db,
+                ) {
+                    self.set_error(format!("Failed to remove gesture: {e}"));
+                } else {
+                    crate::mouse_gestures::mouse_gesture_service().update_db(db);
+                    self.search();
+                }
+            } else {
+                self.set_error("Failed to load gesture database".into());
+            }
         } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
             if label.is_empty() {
                 self.fav_dialog.open();
@@ -4406,6 +4431,10 @@ impl eframe::App for LauncherApp {
         self.unregister_all_hotkeys();
         self.visible_flag.store(false, Ordering::SeqCst);
         self.last_visible = false;
+        crate::mouse_gestures::mouse_gesture_service().stop();
+        if let Ok(mut overlay) = crate::mouse_gestures::mouse_gesture_overlay().lock() {
+            overlay.shutdown();
+        }
         if let Ok(mut settings) = crate::settings::Settings::load(&self.settings_path) {
             settings.window_size = Some(self.window_size);
             settings.pinned_panels = self.pinned_panels.clone();
