@@ -160,6 +160,7 @@ impl MouseGesturesGestureDialog {
                 ui.label("Gesture library");
                 let labels = gesture_labels(&self.db);
                 egui::ScrollArea::vertical()
+                    .id_source("mg_gesture_library")
                     .max_height(140.0)
                     .show(ui, |ui| {
                         for (gesture_id, label) in labels {

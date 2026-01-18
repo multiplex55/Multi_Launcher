@@ -140,6 +140,7 @@ impl MouseGesturesAddDialog {
             .show(ctx, |ui| {
                 ui.label("Profile");
                 egui::ScrollArea::vertical()
+                    .id_source("mg_add_profile_list")
                     .max_height(120.0)
                     .show(ui, |ui| {
                         for (idx, profile) in self.db.profiles.iter().enumerate() {
@@ -196,6 +197,7 @@ impl MouseGesturesAddDialog {
                     app.mouse_gestures_gesture_dialog.open();
                 }
                 egui::ScrollArea::vertical()
+                    .id_source("mg_add_gesture_list")
                     .max_height(120.0)
                     .show(ui, |ui| {
                         for (gesture_id, label) in gesture_labels(&self.db) {

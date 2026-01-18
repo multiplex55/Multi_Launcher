@@ -4408,6 +4408,10 @@ impl eframe::App for LauncherApp {
         self.unregister_all_hotkeys();
         self.visible_flag.store(false, Ordering::SeqCst);
         self.last_visible = false;
+        crate::mouse_gestures::mouse_gesture_service().stop();
+        if let Ok(mut overlay) = crate::mouse_gestures::mouse_gesture_overlay().lock() {
+            overlay.shutdown();
+        }
         if let Ok(mut settings) = crate::settings::Settings::load(&self.settings_path) {
             settings.window_size = Some(self.window_size);
             settings.pinned_panels = self.pinned_panels.clone();
