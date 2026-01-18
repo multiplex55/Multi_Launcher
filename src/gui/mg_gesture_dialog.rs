@@ -125,7 +125,7 @@ impl MouseGesturesGestureDialog {
                         }
                     }
                 }
-                if response.dragged_stopped() {
+                if response.drag_stopped() {
                     self.update_serialized();
                 }
 
