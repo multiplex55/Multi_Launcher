@@ -6,3 +6,6 @@ pub use service::{
     mouse_gesture_service, MockMouseHookBackend, MouseGestureEventSink, MouseGestureService,
     MouseHookBackend, TrackOutcome,
 };
+
+#[cfg(windows)]
+pub use service::{should_ignore_event, MG_PASSTHROUGH_MARK};

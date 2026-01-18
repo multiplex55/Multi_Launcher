@@ -14,6 +14,17 @@ use std::sync::{Arc, Mutex, RwLock};
 
 const DEFAULT_DIRECTION_SEGMENT: f32 = 6.0;
 
+#[cfg(windows)]
+pub const MG_PASSTHROUGH_MARK: usize = 0x4D475054;
+
+#[cfg(windows)]
+pub fn should_ignore_event(flags: u32, extra_info: usize) -> bool {
+    const LLMHF_INJECTED: u32 = 0x00000001;
+    const LLMHF_LOWER_IL_INJECTED: u32 = 0x00000002;
+
+    flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED) != 0 || extra_info == MG_PASSTHROUGH_MARK
+}
+
 #[derive(Clone, Debug)]
 pub struct TrackOutcome {
     pub matched: bool,
@@ -546,6 +557,9 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                 };
                 let event = wparam.0 as u32;
                 let data = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+                if should_ignore_event(data.flags, data.dwExtraInfo) {
+                    return CallNextHookEx(None, code, wparam, lparam);
+                }
                 let point = Point {
                     x: data.pt.x as f32,
                     y: data.pt.y as f32,
@@ -651,7 +665,7 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                             mouseData: 0,
                             dwFlags: down,
                             time: 0,
-                            dwExtraInfo: 0,
+                            dwExtraInfo: MG_PASSTHROUGH_MARK,
                         },
                     },
                 };
