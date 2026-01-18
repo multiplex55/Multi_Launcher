@@ -137,13 +137,14 @@ impl MouseGesturesAddDialog {
             .open(&mut open)
             .show(ctx, |ui| {
                 let gestures = gesture_labels(&self.db);
-                let profile = ensure_default_profile(&mut self.db);
+                let profile_index = ensure_default_profile_index(&mut self.db);
                 ui.label("Bindings");
+                let mut remove_index: Option<usize> = None;
                 egui::ScrollArea::vertical()
                     .id_source("mg_add_binding_list")
                     .max_height(160.0)
                     .show(ui, |ui| {
-                        let mut remove_index: Option<usize> = None;
+                        let profile = &mut self.db.profiles[profile_index];
                         for (idx, binding) in profile.bindings.iter_mut().enumerate() {
                             ui.horizontal(|ui| {
                                 ui.checkbox(&mut binding.enabled, "");
@@ -168,11 +169,11 @@ impl MouseGesturesAddDialog {
                                 }
                             });
                         }
-                        if let Some(idx) = remove_index {
-                            profile.bindings.remove(idx);
-                            self.persist_db(app);
-                        }
                     });
+                if let Some(idx) = remove_index {
+                    self.db.profiles[profile_index].bindings.remove(idx);
+                    self.persist_db(app);
+                }
                 if ui.button("Save changes").clicked() {
                     self.persist_db(app);
                     self.status = Some("Bindings saved.".to_string());
@@ -358,15 +359,17 @@ impl MouseGesturesAddDialog {
             return;
         }
 
-        let profile = ensure_default_profile(&mut self.db);
-        profile.bindings.push(MouseGestureBinding {
-            gesture_id,
-            label: self.binding_label.trim().to_string(),
-            action: choice.action,
-            args: choice.args,
-            priority: self.binding_priority,
-            enabled: true,
-        });
+        let profile_index = ensure_default_profile_index(&mut self.db);
+        self.db.profiles[profile_index]
+            .bindings
+            .push(MouseGestureBinding {
+                gesture_id,
+                label: self.binding_label.trim().to_string(),
+                action: choice.action,
+                args: choice.args,
+                priority: self.binding_priority,
+                enabled: true,
+            });
         self.persist_db(app);
         self.binding_label.clear();
         self.selected_action = None;
@@ -385,17 +388,16 @@ fn default_profile() -> MouseGestureProfile {
     }
 }
 
-fn ensure_default_profile(db: &mut MouseGestureDb) -> &mut MouseGestureProfile {
-    if db.profiles.is_empty() {
-        db.profiles.push(default_profile());
+fn ensure_default_profile_index(db: &mut MouseGestureDb) -> usize {
+    if let Some(idx) = db
+        .profiles
+        .iter()
+        .position(|profile| profile.id == "default")
+    {
+        return idx;
     }
-    db.profiles
-        .iter_mut()
-        .find(|profile| profile.id == "default")
-        .unwrap_or_else(|| {
-            db.profiles.push(default_profile());
-            db.profiles.last_mut().expect("default profile")
-        })
+    db.profiles.push(default_profile());
+    db.profiles.len().saturating_sub(1)
 }
 
 fn gesture_labels(db: &MouseGestureDb) -> Vec<(String, String)> {
