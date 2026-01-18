@@ -54,7 +54,7 @@ struct OverlayState {
 #[cfg(windows)]
 struct GdiOverlayWindow {
     state: Arc<Mutex<OverlayState>>,
-    hwnd: Arc<Mutex<Option<windows::Win32::Foundation::HWND>>>,
+    hwnd: Arc<Mutex<Option<isize>>>,
     thread: Option<std::thread::JoinHandle<()>>,
     stroke_id: Arc<AtomicU64>,
 }
@@ -81,17 +81,17 @@ impl GdiOverlayWindow {
             use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
             use windows::Win32::Graphics::Gdi::{
                 BeginPaint, CreatePen, DeleteObject, EndPaint, FillRect, GetStockObject, LineTo,
-                MoveToEx, SelectObject, SetBkMode, SetDCPenColor, BLACK_BRUSH, HBRUSH, PAINTSTRUCT,
-                PS_SOLID, TRANSPARENT,
+                MoveToEx, RedrawWindow, SelectObject, SetBkMode, SetDCPenColor, BLACK_BRUSH,
+                HBRUSH, PAINTSTRUCT, PS_SOLID, RDW_INVALIDATE, RDW_UPDATENOW, TRANSPARENT,
             };
             use windows::Win32::System::LibraryLoader::GetModuleHandleW;
             use windows::Win32::UI::WindowsAndMessaging::{
                 CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowLongPtrW,
                 PostQuitMessage, RegisterClassW, SetLayeredWindowAttributes, SetWindowLongPtrW,
-                SetWindowPos, ShowWindow, TranslateMessage, UpdateWindow, CS_HREDRAW, CS_VREDRAW,
-                GWLP_USERDATA, HMENU, HWND_TOPMOST, LWA_COLORKEY, MSG, SWP_NOACTIVATE, SWP_NOMOVE,
-                SWP_NOSIZE, SW_SHOW, WM_DESTROY, WM_PAINT, WNDCLASSW, WS_EX_LAYERED,
-                WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+                SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA,
+                HMENU, HWND_TOPMOST, LWA_COLORKEY, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                SW_SHOW, WM_DESTROY, WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+                WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
             };
             use windows::Win32::UI::WindowsAndMessaging::{
                 GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
@@ -112,11 +112,7 @@ impl GdiOverlayWindow {
                         let mut rect = RECT::default();
                         rect.right = paint.rcPaint.right;
                         rect.bottom = paint.rcPaint.bottom;
-                        FillRect(
-                            hdc,
-                            &rect,
-                            HBRUSH(GetStockObject(BLACK_BRUSH).unwrap_or_default().0),
-                        );
+                        FillRect(hdc, &rect, HBRUSH(GetStockObject(BLACK_BRUSH).0));
                         if let Ok(state) = state.lock() {
                             if state.visible && state.points.len() >= 2 {
                                 let color = parse_color(&state.settings.color);
@@ -170,33 +166,36 @@ impl GdiOverlayWindow {
                     HMENU::default(),
                     hinstance,
                     None,
-                );
-                if hwnd.0 != 0 {
-                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, &*state as *const _ as isize);
-                    SetLayeredWindowAttributes(
-                        hwnd,
-                        windows::Win32::Foundation::COLORREF(0),
-                        0,
-                        LWA_COLORKEY,
-                    );
-                    ShowWindow(hwnd, SW_SHOW);
-                    SetWindowPos(
-                        hwnd,
-                        HWND_TOPMOST,
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
-                    );
-                    UpdateWindow(hwnd);
-                    if let Ok(mut store) = hwnd_store.lock() {
-                        *store = Some(hwnd);
+                )
+                .ok();
+                if let Some(hwnd) = hwnd {
+                    if hwnd.0 != std::ptr::null_mut() {
+                        SetWindowLongPtrW(hwnd, GWLP_USERDATA, &*state as *const _ as isize);
+                        let _ = SetLayeredWindowAttributes(
+                            hwnd,
+                            windows::Win32::Foundation::COLORREF(0),
+                            0,
+                            LWA_COLORKEY,
+                        );
+                        ShowWindow(hwnd, SW_SHOW);
+                        let _ = SetWindowPos(
+                            hwnd,
+                            HWND_TOPMOST,
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+                        );
+                        if let Ok(mut store) = hwnd_store.lock() {
+                            *store = Some(hwnd.0 as isize);
+                        }
+                        RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW);
                     }
                 }
 
                 let mut msg = MSG::default();
-                while GetMessageW(&mut msg, HWND(0), 0, 0).into() {
+                while GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0).into() {
                     TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
@@ -209,7 +208,14 @@ impl GdiOverlayWindow {
         if let Ok(store) = self.hwnd.lock() {
             if let Some(hwnd) = *store {
                 unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::InvalidateRect(hwnd, None, false);
+                    let hwnd = windows::Win32::Foundation::HWND(hwnd as *mut _);
+                    windows::Win32::Graphics::Gdi::RedrawWindow(
+                        hwnd,
+                        None,
+                        None,
+                        windows::Win32::Graphics::Gdi::RDW_INVALIDATE
+                            | windows::Win32::Graphics::Gdi::RDW_UPDATENOW,
+                    );
                 }
             }
         }
@@ -281,7 +287,14 @@ impl OverlayWindow for GdiOverlayWindow {
             if let Ok(store) = hwnd.lock() {
                 if let Some(hwnd) = *store {
                     unsafe {
-                        windows::Win32::UI::WindowsAndMessaging::InvalidateRect(hwnd, None, false);
+                        let hwnd = windows::Win32::Foundation::HWND(hwnd as *mut _);
+                        windows::Win32::Graphics::Gdi::RedrawWindow(
+                            hwnd,
+                            None,
+                            None,
+                            windows::Win32::Graphics::Gdi::RDW_INVALIDATE
+                                | windows::Win32::Graphics::Gdi::RDW_UPDATENOW,
+                        );
                     }
                 }
             }
@@ -293,7 +306,7 @@ impl OverlayWindow for GdiOverlayWindow {
             if let Some(hwnd) = *store {
                 unsafe {
                     windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-                        hwnd,
+                        windows::Win32::Foundation::HWND(hwnd as *mut _),
                         windows::Win32::UI::WindowsAndMessaging::WM_CLOSE,
                         windows::Win32::Foundation::WPARAM(0),
                         windows::Win32::Foundation::LPARAM(0),
