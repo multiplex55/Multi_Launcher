@@ -1,4 +1,5 @@
 use crate::gui::{send_event, MouseGestureEvent, WatchEvent};
+use crate::mouse_gestures::mouse_gesture_overlay;
 use crate::plugins::mouse_gestures::db::{
     select_binding, select_profile, ForegroundWindowInfo, MouseGestureDb,
 };
@@ -71,6 +72,7 @@ impl MouseGestureRuntime {
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default();
+        let passthrough_on_no_match = snapshots.settings.passthrough_on_no_match;
         if points.len() < 2 {
             return TrackOutcome::passthrough();
         }
@@ -110,7 +112,11 @@ impl MouseGestureRuntime {
         };
         let gesture_templates = build_gesture_templates(&snapshots.db, &gesture_config);
         if gesture_templates.is_empty() {
-            return TrackOutcome::no_match();
+            return if passthrough_on_no_match {
+                TrackOutcome::passthrough()
+            } else {
+                TrackOutcome::no_match()
+            };
         }
 
         let mut distances = HashMap::new();
@@ -121,12 +127,20 @@ impl MouseGestureRuntime {
 
         let window_info = current_foreground_window();
         let Some(profile) = select_profile(&snapshots.db, &window_info) else {
-            return TrackOutcome::no_match();
+            return if passthrough_on_no_match {
+                TrackOutcome::passthrough()
+            } else {
+                TrackOutcome::no_match()
+            };
         };
         let Some(binding_match) =
             select_binding(profile, &distances, snapshots.settings.max_distance)
         else {
-            return TrackOutcome::no_match();
+            return if passthrough_on_no_match {
+                TrackOutcome::passthrough()
+            } else {
+                TrackOutcome::no_match()
+            };
         };
 
         let template = gesture_templates
@@ -332,6 +346,9 @@ impl MouseGestureService {
         if let Ok(mut guard) = self.snapshots.write() {
             guard.settings = settings.clone();
         }
+        if let Ok(mut overlay) = mouse_gesture_overlay().lock() {
+            overlay.update_settings(&settings);
+        }
         if settings.enabled {
             self.start();
         } else {
@@ -371,9 +388,11 @@ static MOUSE_GESTURE_SERVICE: OnceCell<Arc<MouseGestureService>> = OnceCell::new
 
 pub fn mouse_gesture_service() -> Arc<MouseGestureService> {
     MOUSE_GESTURE_SERVICE
-        .get_or_init(|| Arc::new(MouseGestureService::new_with_backend(Arc::new(
-            WindowsMouseHookBackend::default(),
-        ))))
+        .get_or_init(|| {
+            Arc::new(MouseGestureService::new_with_backend(Arc::new(
+                WindowsMouseHookBackend::default(),
+            )))
+        })
         .clone()
 }
 
@@ -443,10 +462,10 @@ impl MouseHookBackend for WindowsMouseHookBackend {
         let handle = std::thread::spawn(move || {
             use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
             use windows::Win32::UI::WindowsAndMessaging::{
-                CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
-                TranslateMessage, UnhookWindowsHookEx, HC_ACTION, MSG, MSLLHOOKSTRUCT, WH_MOUSE_LL,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_QUIT,
-                WM_RBUTTONDOWN, WM_RBUTTONUP,
+                CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW,
+                SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HC_ACTION, MSG,
+                MSLLHOOKSTRUCT, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+                WM_MBUTTONUP, WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
             };
 
             unsafe extern "system" fn hook_proc(
@@ -466,12 +485,10 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                     x: data.pt.x as f32,
                     y: data.pt.y as f32,
                 };
-                let trigger_button = state
-                    .runtime
-                    .snapshots
-                    .read()
-                    .ok()
-                    .and_then(|snap| TriggerButton::from_setting(&snap.settings.trigger_button));
+                let trigger_button =
+                    state.runtime.snapshots.read().ok().and_then(|snap| {
+                        TriggerButton::from_setting(&snap.settings.trigger_button)
+                    });
 
                 let mut tracking = match state.tracking.lock() {
                     Ok(guard) => guard,
@@ -492,6 +509,9 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                     tracking.points.clear();
                     tracking.last_point = Some(point);
                     tracking.points.push(point);
+                    if let Ok(mut overlay) = mouse_gesture_overlay().lock() {
+                        overlay.begin_stroke(point);
+                    }
                     return LRESULT(1);
                 }
 
@@ -499,6 +519,9 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                     if tracking.last_point.map(|p| p != point).unwrap_or(true) {
                         tracking.points.push(point);
                         tracking.last_point = Some(point);
+                        if let Ok(mut overlay) = mouse_gesture_overlay().lock() {
+                            overlay.push_point(point);
+                        }
                     }
                     return CallNextHookEx(None, code, wparam, lparam);
                 }
@@ -511,6 +534,10 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                     let button = tracking.active_button.take();
                     tracking.last_point = None;
                     drop(tracking);
+
+                    if let Ok(mut overlay) = mouse_gesture_overlay().lock() {
+                        overlay.end_stroke();
+                    }
 
                     let outcome = state.runtime.evaluate_track(&points);
                     if outcome.passthrough_click {
@@ -558,8 +585,7 @@ impl MouseHookBackend for WindowsMouseHookBackend {
             thread_id.store(thread as usize, Ordering::SeqCst);
             let mut msg = MSG::default();
             loop {
-                let result =
-                    unsafe { GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0) };
+                let result = unsafe { GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0) };
                 if result.0 == -1 {
                     break;
                 }
@@ -683,6 +709,9 @@ impl MouseHookBackend for MockMouseHookBackend {
     }
 
     fn is_running(&self) -> bool {
-        self.runtime.lock().map(|guard| guard.is_some()).unwrap_or(false)
+        self.runtime
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
     }
 }
