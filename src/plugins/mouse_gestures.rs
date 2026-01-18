@@ -23,8 +23,9 @@ impl MouseGesturesPlugin {
         ));
         let data_clone = db_cache.clone();
         let watch_path = MOUSE_GESTURES_FILE.to_string();
+        let watch_path_clone = watch_path.clone();
         let watcher = watch_json(&watch_path, move || {
-            if let Ok(db) = load_gestures(&watch_path) {
+            if let Ok(db) = load_gestures(&watch_path_clone) {
                 if let Ok(mut lock) = data_clone.lock() {
                     *lock = db;
                 }
