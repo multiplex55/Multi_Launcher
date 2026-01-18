@@ -208,7 +208,7 @@ impl MouseGesturesAddDialog {
                                 .selectable_label(selected, format!("{label} ({gesture_id})"))
                                 .clicked()
                             {
-                                self.selected_gesture = Some(gesture_id.to_string());
+                                self.selected_gesture = Some(gesture_id);
                             }
                         }
                     });
@@ -396,8 +396,8 @@ fn make_profile_id(label: &str) -> String {
     id.trim_matches('_').to_string()
 }
 
-fn gesture_labels(db: &MouseGestureDb) -> Vec<(&str, String)> {
-    let mut items: Vec<(&str, String)> = db
+fn gesture_labels(db: &MouseGestureDb) -> Vec<(String, String)> {
+    let mut items: Vec<(String, String)> = db
         .bindings
         .iter()
         .map(|(id, serialized)| {
@@ -405,7 +405,7 @@ fn gesture_labels(db: &MouseGestureDb) -> Vec<(&str, String)> {
                 .ok()
                 .and_then(|g| g.name)
                 .unwrap_or_else(|| "(unnamed)".to_string());
-            (id.as_str(), label)
+            (id.clone(), label)
         })
         .collect();
     items.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));

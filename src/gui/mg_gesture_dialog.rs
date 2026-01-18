@@ -125,7 +125,7 @@ impl MouseGesturesGestureDialog {
                         }
                     }
                 }
-                if response.drag_released() {
+                if response.dragged_stopped() {
                     self.update_serialized();
                 }
 
@@ -158,10 +158,11 @@ impl MouseGesturesGestureDialog {
 
                 ui.separator();
                 ui.label("Gesture library");
+                let labels = gesture_labels(&self.db);
                 egui::ScrollArea::vertical()
                     .max_height(140.0)
                     .show(ui, |ui| {
-                        for (gesture_id, label) in gesture_labels(&self.db) {
+                        for (gesture_id, label) in labels {
                             let selected = self
                                 .selected_gesture
                                 .as_deref()
@@ -171,8 +172,8 @@ impl MouseGesturesGestureDialog {
                                 .selectable_label(selected, format!("{label} ({gesture_id})"))
                                 .clicked()
                             {
-                                self.selected_gesture = Some(gesture_id.to_string());
-                                self.load_selected(gesture_id);
+                                self.selected_gesture = Some(gesture_id.clone());
+                                self.load_selected(&gesture_id);
                             }
                         }
                     });
@@ -250,16 +251,16 @@ fn apply_serialized_gesture(
     Ok(())
 }
 
-fn gesture_labels(db: &MouseGestureDb) -> BTreeMap<&str, String> {
+fn gesture_labels(db: &MouseGestureDb) -> Vec<(String, String)> {
     let mut labels = BTreeMap::new();
     for (id, serialized) in &db.bindings {
         let label = parse_gesture(serialized)
             .ok()
             .and_then(|g| g.name)
             .unwrap_or_else(|| "(unnamed)".to_string());
-        labels.insert(id.as_str(), label);
+        labels.insert(id.clone(), label);
     }
-    labels
+    labels.into_iter().collect()
 }
 
 fn next_gesture_id(db: &MouseGestureDb) -> String {

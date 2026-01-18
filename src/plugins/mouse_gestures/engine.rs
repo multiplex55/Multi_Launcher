@@ -20,10 +20,21 @@ pub struct GestureDefinition {
 pub enum ParseErrorKind {
     EmptyInput,
     EmptyName,
-    EmptyPoint { index: usize },
-    MissingCoordinate { index: usize, coord: usize },
-    ExtraCoordinate { index: usize },
-    InvalidNumber { index: usize, coord: usize, value: String },
+    EmptyPoint {
+        index: usize,
+    },
+    MissingCoordinate {
+        index: usize,
+        coord: usize,
+    },
+    ExtraCoordinate {
+        index: usize,
+    },
+    InvalidNumber {
+        index: usize,
+        coord: usize,
+        value: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -199,12 +210,11 @@ fn resample_points(points: &[Point], sample_count: usize) -> Vec<Point> {
 
     let mut accumulated = 0.0;
     let mut segment_start = points[0];
-    let mut segment_length = 0.0;
     let mut target_distance = spacing;
 
     let mut iter = points.iter().skip(1);
     while let Some(point) = iter.next() {
-        segment_length = distance(segment_start, *point);
+        let mut segment_length = distance(segment_start, *point);
         while accumulated + segment_length >= target_distance {
             let remaining = target_distance - accumulated;
             let t = remaining / segment_length;
@@ -259,10 +269,12 @@ fn smooth_points(points: &[Point], window: usize) -> Vec<Point> {
 fn points_to_vectors(points: &[Point]) -> Vec<Vector> {
     points
         .windows(2)
-        .map(|pair| normalize_vector(Vector {
-            x: pair[1].x - pair[0].x,
-            y: pair[1].y - pair[0].y,
-        }))
+        .map(|pair| {
+            normalize_vector(Vector {
+                x: pair[1].x - pair[0].x,
+                y: pair[1].y - pair[0].y,
+            })
+        })
         .collect()
 }
 
@@ -317,12 +329,7 @@ pub fn dtw_distance(vectors_a: &[Vector], vectors_b: &[Vector]) -> f32 {
     (cost[rows - 1][cols - 1] / final_steps).clamp(0.0, 2.0)
 }
 
-fn best_predecessor(
-    cost: &[Vec<f32>],
-    steps: &[Vec<usize>],
-    i: usize,
-    j: usize,
-) -> (f32, usize) {
+fn best_predecessor(cost: &[Vec<f32>], steps: &[Vec<usize>], i: usize, j: usize) -> (f32, usize) {
     let mut best_cost = cost[i - 1][j - 1];
     let mut best_steps = steps[i - 1][j - 1];
 

@@ -39,7 +39,6 @@ impl OverlayWindow for NoopOverlayWindow {
     }
 }
 
-#[derive(Default)]
 pub struct StrokeOverlay {
     settings: MouseGestureOverlaySettings,
     window: Box<dyn OverlayWindow>,
@@ -68,6 +67,12 @@ impl StrokeOverlay {
 
     pub fn end_stroke(&mut self) {
         self.window.end_stroke(&self.settings);
+    }
+}
+
+impl Default for StrokeOverlay {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
