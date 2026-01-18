@@ -14,6 +14,9 @@ mod dashboard_editor_dialog;
 mod fav_dialog;
 mod image_panel;
 mod macro_dialog;
+mod mouse_gestures_add_dialog;
+mod mouse_gestures_gesture_dialog;
+mod mouse_gestures_settings_dialog;
 mod note_panel;
 mod notes_dialog;
 mod screenshot_editor;
@@ -44,6 +47,9 @@ pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
 pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
+pub use mouse_gestures_add_dialog::MouseGesturesAddDialog;
+pub use mouse_gestures_gesture_dialog::MouseGesturesGestureDialog;
+pub use mouse_gestures_settings_dialog::MouseGesturesSettingsDialog;
 pub use note_panel::{
     build_nvim_command, build_wezterm_command, extract_links, show_wiki_link, spawn_external,
     NotePanel,
@@ -257,6 +263,9 @@ pub enum Panel {
     ShellCmdDialog,
     SnippetDialog,
     MacroDialog,
+    MouseGesturesSettingsDialog,
+    MouseGesturesGestureDialog,
+    MouseGesturesAddDialog,
     FavDialog,
     NotesDialog,
     UnusedAssetsDialog,
@@ -293,6 +302,9 @@ struct PanelStates {
     shell_cmd_dialog: bool,
     snippet_dialog: bool,
     macro_dialog: bool,
+    mouse_gestures_settings_dialog: bool,
+    mouse_gestures_gesture_dialog: bool,
+    mouse_gestures_add_dialog: bool,
     fav_dialog: bool,
     notes_dialog: bool,
     unused_assets_dialog: bool,
@@ -395,6 +407,9 @@ pub struct LauncherApp {
     shell_cmd_dialog: ShellCmdDialog,
     snippet_dialog: SnippetDialog,
     macro_dialog: MacroDialog,
+    mouse_gestures_settings_dialog: MouseGesturesSettingsDialog,
+    mouse_gestures_gesture_dialog: MouseGesturesGestureDialog,
+    mouse_gestures_add_dialog: MouseGesturesAddDialog,
     fav_dialog: FavDialog,
     notes_dialog: NotesDialog,
     unused_assets_dialog: UnusedAssetsDialog,
@@ -1050,6 +1065,9 @@ impl LauncherApp {
             shell_cmd_dialog: ShellCmdDialog::default(),
             snippet_dialog: SnippetDialog::default(),
             macro_dialog: MacroDialog::default(),
+            mouse_gestures_settings_dialog: MouseGesturesSettingsDialog::default(),
+            mouse_gestures_gesture_dialog: MouseGesturesGestureDialog::default(),
+            mouse_gestures_add_dialog: MouseGesturesAddDialog::default(),
             fav_dialog: FavDialog::default(),
             notes_dialog: NotesDialog::default(),
             unused_assets_dialog: UnusedAssetsDialog::default(),
@@ -2209,6 +2227,12 @@ impl LauncherApp {
             self.snippet_dialog.open_edit(alias);
         } else if a.action == "macro:dialog" {
             self.macro_dialog.open();
+        } else if a.action == "mg:settings" {
+            self.mouse_gestures_settings_dialog.open();
+        } else if a.action == "mg:gesture_recorder" {
+            self.mouse_gestures_gesture_dialog.open();
+        } else if a.action == "mg:add_binding" {
+            self.mouse_gestures_add_dialog.open();
         } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
             if label.is_empty() {
                 self.fav_dialog.open();
@@ -2603,6 +2627,9 @@ impl LauncherApp {
             || self.shell_cmd_dialog.open
             || self.snippet_dialog.open
             || self.macro_dialog.open
+            || self.mouse_gestures_settings_dialog.open
+            || self.mouse_gestures_gesture_dialog.open
+            || self.mouse_gestures_add_dialog.open
             || self.fav_dialog.open
             || self.notes_dialog.open
             || self.unused_assets_dialog.open
@@ -2718,6 +2745,18 @@ impl LauncherApp {
             Panel::MacroDialog => {
                 self.macro_dialog.open = false;
                 self.panel_states.macro_dialog = false;
+            }
+            Panel::MouseGesturesSettingsDialog => {
+                self.mouse_gestures_settings_dialog.open = false;
+                self.panel_states.mouse_gestures_settings_dialog = false;
+            }
+            Panel::MouseGesturesGestureDialog => {
+                self.mouse_gestures_gesture_dialog.open = false;
+                self.panel_states.mouse_gestures_gesture_dialog = false;
+            }
+            Panel::MouseGesturesAddDialog => {
+                self.mouse_gestures_add_dialog.open = false;
+                self.panel_states.mouse_gestures_add_dialog = false;
             }
             Panel::FavDialog => {
                 self.fav_dialog.open = false;
@@ -2857,6 +2896,18 @@ impl LauncherApp {
                 self.macro_dialog.open = false;
                 self.panel_states.macro_dialog = false;
             }
+            Panel::MouseGesturesSettingsDialog => {
+                self.mouse_gestures_settings_dialog.open = false;
+                self.panel_states.mouse_gestures_settings_dialog = false;
+            }
+            Panel::MouseGesturesGestureDialog => {
+                self.mouse_gestures_gesture_dialog.open = false;
+                self.panel_states.mouse_gestures_gesture_dialog = false;
+            }
+            Panel::MouseGesturesAddDialog => {
+                self.mouse_gestures_add_dialog.open = false;
+                self.panel_states.mouse_gestures_add_dialog = false;
+            }
             Panel::FavDialog => {
                 self.fav_dialog.open = false;
                 self.panel_states.fav_dialog = false;
@@ -2959,6 +3010,9 @@ impl LauncherApp {
             Panel::ShellCmdDialog => self.shell_cmd_dialog.open = true,
             Panel::SnippetDialog => self.snippet_dialog.open = true,
             Panel::MacroDialog => self.macro_dialog.open = true,
+            Panel::MouseGesturesSettingsDialog => self.mouse_gestures_settings_dialog.open = true,
+            Panel::MouseGesturesGestureDialog => self.mouse_gestures_gesture_dialog.open = true,
+            Panel::MouseGesturesAddDialog => self.mouse_gestures_add_dialog.open = true,
             Panel::FavDialog => self.fav_dialog.open = true,
             Panel::NotesDialog => self.notes_dialog.open = true,
             Panel::UnusedAssetsDialog => self.unused_assets_dialog.open = true,
@@ -3076,6 +3130,21 @@ impl LauncherApp {
             Panel::SnippetDialog
         );
         check!(self.macro_dialog.open, macro_dialog, Panel::MacroDialog);
+        check!(
+            self.mouse_gestures_settings_dialog.open,
+            mouse_gestures_settings_dialog,
+            Panel::MouseGesturesSettingsDialog
+        );
+        check!(
+            self.mouse_gestures_gesture_dialog.open,
+            mouse_gestures_gesture_dialog,
+            Panel::MouseGesturesGestureDialog
+        );
+        check!(
+            self.mouse_gestures_add_dialog.open,
+            mouse_gestures_add_dialog,
+            Panel::MouseGesturesAddDialog
+        );
         check!(self.fav_dialog.open, fav_dialog, Panel::FavDialog);
         check!(self.notes_dialog.open, notes_dialog, Panel::NotesDialog);
         check!(
@@ -4184,6 +4253,15 @@ impl eframe::App for LauncherApp {
         let mut macro_dlg = std::mem::take(&mut self.macro_dialog);
         macro_dlg.ui(ctx, self);
         self.macro_dialog = macro_dlg;
+        let mut mg_settings_dlg = std::mem::take(&mut self.mouse_gestures_settings_dialog);
+        mg_settings_dlg.ui(ctx, self);
+        self.mouse_gestures_settings_dialog = mg_settings_dlg;
+        let mut mg_gesture_dlg = std::mem::take(&mut self.mouse_gestures_gesture_dialog);
+        mg_gesture_dlg.ui(ctx, self);
+        self.mouse_gestures_gesture_dialog = mg_gesture_dlg;
+        let mut mg_add_dlg = std::mem::take(&mut self.mouse_gestures_add_dialog);
+        mg_add_dlg.ui(ctx, self);
+        self.mouse_gestures_add_dialog = mg_add_dlg;
         let mut fav_dlg = std::mem::take(&mut self.fav_dialog);
         fav_dlg.ui(ctx, self);
         self.fav_dialog = fav_dlg;

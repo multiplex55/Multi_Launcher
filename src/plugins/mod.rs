@@ -48,3 +48,4 @@ pub mod convert_panel;
 pub mod color_picker;
 pub mod missing;
 pub mod calc_history;
+pub mod mouse_gestures;
