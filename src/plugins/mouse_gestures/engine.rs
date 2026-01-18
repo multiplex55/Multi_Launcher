@@ -16,6 +16,18 @@ pub struct GestureDefinition {
     pub points: Vec<Point>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GestureDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+    UpRight,
+    UpLeft,
+    DownRight,
+    DownLeft,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseErrorKind {
     EmptyInput,
@@ -61,6 +73,66 @@ pub struct PreprocessConfig {
     pub sample_count: usize,
     pub smoothing_window: usize,
     pub min_track_len: f32,
+}
+
+pub fn direction_sequence(points: &[Point], min_segment_len: f32) -> Vec<GestureDirection> {
+    let mut dirs = Vec::new();
+    for pair in points.windows(2) {
+        let dx = pair[1].x - pair[0].x;
+        let dy = pair[1].y - pair[0].y;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < min_segment_len {
+            continue;
+        }
+        let angle = (-dy).atan2(dx);
+        let direction = direction_from_angle(angle);
+        if dirs.last().copied() != Some(direction) {
+            dirs.push(direction);
+        }
+    }
+    dirs
+}
+
+pub fn direction_similarity(a: &[GestureDirection], b: &[GestureDirection]) -> f32 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let distance = levenshtein_distance(a, b);
+    let max_len = a.len().max(b.len()) as f32;
+    if max_len == 0.0 {
+        0.0
+    } else {
+        (1.0 - distance as f32 / max_len).clamp(0.0, 1.0)
+    }
+}
+
+fn levenshtein_distance(a: &[GestureDirection], b: &[GestureDirection]) -> usize {
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0; b.len() + 1];
+    for (i, &av) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, &bv) in b.iter().enumerate() {
+            let cost = if av == bv { 0 } else { 1 };
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        prev.clone_from_slice(&curr);
+    }
+    prev[b.len()]
+}
+
+fn direction_from_angle(angle: f32) -> GestureDirection {
+    use std::f32::consts::PI;
+    let sector = ((angle / (PI / 4.0)).round() as i32).rem_euclid(8);
+    match sector {
+        0 => GestureDirection::Right,
+        1 => GestureDirection::UpRight,
+        2 => GestureDirection::Up,
+        3 => GestureDirection::UpLeft,
+        4 => GestureDirection::Left,
+        5 => GestureDirection::DownLeft,
+        6 => GestureDirection::Down,
+        _ => GestureDirection::DownRight,
+    }
 }
 
 pub fn parse_gesture(input: &str) -> Result<GestureDefinition, ParseError> {

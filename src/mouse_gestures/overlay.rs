@@ -16,6 +16,7 @@ trait OverlayWindow: Send {
     fn begin_stroke(&mut self, settings: &MouseGestureOverlaySettings, start: Point);
     fn push_point(&mut self, settings: &MouseGestureOverlaySettings, point: Point);
     fn end_stroke(&mut self, settings: &MouseGestureOverlaySettings);
+    fn update_preview(&mut self, text: Option<String>, point: Option<Point>);
     fn shutdown(&mut self);
 }
 
@@ -41,6 +42,8 @@ impl OverlayWindow for NoopOverlayWindow {
         self._settings = settings.clone();
     }
 
+    fn update_preview(&mut self, _text: Option<String>, _point: Option<Point>) {}
+
     fn shutdown(&mut self) {}
 }
 
@@ -49,6 +52,7 @@ struct OverlayState {
     settings: MouseGestureOverlaySettings,
     points: Vec<Point>,
     visible: bool,
+    preview: Option<(String, Point)>,
 }
 
 #[cfg(windows)]
@@ -81,8 +85,9 @@ impl GdiOverlayWindow {
             use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
             use windows::Win32::Graphics::Gdi::{
                 BeginPaint, CreatePen, DeleteObject, EndPaint, FillRect, GetStockObject, LineTo,
-                MoveToEx, RedrawWindow, SelectObject, SetBkMode, SetDCPenColor, BLACK_BRUSH,
-                HBRUSH, PAINTSTRUCT, PS_SOLID, RDW_INVALIDATE, RDW_UPDATENOW, TRANSPARENT,
+                MoveToEx, RedrawWindow, SelectObject, SetBkMode, SetDCPenColor, SetTextColor,
+                TextOutW, BLACK_BRUSH, HBRUSH, PAINTSTRUCT, PS_SOLID, RDW_INVALIDATE,
+                RDW_UPDATENOW, TRANSPARENT,
             };
             use windows::Win32::System::LibraryLoader::GetModuleHandleW;
             use windows::Win32::UI::WindowsAndMessaging::{
@@ -128,6 +133,17 @@ impl GdiOverlayWindow {
                                 }
                                 SelectObject(hdc, old);
                                 DeleteObject(pen);
+                            }
+                            if let Some((text, point)) = &state.preview {
+                                let text_w = to_wide(text);
+                                SetTextColor(hdc, windows::Win32::Foundation::COLORREF(0x00ffffff));
+                                TextOutW(
+                                    hdc,
+                                    point.x as i32 + 12,
+                                    point.y as i32 + 12,
+                                    PCWSTR(text_w.as_ptr()),
+                                    (text_w.len().saturating_sub(1)) as i32,
+                                );
                             }
                         }
                         EndPaint(hwnd, &paint);
@@ -235,6 +251,11 @@ fn parse_color(value: &str) -> windows::Win32::Foundation::COLORREF {
 }
 
 #[cfg(windows)]
+fn to_wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
 impl OverlayWindow for GdiOverlayWindow {
     fn update_settings(&mut self, settings: &MouseGestureOverlaySettings) {
         if let Ok(mut state) = self.state.lock() {
@@ -252,6 +273,7 @@ impl OverlayWindow for GdiOverlayWindow {
             state.points.clear();
             state.points.push(start);
             state.visible = true;
+            state.preview = None;
         }
         self.invalidate();
     }
@@ -272,6 +294,7 @@ impl OverlayWindow for GdiOverlayWindow {
         let stroke_id = Arc::clone(&self.stroke_id);
         if let Ok(mut state) = self.state.lock() {
             state.settings = settings.clone();
+            state.preview = None;
         }
         std::thread::spawn(move || {
             if fade > 0 {
@@ -282,6 +305,7 @@ impl OverlayWindow for GdiOverlayWindow {
                 if current == expected {
                     state.visible = false;
                     state.points.clear();
+                    state.preview = None;
                 }
             }
             if let Ok(store) = hwnd.lock() {
@@ -299,6 +323,13 @@ impl OverlayWindow for GdiOverlayWindow {
                 }
             }
         });
+    }
+
+    fn update_preview(&mut self, text: Option<String>, point: Option<Point>) {
+        if let Ok(mut state) = self.state.lock() {
+            state.preview = text.zip(point);
+        }
+        self.invalidate();
     }
 
     fn shutdown(&mut self) {
@@ -332,6 +363,7 @@ impl StrokeOverlay {
             settings: settings.clone(),
             points: Vec::new(),
             visible: false,
+            preview: None,
         }));
         #[cfg(windows)]
         let window: Box<dyn OverlayWindow> = Box::new(GdiOverlayWindow::new(Arc::clone(&state)));
@@ -355,6 +387,10 @@ impl StrokeOverlay {
 
     pub fn end_stroke(&mut self) {
         self.window.end_stroke(&self.settings);
+    }
+
+    pub fn update_preview(&mut self, text: Option<String>, point: Option<Point>) {
+        self.window.update_preview(text, point);
     }
 
     pub fn shutdown(&mut self) {

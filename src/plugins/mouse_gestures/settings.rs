@@ -24,12 +24,18 @@ pub struct MouseGesturePluginSettings {
     pub trigger_button: String,
     pub min_track_len: f32,
     pub max_distance: f32,
+    #[serde(default = "default_match_threshold")]
+    pub match_threshold: f32,
+    #[serde(default)]
+    pub max_track_len: f32,
     pub overlay: MouseGestureOverlaySettings,
     #[serde(default)]
     pub passthrough_on_no_match: bool,
     pub no_match_action: String,
     pub smoothing_enabled: bool,
     pub sampling_enabled: bool,
+    #[serde(default)]
+    pub preview_enabled: bool,
 }
 
 impl Default for MouseGesturePluginSettings {
@@ -39,13 +45,20 @@ impl Default for MouseGesturePluginSettings {
             trigger_button: "right".to_string(),
             min_track_len: 40.0,
             max_distance: 24.0,
+            match_threshold: default_match_threshold(),
+            max_track_len: 0.0,
             overlay: MouseGestureOverlaySettings::default(),
             passthrough_on_no_match: false,
             no_match_action: "none".to_string(),
             smoothing_enabled: true,
             sampling_enabled: true,
+            preview_enabled: false,
         }
     }
+}
+
+fn default_match_threshold() -> f32 {
+    0.7
 }
 
 #[cfg(test)]

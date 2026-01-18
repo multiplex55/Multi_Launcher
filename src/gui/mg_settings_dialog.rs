@@ -123,15 +123,31 @@ impl MouseGesturesSettingsDialog {
                         .changed();
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Max distance");
+                    ui.label("Match threshold");
                     changed |= ui
-                        .add(egui::DragValue::new(&mut self.settings.max_distance).speed(0.5))
+                        .add(
+                            egui::DragValue::new(&mut self.settings.match_threshold)
+                                .speed(0.01)
+                                .clamp_range(0.0..=1.0),
+                        )
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Max track length (0 = unlimited)");
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut self.settings.max_track_len).speed(1.0))
                         .changed();
                 });
                 changed |= ui
                     .checkbox(
                         &mut self.settings.passthrough_on_no_match,
                         "Pass through clicks when no gesture matches",
+                    )
+                    .changed();
+                changed |= ui
+                    .checkbox(
+                        &mut self.settings.preview_enabled,
+                        "Show match preview tooltip",
                     )
                     .changed();
                 changed |= ui
