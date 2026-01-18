@@ -565,10 +565,20 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                     x: data.pt.x as f32,
                     y: data.pt.y as f32,
                 };
-                let trigger_button =
-                    state.runtime.snapshots.read().ok().and_then(|snap| {
-                        TriggerButton::from_setting(&snap.settings.trigger_button)
-                    });
+                let (trigger_button, min_point_distance, preview_enabled) = state
+                    .runtime
+                    .snapshots
+                    .read()
+                    .ok()
+                    .map(|snap| {
+                        (
+                            TriggerButton::from_setting(&snap.settings.trigger_button),
+                            snap.settings.min_point_distance.max(0.0),
+                            snap.settings.preview_enabled,
+                        )
+                    })
+                    .unwrap_or((None, 0.0, false));
+                let min_point_distance_sq = min_point_distance * min_point_distance;
 
                 let mut tracking = match state.tracking.lock() {
                     Ok(guard) => guard,
@@ -589,26 +599,31 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                     tracking.points.clear();
                     tracking.last_point = Some(point);
                     tracking.points.push(point);
-                    if let Ok(mut overlay) = mouse_gesture_overlay().lock() {
+                    if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
                         overlay.begin_stroke(point);
                         overlay.update_preview(None, None);
                     }
-                    return LRESULT(1);
+                    return CallNextHookEx(None, code, wparam, lparam);
                 }
 
                 if event == WM_MOUSEMOVE && tracking.active_button.is_some() {
-                    if tracking.last_point.map(|p| p != point).unwrap_or(true) {
+                    let should_add_point = match tracking.last_point {
+                        None => true,
+                        Some(last_point) => {
+                            if min_point_distance_sq <= 0.0 {
+                                last_point != point
+                            } else {
+                                let dx = point.x - last_point.x;
+                                let dy = point.y - last_point.y;
+                                (dx * dx + dy * dy) >= min_point_distance_sq
+                            }
+                        }
+                    };
+                    if should_add_point {
                         tracking.points.push(point);
                         tracking.last_point = Some(point);
-                        if let Ok(mut overlay) = mouse_gesture_overlay().lock() {
+                        if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
                             overlay.push_point(point);
-                            let preview_enabled = state
-                                .runtime
-                                .snapshots
-                                .read()
-                                .ok()
-                                .map(|snap| snap.settings.preview_enabled)
-                                .unwrap_or(false);
                             if preview_enabled {
                                 let text = state.runtime.preview_text(&tracking.points);
                                 overlay.update_preview(text, Some(point));
@@ -621,58 +636,27 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                 }
 
                 if matches!(event, WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP)
-                    && tracking.active_button.is_some()
+                    && tracking.active_button == event_button
                 {
                     tracking.points.push(point);
                     let points = std::mem::take(&mut tracking.points);
-                    let button = tracking.active_button.take();
+                    tracking.active_button.take();
                     tracking.last_point = None;
                     drop(tracking);
 
-                    if let Ok(mut overlay) = mouse_gesture_overlay().lock() {
+                    if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
                         overlay.end_stroke();
                         overlay.update_preview(None, None);
                     }
 
                     let outcome = state.runtime.evaluate_track(&points);
-                    if outcome.passthrough_click {
-                        if let Some(button) = button {
-                            send_passthrough_click(button);
-                        }
+                    if outcome.matched {
+                        return LRESULT(1);
                     }
-                    return LRESULT(1);
+                    return CallNextHookEx(None, code, wparam, lparam);
                 }
 
                 CallNextHookEx(None, code, wparam, lparam)
-            }
-
-            unsafe fn send_passthrough_click(button: TriggerButton) {
-                use windows::Win32::UI::Input::KeyboardAndMouse::{
-                    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN,
-                    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-                    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT,
-                };
-                let (down, up) = match button {
-                    TriggerButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
-                    TriggerButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
-                    TriggerButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
-                };
-                let down_input = INPUT {
-                    r#type: INPUT_MOUSE,
-                    Anonymous: INPUT_0 {
-                        mi: MOUSEINPUT {
-                            dx: 0,
-                            dy: 0,
-                            mouseData: 0,
-                            dwFlags: down,
-                            time: 0,
-                            dwExtraInfo: MG_PASSTHROUGH_MARK,
-                        },
-                    },
-                };
-                let mut up_input = down_input;
-                up_input.Anonymous.mi.dwFlags = up;
-                let _ = SendInput(&[down_input, up_input], std::mem::size_of::<INPUT>() as i32);
             }
 
             let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(hook_proc), None, 0).ok() };
