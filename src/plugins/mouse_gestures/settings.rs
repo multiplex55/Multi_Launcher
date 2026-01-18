@@ -23,6 +23,8 @@ pub struct MouseGesturePluginSettings {
     pub enabled: bool,
     pub trigger_button: String,
     pub min_track_len: f32,
+    #[serde(default)]
+    pub min_point_distance: f32,
     pub max_distance: f32,
     #[serde(default = "default_match_threshold")]
     pub match_threshold: f32,
@@ -44,6 +46,7 @@ impl Default for MouseGesturePluginSettings {
             enabled: true,
             trigger_button: "right".to_string(),
             min_track_len: 40.0,
+            min_point_distance: 6.0,
             max_distance: 24.0,
             match_threshold: default_match_threshold(),
             max_track_len: 0.0,

@@ -123,6 +123,16 @@ impl MouseGesturesSettingsDialog {
                         .changed();
                 });
                 ui.horizontal(|ui| {
+                    ui.label("Min point distance");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.settings.min_point_distance)
+                                .speed(0.5)
+                                .clamp_range(0.0..=100.0),
+                        )
+                        .changed();
+                });
+                ui.horizontal(|ui| {
                     ui.label("Match threshold");
                     changed |= ui
                         .add(

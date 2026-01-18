@@ -86,8 +86,7 @@ impl GdiOverlayWindow {
             use windows::Win32::Graphics::Gdi::{
                 BeginPaint, CreatePen, DeleteObject, EndPaint, FillRect, GetStockObject, LineTo,
                 MoveToEx, RedrawWindow, SelectObject, SetBkMode, SetDCPenColor, SetTextColor,
-                TextOutW, BLACK_BRUSH, HBRUSH, PAINTSTRUCT, PS_SOLID, RDW_INVALIDATE,
-                RDW_UPDATENOW, TRANSPARENT,
+                TextOutW, BLACK_BRUSH, HBRUSH, PAINTSTRUCT, PS_SOLID, RDW_INVALIDATE, TRANSPARENT,
             };
             use windows::Win32::System::LibraryLoader::GetModuleHandleW;
             use windows::Win32::UI::WindowsAndMessaging::{
@@ -205,7 +204,7 @@ impl GdiOverlayWindow {
                         if let Ok(mut store) = hwnd_store.lock() {
                             *store = Some(hwnd.0 as isize);
                         }
-                        RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW);
+                        RedrawWindow(hwnd, None, None, RDW_INVALIDATE);
                     }
                 }
 
@@ -228,8 +227,7 @@ impl GdiOverlayWindow {
                         hwnd,
                         None,
                         None,
-                        windows::Win32::Graphics::Gdi::RDW_INVALIDATE
-                            | windows::Win32::Graphics::Gdi::RDW_UPDATENOW,
+                        windows::Win32::Graphics::Gdi::RDW_INVALIDATE,
                     );
                 }
             }
@@ -315,8 +313,7 @@ impl OverlayWindow for GdiOverlayWindow {
                             hwnd,
                             None,
                             None,
-                            windows::Win32::Graphics::Gdi::RDW_INVALIDATE
-                                | windows::Win32::Graphics::Gdi::RDW_UPDATENOW,
+                            windows::Win32::Graphics::Gdi::RDW_INVALIDATE,
                         );
                     }
                 }
