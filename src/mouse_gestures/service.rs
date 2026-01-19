@@ -108,14 +108,18 @@ impl MouseGestureRuntime {
         db: &'a MouseGestureDb,
         window: &ForegroundWindowInfo,
     ) -> Option<&'a crate::plugins::mouse_gestures::db::MouseGestureProfile> {
-        if let Ok(mut cache) = self.profile_cache.lock() {
+        if let Ok(cache) = self.profile_cache.lock() {
             if let Some(cached_window) = cache.window.as_ref() {
                 if cached_window == window {
+                    let cached_profile_id = cache.profile_id.clone();
                     #[cfg(test)]
                     {
-                        cache.cache_hits = cache.cache_hits.saturating_add(1);
+                        drop(cache);
+                        if let Ok(mut cache) = self.profile_cache.lock() {
+                            cache.cache_hits = cache.cache_hits.saturating_add(1);
+                        }
                     }
-                    return cache.profile_id.as_ref().and_then(|profile_id| {
+                    return cached_profile_id.as_ref().and_then(|profile_id| {
                         db.profiles.iter().find(|profile| profile.id == *profile_id)
                     });
                 }
@@ -340,7 +344,7 @@ impl MouseGestureRuntime {
         }
 
         let mut distances = HashMap::new();
-        for (gesture_id, template) in &gesture_templates {
+        for (gesture_id, template) in gesture_templates {
             let similarity = direction_similarity(&track_dirs, &template.directions);
             if similarity < snapshots.settings.match_threshold {
                 continue;
@@ -934,127 +938,6 @@ impl HookTrackingState {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct TestBackend;
-
-    impl MouseHookBackend for TestBackend {
-        fn start(&self, _runtime: MouseGestureRuntime) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn stop(&self) {}
-
-        fn is_running(&self) -> bool {
-            false
-        }
-    }
-
-    struct TestEventSink;
-
-    impl MouseGestureEventSink for TestEventSink {
-        fn dispatch(&self, _event: MouseGestureEvent) {}
-    }
-
-    fn make_runtime(service: &MouseGestureService) -> MouseGestureRuntime {
-        MouseGestureRuntime {
-            snapshots: Arc::clone(&service.snapshots),
-            event_sink: Arc::new(TestEventSink),
-            profile_cache: Arc::clone(&service.profile_cache),
-        }
-    }
-
-    fn make_right_points() -> Vec<Point> {
-        vec![Point { x: 0.0, y: 0.0 }, Point { x: 80.0, y: 0.0 }]
-    }
-
-    fn make_db_with_right_gesture() -> MouseGestureDb {
-        let mut db = MouseGestureDb::default();
-        db.bindings.insert(
-            "gesture-right".to_string(),
-            "Swipe Right: 0,0|80,0".to_string(),
-        );
-        db.profiles.push(crate::plugins::mouse_gestures::db::MouseGestureProfile {
-            id: "profile-default".to_string(),
-            label: "Default".to_string(),
-            enabled: true,
-            priority: 0,
-            rules: Vec::new(),
-            bindings: vec![crate::plugins::mouse_gestures::db::MouseGestureBinding {
-                gesture_id: "gesture-right".to_string(),
-                label: "Swipe Right".to_string(),
-                action: "noop".to_string(),
-                args: None,
-                priority: 0,
-                enabled: true,
-            }],
-        });
-        db
-    }
-
-    #[test]
-    fn update_db_refreshes_cached_gesture_templates() {
-        let service = MouseGestureService::new_with_backend_and_sink(
-            Arc::new(TestBackend),
-            Arc::new(TestEventSink),
-        );
-        let runtime = make_runtime(&service);
-        let points = make_right_points();
-
-        let snapshots = runtime
-            .snapshots
-            .read()
-            .expect("read snapshots")
-            .clone();
-        let text = runtime
-            .preview_similarity_text(&points, &snapshots)
-            .expect("preview text");
-        assert_eq!(text, "No match");
-
-        service.update_db(make_db_with_right_gesture());
-
-        let snapshots = runtime
-            .snapshots
-            .read()
-            .expect("read snapshots")
-            .clone();
-        let text = runtime
-            .preview_similarity_text(&points, &snapshots)
-            .expect("preview text after update");
-        assert!(
-            text.contains("Swipe Right"),
-            "expected updated templates in text: {text}"
-        );
-    }
-
-    #[test]
-    fn profile_cache_reuses_selection_for_same_window() {
-        let service = MouseGestureService::new_with_backend_and_sink(
-            Arc::new(TestBackend),
-            Arc::new(TestEventSink),
-        );
-        let runtime = make_runtime(&service);
-        let db = make_db_with_right_gesture();
-        let window = ForegroundWindowInfo {
-            exe: Some("app.exe".to_string()),
-            class: None,
-            title: None,
-        };
-
-        assert!(runtime.select_profile_cached(&db, &window).is_some());
-        assert!(runtime.select_profile_cached(&db, &window).is_some());
-
-        let cache_hits = runtime
-            .profile_cache
-            .lock()
-            .expect("lock profile cache")
-            .cache_hits;
-        assert_eq!(cache_hits, 1);
-    }
-}
-
 #[cfg(windows)]
 struct HookState {
     runtime: MouseGestureRuntime,
@@ -1380,20 +1263,35 @@ impl MouseHookBackend for MockMouseHookBackend {
 #[cfg(test)]
 mod tests {
     use super::{
-        hash_direction_sequence, sequence_changed, should_compute_preview, truncate_with_ellipsis,
-        MouseGestureEventSink, MouseGestureRuntime, MouseGestureSnapshots,
+        build_gesture_templates, hash_direction_sequence, sequence_changed,
+        should_compute_preview, truncate_with_ellipsis, MouseGestureEventSink,
+        MouseGestureRuntime, MouseGestureService, MouseGestureSnapshots, ProfileCache,
         PREVIEW_SIMILARITY_LABEL_MAX_LEN, PREVIEW_SIMILARITY_MAX_LEN,
         PREVIEW_SIMILARITY_TOP_N,
     };
     use crate::gui::MouseGestureEvent;
     use crate::plugins::mouse_gestures::db::{
-        MouseGestureBinding, MouseGestureDb, MouseGestureProfile,
+        ForegroundWindowInfo, MouseGestureBinding, MouseGestureDb, MouseGestureProfile,
     };
     use crate::plugins::mouse_gestures::engine::{GestureDirection, Point};
     use crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
     use std::collections::HashMap;
-    use std::sync::{Arc, RwLock};
+    use std::sync::{Arc, Mutex, RwLock};
     use std::time::{Duration, Instant};
+
+    struct TestBackend;
+
+    impl MouseHookBackend for TestBackend {
+        fn start(&self, _runtime: MouseGestureRuntime) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn stop(&self) {}
+
+        fn is_running(&self) -> bool {
+            false
+        }
+    }
 
     struct TestEventSink;
 
@@ -1409,10 +1307,23 @@ mod tests {
             .join("|")
     }
 
+    fn make_snapshots(
+        db: MouseGestureDb,
+        settings: MouseGesturePluginSettings,
+    ) -> MouseGestureSnapshots {
+        let gesture_templates = build_gesture_templates(&db, &settings);
+        MouseGestureSnapshots {
+            settings,
+            db,
+            gesture_templates,
+        }
+    }
+
     fn make_runtime(db: MouseGestureDb, settings: MouseGesturePluginSettings) -> MouseGestureRuntime {
         MouseGestureRuntime {
-            snapshots: Arc::new(RwLock::new(MouseGestureSnapshots { settings, db })),
+            snapshots: Arc::new(RwLock::new(make_snapshots(db, settings))),
             event_sink: Arc::new(TestEventSink),
+            profile_cache: Arc::new(Mutex::new(ProfileCache::default())),
         }
     }
 
@@ -1509,7 +1420,7 @@ mod tests {
             ..MouseGesturePluginSettings::default()
         };
         let runtime = make_runtime(db.clone(), settings.clone());
-        let snapshots = MouseGestureSnapshots { settings, db };
+        let snapshots = make_snapshots(db, settings);
 
         let summary = runtime
             .preview_similarity_text(&points, &snapshots)
@@ -1548,7 +1459,7 @@ mod tests {
             ..MouseGesturePluginSettings::default()
         };
         let runtime = make_runtime(db.clone(), settings.clone());
-        let snapshots = MouseGestureSnapshots { settings, db };
+        let snapshots = make_snapshots(db, settings);
 
         let summary = runtime
             .preview_similarity_text(&points, &snapshots)
@@ -1609,12 +1520,108 @@ mod tests {
             ..MouseGesturePluginSettings::default()
         };
         let runtime = make_runtime(db.clone(), settings.clone());
-        let snapshots = MouseGestureSnapshots { settings, db };
+        let snapshots = make_snapshots(db, settings);
 
         let summary = runtime
             .preview_similarity_text(&points, &snapshots)
             .expect("summary");
 
         assert!(summary.chars().count() <= PREVIEW_SIMILARITY_MAX_LEN);
+    }
+
+    fn make_right_points() -> Vec<Point> {
+        vec![Point { x: 0.0, y: 0.0 }, Point { x: 80.0, y: 0.0 }]
+    }
+
+    fn make_db_with_right_gesture() -> MouseGestureDb {
+        let mut db = MouseGestureDb::default();
+        db.bindings.insert(
+            "gesture-right".to_string(),
+            "Swipe Right: 0,0|80,0".to_string(),
+        );
+        db.profiles.push(MouseGestureProfile {
+            id: "profile-default".to_string(),
+            label: "Default".to_string(),
+            enabled: true,
+            priority: 0,
+            rules: Vec::new(),
+            bindings: vec![MouseGestureBinding {
+                gesture_id: "gesture-right".to_string(),
+                label: "Swipe Right".to_string(),
+                action: "noop".to_string(),
+                args: None,
+                priority: 0,
+                enabled: true,
+            }],
+        });
+        db
+    }
+
+    #[test]
+    fn update_db_refreshes_cached_gesture_templates() {
+        let service = MouseGestureService::new_with_backend_and_sink(
+            Arc::new(TestBackend),
+            Arc::new(TestEventSink),
+        );
+        let runtime = MouseGestureRuntime {
+            snapshots: Arc::clone(&service.snapshots),
+            event_sink: Arc::new(TestEventSink),
+            profile_cache: Arc::clone(&service.profile_cache),
+        };
+        let points = make_right_points();
+
+        let snapshots = runtime
+            .snapshots
+            .read()
+            .expect("read snapshots")
+            .clone();
+        let text = runtime
+            .preview_similarity_text(&points, &snapshots)
+            .expect("preview text");
+        assert_eq!(text, "No match");
+
+        service.update_db(make_db_with_right_gesture());
+
+        let snapshots = runtime
+            .snapshots
+            .read()
+            .expect("read snapshots")
+            .clone();
+        let text = runtime
+            .preview_similarity_text(&points, &snapshots)
+            .expect("preview text after update");
+        assert!(
+            text.contains("Swipe Right"),
+            "expected updated templates in text: {text}"
+        );
+    }
+
+    #[test]
+    fn profile_cache_reuses_selection_for_same_window() {
+        let service = MouseGestureService::new_with_backend_and_sink(
+            Arc::new(TestBackend),
+            Arc::new(TestEventSink),
+        );
+        let runtime = MouseGestureRuntime {
+            snapshots: Arc::clone(&service.snapshots),
+            event_sink: Arc::new(TestEventSink),
+            profile_cache: Arc::clone(&service.profile_cache),
+        };
+        let db = make_db_with_right_gesture();
+        let window = ForegroundWindowInfo {
+            exe: Some("app.exe".to_string()),
+            class: None,
+            title: None,
+        };
+
+        assert!(runtime.select_profile_cached(&db, &window).is_some());
+        assert!(runtime.select_profile_cached(&db, &window).is_some());
+
+        let cache_hits = runtime
+            .profile_cache
+            .lock()
+            .expect("lock profile cache")
+            .cache_hits;
+        assert_eq!(cache_hits, 1);
     }
 }
