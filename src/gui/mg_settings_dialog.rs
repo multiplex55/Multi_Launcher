@@ -160,6 +160,15 @@ impl MouseGesturesSettingsDialog {
                         "Show match preview tooltip",
                     )
                     .changed();
+                changed |= ui
+                    .add_enabled(
+                        self.settings.preview_enabled,
+                        egui::Checkbox::new(
+                            &mut self.settings.preview_on_end_only,
+                            "Preview only on stroke end",
+                        ),
+                    )
+                    .changed();
                 if !self.settings.preview_enabled && self.settings.debug_show_similarity {
                     self.settings.debug_show_similarity = false;
                     changed = true;

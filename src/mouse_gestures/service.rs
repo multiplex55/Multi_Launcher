@@ -228,7 +228,7 @@ impl MouseGestureRuntime {
             return Some("No match".to_string());
         };
 
-        let mut similarities: Vec<(String, f32)> = Vec::new();
+        let mut similarities: Vec<(f32, String)> = Vec::new();
         for binding in profile.bindings.iter().filter(|binding| binding.enabled) {
             let Some(template) = gesture_templates.get(&binding.gesture_id) else {
                 continue;
@@ -237,36 +237,48 @@ impl MouseGestureRuntime {
             if !similarity.is_finite() {
                 continue;
             }
+
+            let mut min_index = None;
+            let mut min_similarity = None;
+            if similarities.len() >= PREVIEW_SIMILARITY_TOP_N {
+                if let Some((index, (value, _))) = similarities
+                    .iter()
+                    .enumerate()
+                    .min_by(|a, b| a.1.0.partial_cmp(&b.1.0).unwrap_or(CmpOrdering::Equal))
+                {
+                    min_index = Some(index);
+                    min_similarity = Some(*value);
+                }
+            }
+
+            if let Some(min_similarity) = min_similarity {
+                if similarity <= min_similarity {
+                    continue;
+                }
+            }
+
             let label = if binding.label.trim().is_empty() {
-                binding.action.clone()
+                binding.action.as_str()
             } else {
-                binding.label.clone()
+                binding.label.as_str()
             };
-            similarities.push((label, similarity));
+            let truncated =
+                truncate_with_ellipsis(label.trim(), PREVIEW_SIMILARITY_LABEL_MAX_LEN);
+            if let Some(index) = min_index {
+                similarities[index] = (similarity, truncated);
+            } else {
+                similarities.push((similarity, truncated));
+            }
         }
 
         if similarities.is_empty() {
             return Some("No match".to_string());
         }
 
-        if similarities.len() > PREVIEW_SIMILARITY_TOP_N {
-            let nth = PREVIEW_SIMILARITY_TOP_N.saturating_sub(1);
-            similarities.select_nth_unstable_by(nth, |a, b| {
-                b.1.partial_cmp(&a.1).unwrap_or(CmpOrdering::Equal)
-            });
-            similarities.truncate(PREVIEW_SIMILARITY_TOP_N);
-        }
-
-        similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(CmpOrdering::Equal));
+        similarities.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(CmpOrdering::Equal));
         let summary = similarities
             .into_iter()
-            .map(|(label, similarity)| {
-                let truncated = truncate_with_ellipsis(
-                    label.trim(),
-                    PREVIEW_SIMILARITY_LABEL_MAX_LEN,
-                );
-                format!("{truncated}: {:.0}%", similarity * 100.0)
-            })
+            .map(|(similarity, label)| format!("{label}: {:.0}%", similarity * 100.0))
             .collect::<Vec<_>>()
             .join(" | ");
         let full_text = format!("{PREVIEW_SIMILARITY_PREFIX}{summary}");
@@ -395,7 +407,7 @@ impl MouseGestureRuntime {
     }
 }
 
-const PREVIEW_THROTTLE_MS: u64 = 75;
+const PREVIEW_THROTTLE_MS: u64 = 120;
 
 fn should_compute_preview(last: Instant, now: Instant, throttle_ms: u64) -> bool {
     now.duration_since(last) >= Duration::from_millis(throttle_ms)
@@ -741,14 +753,14 @@ pub struct HookTrackingState {
     decimation_stride: usize,
 }
 
-#[cfg(windows)]
+#[cfg(any(test, windows))]
 #[derive(Clone)]
 struct PreviewRequest {
     points: Vec<Point>,
     force: bool,
 }
 
-#[cfg(windows)]
+#[cfg(any(test, windows))]
 fn spawn_preview_worker(
     runtime: MouseGestureRuntime,
 ) -> (SyncSender<PreviewRequest>, Arc<Mutex<Option<String>>>) {
@@ -759,7 +771,7 @@ fn spawn_preview_worker(
     (sender, preview_text)
 }
 
-#[cfg(windows)]
+#[cfg(any(test, windows))]
 fn preview_worker_loop(
     runtime: MouseGestureRuntime,
     receiver: Receiver<PreviewRequest>,
@@ -779,6 +791,10 @@ fn preview_worker_loop(
         let min_point_distance = snapshots.settings.min_point_distance.max(0.0);
         let directions = direction_sequence(&processed_points, min_point_distance);
         let sequence_hash = hash_direction_sequence(&directions);
+
+        if snapshots.settings.preview_on_end_only && !request.force {
+            continue;
+        }
 
         if !request.force {
             if !sequence_changed(last_sequence_hash, sequence_hash) {
@@ -1001,7 +1017,13 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                         x: data.pt.x as f32,
                         y: data.pt.y as f32,
                     };
-                    let (trigger_button, min_point_distance, max_track_len, preview_enabled) =
+                    let (
+                        trigger_button,
+                        min_point_distance,
+                        max_track_len,
+                        preview_enabled,
+                        preview_on_end_only,
+                    ) =
                         state
                             .runtime
                             .snapshots
@@ -1013,9 +1035,10 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                                     snap.settings.min_point_distance.max(0.0),
                                     snap.settings.max_track_len.max(0.0),
                                     snap.settings.preview_enabled,
+                                    snap.settings.preview_on_end_only,
                                 )
                             })
-                            .unwrap_or((None, 0.0, 0.0, false));
+                            .unwrap_or((None, 0.0, 0.0, false, false));
                     let min_point_distance_sq = min_point_distance * min_point_distance;
 
                     let mut tracking = match state.tracking.lock() {
@@ -1048,7 +1071,7 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                         let stored =
                             tracking.handle_move(point, min_point_distance_sq, max_track_len);
                         if stored {
-                            if preview_enabled {
+                            if preview_enabled && !preview_on_end_only {
                                 let _ = state.preview_sender.try_send(PreviewRequest {
                                     points: tracking.points.clone(),
                                     force: false,
@@ -1056,7 +1079,7 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                             }
                             if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
                                 overlay.push_point(point);
-                                if preview_enabled {
+                                if preview_enabled && !preview_on_end_only {
                                     let text = cached_preview_text(&state.preview_text);
                                     overlay.update_preview(text, Some(point));
                                 } else {
@@ -1263,10 +1286,10 @@ impl MouseHookBackend for MockMouseHookBackend {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_gesture_templates, hash_direction_sequence, sequence_changed,
-        should_compute_preview, truncate_with_ellipsis, MouseGestureEventSink,
-        MouseGestureRuntime, MouseGestureService, MouseGestureSnapshots, ProfileCache,
-        PREVIEW_SIMILARITY_LABEL_MAX_LEN, PREVIEW_SIMILARITY_MAX_LEN,
+        build_gesture_templates, hash_direction_sequence, preview_worker_loop,
+        sequence_changed, should_compute_preview, truncate_with_ellipsis, MouseGestureEventSink,
+        MouseGestureRuntime, MouseGestureService, MouseGestureSnapshots, PreviewRequest,
+        ProfileCache, PREVIEW_SIMILARITY_LABEL_MAX_LEN, PREVIEW_SIMILARITY_MAX_LEN,
         PREVIEW_SIMILARITY_TOP_N,
     };
     use crate::mouse_gestures::MouseHookBackend;
@@ -1277,7 +1300,7 @@ mod tests {
     use crate::plugins::mouse_gestures::engine::{GestureDirection, Point};
     use crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex, RwLock};
+    use std::sync::{mpsc, Arc, Mutex, RwLock};
     use std::time::{Duration, Instant};
 
     struct TestBackend;
@@ -1360,6 +1383,59 @@ mod tests {
 
         let new_hash = hash_direction_sequence(&[GestureDirection::Down]);
         assert!(sequence_changed(Some(hash), new_hash));
+    }
+
+    #[test]
+    fn preview_on_end_only_updates_on_force() {
+        let db = make_db_with_right_gesture();
+        let settings = MouseGesturePluginSettings {
+            min_point_distance: 0.0,
+            preview_on_end_only: true,
+            ..MouseGesturePluginSettings::default()
+        };
+        let runtime = make_runtime(db, settings);
+        let preview_text = Arc::new(Mutex::new(None));
+        let preview_text_handle = Arc::clone(&preview_text);
+        let (sender, receiver) = mpsc::sync_channel(2);
+        let points = make_right_points();
+
+        let worker = std::thread::spawn(move || {
+            preview_worker_loop(runtime, receiver, preview_text_handle);
+        });
+
+        sender
+            .send(PreviewRequest {
+                points: points.clone(),
+                force: false,
+            })
+            .expect("send non-force request");
+
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(
+            preview_text.lock().expect("lock preview text").is_none(),
+            "preview text should stay empty until forced"
+        );
+
+        sender
+            .send(PreviewRequest {
+                points,
+                force: true,
+            })
+            .expect("send forced request");
+        drop(sender);
+
+        let deadline = Instant::now() + Duration::from_millis(200);
+        loop {
+            if preview_text.lock().expect("lock preview text").is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                panic!("preview text not updated on forced request");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        worker.join().expect("worker finished");
     }
 
     #[test]

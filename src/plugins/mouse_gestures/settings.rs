@@ -39,6 +39,8 @@ pub struct MouseGesturePluginSettings {
     #[serde(default)]
     pub preview_enabled: bool,
     #[serde(default)]
+    pub preview_on_end_only: bool,
+    #[serde(default)]
     pub debug_show_similarity: bool,
 }
 
@@ -58,6 +60,7 @@ impl Default for MouseGesturePluginSettings {
             smoothing_enabled: true,
             sampling_enabled: true,
             preview_enabled: false,
+            preview_on_end_only: false,
             debug_show_similarity: false,
         }
     }
