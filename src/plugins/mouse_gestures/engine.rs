@@ -122,23 +122,47 @@ pub fn direction_similarity(a: &[GestureDirection], b: &[GestureDirection]) -> f
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }
-    let distance = levenshtein_distance(a, b);
+    let distance = levenshtein_distance_weighted(a, b);
     let max_len = a.len().max(b.len()) as f32;
     if max_len == 0.0 {
         0.0
     } else {
-        (1.0 - distance as f32 / max_len).clamp(0.0, 1.0)
+        (1.0 - distance / max_len).clamp(0.0, 1.0)
     }
 }
 
-fn levenshtein_distance(a: &[GestureDirection], b: &[GestureDirection]) -> usize {
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut curr = vec![0; b.len() + 1];
+fn direction_index(direction: GestureDirection) -> i32 {
+    match direction {
+        GestureDirection::Right => 0,
+        GestureDirection::UpRight => 1,
+        GestureDirection::Up => 2,
+        GestureDirection::UpLeft => 3,
+        GestureDirection::Left => 4,
+        GestureDirection::DownLeft => 5,
+        GestureDirection::Down => 6,
+        GestureDirection::DownRight => 7,
+    }
+}
+
+fn substitution_cost(a: GestureDirection, b: GestureDirection) -> f32 {
+    if a == b {
+        return 0.0;
+    }
+    let a_idx = direction_index(a);
+    let b_idx = direction_index(b);
+    let diff = (a_idx - b_idx).abs();
+    let angular_diff = diff.min(8 - diff);
+    angular_diff as f32 / 4.0
+}
+
+fn levenshtein_distance_weighted(a: &[GestureDirection], b: &[GestureDirection]) -> f32 {
+    let mut prev: Vec<f32> = (0..=b.len()).map(|v| v as f32).collect();
+    let mut curr = vec![0.0; b.len() + 1];
     for (i, &av) in a.iter().enumerate() {
-        curr[0] = i + 1;
+        curr[0] = (i + 1) as f32;
         for (j, &bv) in b.iter().enumerate() {
-            let cost = if av == bv { 0 } else { 1 };
-            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+            let cost = substitution_cost(av, bv);
+            curr[j + 1] = (prev[j + 1] + 1.0).min(curr[j] + 1.0).min(prev[j] + cost);
         }
         prev.clone_from_slice(&curr);
     }
@@ -184,6 +208,39 @@ pub fn parse_gesture(input: &str) -> Result<GestureDefinition, ParseError> {
     let points = parse_points(coords)?;
 
     Ok(GestureDefinition { name, points })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{direction_similarity, GestureDirection};
+
+    #[test]
+    fn direction_similarity_prefers_smaller_angular_difference() {
+        let base = [GestureDirection::Right];
+        let slight = [GestureDirection::UpRight];
+        let opposite = [GestureDirection::Left];
+
+        let slight_similarity = direction_similarity(&base, &slight);
+        let opposite_similarity = direction_similarity(&base, &opposite);
+
+        assert!(
+            slight_similarity > opposite_similarity,
+            "expected {slight_similarity} to be greater than {opposite_similarity}"
+        );
+    }
+
+    #[test]
+    fn direction_similarity_identical_sequences_are_max() {
+        let sequence = [
+            GestureDirection::Up,
+            GestureDirection::UpRight,
+            GestureDirection::Right,
+        ];
+
+        let similarity = direction_similarity(&sequence, &sequence);
+
+        assert_eq!(similarity, 1.0);
+    }
 }
 
 pub fn serialize_gesture(gesture: &GestureDefinition) -> String {
