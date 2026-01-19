@@ -8,6 +8,7 @@ use crate::plugins::mouse_gestures::engine::{
 };
 use crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
 use once_cell::sync::OnceCell;
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -16,6 +17,12 @@ use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 pub const MG_PASSTHROUGH_MARK: usize = 0x4D475054;
+
+const PREVIEW_SIMILARITY_TOP_N: usize = 3;
+const PREVIEW_SIMILARITY_LABEL_MAX_LEN: usize = 40;
+const PREVIEW_SIMILARITY_MAX_LEN: usize = 140;
+const PREVIEW_SIMILARITY_PREFIX: &str = "Similarity: ";
+const PREVIEW_SIMILARITY_ELLIPSIS: &str = "…";
 
 #[cfg(windows)]
 pub fn should_ignore_event(flags: u32, extra_info: usize) -> bool {
@@ -187,13 +194,31 @@ impl MouseGestureRuntime {
             return Some("No match".to_string());
         }
 
-        similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        if similarities.len() > PREVIEW_SIMILARITY_TOP_N {
+            let nth = PREVIEW_SIMILARITY_TOP_N.saturating_sub(1);
+            similarities.select_nth_unstable_by(nth, |a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(CmpOrdering::Equal)
+            });
+            similarities.truncate(PREVIEW_SIMILARITY_TOP_N);
+        }
+
+        similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(CmpOrdering::Equal));
         let summary = similarities
             .into_iter()
-            .map(|(label, similarity)| format!("{label}: {:.0}%", similarity * 100.0))
+            .map(|(label, similarity)| {
+                let truncated = truncate_with_ellipsis(
+                    label.trim(),
+                    PREVIEW_SIMILARITY_LABEL_MAX_LEN,
+                );
+                format!("{truncated}: {:.0}%", similarity * 100.0)
+            })
             .collect::<Vec<_>>()
             .join(" | ");
-        Some(format!("Similarity: {summary}"))
+        let full_text = format!("{PREVIEW_SIMILARITY_PREFIX}{summary}");
+        Some(truncate_with_ellipsis(
+            &full_text,
+            PREVIEW_SIMILARITY_MAX_LEN,
+        ))
     }
 
     fn evaluate_track(&self, points: &[Point]) -> TrackOutcome {
@@ -338,6 +363,23 @@ fn hash_direction_sequence(directions: &[GestureDirection]) -> u64 {
         hash = hash.wrapping_mul(31).wrapping_add(value);
     }
     hash
+}
+
+fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
+    let mut chars = input.chars();
+    let count = chars.clone().count();
+    if count <= max_chars {
+        return input.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    if max_chars == 1 {
+        return PREVIEW_SIMILARITY_ELLIPSIS.to_string();
+    }
+    let mut truncated: String = chars.by_ref().take(max_chars - 1).collect();
+    truncated.push_str(PREVIEW_SIMILARITY_ELLIPSIS);
+    truncated
 }
 
 #[derive(Clone)]
@@ -1140,9 +1182,53 @@ impl MouseHookBackend for MockMouseHookBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::{hash_direction_sequence, sequence_changed, should_compute_preview};
-    use crate::plugins::mouse_gestures::engine::GestureDirection;
+    use super::{
+        hash_direction_sequence, sequence_changed, should_compute_preview, truncate_with_ellipsis,
+        MouseGestureEventSink, MouseGestureRuntime, MouseGestureSnapshots,
+        PREVIEW_SIMILARITY_LABEL_MAX_LEN, PREVIEW_SIMILARITY_MAX_LEN,
+        PREVIEW_SIMILARITY_TOP_N,
+    };
+    use crate::gui::MouseGestureEvent;
+    use crate::plugins::mouse_gestures::db::{
+        MouseGestureBinding, MouseGestureDb, MouseGestureProfile,
+    };
+    use crate::plugins::mouse_gestures::engine::{GestureDirection, Point};
+    use crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
+    use std::collections::HashMap;
+    use std::sync::{Arc, RwLock};
     use std::time::{Duration, Instant};
+
+    struct TestEventSink;
+
+    impl MouseGestureEventSink for TestEventSink {
+        fn dispatch(&self, _event: MouseGestureEvent) {}
+    }
+
+    fn make_gesture(points: &[(f32, f32)]) -> String {
+        points
+            .iter()
+            .map(|(x, y)| format!("{x},{y}"))
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    fn make_runtime(db: MouseGestureDb, settings: MouseGesturePluginSettings) -> MouseGestureRuntime {
+        MouseGestureRuntime {
+            snapshots: Arc::new(RwLock::new(MouseGestureSnapshots { settings, db })),
+            event_sink: Arc::new(TestEventSink),
+        }
+    }
+
+    fn test_profile(bindings: Vec<MouseGestureBinding>) -> MouseGestureProfile {
+        MouseGestureProfile {
+            id: "profile".into(),
+            label: "Test".into(),
+            enabled: true,
+            priority: 0,
+            rules: Vec::new(),
+            bindings,
+        }
+    }
 
     #[test]
     fn preview_throttle_boundary() {
@@ -1165,5 +1251,173 @@ mod tests {
 
         let new_hash = hash_direction_sequence(&[GestureDirection::Down]);
         assert!(sequence_changed(Some(hash), new_hash));
+    }
+
+    #[test]
+    fn preview_similarity_limits_top_matches() {
+        let points = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 10.0, y: 0.0 },
+            Point { x: 10.0, y: -10.0 },
+        ];
+
+        let mut bindings_map = HashMap::new();
+        bindings_map.insert("g1".to_string(), make_gesture(&[(0.0, 0.0), (10.0, 0.0), (10.0, -10.0)]));
+        bindings_map.insert("g2".to_string(), make_gesture(&[(0.0, 0.0), (10.0, 0.0)]));
+        bindings_map.insert("g3".to_string(), make_gesture(&[(0.0, 0.0), (0.0, -10.0)]));
+        bindings_map.insert("g4".to_string(), make_gesture(&[(0.0, 0.0), (-10.0, 0.0)]));
+
+        let bindings = vec![
+            MouseGestureBinding {
+                gesture_id: "g1".into(),
+                label: "Exact".into(),
+                action: "a1".into(),
+                args: None,
+                priority: 0,
+                enabled: true,
+            },
+            MouseGestureBinding {
+                gesture_id: "g2".into(),
+                label: "Short".into(),
+                action: "a2".into(),
+                args: None,
+                priority: 0,
+                enabled: true,
+            },
+            MouseGestureBinding {
+                gesture_id: "g3".into(),
+                label: "Up".into(),
+                action: "a3".into(),
+                args: None,
+                priority: 0,
+                enabled: true,
+            },
+            MouseGestureBinding {
+                gesture_id: "g4".into(),
+                label: "Left".into(),
+                action: "a4".into(),
+                args: None,
+                priority: 0,
+                enabled: true,
+            },
+        ];
+
+        let db = MouseGestureDb {
+            profiles: vec![test_profile(bindings)],
+            bindings: bindings_map,
+            ..MouseGestureDb::default()
+        };
+        let settings = MouseGesturePluginSettings {
+            min_point_distance: 0.0,
+            ..MouseGesturePluginSettings::default()
+        };
+        let runtime = make_runtime(db.clone(), settings.clone());
+        let snapshots = MouseGestureSnapshots { settings, db };
+
+        let summary = runtime
+            .preview_similarity_text(&points, &snapshots)
+            .expect("summary");
+
+        assert!(summary.contains("Exact"));
+        assert!(summary.contains("Short"));
+        assert!(summary.contains("Up"));
+        assert!(!summary.contains("Left"));
+        assert_eq!(summary.matches('%').count(), PREVIEW_SIMILARITY_TOP_N);
+    }
+
+    #[test]
+    fn preview_similarity_truncates_labels() {
+        let points = vec![Point { x: 0.0, y: 0.0 }, Point { x: 10.0, y: 0.0 }];
+        let long_label = "L".repeat(PREVIEW_SIMILARITY_LABEL_MAX_LEN + 10);
+        let mut bindings_map = HashMap::new();
+        bindings_map.insert("g1".to_string(), make_gesture(&[(0.0, 0.0), (10.0, 0.0)]));
+
+        let bindings = vec![MouseGestureBinding {
+            gesture_id: "g1".into(),
+            label: long_label.clone(),
+            action: "a1".into(),
+            args: None,
+            priority: 0,
+            enabled: true,
+        }];
+
+        let db = MouseGestureDb {
+            profiles: vec![test_profile(bindings)],
+            bindings: bindings_map,
+            ..MouseGestureDb::default()
+        };
+        let settings = MouseGesturePluginSettings {
+            min_point_distance: 0.0,
+            ..MouseGesturePluginSettings::default()
+        };
+        let runtime = make_runtime(db.clone(), settings.clone());
+        let snapshots = MouseGestureSnapshots { settings, db };
+
+        let summary = runtime
+            .preview_similarity_text(&points, &snapshots)
+            .expect("summary");
+
+        let truncated = truncate_with_ellipsis(&long_label, PREVIEW_SIMILARITY_LABEL_MAX_LEN);
+        assert!(summary.contains(&truncated));
+        assert!(!summary.contains(&long_label));
+    }
+
+    #[test]
+    fn preview_similarity_caps_total_length() {
+        let points = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 10.0, y: 0.0 },
+            Point { x: 10.0, y: -10.0 },
+        ];
+
+        let mut bindings_map = HashMap::new();
+        bindings_map.insert("g1".to_string(), make_gesture(&[(0.0, 0.0), (10.0, 0.0), (10.0, -10.0)]));
+        bindings_map.insert("g2".to_string(), make_gesture(&[(0.0, 0.0), (10.0, 0.0)]));
+        bindings_map.insert("g3".to_string(), make_gesture(&[(0.0, 0.0), (0.0, -10.0)]));
+
+        let bindings = vec![
+            MouseGestureBinding {
+                gesture_id: "g1".into(),
+                label: "A".repeat(80),
+                action: "a1".into(),
+                args: None,
+                priority: 0,
+                enabled: true,
+            },
+            MouseGestureBinding {
+                gesture_id: "g2".into(),
+                label: "B".repeat(80),
+                action: "a2".into(),
+                args: None,
+                priority: 0,
+                enabled: true,
+            },
+            MouseGestureBinding {
+                gesture_id: "g3".into(),
+                label: "C".repeat(80),
+                action: "a3".into(),
+                args: None,
+                priority: 0,
+                enabled: true,
+            },
+        ];
+
+        let db = MouseGestureDb {
+            profiles: vec![test_profile(bindings)],
+            bindings: bindings_map,
+            ..MouseGestureDb::default()
+        };
+        let settings = MouseGesturePluginSettings {
+            min_point_distance: 0.0,
+            ..MouseGesturePluginSettings::default()
+        };
+        let runtime = make_runtime(db.clone(), settings.clone());
+        let snapshots = MouseGestureSnapshots { settings, db };
+
+        let summary = runtime
+            .preview_similarity_text(&points, &snapshots)
+            .expect("summary");
+
+        assert!(summary.chars().count() <= PREVIEW_SIMILARITY_MAX_LEN);
     }
 }
