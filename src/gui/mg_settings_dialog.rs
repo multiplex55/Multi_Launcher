@@ -160,6 +160,19 @@ impl MouseGesturesSettingsDialog {
                         "Show match preview tooltip",
                     )
                     .changed();
+                if !self.settings.preview_enabled && self.settings.debug_show_similarity {
+                    self.settings.debug_show_similarity = false;
+                    changed = true;
+                }
+                changed |= ui
+                    .add_enabled(
+                        self.settings.preview_enabled,
+                        egui::Checkbox::new(
+                            &mut self.settings.debug_show_similarity,
+                            "debug: show similarity",
+                        ),
+                    )
+                    .changed();
                 changed |= ui
                     .checkbox(&mut self.settings.sampling_enabled, "Enable sampling")
                     .changed();
@@ -202,7 +215,11 @@ fn overlay_settings_ui(
     ui.horizontal(|ui| {
         ui.label("Thickness");
         *changed |= ui
-            .add(egui::DragValue::new(&mut overlay.thickness).speed(0.1))
+            .add(
+                egui::DragValue::new(&mut overlay.thickness)
+                    .speed(0.1)
+                    .clamp_range(0.0..=100.0),
+            )
             .changed();
     });
     ui.horizontal(|ui| {
