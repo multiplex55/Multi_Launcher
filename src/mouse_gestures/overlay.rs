@@ -5,7 +5,7 @@ use crate::plugins::mouse_gestures::settings::{
 use once_cell::sync::OnceCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Rendering surface for gesture overlays.
 ///
@@ -55,12 +55,35 @@ struct OverlayState {
     preview: Option<(String, Point)>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct OverlaySnapshot {
+    settings: MouseGestureOverlaySettings,
+    points: Vec<Point>,
+    visible: bool,
+    preview: Option<(String, Point)>,
+}
+
+fn snapshot_state(state: &Mutex<OverlayState>) -> Option<OverlaySnapshot> {
+    state.lock().ok().map(|state| OverlaySnapshot {
+        settings: state.settings.clone(),
+        points: state.points.clone(),
+        visible: state.visible,
+        preview: state.preview.clone(),
+    })
+}
+
+fn should_invalidate(last_ms: u64, now_ms: u64, throttle_ms: u64) -> bool {
+    now_ms.saturating_sub(last_ms) >= throttle_ms
+}
+
 #[cfg(windows)]
 struct GdiOverlayWindow {
     state: Arc<Mutex<OverlayState>>,
     hwnd: Arc<Mutex<Option<isize>>>,
     thread: Option<std::thread::JoinHandle<()>>,
     stroke_id: Arc<AtomicU64>,
+    last_invalidate_at: Arc<AtomicU64>,
+    invalidate_start: Instant,
 }
 
 #[cfg(windows)]
@@ -71,6 +94,8 @@ impl GdiOverlayWindow {
             hwnd: Arc::new(Mutex::new(None)),
             thread: None,
             stroke_id: Arc::new(AtomicU64::new(0)),
+            last_invalidate_at: Arc::new(AtomicU64::new(0)),
+            invalidate_start: Instant::now(),
         }
     }
 
@@ -117,23 +142,24 @@ impl GdiOverlayWindow {
                         rect.right = paint.rcPaint.right;
                         rect.bottom = paint.rcPaint.bottom;
                         FillRect(hdc, &rect, HBRUSH(GetStockObject(BLACK_BRUSH).0));
-                        if let Ok(state) = state.lock() {
-                            if state.visible && state.points.len() >= 2 {
-                                let color = parse_color(&state.settings.color);
+                        let snapshot = snapshot_state(state);
+                        if let Some(snapshot) = snapshot {
+                            if snapshot.visible && snapshot.points.len() >= 2 {
+                                let color = parse_color(&snapshot.settings.color);
                                 let pen =
-                                    CreatePen(PS_SOLID, state.settings.thickness as i32, color);
+                                    CreatePen(PS_SOLID, snapshot.settings.thickness as i32, color);
                                 let old = SelectObject(hdc, pen);
                                 SetBkMode(hdc, TRANSPARENT);
                                 SetDCPenColor(hdc, color);
-                                let first = state.points[0];
+                                let first = snapshot.points[0];
                                 MoveToEx(hdc, first.x as i32, first.y as i32, None);
-                                for point in state.points.iter().skip(1) {
+                                for point in snapshot.points.iter().skip(1) {
                                     LineTo(hdc, point.x as i32, point.y as i32);
                                 }
                                 SelectObject(hdc, old);
                                 DeleteObject(pen);
                             }
-                            if let Some((text, point)) = &state.preview {
+                            if let Some((text, point)) = &snapshot.preview {
                                 let text_w = to_wide(text);
                                 SetTextColor(hdc, windows::Win32::Foundation::COLORREF(0x00ffffff));
                                 TextOutW(
@@ -218,8 +244,19 @@ impl GdiOverlayWindow {
         self.thread = Some(handle);
     }
 
-    fn invalidate(&self) {
-        if let Ok(store) = self.hwnd.lock() {
+    fn invalidate_window(
+        hwnd_store: &Mutex<Option<isize>>,
+        last_invalidate_at: &AtomicU64,
+        invalidate_start: Instant,
+    ) {
+        const INVALIDATE_THROTTLE_MS: u64 = 16;
+        let now_ms = invalidate_start.elapsed().as_millis() as u64;
+        let last_ms = last_invalidate_at.load(Ordering::Relaxed);
+        if last_ms != 0 && !should_invalidate(last_ms, now_ms, INVALIDATE_THROTTLE_MS) {
+            return;
+        }
+        last_invalidate_at.store(now_ms, Ordering::Relaxed);
+        if let Ok(store) = hwnd_store.lock() {
             if let Some(hwnd) = *store {
                 unsafe {
                     let hwnd = windows::Win32::Foundation::HWND(hwnd as *mut _);
@@ -232,6 +269,14 @@ impl GdiOverlayWindow {
                 }
             }
         }
+    }
+
+    fn invalidate(&self) {
+        Self::invalidate_window(
+            &self.hwnd,
+            &self.last_invalidate_at,
+            self.invalidate_start,
+        );
     }
 }
 
@@ -265,7 +310,7 @@ impl OverlayWindow for GdiOverlayWindow {
     fn begin_stroke(&mut self, settings: &MouseGestureOverlaySettings, start: Point) {
         self.ensure_thread();
         self.stroke_id.fetch_add(1, Ordering::SeqCst);
-        if let Ok(mut state) = self.state.lock() {
+        if let Ok(mut state) = self.state.try_lock() {
             state.settings = settings.clone();
             state.points.clear();
             state.points.push(start);
@@ -276,7 +321,7 @@ impl OverlayWindow for GdiOverlayWindow {
     }
 
     fn push_point(&mut self, settings: &MouseGestureOverlaySettings, point: Point) {
-        if let Ok(mut state) = self.state.lock() {
+        if let Ok(mut state) = self.state.try_lock() {
             state.settings = settings.clone();
             state.points.push(point);
         }
@@ -287,6 +332,8 @@ impl OverlayWindow for GdiOverlayWindow {
         let fade = settings.fade;
         let state = Arc::clone(&self.state);
         let hwnd = Arc::clone(&self.hwnd);
+        let last_invalidate_at = Arc::clone(&self.last_invalidate_at);
+        let invalidate_start = self.invalidate_start;
         let expected = self.stroke_id.load(Ordering::SeqCst);
         let stroke_id = Arc::clone(&self.stroke_id);
         if let Ok(mut state) = self.state.lock() {
@@ -305,24 +352,12 @@ impl OverlayWindow for GdiOverlayWindow {
                     state.preview = None;
                 }
             }
-            if let Ok(store) = hwnd.lock() {
-                if let Some(hwnd) = *store {
-                    unsafe {
-                        let hwnd = windows::Win32::Foundation::HWND(hwnd as *mut _);
-                        windows::Win32::Graphics::Gdi::RedrawWindow(
-                            hwnd,
-                            None,
-                            None,
-                            windows::Win32::Graphics::Gdi::RDW_INVALIDATE,
-                        );
-                    }
-                }
-            }
+            GdiOverlayWindow::invalidate_window(&hwnd, &last_invalidate_at, invalidate_start);
         });
     }
 
     fn update_preview(&mut self, text: Option<String>, point: Option<Point>) {
-        if let Ok(mut state) = self.state.lock() {
+        if let Ok(mut state) = self.state.try_lock() {
             state.preview = text.zip(point);
         }
         self.invalidate();
@@ -406,4 +441,44 @@ pub fn mouse_gesture_overlay() -> Arc<Mutex<StrokeOverlay>> {
     OVERLAY
         .get_or_init(|| Arc::new(Mutex::new(StrokeOverlay::new())))
         .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_invalidate_boundaries() {
+        assert!(!should_invalidate(100, 115, 16));
+        assert!(should_invalidate(100, 116, 16));
+        assert!(should_invalidate(100, 117, 16));
+    }
+
+    #[test]
+    fn snapshot_state_copies_values() {
+        let mut state = OverlayState::default();
+        state.settings = MouseGestureOverlaySettings {
+            color: "#abcdef".into(),
+            thickness: 4.5,
+            fade: 250,
+        };
+        state.points = vec![Point { x: 1.0, y: 2.0 }, Point { x: 3.0, y: 4.0 }];
+        state.visible = true;
+        state.preview = Some(("Preview".into(), Point { x: 9.0, y: 8.0 }));
+        let state = Mutex::new(state);
+
+        let snapshot = snapshot_state(&state).expect("snapshot");
+        assert_eq!(snapshot.settings.color, "#abcdef");
+        assert_eq!(snapshot.settings.thickness, 4.5);
+        assert_eq!(snapshot.settings.fade, 250);
+        assert_eq!(
+            snapshot.points,
+            vec![Point { x: 1.0, y: 2.0 }, Point { x: 3.0, y: 4.0 }]
+        );
+        assert!(snapshot.visible);
+        assert_eq!(
+            snapshot.preview,
+            Some(("Preview".into(), Point { x: 9.0, y: 8.0 }))
+        );
+    }
 }
