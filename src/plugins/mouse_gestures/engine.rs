@@ -77,6 +77,7 @@ pub struct PreprocessConfig {
 
 const DIRECTION_SAMPLE_COUNT: usize = 64;
 const DIRECTION_SMOOTHING_WINDOW: usize = 5;
+const INSERT_DELETE_COST: f32 = 0.35;
 
 pub fn preprocess_points_for_directions(
     points: &[Point],
@@ -122,6 +123,9 @@ pub fn direction_similarity(a: &[GestureDirection], b: &[GestureDirection]) -> f
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }
+    if b.len() == 1 {
+        return single_direction_similarity(a, b[0]);
+    }
     let distance = levenshtein_distance_weighted(a, b);
     let max_len = a.len().max(b.len()) as f32;
     if max_len == 0.0 {
@@ -144,29 +148,69 @@ fn direction_index(direction: GestureDirection) -> i32 {
     }
 }
 
+fn angular_steps(a: GestureDirection, b: GestureDirection) -> i32 {
+    let a_idx = direction_index(a);
+    let b_idx = direction_index(b);
+    let diff = (a_idx - b_idx).abs();
+    diff.min(8 - diff)
+}
+
 fn substitution_cost(a: GestureDirection, b: GestureDirection) -> f32 {
     if a == b {
         return 0.0;
     }
-    let a_idx = direction_index(a);
-    let b_idx = direction_index(b);
-    let diff = (a_idx - b_idx).abs();
-    let angular_diff = diff.min(8 - diff);
-    angular_diff as f32 / 4.0
+    angular_steps(a, b) as f32 / 4.0
 }
 
 fn levenshtein_distance_weighted(a: &[GestureDirection], b: &[GestureDirection]) -> f32 {
-    let mut prev: Vec<f32> = (0..=b.len()).map(|v| v as f32).collect();
+    let mut prev: Vec<f32> = (0..=b.len())
+        .map(|v| v as f32 * INSERT_DELETE_COST)
+        .collect();
     let mut curr = vec![0.0; b.len() + 1];
     for (i, &av) in a.iter().enumerate() {
-        curr[0] = (i + 1) as f32;
+        curr[0] = (i + 1) as f32 * INSERT_DELETE_COST;
         for (j, &bv) in b.iter().enumerate() {
             let cost = substitution_cost(av, bv);
-            curr[j + 1] = (prev[j + 1] + 1.0).min(curr[j] + 1.0).min(prev[j] + cost);
+            curr[j + 1] = (prev[j + 1] + INSERT_DELETE_COST)
+                .min(curr[j] + INSERT_DELETE_COST)
+                .min(prev[j] + cost);
         }
         prev.clone_from_slice(&curr);
     }
     prev[b.len()]
+}
+
+fn direction_vector(direction: GestureDirection) -> Vector {
+    let diag = (2.0_f32).sqrt() / 2.0;
+    match direction {
+        GestureDirection::Right => Vector { x: 1.0, y: 0.0 },
+        GestureDirection::UpRight => Vector { x: diag, y: -diag },
+        GestureDirection::Up => Vector { x: 0.0, y: -1.0 },
+        GestureDirection::UpLeft => Vector { x: -diag, y: -diag },
+        GestureDirection::Left => Vector { x: -1.0, y: 0.0 },
+        GestureDirection::DownLeft => Vector { x: -diag, y: diag },
+        GestureDirection::Down => Vector { x: 0.0, y: 1.0 },
+        GestureDirection::DownRight => Vector { x: diag, y: diag },
+    }
+}
+
+fn single_direction_similarity(a: &[GestureDirection], template: GestureDirection) -> f32 {
+    let matches = a
+        .iter()
+        .filter(|&&direction| angular_steps(direction, template) <= 1)
+        .count();
+    let purity = matches as f32 / a.len() as f32;
+    let gesture_vector = a.iter().fold(Vector { x: 0.0, y: 0.0 }, |acc, &dir| {
+        let v = direction_vector(dir);
+        Vector {
+            x: acc.x + v.x,
+            y: acc.y + v.y,
+        }
+    });
+    let template_vector = direction_vector(template);
+    let dot = gesture_vector.x * template_vector.x + gesture_vector.y * template_vector.y;
+    let agreement = if dot >= 0.0 { 1.0 } else { 0.0 };
+    (purity * agreement).clamp(0.0, 1.0)
 }
 
 fn direction_from_angle(angle: f32) -> GestureDirection {
@@ -240,6 +284,73 @@ mod tests {
         let similarity = direction_similarity(&sequence, &sequence);
 
         assert_eq!(similarity, 1.0);
+    }
+
+    #[test]
+    fn direction_similarity_long_up_with_wobble_is_high() {
+        let gesture = [
+            GestureDirection::Up,
+            GestureDirection::UpRight,
+            GestureDirection::Up,
+            GestureDirection::UpLeft,
+            GestureDirection::Up,
+            GestureDirection::Up,
+        ];
+        let template = [
+            GestureDirection::Up,
+            GestureDirection::Up,
+            GestureDirection::Up,
+        ];
+
+        let similarity = direction_similarity(&gesture, &template);
+
+        assert!(similarity > 0.8, "expected {similarity} to exceed 0.8");
+    }
+
+    #[test]
+    fn direction_similarity_up_vs_down_is_low() {
+        let gesture = [GestureDirection::Up, GestureDirection::Up];
+        let template = [GestureDirection::Down, GestureDirection::Down];
+
+        let similarity = direction_similarity(&gesture, &template);
+
+        assert!(similarity < 0.3, "expected {similarity} to be below 0.3");
+    }
+
+    #[test]
+    fn direction_similarity_insert_delete_tolerant() {
+        let gesture = [
+            GestureDirection::Up,
+            GestureDirection::Up,
+            GestureDirection::Up,
+            GestureDirection::Up,
+        ];
+        let template = [GestureDirection::Up, GestureDirection::Up];
+
+        let similarity = direction_similarity(&gesture, &template);
+
+        assert!(similarity > 0.7, "expected {similarity} to stay above 0.7");
+    }
+
+    #[test]
+    fn direction_similarity_single_direction_purity_scoring() {
+        let gesture = [
+            GestureDirection::Up,
+            GestureDirection::Up,
+            GestureDirection::Up,
+            GestureDirection::UpLeft,
+            GestureDirection::Up,
+            GestureDirection::Up,
+            GestureDirection::UpLeft,
+            GestureDirection::Up,
+            GestureDirection::UpLeft,
+            GestureDirection::Up,
+        ];
+        let template = [GestureDirection::Up];
+
+        let similarity = direction_similarity(&gesture, &template);
+
+        assert!(similarity > 0.8, "expected {similarity} to be above 0.8");
     }
 }
 
