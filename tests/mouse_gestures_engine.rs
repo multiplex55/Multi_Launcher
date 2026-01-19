@@ -1,7 +1,9 @@
 use multi_launcher::plugins::mouse_gestures::engine::{
-    dtw_distance, meets_min_track_len, parse_gesture, preprocess_points, serialize_gesture,
-    track_length, Point, PreprocessConfig, Vector,
+    direction_sequence, dtw_distance, meets_min_track_len, parse_gesture, preprocess_points,
+    preprocess_points_for_directions, serialize_gesture, track_length, Point, PreprocessConfig,
+    Vector,
 };
+use multi_launcher::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
 
 fn approx_eq(left: f32, right: f32, tolerance: f32) -> bool {
     (left - right).abs() <= tolerance
@@ -107,4 +109,30 @@ fn dtw_invariants() {
     ];
     let unrelated_distance = dtw_distance(&base, &unrelated);
     assert!(unrelated_distance > 0.9);
+}
+
+#[test]
+fn preprocess_for_directions_smooths_jittery_input() {
+    let points = vec![
+        Point { x: 0.0, y: 0.0 },
+        Point { x: 10.0, y: 5.0 },
+        Point { x: 20.0, y: -5.0 },
+        Point { x: 30.0, y: 5.0 },
+        Point { x: 40.0, y: -5.0 },
+        Point { x: 50.0, y: 0.0 },
+    ];
+
+    let raw_dirs = direction_sequence(&points, 0.0);
+
+    let mut settings = MouseGesturePluginSettings::default();
+    settings.sampling_enabled = true;
+    settings.smoothing_enabled = true;
+
+    let processed = preprocess_points_for_directions(&points, &settings);
+    let processed_dirs = direction_sequence(&processed, 0.0);
+
+    assert!(!raw_dirs.is_empty());
+    assert!(!processed_dirs.is_empty());
+    assert_ne!(raw_dirs, processed_dirs);
+    assert!(processed_dirs.len() < raw_dirs.len());
 }

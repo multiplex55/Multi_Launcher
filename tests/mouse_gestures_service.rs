@@ -116,6 +116,49 @@ fn mouse_gesture_service_dispatches_event_on_match() {
 }
 
 #[test]
+fn mouse_gesture_service_respects_max_distance_threshold() {
+    let backend = Arc::new(MockMouseHookBackend::default());
+    let sink = Arc::new(RecordingSink::default());
+    let service = MouseGestureService::new_with_backend_and_sink(backend.clone(), sink.clone());
+
+    let mut db = MouseGestureDb::default();
+    db.bindings = HashMap::from([("gesture-1".to_string(), "SwipeRight:0,0|100,0".to_string())]);
+    db.profiles.push(MouseGestureProfile {
+        id: "default".to_string(),
+        label: "Default".to_string(),
+        enabled: true,
+        priority: 0,
+        rules: Vec::new(),
+        bindings: vec![MouseGestureBinding {
+            gesture_id: "gesture-1".to_string(),
+            label: "Calc".to_string(),
+            action: "query:calc".to_string(),
+            args: Some("1+1".to_string()),
+            priority: 0,
+            enabled: true,
+        }],
+    });
+    service.update_db(db);
+
+    let mut settings = MouseGesturePluginSettings::default();
+    settings.enabled = true;
+    settings.max_distance = 0.5;
+    settings.match_threshold = 0.0;
+    settings.min_track_len = 1.0;
+    settings.sampling_enabled = false;
+    settings.smoothing_enabled = false;
+    service.update_settings(settings);
+    service.start();
+
+    let points = vec![Point { x: 0.0, y: 0.0 }, Point { x: -100.0, y: 0.0 }];
+    let outcome = backend.simulate_track(points);
+
+    assert!(!outcome.matched);
+    assert!(!outcome.passthrough_click);
+    assert!(sink.events().is_empty());
+}
+
+#[test]
 fn tracking_state_sets_too_long_and_stops_storing_points() {
     let mut tracking = HookTrackingState::default();
     tracking.begin_track(Point { x: 0.0, y: 0.0 });
