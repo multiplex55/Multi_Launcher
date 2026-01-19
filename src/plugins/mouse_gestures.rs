@@ -59,6 +59,12 @@ impl MouseGesturesPlugin {
                 args: None,
             },
             Action {
+                label: "Add mouse gesture binding".into(),
+                desc: "Mouse Gestures".into(),
+                action: "mg:add_binding".into(),
+                args: None,
+            },
+            Action {
                 label: "Edit mouse gestures".into(),
                 desc: "Mouse Gestures".into(),
                 action: "mg:edit".into(),
@@ -98,10 +104,17 @@ impl MouseGesturesPlugin {
                 args: None,
             });
         }
-        if crate::common::strip_prefix_ci(query, "edit").is_some()
+        if crate::common::strip_prefix_ci(query, "add").is_some()
             || crate::common::strip_prefix_ci(query, "binding").is_some()
-            || crate::common::strip_prefix_ci(query, "add").is_some()
         {
+            return Some(Action {
+                label: "Add mouse gesture binding".into(),
+                desc: "Mouse Gestures".into(),
+                action: "mg:add_binding".into(),
+                args: None,
+            });
+        }
+        if crate::common::strip_prefix_ci(query, "edit").is_some() {
             return Some(Action {
                 label: "Edit mouse gestures".into(),
                 desc: "Mouse Gestures".into(),

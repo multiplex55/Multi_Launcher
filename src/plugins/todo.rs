@@ -529,7 +529,7 @@ impl Default for TodoPlugin {
 impl Plugin for TodoPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
-        let key = trimmed.to_string();
+        let key = format!("{}:{}", todo_version(), trimmed);
         if let Ok(mut cache) = self.cache.write() {
             if let Some(res) = cache.get(&key).cloned() {
                 return res;
