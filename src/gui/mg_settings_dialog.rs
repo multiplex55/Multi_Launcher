@@ -215,7 +215,11 @@ fn overlay_settings_ui(
     ui.horizontal(|ui| {
         ui.label("Thickness");
         *changed |= ui
-            .add(egui::DragValue::new(&mut overlay.thickness).speed(0.1))
+            .add(
+                egui::DragValue::new(&mut overlay.thickness)
+                    .speed(0.1)
+                    .clamp_range(0.0..=100.0),
+            )
             .changed();
     });
     ui.horizontal(|ui| {

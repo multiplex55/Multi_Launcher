@@ -186,11 +186,12 @@ impl MouseGestureRuntime {
         }
 
         similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let lines = similarities
+        let summary = similarities
             .into_iter()
             .map(|(label, similarity)| format!("{label}: {:.0}%", similarity * 100.0))
-            .collect::<Vec<_>>();
-        Some(lines.join("\n"))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        Some(format!("Similarity: {summary}"))
     }
 
     fn evaluate_track(&self, points: &[Point]) -> TrackOutcome {
