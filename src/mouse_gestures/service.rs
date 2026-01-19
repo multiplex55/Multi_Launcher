@@ -133,6 +133,9 @@ impl MouseGestureRuntime {
         if snapshots.settings.max_track_len > 0.0 && length > snapshots.settings.max_track_len {
             return Some("Too long".to_string());
         }
+        if snapshots.settings.debug_show_similarity {
+            return self.preview_similarity_text(points, &snapshots);
+        }
         let Some((label, similarity)) = self.best_match(points) else {
             return Some("No match".to_string());
         };
@@ -140,6 +143,54 @@ impl MouseGestureRuntime {
             "Will trigger: {label} ({:.0}%)",
             similarity * 100.0
         ))
+    }
+
+    fn preview_similarity_text(
+        &self,
+        points: &[Point],
+        snapshots: &MouseGestureSnapshots,
+    ) -> Option<String> {
+        let track_dirs = direction_sequence(points, snapshots.settings.min_point_distance);
+        if track_dirs.is_empty() {
+            return Some("No match".to_string());
+        }
+        let gesture_templates =
+            build_gesture_templates(&snapshots.db, snapshots.settings.min_point_distance);
+        if gesture_templates.is_empty() {
+            return Some("No match".to_string());
+        }
+        let window_info = current_foreground_window();
+        let Some(profile) = select_profile(&snapshots.db, &window_info) else {
+            return Some("No match".to_string());
+        };
+
+        let mut similarities: Vec<(String, f32)> = Vec::new();
+        for binding in profile.bindings.iter().filter(|binding| binding.enabled) {
+            let Some(template) = gesture_templates.get(&binding.gesture_id) else {
+                continue;
+            };
+            let similarity = direction_similarity(&track_dirs, &template.directions);
+            if !similarity.is_finite() {
+                continue;
+            }
+            let label = if binding.label.trim().is_empty() {
+                binding.action.clone()
+            } else {
+                binding.label.clone()
+            };
+            similarities.push((label, similarity));
+        }
+
+        if similarities.is_empty() {
+            return Some("No match".to_string());
+        }
+
+        similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let lines = similarities
+            .into_iter()
+            .map(|(label, similarity)| format!("{label}: {:.0}%", similarity * 100.0))
+            .collect::<Vec<_>>();
+        Some(lines.join("\n"))
     }
 
     fn evaluate_track(&self, points: &[Point]) -> TrackOutcome {

@@ -160,6 +160,19 @@ impl MouseGesturesSettingsDialog {
                         "Show match preview tooltip",
                     )
                     .changed();
+                if !self.settings.preview_enabled && self.settings.debug_show_similarity {
+                    self.settings.debug_show_similarity = false;
+                    changed = true;
+                }
+                changed |= ui
+                    .add_enabled(
+                        self.settings.preview_enabled,
+                        egui::Checkbox::new(
+                            &mut self.settings.debug_show_similarity,
+                            "debug: show similarity",
+                        ),
+                    )
+                    .changed();
                 changed |= ui
                     .checkbox(&mut self.settings.sampling_enabled, "Enable sampling")
                     .changed();
