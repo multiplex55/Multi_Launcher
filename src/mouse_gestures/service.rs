@@ -24,6 +24,7 @@ const PREVIEW_SIMILARITY_LABEL_MAX_LEN: usize = 40;
 const PREVIEW_SIMILARITY_MAX_LEN: usize = 140;
 const PREVIEW_SIMILARITY_PREFIX: &str = "Similarity: ";
 const PREVIEW_SIMILARITY_ELLIPSIS: &str = "…";
+const MAX_TRACK_DURATION_MS: u64 = 2_000;
 
 #[cfg(windows)]
 pub fn should_ignore_event(flags: u32, extra_info: usize) -> bool {
@@ -413,6 +414,14 @@ fn should_compute_preview(last: Instant, now: Instant, throttle_ms: u64) -> bool
     now.duration_since(last) >= Duration::from_millis(throttle_ms)
 }
 
+fn should_cancel(started_at: Instant, now: Instant, max_duration_ms: u64) -> bool {
+    if max_duration_ms == 0 {
+        return false;
+    }
+    now.checked_duration_since(started_at)
+        .is_some_and(|duration| duration >= Duration::from_millis(max_duration_ms))
+}
+
 fn sequence_changed(last_hash: Option<u64>, new_hash: u64) -> bool {
     last_hash.map_or(true, |last| last != new_hash)
 }
@@ -747,6 +756,7 @@ pub struct HookTrackingState {
     points: Vec<Point>,
     last_point: Option<Point>,
     last_stored_point: Option<Point>,
+    started_at: Instant,
     acc_len: f32,
     too_long: bool,
     stored_points: usize,
@@ -829,6 +839,7 @@ impl Default for HookTrackingState {
             points: Vec::new(),
             last_point: None,
             last_stored_point: None,
+            started_at: Instant::now(),
             acc_len: 0.0,
             too_long: false,
             stored_points: 0,
@@ -847,6 +858,11 @@ impl HookTrackingState {
         self.too_long = false;
         self.stored_points = 0;
         self.decimation_stride = 1;
+    }
+
+    fn cancel_tracking(&mut self) -> TrackOutcome {
+        self.reset_tracking();
+        TrackOutcome::no_match()
     }
 
     fn update_length(&mut self, point: Point) {
@@ -897,6 +913,7 @@ impl HookTrackingState {
         self.active_button = button;
         self.last_point = Some(point);
         self.last_stored_point = Some(point);
+        self.started_at = Instant::now();
         self.points.push(point);
         self.stored_points = 1;
     }
@@ -1001,6 +1018,20 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                 wparam: WPARAM,
                 lparam: LPARAM,
             ) -> LRESULT {
+                fn trigger_button_down(button: TriggerButton) -> bool {
+                    use windows::Win32::UI::Input::KeyboardAndMouse::{
+                        GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
+                    };
+
+                    let virtual_key = match button {
+                        TriggerButton::Left => VK_LBUTTON,
+                        TriggerButton::Right => VK_RBUTTON,
+                        TriggerButton::Middle => VK_MBUTTON,
+                    };
+                    const KEY_PRESSED_MASK: i16 = 0x8000u16 as i16;
+                    unsafe { (GetAsyncKeyState(virtual_key.0 as i32) & KEY_PRESSED_MASK) != 0 }
+                }
+
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if code != HC_ACTION as i32 {
                         return CallNextHookEx(None, code, wparam, lparam);
@@ -1068,6 +1099,33 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                     }
 
                     if event == WM_MOUSEMOVE && tracking.active_button.is_some() {
+                        if should_cancel(tracking.started_at, Instant::now(), MAX_TRACK_DURATION_MS)
+                        {
+                            let _ = tracking.cancel_tracking();
+                            if let Ok(mut preview_guard) = state.preview_text.lock() {
+                                *preview_guard = None;
+                            }
+                            if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
+                                overlay.end_stroke();
+                                overlay.update_preview(None, None);
+                            }
+                            return CallNextHookEx(None, code, wparam, lparam);
+                        }
+
+                        if let Some(active_button) = tracking.active_button {
+                            if !trigger_button_down(active_button) {
+                                let _ = tracking.cancel_tracking();
+                                if let Ok(mut preview_guard) = state.preview_text.lock() {
+                                    *preview_guard = None;
+                                }
+                                if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
+                                    overlay.end_stroke();
+                                    overlay.update_preview(None, None);
+                                }
+                                return CallNextHookEx(None, code, wparam, lparam);
+                            }
+                        }
+
                         let stored =
                             tracking.handle_move(point, min_point_distance_sq, max_track_len);
                         if stored {
@@ -1148,12 +1206,12 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                     break;
                 }
                 unsafe {
-                    TranslateMessage(&msg);
+                    let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
                 if stop_flag.load(Ordering::SeqCst) {
                     unsafe {
-                        PostThreadMessageW(thread, WM_QUIT, WPARAM(0), LPARAM(0));
+                        let _ = PostThreadMessageW(thread, WM_QUIT, WPARAM(0), LPARAM(0));
                     }
                 }
             }
@@ -1287,10 +1345,10 @@ impl MouseHookBackend for MockMouseHookBackend {
 mod tests {
     use super::{
         build_gesture_templates, hash_direction_sequence, preview_worker_loop,
-        sequence_changed, should_compute_preview, truncate_with_ellipsis, MouseGestureEventSink,
-        MouseGestureRuntime, MouseGestureService, MouseGestureSnapshots, PreviewRequest,
-        ProfileCache, PREVIEW_SIMILARITY_LABEL_MAX_LEN, PREVIEW_SIMILARITY_MAX_LEN,
-        PREVIEW_SIMILARITY_TOP_N,
+        sequence_changed, should_cancel, should_compute_preview, truncate_with_ellipsis,
+        HookTrackingState, MouseGestureEventSink, MouseGestureRuntime, MouseGestureService,
+        MouseGestureSnapshots, PreviewRequest, ProfileCache, TrackOutcome, MAX_TRACK_DURATION_MS,
+        PREVIEW_SIMILARITY_LABEL_MAX_LEN, PREVIEW_SIMILARITY_MAX_LEN, PREVIEW_SIMILARITY_TOP_N,
     };
     use crate::mouse_gestures::MouseHookBackend;
     use crate::gui::MouseGestureEvent;
@@ -1371,6 +1429,36 @@ mod tests {
 
         assert!(!should_compute_preview(too_soon, now, throttle_ms));
         assert!(should_compute_preview(on_time, now, throttle_ms));
+    }
+
+    #[test]
+    fn tracking_max_duration_cancels() {
+        let started_at = Instant::now();
+        let before_deadline = started_at + Duration::from_millis(MAX_TRACK_DURATION_MS - 1);
+        let after_deadline = started_at + Duration::from_millis(MAX_TRACK_DURATION_MS + 1);
+
+        assert!(!should_cancel(started_at, before_deadline, MAX_TRACK_DURATION_MS));
+        assert!(should_cancel(started_at, after_deadline, MAX_TRACK_DURATION_MS));
+        assert!(!should_cancel(started_at, after_deadline, 0));
+    }
+
+    #[test]
+    fn canceling_tracking_resets_state() {
+        let mut tracking = HookTrackingState::default();
+        tracking.begin_track(Point { x: 1.0, y: 1.0 });
+        tracking.handle_move(Point { x: 2.0, y: 2.0 }, 0.0, 0.0);
+
+        let outcome = tracking.cancel_tracking();
+
+        assert_eq!(tracking.points_len(), 0);
+        assert!(!tracking.too_long());
+        assert_eq!(tracking.active_button, None);
+        assert_eq!(tracking.acc_len(), 0.0);
+        assert_eq!(outcome.matched, TrackOutcome::no_match().matched);
+        assert_eq!(
+            outcome.passthrough_click,
+            TrackOutcome::no_match().passthrough_click
+        );
     }
 
     #[test]

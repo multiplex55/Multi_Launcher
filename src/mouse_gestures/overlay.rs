@@ -152,17 +152,17 @@ impl GdiOverlayWindow {
                                 SetBkMode(hdc, TRANSPARENT);
                                 SetDCPenColor(hdc, color);
                                 let first = snapshot.points[0];
-                                MoveToEx(hdc, first.x as i32, first.y as i32, None);
+                                let _ = MoveToEx(hdc, first.x as i32, first.y as i32, None);
                                 for point in snapshot.points.iter().skip(1) {
-                                    LineTo(hdc, point.x as i32, point.y as i32);
+                                    let _ = LineTo(hdc, point.x as i32, point.y as i32);
                                 }
                                 SelectObject(hdc, old);
-                                DeleteObject(pen);
+                                let _ = DeleteObject(pen);
                             }
                             if let Some((text, point)) = &snapshot.preview {
                                 let text_w = to_wide(text);
                                 SetTextColor(hdc, windows::Win32::Foundation::COLORREF(0x00ffffff));
-                                TextOutW(
+                                let _ = TextOutW(
                                     hdc,
                                     point.x as i32 + 12,
                                     point.y as i32 + 12,
@@ -170,7 +170,7 @@ impl GdiOverlayWindow {
                                 );
                             }
                         }
-                        EndPaint(hwnd, &paint);
+                        let _ = EndPaint(hwnd, &paint);
                         return LRESULT(0);
                     }
                 }
@@ -217,7 +217,7 @@ impl GdiOverlayWindow {
                             0,
                             LWA_COLORKEY,
                         );
-                        ShowWindow(hwnd, SW_SHOW);
+                        let _ = ShowWindow(hwnd, SW_SHOW);
                         let _ = SetWindowPos(
                             hwnd,
                             HWND_TOPMOST,
@@ -230,13 +230,13 @@ impl GdiOverlayWindow {
                         if let Ok(mut store) = hwnd_store.lock() {
                             *store = Some(hwnd.0 as isize);
                         }
-                        RedrawWindow(hwnd, None, None, RDW_INVALIDATE);
+                        let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE);
                     }
                 }
 
                 let mut msg = MSG::default();
                 while GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0).into() {
-                    TranslateMessage(&msg);
+                    let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
             }
@@ -260,7 +260,7 @@ impl GdiOverlayWindow {
             if let Some(hwnd) = *store {
                 unsafe {
                     let hwnd = windows::Win32::Foundation::HWND(hwnd as *mut _);
-                    windows::Win32::Graphics::Gdi::RedrawWindow(
+                    let _ = windows::Win32::Graphics::Gdi::RedrawWindow(
                         hwnd,
                         None,
                         None,
@@ -367,7 +367,7 @@ impl OverlayWindow for GdiOverlayWindow {
         if let Ok(store) = self.hwnd.lock() {
             if let Some(hwnd) = *store {
                 unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                    let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
                         windows::Win32::Foundation::HWND(hwnd as *mut _),
                         windows::Win32::UI::WindowsAndMessaging::WM_CLOSE,
                         windows::Win32::Foundation::WPARAM(0),
