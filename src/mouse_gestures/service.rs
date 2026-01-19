@@ -64,14 +64,34 @@ impl TrackOutcome {
 struct MouseGestureSnapshots {
     settings: MouseGesturePluginSettings,
     db: MouseGestureDb,
+    gesture_templates: HashMap<String, GestureTemplate>,
 }
 
 impl Default for MouseGestureSnapshots {
     fn default() -> Self {
+        let settings = MouseGesturePluginSettings::default();
+        let db = MouseGestureDb::default();
+        let gesture_templates = build_gesture_templates(&db, &settings);
         Self {
-            settings: MouseGesturePluginSettings::default(),
-            db: MouseGestureDb::default(),
+            settings,
+            db,
+            gesture_templates,
         }
+    }
+}
+
+#[derive(Clone, Default)]
+struct ProfileCache {
+    window: Option<ForegroundWindowInfo>,
+    profile_id: Option<String>,
+    #[cfg(test)]
+    cache_hits: usize,
+}
+
+impl ProfileCache {
+    fn clear(&mut self) {
+        self.window = None;
+        self.profile_id = None;
     }
 }
 
@@ -79,9 +99,36 @@ impl Default for MouseGestureSnapshots {
 pub struct MouseGestureRuntime {
     snapshots: Arc<RwLock<MouseGestureSnapshots>>,
     event_sink: Arc<dyn MouseGestureEventSink>,
+    profile_cache: Arc<Mutex<ProfileCache>>,
 }
 
 impl MouseGestureRuntime {
+    fn select_profile_cached<'a>(
+        &self,
+        db: &'a MouseGestureDb,
+        window: &ForegroundWindowInfo,
+    ) -> Option<&'a crate::plugins::mouse_gestures::db::MouseGestureProfile> {
+        if let Ok(mut cache) = self.profile_cache.lock() {
+            if let Some(cached_window) = cache.window.as_ref() {
+                if cached_window == window {
+                    #[cfg(test)]
+                    {
+                        cache.cache_hits = cache.cache_hits.saturating_add(1);
+                    }
+                    return cache.profile_id.as_ref().and_then(|profile_id| {
+                        db.profiles.iter().find(|profile| profile.id == *profile_id)
+                    });
+                }
+            }
+        }
+        let profile = select_profile(db, window);
+        if let Ok(mut cache) = self.profile_cache.lock() {
+            cache.window = Some(window.clone());
+            cache.profile_id = profile.map(|profile| profile.id.clone());
+        }
+        profile
+    }
+
     fn best_match(&self, points: &[Point]) -> Option<(String, f32)> {
         let snapshots = self
             .snapshots
@@ -104,9 +151,9 @@ impl MouseGestureRuntime {
         if track_dirs.is_empty() {
             return None;
         }
-        let gesture_templates = build_gesture_templates(&snapshots.db, &snapshots.settings);
+        let gesture_templates = &snapshots.gesture_templates;
         let mut distances = HashMap::new();
-        for (gesture_id, template) in &gesture_templates {
+        for (gesture_id, template) in gesture_templates {
             let similarity = direction_similarity(&track_dirs, &template.directions);
             if similarity < snapshots.settings.match_threshold {
                 continue;
@@ -117,7 +164,7 @@ impl MouseGestureRuntime {
             return None;
         }
         let window_info = current_foreground_window();
-        let profile = select_profile(&snapshots.db, &window_info)?;
+        let profile = self.select_profile_cached(&snapshots.db, &window_info)?;
         let binding =
             select_binding(profile, &distances, snapshots.settings.max_distance)?;
         let similarity = 1.0 - binding.distance;
@@ -168,12 +215,12 @@ impl MouseGestureRuntime {
         if track_dirs.is_empty() {
             return Some("No match".to_string());
         }
-        let gesture_templates = build_gesture_templates(&snapshots.db, &snapshots.settings);
+        let gesture_templates = &snapshots.gesture_templates;
         if gesture_templates.is_empty() {
             return Some("No match".to_string());
         }
         let window_info = current_foreground_window();
-        let Some(profile) = select_profile(&snapshots.db, &window_info) else {
+        let Some(profile) = self.select_profile_cached(&snapshots.db, &window_info) else {
             return Some("No match".to_string());
         };
 
@@ -283,7 +330,7 @@ impl MouseGestureRuntime {
             };
         }
 
-        let gesture_templates = build_gesture_templates(&snapshots.db, &snapshots.settings);
+        let gesture_templates = &snapshots.gesture_templates;
         if gesture_templates.is_empty() {
             return if passthrough_on_no_match {
                 TrackOutcome::passthrough()
@@ -310,7 +357,7 @@ impl MouseGestureRuntime {
         }
 
         let window_info = current_foreground_window();
-        let Some(profile) = select_profile(&snapshots.db, &window_info) else {
+        let Some(profile) = self.select_profile_cached(&snapshots.db, &window_info) else {
             return if passthrough_on_no_match {
                 TrackOutcome::passthrough()
             } else {
@@ -419,6 +466,15 @@ fn build_gesture_templates(
         );
     }
     templates
+}
+
+fn should_refresh_gesture_templates(
+    current: &MouseGesturePluginSettings,
+    updated: &MouseGesturePluginSettings,
+) -> bool {
+    current.min_point_distance != updated.min_point_distance
+        || current.sampling_enabled != updated.sampling_enabled
+        || current.smoothing_enabled != updated.smoothing_enabled
 }
 
 fn current_foreground_window() -> ForegroundWindowInfo {
@@ -552,6 +608,7 @@ pub struct MouseGestureService {
     snapshots: Arc<RwLock<MouseGestureSnapshots>>,
     backend: Arc<dyn MouseHookBackend>,
     event_sink: Arc<dyn MouseGestureEventSink>,
+    profile_cache: Arc<Mutex<ProfileCache>>,
     running: AtomicBool,
 }
 
@@ -564,6 +621,7 @@ impl MouseGestureService {
             snapshots: Arc::new(RwLock::new(MouseGestureSnapshots::default())),
             backend,
             event_sink,
+            profile_cache: Arc::new(Mutex::new(ProfileCache::default())),
             running: AtomicBool::new(false),
         }
     }
@@ -574,6 +632,9 @@ impl MouseGestureService {
 
     pub fn update_settings(&self, settings: MouseGesturePluginSettings) {
         if let Ok(mut guard) = self.snapshots.write() {
+            if should_refresh_gesture_templates(&guard.settings, &settings) {
+                guard.gesture_templates = build_gesture_templates(&guard.db, &settings);
+            }
             guard.settings = settings.clone();
         }
         if let Ok(mut overlay) = mouse_gesture_overlay().lock() {
@@ -593,6 +654,10 @@ impl MouseGestureService {
     pub fn update_db(&self, db: MouseGestureDb) {
         if let Ok(mut guard) = self.snapshots.write() {
             guard.db = db;
+            guard.gesture_templates = build_gesture_templates(&guard.db, &guard.settings);
+        }
+        if let Ok(mut cache) = self.profile_cache.lock() {
+            cache.clear();
         }
     }
 
@@ -603,6 +668,7 @@ impl MouseGestureService {
         let runtime = MouseGestureRuntime {
             snapshots: Arc::clone(&self.snapshots),
             event_sink: Arc::clone(&self.event_sink),
+            profile_cache: Arc::clone(&self.profile_cache),
         };
         if let Err(err) = self.backend.start(runtime) {
             self.running.store(false, Ordering::SeqCst);
@@ -865,6 +931,127 @@ impl HookTrackingState {
 
     pub fn too_long(&self) -> bool {
         self.too_long
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestBackend;
+
+    impl MouseHookBackend for TestBackend {
+        fn start(&self, _runtime: MouseGestureRuntime) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn stop(&self) {}
+
+        fn is_running(&self) -> bool {
+            false
+        }
+    }
+
+    struct TestEventSink;
+
+    impl MouseGestureEventSink for TestEventSink {
+        fn dispatch(&self, _event: MouseGestureEvent) {}
+    }
+
+    fn make_runtime(service: &MouseGestureService) -> MouseGestureRuntime {
+        MouseGestureRuntime {
+            snapshots: Arc::clone(&service.snapshots),
+            event_sink: Arc::new(TestEventSink),
+            profile_cache: Arc::clone(&service.profile_cache),
+        }
+    }
+
+    fn make_right_points() -> Vec<Point> {
+        vec![Point { x: 0.0, y: 0.0 }, Point { x: 80.0, y: 0.0 }]
+    }
+
+    fn make_db_with_right_gesture() -> MouseGestureDb {
+        let mut db = MouseGestureDb::default();
+        db.bindings.insert(
+            "gesture-right".to_string(),
+            "Swipe Right: 0,0|80,0".to_string(),
+        );
+        db.profiles.push(crate::plugins::mouse_gestures::db::MouseGestureProfile {
+            id: "profile-default".to_string(),
+            label: "Default".to_string(),
+            enabled: true,
+            priority: 0,
+            rules: Vec::new(),
+            bindings: vec![crate::plugins::mouse_gestures::db::MouseGestureBinding {
+                gesture_id: "gesture-right".to_string(),
+                label: "Swipe Right".to_string(),
+                action: "noop".to_string(),
+                args: None,
+                priority: 0,
+                enabled: true,
+            }],
+        });
+        db
+    }
+
+    #[test]
+    fn update_db_refreshes_cached_gesture_templates() {
+        let service = MouseGestureService::new_with_backend_and_sink(
+            Arc::new(TestBackend),
+            Arc::new(TestEventSink),
+        );
+        let runtime = make_runtime(&service);
+        let points = make_right_points();
+
+        let snapshots = runtime
+            .snapshots
+            .read()
+            .expect("read snapshots")
+            .clone();
+        let text = runtime
+            .preview_similarity_text(&points, &snapshots)
+            .expect("preview text");
+        assert_eq!(text, "No match");
+
+        service.update_db(make_db_with_right_gesture());
+
+        let snapshots = runtime
+            .snapshots
+            .read()
+            .expect("read snapshots")
+            .clone();
+        let text = runtime
+            .preview_similarity_text(&points, &snapshots)
+            .expect("preview text after update");
+        assert!(
+            text.contains("Swipe Right"),
+            "expected updated templates in text: {text}"
+        );
+    }
+
+    #[test]
+    fn profile_cache_reuses_selection_for_same_window() {
+        let service = MouseGestureService::new_with_backend_and_sink(
+            Arc::new(TestBackend),
+            Arc::new(TestEventSink),
+        );
+        let runtime = make_runtime(&service);
+        let db = make_db_with_right_gesture();
+        let window = ForegroundWindowInfo {
+            exe: Some("app.exe".to_string()),
+            class: None,
+            title: None,
+        };
+
+        assert!(runtime.select_profile_cached(&db, &window).is_some());
+        assert!(runtime.select_profile_cached(&db, &window).is_some());
+
+        let cache_hits = runtime
+            .profile_cache
+            .lock()
+            .expect("lock profile cache")
+            .cache_hits;
+        assert_eq!(cache_hits, 1);
     }
 }
 
