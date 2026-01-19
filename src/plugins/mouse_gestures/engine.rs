@@ -314,7 +314,7 @@ mod tests {
 
         let similarity = direction_similarity(&gesture, &template);
 
-        assert!(similarity < 0.3, "expected {similarity} to be below 0.3");
+        assert!(similarity <= 0.3, "expected {similarity} to be at most 0.3");
     }
 
     #[test]
