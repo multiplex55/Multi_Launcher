@@ -312,15 +312,6 @@ impl MouseGestureRuntime {
     }
 }
 
-impl Clone for MouseGestureRuntime {
-    fn clone(&self) -> Self {
-        Self {
-            snapshots: Arc::clone(&self.snapshots),
-            event_sink: Arc::clone(&self.event_sink),
-        }
-    }
-}
-
 const PREVIEW_THROTTLE_MS: u64 = 75;
 
 fn should_compute_preview(last: Instant, now: Instant, throttle_ms: u64) -> bool {
@@ -654,8 +645,7 @@ fn preview_worker_loop(
     receiver: Receiver<PreviewRequest>,
     preview_text: Arc<Mutex<Option<String>>>,
 ) {
-    let mut last_preview_at =
-        Instant::now().saturating_sub(Duration::from_millis(PREVIEW_THROTTLE_MS));
+    let mut last_preview_at = Instant::now() - Duration::from_millis(PREVIEW_THROTTLE_MS);
     let mut last_sequence_hash = None;
     for request in receiver {
         let now = Instant::now();
