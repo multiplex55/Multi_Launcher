@@ -148,6 +148,31 @@ impl MouseGestureRuntime {
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default();
+        self.evaluate_track_with_snapshots(points, snapshots)
+    }
+
+    fn evaluate_track_with_limit(&self, points: &[Point], too_long: bool) -> TrackOutcome {
+        let snapshots = self
+            .snapshots
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let passthrough_on_no_match = snapshots.settings.passthrough_on_no_match;
+        if too_long {
+            return if passthrough_on_no_match {
+                TrackOutcome::passthrough()
+            } else {
+                TrackOutcome::no_match()
+            };
+        }
+        self.evaluate_track_with_snapshots(points, snapshots)
+    }
+
+    fn evaluate_track_with_snapshots(
+        &self,
+        points: &[Point],
+        snapshots: MouseGestureSnapshots,
+    ) -> TrackOutcome {
         let passthrough_on_no_match = snapshots.settings.passthrough_on_no_match;
         if points.len() < 2 {
             return TrackOutcome::passthrough();
@@ -500,12 +525,150 @@ pub struct WindowsMouseHookBackend {
     handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
-#[cfg(windows)]
-#[derive(Default)]
-struct HookTrackingState {
+const MIN_DECIMATION_DISTANCE_SQ: f32 = 4.0;
+pub const MAX_TRACK_POINTS: usize = 4096;
+
+pub struct HookTrackingState {
     active_button: Option<TriggerButton>,
     points: Vec<Point>,
     last_point: Option<Point>,
+    last_stored_point: Option<Point>,
+    acc_len: f32,
+    too_long: bool,
+    stored_points: usize,
+    decimation_stride: usize,
+}
+
+impl Default for HookTrackingState {
+    fn default() -> Self {
+        Self {
+            active_button: None,
+            points: Vec::new(),
+            last_point: None,
+            last_stored_point: None,
+            acc_len: 0.0,
+            too_long: false,
+            stored_points: 0,
+            decimation_stride: 1,
+        }
+    }
+}
+
+impl HookTrackingState {
+    fn reset_tracking(&mut self) {
+        self.active_button = None;
+        self.points.clear();
+        self.last_point = None;
+        self.last_stored_point = None;
+        self.acc_len = 0.0;
+        self.too_long = false;
+        self.stored_points = 0;
+        self.decimation_stride = 1;
+    }
+
+    fn update_length(&mut self, point: Point) {
+        if let Some(last_point) = self.last_point {
+            let dx = point.x - last_point.x;
+            let dy = point.y - last_point.y;
+            self.acc_len += (dx * dx + dy * dy).sqrt();
+        }
+        self.last_point = Some(point);
+    }
+
+    fn should_store_point(&self, point: Point, min_point_distance_sq: f32) -> bool {
+        let distance_sq = min_point_distance_sq.max(MIN_DECIMATION_DISTANCE_SQ);
+        match self.last_stored_point {
+            None => true,
+            Some(last_stored_point) => {
+                let dx = point.x - last_stored_point.x;
+                let dy = point.y - last_stored_point.y;
+                (dx * dx + dy * dy) >= distance_sq
+            }
+        }
+    }
+
+    fn store_point(&mut self, point: Point) -> bool {
+        self.stored_points = self.stored_points.saturating_add(1);
+        if self.points.len() < MAX_TRACK_POINTS {
+            self.points.push(point);
+            self.last_stored_point = Some(point);
+            return true;
+        }
+        if self.decimation_stride == 1 {
+            self.decimation_stride = 2;
+        }
+        // Once we hit the cap, keep the buffer size fixed and only replace the last point every
+        // Nth accepted sample. This bounds memory while still refreshing the tail of long tracks.
+        if self.stored_points % self.decimation_stride == 0 {
+            if let Some(last) = self.points.last_mut() {
+                *last = point;
+            }
+            self.last_stored_point = Some(point);
+            return true;
+        }
+        false
+    }
+
+    fn begin_stroke(&mut self, button: Option<TriggerButton>, point: Point) {
+        self.reset_tracking();
+        self.active_button = button;
+        self.last_point = Some(point);
+        self.last_stored_point = Some(point);
+        self.points.push(point);
+        self.stored_points = 1;
+    }
+
+    pub fn begin_track(&mut self, point: Point) {
+        self.begin_stroke(None, point);
+    }
+
+    pub fn handle_move(
+        &mut self,
+        point: Point,
+        min_point_distance_sq: f32,
+        max_track_len: f32,
+    ) -> bool {
+        self.update_length(point);
+        if max_track_len > 0.0 && self.acc_len > max_track_len {
+            self.too_long = true;
+            return false;
+        }
+        if self.too_long || !self.should_store_point(point, min_point_distance_sq) {
+            return false;
+        }
+        self.store_point(point)
+    }
+
+    pub fn finish_stroke(
+        &mut self,
+        point: Point,
+        min_point_distance_sq: f32,
+        max_track_len: f32,
+    ) -> (Vec<Point>, bool) {
+        self.update_length(point);
+        if max_track_len > 0.0 && self.acc_len > max_track_len {
+            self.too_long = true;
+        }
+        if !self.too_long && self.should_store_point(point, min_point_distance_sq) {
+            let _ = self.store_point(point);
+        }
+        let points = std::mem::take(&mut self.points);
+        let too_long = self.too_long;
+        self.reset_tracking();
+        (points, too_long)
+    }
+
+    pub fn points_len(&self) -> usize {
+        self.points.len()
+    }
+
+    pub fn acc_len(&self) -> f32 {
+        self.acc_len
+    }
+
+    pub fn too_long(&self) -> bool {
+        self.too_long
+    }
 }
 
 #[cfg(windows)]
@@ -565,7 +728,7 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                     x: data.pt.x as f32,
                     y: data.pt.y as f32,
                 };
-                let (trigger_button, min_point_distance, preview_enabled) = state
+                let (trigger_button, min_point_distance, max_track_len, preview_enabled) = state
                     .runtime
                     .snapshots
                     .read()
@@ -574,10 +737,11 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                         (
                             TriggerButton::from_setting(&snap.settings.trigger_button),
                             snap.settings.min_point_distance.max(0.0),
+                            snap.settings.max_track_len.max(0.0),
                             snap.settings.preview_enabled,
                         )
                     })
-                    .unwrap_or((None, 0.0, false));
+                    .unwrap_or((None, 0.0, 0.0, false));
                 let min_point_distance_sq = min_point_distance * min_point_distance;
 
                 let mut tracking = match state.tracking.lock() {
@@ -595,10 +759,7 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                 if matches!(event, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN)
                     && event_button == trigger_button
                 {
-                    tracking.active_button = event_button;
-                    tracking.points.clear();
-                    tracking.last_point = Some(point);
-                    tracking.points.push(point);
+                    tracking.begin_stroke(event_button, point);
                     if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
                         overlay.begin_stroke(point);
                         overlay.update_preview(None, None);
@@ -607,21 +768,8 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                 }
 
                 if event == WM_MOUSEMOVE && tracking.active_button.is_some() {
-                    let should_add_point = match tracking.last_point {
-                        None => true,
-                        Some(last_point) => {
-                            if min_point_distance_sq <= 0.0 {
-                                last_point != point
-                            } else {
-                                let dx = point.x - last_point.x;
-                                let dy = point.y - last_point.y;
-                                (dx * dx + dy * dy) >= min_point_distance_sq
-                            }
-                        }
-                    };
-                    if should_add_point {
-                        tracking.points.push(point);
-                        tracking.last_point = Some(point);
+                    let stored = tracking.handle_move(point, min_point_distance_sq, max_track_len);
+                    if stored {
                         if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
                             overlay.push_point(point);
                             if preview_enabled {
@@ -638,10 +786,8 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                 if matches!(event, WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP)
                     && tracking.active_button == event_button
                 {
-                    tracking.points.push(point);
-                    let points = std::mem::take(&mut tracking.points);
-                    tracking.active_button.take();
-                    tracking.last_point = None;
+                    let (points, too_long) =
+                        tracking.finish_stroke(point, min_point_distance_sq, max_track_len);
                     drop(tracking);
 
                     if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
@@ -649,7 +795,7 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                         overlay.update_preview(None, None);
                     }
 
-                    let outcome = state.runtime.evaluate_track(&points);
+                    let outcome = state.runtime.evaluate_track_with_limit(&points, too_long);
                     if outcome.matched {
                         return LRESULT(1);
                     }
@@ -764,6 +910,18 @@ impl MockMouseHookBackend {
             return TrackOutcome::no_match();
         };
         let outcome = runtime.evaluate_track(&points);
+        if outcome.passthrough_click {
+            self.passthrough_clicks.fetch_add(1, Ordering::SeqCst);
+        }
+        outcome
+    }
+
+    pub fn simulate_track_with_limit(&self, points: Vec<Point>, too_long: bool) -> TrackOutcome {
+        let runtime = self.runtime.lock().ok().and_then(|guard| guard.clone());
+        let Some(runtime) = runtime else {
+            return TrackOutcome::no_match();
+        };
+        let outcome = runtime.evaluate_track_with_limit(&points, too_long);
         if outcome.passthrough_click {
             self.passthrough_clicks.fetch_add(1, Ordering::SeqCst);
         }

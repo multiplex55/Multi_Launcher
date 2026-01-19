@@ -3,8 +3,8 @@ mod service;
 
 pub use overlay::{mouse_gesture_overlay, StrokeOverlay};
 pub use service::{
-    mouse_gesture_service, MockMouseHookBackend, MouseGestureEventSink, MouseGestureService,
-    MouseHookBackend, TrackOutcome,
+    mouse_gesture_service, HookTrackingState, MockMouseHookBackend, MouseGestureEventSink,
+    MouseGestureService, MouseHookBackend, TrackOutcome, MAX_TRACK_POINTS,
 };
 
 #[cfg(windows)]
