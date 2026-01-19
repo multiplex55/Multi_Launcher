@@ -1564,6 +1564,11 @@ mod tests {
             Arc::new(TestBackend),
             Arc::new(TestEventSink),
         );
+        let settings = MouseGesturePluginSettings {
+            min_point_distance: 0.0,
+            ..MouseGesturePluginSettings::default()
+        };
+        service.update_settings(settings);
         let runtime = MouseGestureRuntime {
             snapshots: Arc::clone(&service.snapshots),
             event_sink: Arc::new(TestEventSink),
