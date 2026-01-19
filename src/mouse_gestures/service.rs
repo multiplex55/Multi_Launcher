@@ -1028,7 +1028,8 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                         TriggerButton::Right => VK_RBUTTON,
                         TriggerButton::Middle => VK_MBUTTON,
                     };
-                    unsafe { (GetAsyncKeyState(virtual_key.0 as i32) & 0x8000) != 0 }
+                    const KEY_PRESSED_MASK: i16 = 0x8000u16 as i16;
+                    unsafe { (GetAsyncKeyState(virtual_key.0 as i32) & KEY_PRESSED_MASK) != 0 }
                 }
 
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1205,12 +1206,12 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                     break;
                 }
                 unsafe {
-                    TranslateMessage(&msg);
+                    let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
                 if stop_flag.load(Ordering::SeqCst) {
                     unsafe {
-                        PostThreadMessageW(thread, WM_QUIT, WPARAM(0), LPARAM(0));
+                        let _ = PostThreadMessageW(thread, WM_QUIT, WPARAM(0), LPARAM(0));
                     }
                 }
             }
