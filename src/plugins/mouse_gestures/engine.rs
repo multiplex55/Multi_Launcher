@@ -75,6 +75,31 @@ pub struct PreprocessConfig {
     pub min_track_len: f32,
 }
 
+const DIRECTION_SAMPLE_COUNT: usize = 64;
+const DIRECTION_SMOOTHING_WINDOW: usize = 5;
+
+pub fn preprocess_points_for_directions(
+    points: &[Point],
+    settings: &crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings,
+) -> Vec<Point> {
+    if points.len() < 2 || (!settings.sampling_enabled && !settings.smoothing_enabled) {
+        return points.to_vec();
+    }
+
+    let mut processed = if settings.sampling_enabled {
+        let sample_count = DIRECTION_SAMPLE_COUNT.min(points.len().max(2));
+        resample_points(points, sample_count)
+    } else {
+        points.to_vec()
+    };
+
+    if settings.smoothing_enabled {
+        processed = smooth_points(&processed, DIRECTION_SMOOTHING_WINDOW);
+    }
+
+    processed
+}
+
 pub fn direction_sequence(points: &[Point], min_segment_len: f32) -> Vec<GestureDirection> {
     let mut dirs = Vec::new();
     for pair in points.windows(2) {

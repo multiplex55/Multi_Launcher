@@ -4,7 +4,8 @@ use crate::plugins::mouse_gestures::db::{
     select_binding, select_profile, ForegroundWindowInfo, MouseGestureDb,
 };
 use crate::plugins::mouse_gestures::engine::{
-    direction_sequence, direction_similarity, parse_gesture, track_length, GestureDirection, Point,
+    direction_sequence, direction_similarity, parse_gesture, preprocess_points_for_directions,
+    track_length, GestureDirection, Point,
 };
 use crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
 use once_cell::sync::OnceCell;
@@ -97,12 +98,13 @@ impl MouseGestureRuntime {
         if snapshots.settings.max_track_len > 0.0 && length > snapshots.settings.max_track_len {
             return None;
         }
-        let track_dirs = direction_sequence(points, snapshots.settings.min_point_distance);
+        let processed_points = preprocess_points_for_directions(points, &snapshots.settings);
+        let track_dirs =
+            direction_sequence(&processed_points, snapshots.settings.min_point_distance);
         if track_dirs.is_empty() {
             return None;
         }
-        let gesture_templates =
-            build_gesture_templates(&snapshots.db, snapshots.settings.min_point_distance);
+        let gesture_templates = build_gesture_templates(&snapshots.db, &snapshots.settings);
         let mut distances = HashMap::new();
         for (gesture_id, template) in &gesture_templates {
             let similarity = direction_similarity(&track_dirs, &template.directions);
@@ -116,7 +118,8 @@ impl MouseGestureRuntime {
         }
         let window_info = current_foreground_window();
         let profile = select_profile(&snapshots.db, &window_info)?;
-        let binding = select_binding(profile, &distances, 1.0)?;
+        let binding =
+            select_binding(profile, &distances, snapshots.settings.max_distance)?;
         let similarity = 1.0 - binding.distance;
         let label = if binding.binding.label.trim().is_empty() {
             binding.binding.action.clone()
@@ -159,12 +162,13 @@ impl MouseGestureRuntime {
         points: &[Point],
         snapshots: &MouseGestureSnapshots,
     ) -> Option<String> {
-        let track_dirs = direction_sequence(points, snapshots.settings.min_point_distance);
+        let processed_points = preprocess_points_for_directions(points, &snapshots.settings);
+        let track_dirs =
+            direction_sequence(&processed_points, snapshots.settings.min_point_distance);
         if track_dirs.is_empty() {
             return Some("No match".to_string());
         }
-        let gesture_templates =
-            build_gesture_templates(&snapshots.db, snapshots.settings.min_point_distance);
+        let gesture_templates = build_gesture_templates(&snapshots.db, &snapshots.settings);
         if gesture_templates.is_empty() {
             return Some("No match".to_string());
         }
@@ -268,7 +272,9 @@ impl MouseGestureRuntime {
             };
         }
 
-        let track_dirs = direction_sequence(points, snapshots.settings.min_point_distance);
+        let processed_points = preprocess_points_for_directions(points, &snapshots.settings);
+        let track_dirs =
+            direction_sequence(&processed_points, snapshots.settings.min_point_distance);
         if track_dirs.is_empty() {
             return if passthrough_on_no_match {
                 TrackOutcome::passthrough()
@@ -277,8 +283,7 @@ impl MouseGestureRuntime {
             };
         }
 
-        let gesture_templates =
-            build_gesture_templates(&snapshots.db, snapshots.settings.min_point_distance);
+        let gesture_templates = build_gesture_templates(&snapshots.db, &snapshots.settings);
         if gesture_templates.is_empty() {
             return if passthrough_on_no_match {
                 TrackOutcome::passthrough()
@@ -312,7 +317,9 @@ impl MouseGestureRuntime {
                 TrackOutcome::no_match()
             };
         };
-        let Some(binding_match) = select_binding(profile, &distances, 1.0) else {
+        let Some(binding_match) =
+            select_binding(profile, &distances, snapshots.settings.max_distance)
+        else {
             return if passthrough_on_no_match {
                 TrackOutcome::passthrough()
             } else {
@@ -390,7 +397,7 @@ struct GestureTemplate {
 
 fn build_gesture_templates(
     db: &MouseGestureDb,
-    min_point_distance: f32,
+    settings: &MouseGesturePluginSettings,
 ) -> HashMap<String, GestureTemplate> {
     let mut templates = HashMap::new();
     for (gesture_id, serialized) in &db.bindings {
@@ -398,7 +405,8 @@ fn build_gesture_templates(
             Ok(def) => def,
             Err(_) => continue,
         };
-        let directions = direction_sequence(&parsed.points, min_point_distance);
+        let processed_points = preprocess_points_for_directions(&parsed.points, settings);
+        let directions = direction_sequence(&processed_points, settings.min_point_distance);
         if directions.is_empty() {
             continue;
         }
@@ -696,8 +704,10 @@ fn preview_worker_loop(
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default();
+        let processed_points =
+            preprocess_points_for_directions(&request.points, &snapshots.settings);
         let min_point_distance = snapshots.settings.min_point_distance.max(0.0);
-        let directions = direction_sequence(&request.points, min_point_distance);
+        let directions = direction_sequence(&processed_points, min_point_distance);
         let sequence_hash = hash_direction_sequence(&directions);
 
         if !request.force {
