@@ -1269,6 +1269,7 @@ mod tests {
         PREVIEW_SIMILARITY_LABEL_MAX_LEN, PREVIEW_SIMILARITY_MAX_LEN,
         PREVIEW_SIMILARITY_TOP_N,
     };
+    use crate::mouse_gestures::MouseHookBackend;
     use crate::gui::MouseGestureEvent;
     use crate::plugins::mouse_gestures::db::{
         ForegroundWindowInfo, MouseGestureBinding, MouseGestureDb, MouseGestureProfile,
