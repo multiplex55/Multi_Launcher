@@ -35,6 +35,7 @@ pub struct MouseGesturePluginSettings {
     pub multi_dir_match_threshold: f32,
     #[serde(default)]
     pub max_track_len: f32,
+    /// 0 = unlimited.
     #[serde(default = "default_max_gesture_duration_ms")]
     pub max_gesture_duration_ms: u64,
     #[serde(default = "default_max_sample_count")]
@@ -126,7 +127,7 @@ fn default_multi_dir_match_threshold() -> f32 {
 }
 
 fn default_max_gesture_duration_ms() -> u64 {
-    2_000
+    0
 }
 
 fn default_max_sample_count() -> usize {

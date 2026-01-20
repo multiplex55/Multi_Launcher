@@ -158,6 +158,16 @@ impl MouseGesturesSettingsDialog {
                         .add(egui::DragValue::new(&mut self.settings.max_track_len).speed(1.0))
                         .changed();
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Max gesture duration (ms, 0 = unlimited)");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.settings.max_gesture_duration_ms)
+                                .speed(50.0)
+                                .clamp_range(0..=60_000),
+                        )
+                        .changed();
+                });
                 changed |= ui
                     .checkbox(
                         &mut self.settings.passthrough_on_no_match,
