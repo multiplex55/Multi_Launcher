@@ -133,10 +133,20 @@ impl MouseGesturesSettingsDialog {
                         .changed();
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Match threshold");
+                    ui.label("Single direction match threshold");
                     changed |= ui
                         .add(
-                            egui::DragValue::new(&mut self.settings.match_threshold)
+                            egui::DragValue::new(&mut self.settings.single_dir_match_threshold)
+                                .speed(0.01)
+                                .clamp_range(0.0..=1.0),
+                        )
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Multi direction match threshold");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.settings.multi_dir_match_threshold)
                                 .speed(0.01)
                                 .clamp_range(0.0..=1.0),
                         )

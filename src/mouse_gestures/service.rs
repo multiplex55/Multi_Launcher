@@ -203,7 +203,11 @@ impl MouseGestureRuntime {
         let mut distances = HashMap::new();
         for (gesture_id, template) in gesture_templates {
             let similarity = direction_similarity(&track_dirs, &template.directions);
-            if similarity < snapshots.settings.match_threshold {
+            let threshold =
+                snapshots
+                    .settings
+                    .match_threshold_for_template_len(template.directions.len());
+            if similarity < threshold {
                 continue;
             }
             distances.insert(gesture_id.clone(), 1.0 - similarity);
@@ -275,6 +279,13 @@ impl MouseGestureRuntime {
                 continue;
             };
             let similarity = direction_similarity(&track_dirs, &template.directions);
+            let threshold =
+                snapshots
+                    .settings
+                    .match_threshold_for_template_len(template.directions.len());
+            if similarity < threshold {
+                continue;
+            }
             if !similarity.is_finite() {
                 continue;
             }
@@ -403,7 +414,11 @@ impl MouseGestureRuntime {
         let mut distances = HashMap::new();
         for (gesture_id, template) in gesture_templates {
             let similarity = direction_similarity(&track_dirs, &template.directions);
-            if similarity < snapshots.settings.match_threshold {
+            let threshold =
+                snapshots
+                    .settings
+                    .match_threshold_for_template_len(template.directions.len());
+            if similarity < threshold {
                 continue;
             }
             let distance = 1.0 - similarity;
@@ -1850,6 +1865,111 @@ mod tests {
             rules: Vec::new(),
             bindings,
         }
+    }
+
+    #[test]
+    fn match_thresholds_prefer_multi_template_when_single_is_stricter() {
+        let mut db = MouseGestureDb::default();
+        db.bindings.insert(
+            "single".into(),
+            make_gesture(&[(0.0, 0.0), (0.0, -20.0)]),
+        );
+        db.bindings.insert(
+            "multi".into(),
+            make_gesture(&[(0.0, 0.0), (0.0, -20.0), (20.0, -20.0)]),
+        );
+        db.profiles = vec![test_profile(vec![
+            MouseGestureBinding {
+                gesture_id: "single".into(),
+                label: "Single".into(),
+                action: "single_action".into(),
+                args: None,
+                priority: 0,
+                enabled: true,
+            },
+            MouseGestureBinding {
+                gesture_id: "multi".into(),
+                label: "Multi".into(),
+                action: "multi_action".into(),
+                args: None,
+                priority: 0,
+                enabled: true,
+            },
+        ])];
+        let settings = MouseGesturePluginSettings {
+            min_track_len: 0.0,
+            segment_threshold_px: 5.0,
+            direction_tolerance_deg: 0.0,
+            single_dir_match_threshold: 0.9,
+            multi_dir_match_threshold: 0.8,
+            sampling_enabled: false,
+            smoothing_enabled: false,
+            ..MouseGesturePluginSettings::default()
+        };
+        let runtime = make_runtime(db, settings);
+        let points = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 0.0, y: -20.0 },
+            Point { x: 20.0, y: -20.0 },
+        ];
+
+        let (label, _similarity) = runtime
+            .best_match(&points)
+            .expect("expected multi match");
+
+        assert_eq!(label, "Multi");
+    }
+
+    #[test]
+    fn match_thresholds_prefer_single_template_when_multi_is_stricter() {
+        let mut db = MouseGestureDb::default();
+        db.bindings.insert(
+            "single".into(),
+            make_gesture(&[(0.0, 0.0), (0.0, -20.0)]),
+        );
+        db.bindings.insert(
+            "multi".into(),
+            make_gesture(&[(0.0, 0.0), (0.0, -20.0), (20.0, -20.0)]),
+        );
+        db.profiles = vec![test_profile(vec![
+            MouseGestureBinding {
+                gesture_id: "single".into(),
+                label: "Single".into(),
+                action: "single_action".into(),
+                args: None,
+                priority: 0,
+                enabled: true,
+            },
+            MouseGestureBinding {
+                gesture_id: "multi".into(),
+                label: "Multi".into(),
+                action: "multi_action".into(),
+                args: None,
+                priority: 0,
+                enabled: true,
+            },
+        ])];
+        let settings = MouseGesturePluginSettings {
+            min_track_len: 0.0,
+            segment_threshold_px: 5.0,
+            direction_tolerance_deg: 0.0,
+            single_dir_match_threshold: 0.8,
+            multi_dir_match_threshold: 0.9,
+            sampling_enabled: false,
+            smoothing_enabled: false,
+            ..MouseGesturePluginSettings::default()
+        };
+        let runtime = make_runtime(db, settings);
+        let points = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 0.0, y: -20.0 },
+        ];
+
+        let (label, _similarity) = runtime
+            .best_match(&points)
+            .expect("expected single match");
+
+        assert_eq!(label, "Single");
     }
 
     #[test]

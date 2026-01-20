@@ -29,8 +29,10 @@ pub struct MouseGesturePluginSettings {
     #[serde(default)]
     pub min_point_distance: f32,
     pub max_distance: f32,
-    #[serde(default = "default_match_threshold")]
-    pub match_threshold: f32,
+    #[serde(default = "default_single_dir_match_threshold")]
+    pub single_dir_match_threshold: f32,
+    #[serde(default = "default_multi_dir_match_threshold")]
+    pub multi_dir_match_threshold: f32,
     #[serde(default)]
     pub max_track_len: f32,
     #[serde(default = "default_max_gesture_duration_ms")]
@@ -71,7 +73,8 @@ impl Default for MouseGesturePluginSettings {
             min_track_len: 40.0,
             min_point_distance: 6.0,
             max_distance: 24.0,
-            match_threshold: default_match_threshold(),
+            single_dir_match_threshold: default_single_dir_match_threshold(),
+            multi_dir_match_threshold: default_multi_dir_match_threshold(),
             max_track_len: 0.0,
             max_gesture_duration_ms: default_max_gesture_duration_ms(),
             max_sample_count: default_max_sample_count(),
@@ -97,9 +100,21 @@ impl MouseGesturePluginSettings {
     pub fn sample_interval_ms(&self) -> u64 {
         clamp_sample_interval_ms(self.sample_interval_ms)
     }
+
+    pub fn match_threshold_for_template_len(&self, template_len: usize) -> f32 {
+        if template_len <= 1 {
+            self.single_dir_match_threshold
+        } else {
+            self.multi_dir_match_threshold
+        }
+    }
 }
 
-fn default_match_threshold() -> f32 {
+fn default_single_dir_match_threshold() -> f32 {
+    0.7
+}
+
+fn default_multi_dir_match_threshold() -> f32 {
     0.7
 }
 
