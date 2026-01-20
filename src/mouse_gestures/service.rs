@@ -976,6 +976,7 @@ pub struct WindowsMouseHookBackend {
 }
 
 const MIN_DECIMATION_DISTANCE_SQ: f32 = 4.0;
+const VISUAL_POINT_DISTANCE_SQ: f32 = 4.0;
 pub const MAX_TRACK_POINTS: usize = 4096;
 
 struct HookDiagnosticsSnapshot {
@@ -1069,6 +1070,8 @@ pub struct HookTrackingState {
     points: Vec<Point>,
     last_point: Option<Point>,
     last_stored_point: Option<Point>,
+    last_visual_point: Option<Point>,
+    visual_points: usize,
     trigger_started_at: Option<Instant>,
     trigger_start_point: Option<Point>,
     started_at: Instant,
@@ -1152,6 +1155,7 @@ fn cached_preview_text(preview_text: &Arc<Mutex<Option<String>>>) -> Option<Stri
 #[derive(Clone, Copy)]
 struct SamplerConfig {
     min_point_distance_sq: f32,
+    visual_point_distance_sq: f32,
     max_track_len: f32,
     max_gesture_duration_ms: u64,
     max_sample_count: usize,
@@ -1272,6 +1276,7 @@ fn sampler_worker_loop(
                     }
                     let now = Instant::now();
                     let mut stored = None;
+                    let mut overlay_point = None;
                     let mut should_cancel_tracking = false;
                     let mut timed_out = false;
                     if let Ok(mut guard) = tracking.lock() {
@@ -1290,13 +1295,22 @@ fn sampler_worker_loop(
                             // Fall through to cancellation outside the tracking lock.
                         } else {
                             let point = cursor_provider();
-                            if guard.sample_point(
+                            let visual_stored =
+                                guard.record_visual_point(point, config.visual_point_distance_sq);
+                            let recognition_stored = guard.sample_point(
                                 point,
                                 config.min_point_distance_sq,
                                 config.max_track_len,
                                 config.max_sample_count,
-                            ) {
+                            );
+                            if recognition_stored && !visual_stored {
+                                guard.force_visual_point(point);
+                            }
+                            if recognition_stored {
                                 stored = Some((point, guard.points.clone()));
+                            }
+                            if visual_stored || recognition_stored {
+                                overlay_point = Some(point);
                             }
                         }
                     }
@@ -1310,6 +1324,11 @@ fn sampler_worker_loop(
                         );
                         break;
                     }
+                    if let Some(point) = overlay_point {
+                        if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
+                            overlay.push_point(point);
+                        }
+                    }
                     if let Some((point, points)) = stored {
                         if config.preview_enabled && !config.preview_on_end_only {
                             let _ = preview_sender.try_send(PreviewRequest {
@@ -1318,7 +1337,6 @@ fn sampler_worker_loop(
                             });
                         }
                         if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
-                            overlay.push_point(point);
                             if config.preview_enabled
                                 && !config.preview_on_end_only
                                 && should_compute_preview(
@@ -1396,6 +1414,8 @@ impl Default for HookTrackingState {
             points: Vec::new(),
             last_point: None,
             last_stored_point: None,
+            last_visual_point: None,
+            visual_points: 0,
             trigger_started_at: None,
             trigger_start_point: None,
             started_at: Instant::now(),
@@ -1418,6 +1438,8 @@ impl HookTrackingState {
         self.points.clear();
         self.last_point = None;
         self.last_stored_point = None;
+        self.last_visual_point = None;
+        self.visual_points = 0;
         self.trigger_started_at = None;
         self.trigger_start_point = None;
         self.acc_len = 0.0;
@@ -1457,6 +1479,31 @@ impl HookTrackingState {
         }
     }
 
+    fn should_store_visual_point(&self, point: Point, min_visual_distance_sq: f32) -> bool {
+        match self.last_visual_point {
+            None => true,
+            Some(last_visual_point) => {
+                let dx = point.x - last_visual_point.x;
+                let dy = point.y - last_visual_point.y;
+                (dx * dx + dy * dy) >= min_visual_distance_sq
+            }
+        }
+    }
+
+    fn record_visual_point(&mut self, point: Point, min_visual_distance_sq: f32) -> bool {
+        if !self.should_store_visual_point(point, min_visual_distance_sq) {
+            return false;
+        }
+        self.last_visual_point = Some(point);
+        self.visual_points = self.visual_points.saturating_add(1);
+        true
+    }
+
+    fn force_visual_point(&mut self, point: Point) {
+        self.last_visual_point = Some(point);
+        self.visual_points = self.visual_points.saturating_add(1);
+    }
+
     fn max_allowed_points(max_sample_count: usize) -> usize {
         if max_sample_count == 0 {
             MAX_TRACK_POINTS
@@ -1493,9 +1540,11 @@ impl HookTrackingState {
         self.active_button = button;
         self.last_point = Some(point);
         self.last_stored_point = Some(point);
+        self.last_visual_point = Some(point);
         self.started_at = Instant::now();
         self.points.push(point);
         self.stored_points = 1;
+        self.visual_points = 1;
     }
 
     pub fn begin_track(&mut self, point: Point) {
@@ -1560,6 +1609,11 @@ impl HookTrackingState {
 
     pub fn points_len(&self) -> usize {
         self.points.len()
+    }
+
+    #[cfg(test)]
+    fn visual_points_len(&self) -> usize {
+        self.visual_points
     }
 
     pub fn acc_len(&self) -> f32 {
@@ -1758,6 +1812,7 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                             if !state.tracking_active.load(Ordering::SeqCst) {
                                 let config = SamplerConfig {
                                     min_point_distance_sq,
+                                    visual_point_distance_sq: VISUAL_POINT_DISTANCE_SQ,
                                     max_track_len,
                                     max_gesture_duration_ms,
                                     max_sample_count,
@@ -2009,7 +2064,7 @@ mod tests {
         MouseGestureService, MouseGestureSnapshots, PreviewRequest, ProfileCache, SamplerCommand,
         SamplerConfig, TrackOutcome, TriggerButton,
         PREVIEW_SIMILARITY_LABEL_MAX_LEN, PREVIEW_SIMILARITY_MAX_LEN,
-        PREVIEW_SIMILARITY_TOP_N, track_directions_with_override,
+        PREVIEW_SIMILARITY_TOP_N, track_directions_with_override, VISUAL_POINT_DISTANCE_SQ,
     };
     use crate::gui::MouseGestureEvent;
     use crate::mouse_gestures::MouseHookBackend;
@@ -2244,6 +2299,7 @@ mod tests {
 
         let config = SamplerConfig {
             min_point_distance_sq: 0.0,
+            visual_point_distance_sq: VISUAL_POINT_DISTANCE_SQ,
             max_track_len: 0.0,
             max_gesture_duration_ms: 0,
             max_sample_count: 0,
@@ -2323,6 +2379,7 @@ mod tests {
 
         let config = SamplerConfig {
             min_point_distance_sq: 0.0,
+            visual_point_distance_sq: VISUAL_POINT_DISTANCE_SQ,
             max_track_len: 0.0,
             max_gesture_duration_ms: 0,
             max_sample_count: 0,
@@ -2419,6 +2476,7 @@ mod tests {
 
         let config = SamplerConfig {
             min_point_distance_sq: 0.0,
+            visual_point_distance_sq: VISUAL_POINT_DISTANCE_SQ,
             max_track_len: 0.0,
             max_gesture_duration_ms: 20,
             max_sample_count: 0,
@@ -2571,6 +2629,28 @@ mod tests {
         assert_eq!(points.len(), max_sample_count);
         assert!(!too_long);
         assert_eq!(tracking.points_len(), 0);
+    }
+
+    #[test]
+    fn visual_sampling_tracks_small_movements() {
+        let mut tracking = HookTrackingState::default();
+        tracking.begin_track(Point { x: 0.0, y: 0.0 });
+        let min_point_distance_sq = 25.0;
+
+        for step in 1..=3 {
+            let point = Point {
+                x: (step * 2) as f32,
+                y: 0.0,
+            };
+            let visual_stored = tracking.record_visual_point(point, VISUAL_POINT_DISTANCE_SQ);
+            let recognition_stored = tracking.sample_point(point, min_point_distance_sq, 0.0, 0);
+            if recognition_stored && !visual_stored {
+                tracking.force_visual_point(point);
+            }
+        }
+
+        assert_eq!(tracking.points_len(), 1);
+        assert_eq!(tracking.visual_points_len(), 4);
     }
 
     #[test]
