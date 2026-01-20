@@ -20,6 +20,7 @@ pub struct MouseGesturesGestureDialog {
     gesture_name: String,
     gesture_text: String,
     points: Vec<Point>,
+    recording: bool,
     status: Option<String>,
 }
 
@@ -157,16 +158,25 @@ impl MouseGesturesGestureDialog {
                 ui.label("Draw gesture");
 
                 let canvas_size = egui::vec2(360.0, 200.0);
-                let (rect, response) = ui.allocate_exact_size(canvas_size, egui::Sense::drag());
+                let (rect, _response) = ui.allocate_exact_size(canvas_size, egui::Sense::hover());
                 let painter = ui.painter_at(rect);
                 painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
 
                 let trigger_button = pointer_button_from_setting(&settings.trigger_button);
-                if response.drag_started_by(trigger_button) {
+                let (pressed, down, released, pointer_pos) = ctx.input(|input| {
+                    (
+                        input.pointer.button_pressed(trigger_button),
+                        input.pointer.button_down(trigger_button),
+                        input.pointer.button_released(trigger_button),
+                        input.pointer.interact_pos(),
+                    )
+                });
+                if pressed && pointer_pos.map(|pos| rect.contains(pos)).unwrap_or(false) {
                     self.points.clear();
+                    self.recording = true;
                 }
-                if response.dragged_by(trigger_button) {
-                    if let Some(pos) = response.interact_pointer_pos() {
+                if self.recording && down {
+                    if let Some(pos) = pointer_pos.filter(|pos| rect.contains(*pos)) {
                         let point = Point {
                             x: pos.x - rect.left(),
                             y: pos.y - rect.top(),
@@ -184,7 +194,8 @@ impl MouseGesturesGestureDialog {
                         }
                     }
                 }
-                if response.drag_stopped_by(trigger_button) {
+                if self.recording && (released || !down) {
+                    self.recording = false;
                     self.update_serialized();
                 }
 
