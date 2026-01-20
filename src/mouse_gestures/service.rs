@@ -489,10 +489,13 @@ fn should_compute_preview(last: Instant, now: Instant, throttle_ms: u64) -> bool
     now.duration_since(last) >= Duration::from_millis(throttle_ms)
 }
 
-fn should_cancel(started_at: Instant, now: Instant, max_duration_ms: u64) -> bool {
+fn should_cancel(started_at: Option<Instant>, now: Instant, max_duration_ms: u64) -> bool {
     if max_duration_ms == 0 {
         return false;
     }
+    let Some(started_at) = started_at else {
+        return false;
+    };
     now.checked_duration_since(started_at)
         .is_some_and(|duration| duration >= Duration::from_millis(max_duration_ms))
 }
@@ -976,6 +979,7 @@ pub struct WindowsMouseHookBackend {
 }
 
 const MIN_DECIMATION_DISTANCE_SQ: f32 = 4.0;
+const TRACKING_START_DISTANCE_SQ: f32 = 9.0;
 const VISUAL_POINT_DISTANCE_SQ: f32 = 4.0;
 pub const MAX_TRACK_POINTS: usize = 4096;
 
@@ -1074,7 +1078,7 @@ pub struct HookTrackingState {
     visual_points: usize,
     trigger_started_at: Option<Instant>,
     trigger_start_point: Option<Point>,
-    started_at: Instant,
+    tracking_started_at: Option<Instant>,
     acc_len: f32,
     too_long: bool,
     stored_points: usize,
@@ -1275,6 +1279,7 @@ fn sampler_worker_loop(
                         break;
                     }
                     let now = Instant::now();
+                    let point = cursor_provider();
                     let mut stored = None;
                     let mut overlay_point = None;
                     let mut should_cancel_tracking = false;
@@ -1283,7 +1288,16 @@ fn sampler_worker_loop(
                         if guard.active_button.is_none() {
                             break;
                         }
-                        if should_cancel(guard.started_at, now, config.max_gesture_duration_ms) {
+                        guard.update_tracking_started(
+                            point,
+                            TRACKING_START_DISTANCE_SQ,
+                            now,
+                        );
+                        if should_cancel(
+                            guard.tracking_started_at,
+                            now,
+                            config.max_gesture_duration_ms,
+                        ) {
                             timed_out = true;
                             should_cancel_tracking = true;
                         } else if let Some(button) = guard.active_button {
@@ -1294,7 +1308,6 @@ fn sampler_worker_loop(
                         if should_cancel_tracking {
                             // Fall through to cancellation outside the tracking lock.
                         } else {
-                            let point = cursor_provider();
                             let visual_stored =
                                 guard.record_visual_point(point, config.visual_point_distance_sq);
                             let recognition_stored = guard.sample_point(
@@ -1418,7 +1431,7 @@ impl Default for HookTrackingState {
             visual_points: 0,
             trigger_started_at: None,
             trigger_start_point: None,
-            started_at: Instant::now(),
+            tracking_started_at: None,
             acc_len: 0.0,
             too_long: false,
             stored_points: 0,
@@ -1442,6 +1455,7 @@ impl HookTrackingState {
         self.visual_points = 0;
         self.trigger_started_at = None;
         self.trigger_start_point = None;
+        self.tracking_started_at = None;
         self.acc_len = 0.0;
         self.too_long = false;
         self.stored_points = 0;
@@ -1451,6 +1465,21 @@ impl HookTrackingState {
     fn record_trigger_start(&mut self, point: Point) {
         self.trigger_started_at = Some(Instant::now());
         self.trigger_start_point = Some(point);
+    }
+
+    fn update_tracking_started(&mut self, point: Point, threshold_sq: f32, now: Instant) {
+        if self.tracking_started_at.is_some() {
+            return;
+        }
+        let start_point = self.trigger_start_point.or(self.last_point);
+        let Some(start_point) = start_point else {
+            return;
+        };
+        let dx = point.x - start_point.x;
+        let dy = point.y - start_point.y;
+        if (dx * dx + dy * dy) >= threshold_sq {
+            self.tracking_started_at = Some(now);
+        }
     }
 
     fn cancel_tracking(&mut self) -> TrackOutcome {
@@ -1541,7 +1570,7 @@ impl HookTrackingState {
         self.last_point = Some(point);
         self.last_stored_point = Some(point);
         self.last_visual_point = Some(point);
-        self.started_at = Instant::now();
+        self.trigger_start_point = Some(point);
         self.points.push(point);
         self.stored_points = 1;
         self.visual_points = 1;
@@ -2557,7 +2586,10 @@ mod tests {
 
     #[test]
     fn tracking_max_duration_cancels() {
-        let settings = MouseGesturePluginSettings::default();
+        let settings = MouseGesturePluginSettings {
+            max_gesture_duration_ms: 10,
+            ..MouseGesturePluginSettings::default()
+        };
         let started_at = Instant::now();
         let before_deadline =
             started_at + Duration::from_millis(settings.max_gesture_duration_ms - 1);
@@ -2565,16 +2597,47 @@ mod tests {
             started_at + Duration::from_millis(settings.max_gesture_duration_ms + 1);
 
         assert!(!should_cancel(
-            started_at,
+            Some(started_at),
             before_deadline,
             settings.max_gesture_duration_ms
         ));
         assert!(should_cancel(
-            started_at,
+            Some(started_at),
             after_deadline,
             settings.max_gesture_duration_ms
         ));
-        assert!(!should_cancel(started_at, after_deadline, 0));
+        assert!(!should_cancel(Some(started_at), after_deadline, 0));
+        assert!(!should_cancel(None, after_deadline, settings.max_gesture_duration_ms));
+    }
+
+    #[test]
+    fn tracking_duration_starts_on_first_move() {
+        let mut tracking = HookTrackingState::default();
+        tracking.begin_track(Point { x: 0.0, y: 0.0 });
+        let now = Instant::now();
+
+        tracking.update_tracking_started(Point { x: 1.0, y: 1.0 }, TRACKING_START_DISTANCE_SQ, now);
+        assert!(tracking.tracking_started_at.is_none());
+
+        tracking.update_tracking_started(Point { x: 4.0, y: 0.0 }, TRACKING_START_DISTANCE_SQ, now);
+        assert!(tracking.tracking_started_at.is_some());
+    }
+
+    #[test]
+    fn tracking_no_timeout_without_movement() {
+        let settings = MouseGesturePluginSettings {
+            max_gesture_duration_ms: 5,
+            ..MouseGesturePluginSettings::default()
+        };
+        let mut tracking = HookTrackingState::default();
+        tracking.begin_track(Point { x: 0.0, y: 0.0 });
+        let after_deadline = Instant::now() + Duration::from_millis(10);
+
+        assert!(!should_cancel(
+            tracking.tracking_started_at,
+            after_deadline,
+            settings.max_gesture_duration_ms
+        ));
     }
 
     #[test]
@@ -2585,11 +2648,12 @@ mod tests {
         };
         let mut tracking = HookTrackingState::default();
         tracking.begin_track(Point { x: 0.0, y: 0.0 });
-        tracking.started_at = Instant::now()
-            - Duration::from_millis(settings.max_gesture_duration_ms + 1);
+        tracking.tracking_started_at = Some(
+            Instant::now() - Duration::from_millis(settings.max_gesture_duration_ms + 1),
+        );
 
         assert!(should_cancel(
-            tracking.started_at,
+            tracking.tracking_started_at,
             Instant::now(),
             settings.max_gesture_duration_ms
         ));
