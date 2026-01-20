@@ -2067,6 +2067,8 @@ mod tests {
         let settings = MouseGesturePluginSettings {
             segment_threshold_px: 0.0,
             direction_tolerance_deg: 0.0,
+            smoothing_enabled: false,
+            sampling_enabled: false,
             straightness_threshold: 0.9,
             straightness_min_displacement_px: 20.0,
             ..MouseGesturePluginSettings::default()
@@ -2087,6 +2089,8 @@ mod tests {
         let settings = MouseGesturePluginSettings {
             segment_threshold_px: 0.0,
             direction_tolerance_deg: 0.0,
+            smoothing_enabled: false,
+            sampling_enabled: false,
             straightness_threshold: 0.9,
             straightness_min_displacement_px: 20.0,
             ..MouseGesturePluginSettings::default()
