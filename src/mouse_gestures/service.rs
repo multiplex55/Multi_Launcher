@@ -980,6 +980,7 @@ pub struct WindowsMouseHookBackend {
 
 const MIN_DECIMATION_DISTANCE_SQ: f32 = 4.0;
 const TRACKING_START_DISTANCE_SQ: f32 = 9.0;
+const TRACKING_WATCHDOG_FALLBACK_MS: u64 = 10_000;
 const VISUAL_POINT_DISTANCE_SQ: f32 = 4.0;
 pub const MAX_TRACK_POINTS: usize = 4096;
 
@@ -1069,7 +1070,17 @@ impl HookDiagnostics {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrackingState {
+    Idle,
+    Armed,
+    Tracking,
+    Finalizing,
+    Canceled,
+}
+
 pub struct HookTrackingState {
+    tracking_state: TrackingState,
     active_button: Option<TriggerButton>,
     points: Vec<Point>,
     last_point: Option<Point>,
@@ -1196,13 +1207,7 @@ fn cancel_tracking_state(
             .tracking_canceled_timeout
             .fetch_add(1, Ordering::SeqCst);
     }
-    if let Ok(mut preview_guard) = preview_text.lock() {
-        *preview_guard = None;
-    }
-    if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
-        overlay.end_stroke();
-        overlay.update_preview(None, None);
-    }
+    clear_overlay_and_preview(preview_text);
     tracking_active.store(false, Ordering::SeqCst);
     outcome
 }
@@ -1257,13 +1262,22 @@ fn sampler_worker_loop(
                 trigger_button,
                 config,
             } => {
+                {
+                    let Ok(mut guard) = tracking.lock() else {
+                        continue;
+                    };
+                    if !matches!(
+                        guard.tracking_state,
+                        TrackingState::Idle | TrackingState::Armed
+                    ) {
+                        continue;
+                    }
+                    guard.begin_stroke(trigger_button, start_point);
+                }
                 diagnostics
                     .tracking_started
                     .fetch_add(1, Ordering::SeqCst);
                 stop_flag.store(false, Ordering::SeqCst);
-                if let Ok(mut guard) = tracking.lock() {
-                    guard.begin_stroke(trigger_button, start_point);
-                }
                 tracking_active.store(true, Ordering::SeqCst);
                 if let Ok(mut preview_guard) = preview_text.lock() {
                     *preview_guard = None;
@@ -1288,16 +1302,13 @@ fn sampler_worker_loop(
                         if guard.active_button.is_none() {
                             break;
                         }
-                        guard.update_tracking_started(
-                            point,
-                            TRACKING_START_DISTANCE_SQ,
-                            now,
-                        );
-                        if should_cancel(
-                            guard.tracking_started_at,
-                            now,
-                            config.max_gesture_duration_ms,
-                        ) {
+                        guard.update_tracking_started(point, TRACKING_START_DISTANCE_SQ, now);
+                        let watchdog_limit_ms = if config.max_gesture_duration_ms > 0 {
+                            config.max_gesture_duration_ms
+                        } else {
+                            TRACKING_WATCHDOG_FALLBACK_MS
+                        };
+                        if guard.should_watchdog_cancel(now, watchdog_limit_ms) {
                             timed_out = true;
                             should_cancel_tracking = true;
                         } else if let Some(button) = guard.active_button {
@@ -1423,6 +1434,7 @@ fn hook_action_for_event(
 impl Default for HookTrackingState {
     fn default() -> Self {
         Self {
+            tracking_state: TrackingState::Idle,
             active_button: None,
             points: Vec::new(),
             last_point: None,
@@ -1447,6 +1459,7 @@ impl HookTrackingState {
     }
 
     fn reset_tracking(&mut self) {
+        self.tracking_state = TrackingState::Idle;
         self.active_button = None;
         self.points.clear();
         self.last_point = None;
@@ -1462,7 +1475,23 @@ impl HookTrackingState {
         self.decimation_stride = 1;
     }
 
+    fn clear_tracking_buffers(&mut self) {
+        self.active_button = None;
+        self.points.clear();
+        self.last_point = None;
+        self.last_stored_point = None;
+        self.last_visual_point = None;
+        self.visual_points = 0;
+        self.tracking_started_at = None;
+        self.acc_len = 0.0;
+        self.too_long = false;
+        self.stored_points = 0;
+        self.decimation_stride = 1;
+    }
+
     fn record_trigger_start(&mut self, point: Point) {
+        self.clear_tracking_buffers();
+        self.tracking_state = TrackingState::Armed;
         self.trigger_started_at = Some(Instant::now());
         self.trigger_start_point = Some(point);
     }
@@ -1479,10 +1508,24 @@ impl HookTrackingState {
         let dy = point.y - start_point.y;
         if (dx * dx + dy * dy) >= threshold_sq {
             self.tracking_started_at = Some(now);
+            self.tracking_state = TrackingState::Tracking;
         }
     }
 
+    fn should_watchdog_cancel(&self, now: Instant, max_duration_ms: u64) -> bool {
+        if max_duration_ms == 0 {
+            return false;
+        }
+        let started_at = match self.tracking_state {
+            TrackingState::Armed => self.trigger_started_at,
+            TrackingState::Tracking => self.tracking_started_at.or(self.trigger_started_at),
+            _ => None,
+        };
+        should_cancel(started_at, now, max_duration_ms)
+    }
+
     fn cancel_tracking(&mut self) -> TrackOutcome {
+        self.tracking_state = TrackingState::Canceled;
         self.reset_tracking();
         TrackOutcome::no_match()
     }
@@ -1565,11 +1608,15 @@ impl HookTrackingState {
     }
 
     fn begin_stroke(&mut self, button: Option<TriggerButton>, point: Point) {
-        self.reset_tracking();
+        self.clear_tracking_buffers();
+        self.tracking_state = TrackingState::Armed;
         self.active_button = button;
         self.last_point = Some(point);
         self.last_stored_point = Some(point);
         self.last_visual_point = Some(point);
+        if self.trigger_started_at.is_none() {
+            self.trigger_started_at = Some(Instant::now());
+        }
         self.trigger_start_point = Some(point);
         self.points.push(point);
         self.stored_points = 1;
@@ -1623,6 +1670,7 @@ impl HookTrackingState {
         max_track_len: f32,
         max_sample_count: usize,
     ) -> (Vec<Point>, bool) {
+        self.tracking_state = TrackingState::Finalizing;
         self.update_length(point);
         if max_track_len > 0.0 && self.acc_len > max_track_len {
             self.too_long = true;
@@ -1651,6 +1699,17 @@ impl HookTrackingState {
 
     pub fn too_long(&self) -> bool {
         self.too_long
+    }
+}
+
+#[cfg(any(test, windows))]
+fn clear_overlay_and_preview(preview_text: &Arc<Mutex<Option<String>>>) {
+    if let Ok(mut preview_guard) = preview_text.lock() {
+        *preview_guard = None;
+    }
+    if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
+        overlay.end_stroke();
+        overlay.update_preview(None, None);
     }
 }
 
@@ -1838,7 +1897,18 @@ impl MouseHookBackend for WindowsMouseHookBackend {
 
                     match hook_action_for_event(event_kind, event_button, trigger_button) {
                         HookAction::Start => {
-                            if !state.tracking_active.load(Ordering::SeqCst) {
+                            let should_start = if let Ok(mut tracking) = state.tracking.try_lock()
+                            {
+                                if tracking.tracking_state == TrackingState::Idle {
+                                    tracking.record_trigger_start(point);
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                            if should_start {
                                 let config = SamplerConfig {
                                     min_point_distance_sq,
                                     visual_point_distance_sq: VISUAL_POINT_DISTANCE_SQ,
@@ -1856,9 +1926,6 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                                     trigger_button: event_button,
                                     config,
                                 });
-                                if let Ok(mut tracking) = state.tracking.try_lock() {
-                                    tracking.record_trigger_start(point);
-                                }
                             }
                             return LRESULT(1);
                         }
@@ -1867,7 +1934,9 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                             let Ok(mut tracking) = state.tracking.try_lock() else {
                                 return CallNextHookEx(None, code, wparam, lparam);
                             };
-                            if tracking.active_button != event_button {
+                            if tracking.tracking_state == TrackingState::Idle
+                                || tracking.active_button != event_button
+                            {
                                 return CallNextHookEx(None, code, wparam, lparam);
                             }
                             let (points, too_long) =
@@ -1889,10 +1958,7 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                                 });
                             }
 
-                            if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
-                                overlay.end_stroke();
-                                overlay.update_preview(None, None);
-                            }
+                            clear_overlay_and_preview(&state.preview_text);
 
                             let (outcome, should_inject) = finalize_hook_outcome(
                                 &state.runtime,
@@ -2089,9 +2155,10 @@ mod tests {
         hook_action_for_event, is_tap_track, preview_worker_loop, sampler_worker_loop,
         reset_template_build_counter, sequence_changed, should_cancel, should_compute_preview,
         template_build_count, truncate_with_ellipsis, HookAction, HookEventKind,
-        HookDiagnostics, HookTrackingState, MouseGestureEventSink, MouseGestureRuntime,
+        clear_overlay_and_preview, HookDiagnostics, HookTrackingState, MouseGestureEventSink,
+        MouseGestureRuntime,
         MouseGestureService, MouseGestureSnapshots, PreviewRequest, ProfileCache, SamplerCommand,
-        SamplerConfig, TrackOutcome, TriggerButton,
+        SamplerConfig, TrackOutcome, TrackingState, TriggerButton,
         PREVIEW_SIMILARITY_LABEL_MAX_LEN, PREVIEW_SIMILARITY_MAX_LEN,
         PREVIEW_SIMILARITY_TOP_N, track_directions_with_override, VISUAL_POINT_DISTANCE_SQ,
     };
@@ -2460,6 +2527,87 @@ mod tests {
     }
 
     #[test]
+    fn watchdog_cancels_when_trigger_up_missing() {
+        let runtime = make_runtime(
+            MouseGestureDb::default(),
+            MouseGesturePluginSettings::default(),
+        );
+        let (preview_sender, _preview_receiver) = mpsc::sync_channel(1);
+        let preview_text = Arc::new(Mutex::new(None));
+        let tracking = Arc::new(Mutex::new(HookTrackingState::default()));
+        let tracking_active = Arc::new(AtomicBool::new(false));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let diagnostics = Arc::new(HookDiagnostics::default());
+        if let Ok(mut guard) = tracking.lock() {
+            guard.attach_diagnostics(Arc::clone(&diagnostics));
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
+
+        let tracking_handle = Arc::clone(&tracking);
+        let tracking_active_handle = Arc::clone(&tracking_active);
+        let stop_flag_handle = Arc::clone(&stop_flag);
+        let preview_text_handle = Arc::clone(&preview_text);
+        let runtime_handle = runtime.clone();
+
+        let worker = std::thread::spawn(move || {
+            sampler_worker_loop(
+                runtime_handle,
+                receiver,
+                preview_sender,
+                preview_text_handle,
+                tracking_handle,
+                tracking_active_handle,
+                stop_flag_handle,
+                Arc::clone(&diagnostics),
+                || Point { x: 1.0, y: 1.0 },
+                |_| true,
+            );
+        });
+
+        let config = SamplerConfig {
+            min_point_distance_sq: 0.0,
+            visual_point_distance_sq: VISUAL_POINT_DISTANCE_SQ,
+            max_track_len: 0.0,
+            max_gesture_duration_ms: 20,
+            max_sample_count: 0,
+            preview_enabled: false,
+            preview_on_end_only: false,
+            preview_throttle_ms: crate::plugins::mouse_gestures::settings::PREVIEW_THROTTLE_MS,
+            sample_interval: Duration::from_millis(5),
+        };
+        sender
+            .send(SamplerCommand::Start {
+                start_point: Point { x: 0.0, y: 0.0 },
+                trigger_button: Some(TriggerButton::Right),
+                config,
+            })
+            .expect("send start command");
+
+        let start_deadline = Instant::now() + Duration::from_millis(200);
+        while !tracking_active.load(Ordering::SeqCst) {
+            if Instant::now() >= start_deadline {
+                panic!("sampler never reported active tracking");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let cancel_deadline = Instant::now() + Duration::from_millis(200);
+        while tracking_active.load(Ordering::SeqCst) {
+            if Instant::now() >= cancel_deadline {
+                panic!("sampler did not cancel on watchdog timeout");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let guard = tracking.lock().expect("lock tracking");
+        assert_eq!(guard.tracking_state, TrackingState::Idle);
+        drop(guard);
+
+        drop(sender);
+        worker.join().expect("sampler worker exits");
+    }
+
+    #[test]
     fn diagnostics_counters_increment_on_sample_and_timeout() {
         let runtime = make_runtime(
             MouseGestureDb::default(),
@@ -2731,6 +2879,7 @@ mod tests {
         assert!(!tracking.too_long());
         assert_eq!(tracking.active_button, None);
         assert_eq!(tracking.acc_len(), 0.0);
+        assert_eq!(tracking.tracking_state, TrackingState::Idle);
         assert_eq!(outcome.matched, TrackOutcome::no_match().matched);
         assert_eq!(
             outcome.passthrough_click,
@@ -2835,6 +2984,16 @@ mod tests {
         assert!(
             preview_text.lock().expect("lock preview text").is_none(),
             "preview text should remain empty when preview is disabled"
+        );
+    }
+
+    #[test]
+    fn stop_path_clears_preview_state() {
+        let preview_text = Arc::new(Mutex::new(Some("Preview".into())));
+        clear_overlay_and_preview(&preview_text);
+        assert!(
+            preview_text.lock().expect("lock preview text").is_none(),
+            "preview text should clear on stop cleanup"
         );
     }
 
