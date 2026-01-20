@@ -49,6 +49,8 @@ pub struct MouseGesturePluginSettings {
     pub straightness_threshold: f32,
     #[serde(default = "default_straightness_min_displacement_px")]
     pub straightness_min_displacement_px: f32,
+    #[serde(default = "default_tap_threshold_px")]
+    pub tap_threshold_px: f32,
     #[serde(default)]
     pub preview_enabled: bool,
     #[serde(default)]
@@ -77,6 +79,7 @@ impl Default for MouseGesturePluginSettings {
             direction_tolerance_deg: default_direction_tolerance_deg(),
             straightness_threshold: default_straightness_threshold(),
             straightness_min_displacement_px: default_straightness_min_displacement_px(),
+            tap_threshold_px: default_tap_threshold_px(),
             preview_enabled: false,
             preview_on_end_only: false,
             debug_show_similarity: false,
@@ -112,6 +115,10 @@ fn default_straightness_threshold() -> f32 {
 
 fn default_straightness_min_displacement_px() -> f32 {
     80.0
+}
+
+fn default_tap_threshold_px() -> f32 {
+    8.0
 }
 
 fn clamp_sample_interval_ms(value: u64) -> u64 {

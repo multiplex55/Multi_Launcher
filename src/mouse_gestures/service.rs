@@ -33,6 +33,51 @@ pub fn should_ignore_event(flags: u32, extra_info: usize) -> bool {
     extra_info == MG_PASSTHROUGH_MARK
 }
 
+#[cfg(windows)]
+fn send_passthrough_click(button: TriggerButton) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEINPUT, MOUSEEVENTF_LEFTDOWN,
+        MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
+        MOUSEEVENTF_RIGHTUP,
+    };
+
+    let (down_flag, up_flag) = match button {
+        TriggerButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+        TriggerButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+        TriggerButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+    };
+
+    let inputs = [
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: 0,
+                    dwFlags: down_flag,
+                    time: 0,
+                    dwExtraInfo: MG_PASSTHROUGH_MARK,
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: 0,
+                    dwFlags: up_flag,
+                    time: 0,
+                    dwExtraInfo: MG_PASSTHROUGH_MARK,
+                },
+            },
+        },
+    ];
+    let _ = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+}
+
 #[derive(Clone, Debug)]
 pub struct TrackOutcome {
     pub matched: bool,
@@ -453,6 +498,32 @@ fn track_displacement(points: &[Point]) -> f32 {
     ((last.x - first.x).powi(2) + (last.y - first.y).powi(2)).sqrt()
 }
 
+fn is_tap_track(points: &[Point], tap_threshold_px: f32) -> bool {
+    if tap_threshold_px <= 0.0 {
+        return false;
+    }
+    let displacement = track_displacement(points);
+    let length = track_length(points);
+    displacement <= tap_threshold_px || length <= tap_threshold_px
+}
+
+fn finalize_hook_outcome(
+    runtime: &MouseGestureRuntime,
+    points: &[Point],
+    too_long: bool,
+    tap_threshold_px: f32,
+) -> (TrackOutcome, bool) {
+    if is_tap_track(points, tap_threshold_px) {
+        return (TrackOutcome::passthrough(), true);
+    }
+    let outcome = runtime.evaluate_track_with_limit(points, too_long);
+    if outcome.matched {
+        (outcome, false)
+    } else {
+        (TrackOutcome::passthrough(), true)
+    }
+}
+
 fn track_directions_with_override(
     points: &[Point],
     settings: &MouseGesturePluginSettings,
@@ -822,6 +893,8 @@ pub struct HookTrackingState {
     points: Vec<Point>,
     last_point: Option<Point>,
     last_stored_point: Option<Point>,
+    trigger_started_at: Option<Instant>,
+    trigger_start_point: Option<Point>,
     started_at: Instant,
     acc_len: f32,
     too_long: bool,
@@ -1092,6 +1165,8 @@ impl Default for HookTrackingState {
             points: Vec::new(),
             last_point: None,
             last_stored_point: None,
+            trigger_started_at: None,
+            trigger_start_point: None,
             started_at: Instant::now(),
             acc_len: 0.0,
             too_long: false,
@@ -1107,10 +1182,17 @@ impl HookTrackingState {
         self.points.clear();
         self.last_point = None;
         self.last_stored_point = None;
+        self.trigger_started_at = None;
+        self.trigger_start_point = None;
         self.acc_len = 0.0;
         self.too_long = false;
         self.stored_points = 0;
         self.decimation_stride = 1;
+    }
+
+    fn record_trigger_start(&mut self, point: Point) {
+        self.trigger_started_at = Some(Instant::now());
+        self.trigger_start_point = Some(point);
     }
 
     fn cancel_tracking(&mut self) -> TrackOutcome {
@@ -1324,6 +1406,7 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                         preview_enabled,
                         preview_on_end_only,
                         sample_interval,
+                        tap_threshold_px,
                     ) = state
                         .runtime
                         .snapshots
@@ -1338,9 +1421,18 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                                 settings.preview_enabled,
                                 settings.preview_on_end_only,
                                 Duration::from_millis(settings.sample_interval_ms()),
+                                settings.tap_threshold_px.max(0.0),
                             )
                         })
-                        .unwrap_or((None, 0.0, 0.0, false, false, Duration::from_millis(16)));
+                        .unwrap_or((
+                            None,
+                            0.0,
+                            0.0,
+                            false,
+                            false,
+                            Duration::from_millis(16),
+                            0.0,
+                        ));
                     let min_point_distance_sq = min_point_distance * min_point_distance;
 
                     let event_button = match event {
@@ -1375,8 +1467,11 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                                     trigger_button: event_button,
                                     config,
                                 });
+                                if let Ok(mut tracking) = state.tracking.try_lock() {
+                                    tracking.record_trigger_start(point);
+                                }
                             }
-                            return CallNextHookEx(None, code, wparam, lparam);
+                            return LRESULT(1);
                         }
                         HookAction::Stop => {
                             state.stop_flag.store(true, Ordering::SeqCst);
@@ -1401,9 +1496,19 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                                 overlay.update_preview(None, None);
                             }
 
-                            let outcome =
-                                state.runtime.evaluate_track_with_limit(&points, too_long);
+                            let (outcome, should_inject) = finalize_hook_outcome(
+                                &state.runtime,
+                                &points,
+                                too_long,
+                                tap_threshold_px,
+                            );
                             if outcome.matched {
+                                return LRESULT(1);
+                            }
+                            if should_inject {
+                                if let Some(button) = event_button {
+                                    send_passthrough_click(button);
+                                }
                                 return LRESULT(1);
                             }
                             return CallNextHookEx(None, code, wparam, lparam);
@@ -1583,13 +1688,14 @@ impl MouseHookBackend for MockMouseHookBackend {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_gesture_templates, hash_direction_sequence, hook_action_for_event,
-        preview_worker_loop, sampler_worker_loop, sequence_changed, should_cancel,
-        should_compute_preview, truncate_with_ellipsis, HookAction, HookEventKind,
-        HookTrackingState, MouseGestureEventSink, MouseGestureRuntime, MouseGestureService,
-        MouseGestureSnapshots, PreviewRequest, ProfileCache, SamplerCommand, SamplerConfig,
-        TrackOutcome, TriggerButton, MAX_TRACK_DURATION_MS, PREVIEW_SIMILARITY_LABEL_MAX_LEN,
-        PREVIEW_SIMILARITY_MAX_LEN, PREVIEW_SIMILARITY_TOP_N, track_directions_with_override,
+        build_gesture_templates, finalize_hook_outcome, hash_direction_sequence,
+        hook_action_for_event, is_tap_track, preview_worker_loop, sampler_worker_loop,
+        sequence_changed, should_cancel, should_compute_preview, truncate_with_ellipsis,
+        HookAction, HookEventKind, HookTrackingState, MouseGestureEventSink, MouseGestureRuntime,
+        MouseGestureService, MouseGestureSnapshots, PreviewRequest, ProfileCache, SamplerCommand,
+        SamplerConfig, TrackOutcome, TriggerButton, MAX_TRACK_DURATION_MS,
+        PREVIEW_SIMILARITY_LABEL_MAX_LEN, PREVIEW_SIMILARITY_MAX_LEN,
+        PREVIEW_SIMILARITY_TOP_N, track_directions_with_override,
     };
     use crate::gui::MouseGestureEvent;
     use crate::mouse_gestures::MouseHookBackend;
@@ -1602,6 +1708,9 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{mpsc, Arc, Mutex, RwLock};
     use std::time::{Duration, Instant};
+
+    #[cfg(windows)]
+    use super::{should_ignore_event, MG_PASSTHROUGH_MARK};
 
     struct TestBackend;
 
@@ -1952,6 +2061,56 @@ mod tests {
         assert!(summary.contains("Up"));
         assert!(!summary.contains("Left"));
         assert_eq!(summary.matches('%').count(), PREVIEW_SIMILARITY_TOP_N);
+    }
+
+    #[test]
+    fn tap_detection_below_threshold_counts_as_tap() {
+        let short_points = vec![Point { x: 0.0, y: 0.0 }, Point { x: 2.0, y: 1.0 }];
+        let long_points = vec![Point { x: 0.0, y: 0.0 }, Point { x: 12.0, y: 0.0 }];
+
+        assert!(is_tap_track(&short_points, 8.0));
+        assert!(!is_tap_track(&long_points, 8.0));
+    }
+
+    #[test]
+    fn tap_tracks_generate_passthrough_outcome() {
+        let runtime = make_runtime(
+            MouseGestureDb::default(),
+            MouseGesturePluginSettings::default(),
+        );
+        let points = vec![Point { x: 1.0, y: 1.0 }, Point { x: 2.0, y: 2.0 }];
+
+        let (outcome, should_inject) = finalize_hook_outcome(&runtime, &points, false, 10.0);
+
+        assert!(should_inject);
+        assert!(outcome.passthrough_click);
+        assert!(!outcome.matched);
+    }
+
+    #[test]
+    fn matched_gestures_do_not_passthrough_clicks() {
+        let db = make_db_with_right_gesture();
+        let settings = MouseGesturePluginSettings {
+            min_point_distance: 0.0,
+            segment_threshold_px: 0.0,
+            direction_tolerance_deg: 0.0,
+            ..MouseGesturePluginSettings::default()
+        };
+        let runtime = make_runtime(db, settings);
+        let points = make_right_points();
+
+        let (outcome, should_inject) = finalize_hook_outcome(&runtime, &points, false, 5.0);
+
+        assert!(!should_inject);
+        assert!(outcome.matched);
+        assert!(!outcome.passthrough_click);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn passthrough_mark_ignored_by_hook() {
+        assert!(should_ignore_event(0, MG_PASSTHROUGH_MARK));
+        assert!(!should_ignore_event(0, MG_PASSTHROUGH_MARK + 1));
     }
 
     #[test]
