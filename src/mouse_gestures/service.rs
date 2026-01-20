@@ -2636,13 +2636,15 @@ mod tests {
         let mut tracking = HookTrackingState::default();
         tracking.begin_track(Point { x: 0.0, y: 0.0 });
         let min_point_distance_sq = 25.0;
+        let visual_point_distance_sq = 1.0;
 
         for step in 1..=3 {
             let point = Point {
-                x: (step * 2) as f32,
+                x: step as f32,
                 y: 0.0,
             };
-            let visual_stored = tracking.record_visual_point(point, VISUAL_POINT_DISTANCE_SQ);
+            let visual_stored =
+                tracking.record_visual_point(point, visual_point_distance_sq);
             let recognition_stored = tracking.sample_point(point, min_point_distance_sq, 0.0, 0);
             if recognition_stored && !visual_stored {
                 tracking.force_visual_point(point);
