@@ -185,6 +185,14 @@ impl MouseGestureRuntime {
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default();
+        self.best_match_with_snapshots(points, &snapshots)
+    }
+
+    fn best_match_with_snapshots(
+        &self,
+        points: &[Point],
+        snapshots: &MouseGestureSnapshots,
+    ) -> Option<(String, f32)> {
         if points.len() < 2 {
             return None;
         }
@@ -233,6 +241,16 @@ impl MouseGestureRuntime {
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default();
+        let encoder = PreviewTextEncoder::default();
+        self.preview_text_with_snapshots(points, &snapshots, &encoder)
+    }
+
+    fn preview_text_with_snapshots(
+        &self,
+        points: &[Point],
+        snapshots: &MouseGestureSnapshots,
+        encoder: &PreviewTextEncoder,
+    ) -> Option<String> {
         if points.len() < 2 {
             return None;
         }
@@ -244,9 +262,9 @@ impl MouseGestureRuntime {
             return Some("Too long".to_string());
         }
         if snapshots.settings.debug_show_similarity {
-            return self.preview_similarity_text(points, &snapshots);
+            return self.preview_similarity_text_with_encoder(points, snapshots, encoder);
         }
-        let Some((label, similarity)) = self.best_match(points) else {
+        let Some((label, similarity)) = self.best_match_with_snapshots(points, snapshots) else {
             return Some("No match".to_string());
         };
         Some(format!(
@@ -259,6 +277,16 @@ impl MouseGestureRuntime {
         &self,
         points: &[Point],
         snapshots: &MouseGestureSnapshots,
+    ) -> Option<String> {
+        let encoder = PreviewTextEncoder::default();
+        self.preview_similarity_text_with_encoder(points, snapshots, &encoder)
+    }
+
+    fn preview_similarity_text_with_encoder(
+        &self,
+        points: &[Point],
+        snapshots: &MouseGestureSnapshots,
+        encoder: &PreviewTextEncoder,
     ) -> Option<String> {
         let track_dirs = track_directions_with_override(points, &snapshots.settings, None, None);
         if track_dirs.is_empty() {
@@ -314,7 +342,7 @@ impl MouseGestureRuntime {
             } else {
                 binding.label.as_str()
             };
-            let truncated = truncate_with_ellipsis(label.trim(), PREVIEW_SIMILARITY_LABEL_MAX_LEN);
+            let truncated = encoder.truncate_label(label.trim());
             if let Some(index) = min_index {
                 similarities[index] = (similarity, truncated);
             } else {
@@ -326,17 +354,7 @@ impl MouseGestureRuntime {
             return Some("No match".to_string());
         }
 
-        similarities.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(CmpOrdering::Equal));
-        let summary = similarities
-            .into_iter()
-            .map(|(similarity, label)| format!("{label}: {:.0}%", similarity * 100.0))
-            .collect::<Vec<_>>()
-            .join(" | ");
-        let full_text = format!("{PREVIEW_SIMILARITY_PREFIX}{summary}");
-        Some(truncate_with_ellipsis(
-            &full_text,
-            PREVIEW_SIMILARITY_MAX_LEN,
-        ))
+        Some(encoder.encode_similarity(similarities))
     }
 
     fn evaluate_track(&self, points: &[Point]) -> TrackOutcome {
@@ -467,8 +485,6 @@ impl MouseGestureRuntime {
     }
 }
 
-const PREVIEW_THROTTLE_MS: u64 = 120;
-
 fn should_compute_preview(last: Instant, now: Instant, throttle_ms: u64) -> bool {
     now.duration_since(last) >= Duration::from_millis(throttle_ms)
 }
@@ -584,6 +600,27 @@ fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
 struct GestureTemplate {
     name: Option<String>,
     directions: Vec<GestureDirection>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PreviewTextEncoder;
+
+impl PreviewTextEncoder {
+    fn truncate_label(&self, label: &str) -> String {
+        truncate_with_ellipsis(label, PREVIEW_SIMILARITY_LABEL_MAX_LEN)
+    }
+
+    fn encode_similarity(&self, mut similarities: Vec<(f32, String)>) -> String {
+        similarities.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(CmpOrdering::Equal));
+        similarities.truncate(PREVIEW_SIMILARITY_TOP_N);
+        let summary = similarities
+            .into_iter()
+            .map(|(similarity, label)| format!("{label}: {:.0}%", similarity * 100.0))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let full_text = format!("{PREVIEW_SIMILARITY_PREFIX}{summary}");
+        truncate_with_ellipsis(&full_text, PREVIEW_SIMILARITY_MAX_LEN)
+    }
 }
 
 #[cfg(test)]
@@ -972,7 +1009,8 @@ fn preview_worker_loop(
     receiver: Receiver<PreviewRequest>,
     preview_text: Arc<Mutex<Option<String>>>,
 ) {
-    let mut last_preview_at = Instant::now() - Duration::from_millis(PREVIEW_THROTTLE_MS);
+    let encoder = PreviewTextEncoder::default();
+    let mut last_preview_at: Option<Instant> = None;
     let mut last_sequence_hash = None;
     for request in receiver {
         let now = Instant::now();
@@ -981,6 +1019,10 @@ fn preview_worker_loop(
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default();
+        let throttle_ms = snapshots.settings.preview_throttle_ms();
+        if !snapshots.settings.preview_enabled {
+            continue;
+        }
         let directions =
             track_directions_with_override(&request.points, &snapshots.settings, None, None);
         let sequence_hash = hash_direction_sequence(&directions);
@@ -993,16 +1035,16 @@ fn preview_worker_loop(
             if !sequence_changed(last_sequence_hash, sequence_hash) {
                 continue;
             }
-            if !should_compute_preview(last_preview_at, now, PREVIEW_THROTTLE_MS) {
+            if last_preview_at.is_some_and(|last| !should_compute_preview(last, now, throttle_ms)) {
                 continue;
             }
         }
 
-        let text = runtime.preview_text(&request.points);
+        let text = runtime.preview_text_with_snapshots(&request.points, &snapshots, &encoder);
         if let Ok(mut guard) = preview_text.lock() {
             *guard = text;
         }
-        last_preview_at = now;
+        last_preview_at = Some(now);
         last_sequence_hash = Some(sequence_hash);
     }
 }
@@ -1021,6 +1063,7 @@ struct SamplerConfig {
     max_sample_count: usize,
     preview_enabled: bool,
     preview_on_end_only: bool,
+    preview_throttle_ms: u64,
     sample_interval: Duration,
 }
 
@@ -1115,7 +1158,7 @@ fn sampler_worker_loop(
                     overlay.update_preview(None, None);
                 }
                 let mut last_preview_at =
-                    Instant::now() - Duration::from_millis(PREVIEW_THROTTLE_MS);
+                    Instant::now() - Duration::from_millis(config.preview_throttle_ms);
                 loop {
                     if stop_flag.load(Ordering::SeqCst) {
                         break;
@@ -1167,7 +1210,11 @@ fn sampler_worker_loop(
                             overlay.push_point(point);
                             if config.preview_enabled
                                 && !config.preview_on_end_only
-                                && should_compute_preview(last_preview_at, now, PREVIEW_THROTTLE_MS)
+                                && should_compute_preview(
+                                    last_preview_at,
+                                    now,
+                                    config.preview_throttle_ms,
+                                )
                             {
                                 let text = cached_preview_text(&preview_text);
                                 overlay.update_preview(text, Some(point));
@@ -1487,6 +1534,7 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                         max_sample_count,
                         preview_enabled,
                         preview_on_end_only,
+                        preview_throttle_ms,
                         sample_interval,
                         tap_threshold_px,
                     ) = state
@@ -1504,6 +1552,7 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                                 settings.max_sample_count,
                                 settings.preview_enabled,
                                 settings.preview_on_end_only,
+                                settings.preview_throttle_ms(),
                                 Duration::from_millis(settings.sample_interval_ms()),
                                 settings.tap_threshold_px.max(0.0),
                             )
@@ -1516,6 +1565,7 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                             0,
                             false,
                             false,
+                            crate::plugins::mouse_gestures::settings::PREVIEW_THROTTLE_MS,
                             Duration::from_millis(16),
                             0.0,
                         ));
@@ -1547,6 +1597,7 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                                     max_sample_count,
                                     preview_enabled,
                                     preview_on_end_only,
+                                    preview_throttle_ms,
                                     sample_interval,
                                 };
                                 state.stop_flag.store(false, Ordering::SeqCst);
@@ -2023,6 +2074,7 @@ mod tests {
             max_sample_count: 0,
             preview_enabled: false,
             preview_on_end_only: false,
+            preview_throttle_ms: crate::plugins::mouse_gestures::settings::PREVIEW_THROTTLE_MS,
             sample_interval: Duration::from_millis(5),
         };
         sender
@@ -2096,6 +2148,7 @@ mod tests {
             max_sample_count: 0,
             preview_enabled: false,
             preview_on_end_only: false,
+            preview_throttle_ms: crate::plugins::mouse_gestures::settings::PREVIEW_THROTTLE_MS,
             sample_interval: Duration::from_millis(5),
         };
         sender
@@ -2281,6 +2334,7 @@ mod tests {
         let db = make_db_with_right_gesture();
         let settings = MouseGesturePluginSettings {
             min_point_distance: 0.0,
+            preview_enabled: true,
             preview_on_end_only: true,
             ..MouseGesturePluginSettings::default()
         };
@@ -2327,6 +2381,98 @@ mod tests {
         }
 
         worker.join().expect("worker finished");
+    }
+
+    #[test]
+    fn preview_disabled_skips_computation() {
+        let db = make_db_with_right_gesture();
+        let settings = MouseGesturePluginSettings {
+            min_point_distance: 0.0,
+            preview_enabled: false,
+            ..MouseGesturePluginSettings::default()
+        };
+        let runtime = make_runtime(db, settings);
+        let preview_text = Arc::new(Mutex::new(None));
+        let preview_text_handle = Arc::clone(&preview_text);
+        let (sender, receiver) = mpsc::sync_channel(2);
+        let points = make_right_points();
+
+        let worker = std::thread::spawn(move || {
+            preview_worker_loop(runtime, receiver, preview_text_handle);
+        });
+
+        sender
+            .send(PreviewRequest {
+                points,
+                force: true,
+            })
+            .expect("send preview request");
+        drop(sender);
+
+        worker.join().expect("preview worker finished");
+
+        assert!(
+            preview_text.lock().expect("lock preview text").is_none(),
+            "preview text should remain empty when preview is disabled"
+        );
+    }
+
+    #[test]
+    fn preview_throttle_prevents_frequent_updates() {
+        let db = make_db_with_right_and_up_gestures();
+        let settings = MouseGesturePluginSettings {
+            min_point_distance: 0.0,
+            segment_threshold_px: 0.0,
+            direction_tolerance_deg: 0.0,
+            preview_enabled: true,
+            preview_throttle_ms: 200,
+            ..MouseGesturePluginSettings::default()
+        };
+        let runtime = make_runtime(db, settings);
+        let preview_text = Arc::new(Mutex::new(None));
+        let preview_text_handle = Arc::clone(&preview_text);
+        let (sender, receiver) = mpsc::sync_channel(2);
+
+        let worker = std::thread::spawn(move || {
+            preview_worker_loop(runtime, receiver, preview_text_handle);
+        });
+
+        sender
+            .send(PreviewRequest {
+                points: make_right_points(),
+                force: false,
+            })
+            .expect("send preview request");
+
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let first_text = loop {
+            if let Some(text) = preview_text.lock().expect("lock preview text").clone() {
+                break text;
+            }
+            if Instant::now() >= deadline {
+                panic!("preview text not computed after first request");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        sender
+            .send(PreviewRequest {
+                points: make_up_points(),
+                force: false,
+            })
+            .expect("send second preview request");
+
+        std::thread::sleep(Duration::from_millis(60));
+
+        let second_text = preview_text.lock().expect("lock preview text").clone();
+        assert_eq!(
+            second_text,
+            Some(first_text),
+            "preview text should not update within throttle window"
+        );
+
+        drop(sender);
+        worker.join().expect("preview worker finished");
     }
 
     #[test]
@@ -2390,6 +2536,7 @@ mod tests {
             min_point_distance: 0.0,
             segment_threshold_px: 0.0,
             direction_tolerance_deg: 0.0,
+            preview_enabled: true,
             ..MouseGesturePluginSettings::default()
         };
         let runtime = make_runtime(db.clone(), settings.clone());
@@ -2607,6 +2754,10 @@ mod tests {
         vec![Point { x: 0.0, y: 0.0 }, Point { x: 80.0, y: 0.0 }]
     }
 
+    fn make_up_points() -> Vec<Point> {
+        vec![Point { x: 0.0, y: 0.0 }, Point { x: 0.0, y: -80.0 }]
+    }
+
     fn make_db_with_right_gesture() -> MouseGestureDb {
         let mut db = MouseGestureDb::default();
         db.bindings.insert(
@@ -2628,6 +2779,25 @@ mod tests {
                 enabled: true,
             }],
         });
+        db
+    }
+
+    fn make_db_with_right_and_up_gestures() -> MouseGestureDb {
+        let mut db = make_db_with_right_gesture();
+        db.bindings.insert(
+            "gesture-up".to_string(),
+            "Swipe Up: 0,0|0,-80".to_string(),
+        );
+        if let Some(profile) = db.profiles.first_mut() {
+            profile.bindings.push(MouseGestureBinding {
+                gesture_id: "gesture-up".to_string(),
+                label: "Swipe Up".to_string(),
+                action: "noop".to_string(),
+                args: None,
+                priority: 0,
+                enabled: true,
+            });
+        }
         db
     }
 
@@ -2722,6 +2892,7 @@ mod tests {
             min_point_distance: 0.0,
             segment_threshold_px: 0.0,
             direction_tolerance_deg: 0.0,
+            preview_enabled: true,
             ..MouseGesturePluginSettings::default()
         };
         let runtime = make_runtime(db, settings);

@@ -61,6 +61,8 @@ pub struct MouseGesturePluginSettings {
     pub preview_enabled: bool,
     #[serde(default)]
     pub preview_on_end_only: bool,
+    #[serde(default = "default_preview_throttle_ms")]
+    pub preview_throttle_ms: u64,
     #[serde(default)]
     pub debug_show_similarity: bool,
 }
@@ -91,6 +93,7 @@ impl Default for MouseGesturePluginSettings {
             tap_threshold_px: default_tap_threshold_px(),
             preview_enabled: false,
             preview_on_end_only: false,
+            preview_throttle_ms: default_preview_throttle_ms(),
             debug_show_similarity: false,
         }
     }
@@ -99,6 +102,10 @@ impl Default for MouseGesturePluginSettings {
 impl MouseGesturePluginSettings {
     pub fn sample_interval_ms(&self) -> u64 {
         clamp_sample_interval_ms(self.sample_interval_ms)
+    }
+
+    pub fn preview_throttle_ms(&self) -> u64 {
+        clamp_preview_throttle_ms(self.preview_throttle_ms)
     }
 
     pub fn match_threshold_for_template_len(&self, template_len: usize) -> f32 {
@@ -150,8 +157,18 @@ fn default_tap_threshold_px() -> f32 {
     8.0
 }
 
+pub const PREVIEW_THROTTLE_MS: u64 = 150;
+
+fn default_preview_throttle_ms() -> u64 {
+    PREVIEW_THROTTLE_MS
+}
+
 fn clamp_sample_interval_ms(value: u64) -> u64 {
     value.clamp(5, 50)
+}
+
+fn clamp_preview_throttle_ms(value: u64) -> u64 {
+    value.clamp(100, 200)
 }
 
 #[cfg(test)]
