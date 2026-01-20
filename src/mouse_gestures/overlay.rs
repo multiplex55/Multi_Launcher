@@ -127,7 +127,7 @@ fn clone_snapshot(buffer: &OverlaySnapshotBuffer) -> Option<OverlaySnapshot> {
 }
 
 fn should_invalidate(deadline: Instant, now: Instant, dirty: bool) -> bool {
-    dirty || now >= deadline
+    dirty && now >= deadline
 }
 
 fn decimate_points(points: &[Point], max_points: usize) -> Vec<Point> {
@@ -165,6 +165,7 @@ impl OverlaySnapshotPublisher {
     }
 
     fn update_settings(&mut self, settings: &MouseGestureOverlaySettings) {
+        self.cap_raw_points(settings);
         let points = decimate_points(&self.raw_points, settings.max_render_points);
         self.snapshot.update(|snapshot| {
             snapshot.settings = settings.clone();
@@ -175,6 +176,7 @@ impl OverlaySnapshotPublisher {
     fn begin_stroke(&mut self, settings: &MouseGestureOverlaySettings, start: Point) {
         self.raw_points.clear();
         self.raw_points.push(start);
+        self.cap_raw_points(settings);
         let points = decimate_points(&self.raw_points, settings.max_render_points);
         self.snapshot.update(|snapshot| {
             snapshot.settings = settings.clone();
@@ -187,6 +189,7 @@ impl OverlaySnapshotPublisher {
 
     fn push_point(&mut self, settings: &MouseGestureOverlaySettings, point: Point) {
         self.raw_points.push(point);
+        self.cap_raw_points(settings);
         let points = decimate_points(&self.raw_points, settings.max_render_points);
         self.snapshot.update(|snapshot| {
             snapshot.settings = settings.clone();
@@ -196,6 +199,7 @@ impl OverlaySnapshotPublisher {
 
     fn end_stroke(&mut self, settings: &MouseGestureOverlaySettings) {
         let deadline = Instant::now() + Duration::from_millis(settings.fade);
+        self.cap_raw_points(settings);
         let points = decimate_points(&self.raw_points, settings.max_render_points);
         self.snapshot.update(|snapshot| {
             snapshot.settings = settings.clone();
@@ -208,6 +212,14 @@ impl OverlaySnapshotPublisher {
     fn update_preview(&mut self, text: Option<String>, point: Option<Point>) {
         self.snapshot
             .update(|snapshot| snapshot.preview = text.zip(point));
+    }
+
+    fn cap_raw_points(&mut self, settings: &MouseGestureOverlaySettings) {
+        let max_raw_points = settings.max_raw_points;
+        if max_raw_points == 0 || self.raw_points.len() <= max_raw_points {
+            return;
+        }
+        self.raw_points = decimate_points(&self.raw_points, max_raw_points);
     }
 }
 
@@ -299,11 +311,11 @@ impl GdiOverlayWindow {
                     if msg == WM_PAINT {
                         let mut paint = PAINTSTRUCT::default();
                         let hdc = BeginPaint(hwnd, &mut paint);
+                        let snapshot = clone_snapshot(&state.snapshot);
                         let mut rect = RECT::default();
                         rect.right = paint.rcPaint.right;
                         rect.bottom = paint.rcPaint.bottom;
                         FillRect(hdc, &rect, HBRUSH(GetStockObject(BLACK_BRUSH).0));
-                        let snapshot = clone_snapshot(&state.snapshot);
                         if let Some(snapshot) = snapshot {
                             if snapshot_has_visible_stroke(&snapshot) {
                                 let color = parse_color(&snapshot.settings.color);
@@ -560,14 +572,19 @@ mod tests {
             base + Duration::from_millis(15),
             false
         ));
-        assert!(should_invalidate(
+        assert!(!should_invalidate(
             deadline,
             base + Duration::from_millis(16),
             false
         ));
-        assert!(should_invalidate(
+        assert!(!should_invalidate(
             deadline,
             base + Duration::from_millis(1),
+            true
+        ));
+        assert!(should_invalidate(
+            deadline,
+            base + Duration::from_millis(16),
             true
         ));
     }
@@ -641,5 +658,48 @@ mod tests {
         let snapshot = buffer.snapshot().expect("snapshot");
         assert_eq!(snapshot.points.len(), 1);
         assert!(snapshot_has_visible_stroke(&snapshot));
+    }
+
+    #[test]
+    fn decimate_points_selects_evenly_spaced_points() {
+        let points: Vec<Point> = (0..10)
+            .map(|index| Point {
+                x: index as f32,
+                y: 0.0,
+            })
+            .collect();
+        let reduced = decimate_points(&points, 5);
+        let reduced_x: Vec<i32> = reduced.iter().map(|point| point.x as i32).collect();
+        assert_eq!(reduced_x, vec![0, 2, 5, 7, 9]);
+    }
+
+    #[test]
+    fn raw_points_are_capped_within_bounds() {
+        let settings = MouseGestureOverlaySettings {
+            max_render_points: 10,
+            max_raw_points: 4,
+            ..MouseGestureOverlaySettings::default()
+        };
+        let buffer = Arc::new(OverlaySnapshotBuffer::new(settings.clone()));
+        let mut publisher = OverlaySnapshotPublisher::new(Arc::clone(&buffer));
+
+        publisher.begin_stroke(&settings, Point { x: 0.0, y: 0.0 });
+        for index in 1..10 {
+            publisher.push_point(
+                &settings,
+                Point {
+                    x: index as f32,
+                    y: 0.0,
+                },
+            );
+        }
+
+        assert_eq!(publisher.raw_points.len(), 4);
+        assert_eq!(publisher.raw_points.first().unwrap().x, 0.0);
+        assert_eq!(publisher.raw_points.last().unwrap().x, 9.0);
+        assert!(publisher
+            .raw_points
+            .windows(2)
+            .all(|pair| pair[0].x <= pair[1].x));
     }
 }
