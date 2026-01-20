@@ -1897,6 +1897,8 @@ mod tests {
         };
         let settings = MouseGesturePluginSettings {
             min_point_distance: 0.0,
+            segment_threshold_px: 0.0,
+            direction_tolerance_deg: 0.0,
             ..MouseGesturePluginSettings::default()
         };
         let runtime = make_runtime(db.clone(), settings.clone());
@@ -1936,6 +1938,8 @@ mod tests {
         };
         let settings = MouseGesturePluginSettings {
             min_point_distance: 0.0,
+            segment_threshold_px: 0.0,
+            direction_tolerance_deg: 0.0,
             ..MouseGesturePluginSettings::default()
         };
         let runtime = make_runtime(db.clone(), settings.clone());
@@ -2000,6 +2004,8 @@ mod tests {
         };
         let settings = MouseGesturePluginSettings {
             min_point_distance: 0.0,
+            segment_threshold_px: 0.0,
+            direction_tolerance_deg: 0.0,
             ..MouseGesturePluginSettings::default()
         };
         let runtime = make_runtime(db.clone(), settings.clone());
@@ -2048,6 +2054,8 @@ mod tests {
         );
         let settings = MouseGesturePluginSettings {
             min_point_distance: 0.0,
+            segment_threshold_px: 0.0,
+            direction_tolerance_deg: 0.0,
             ..MouseGesturePluginSettings::default()
         };
         service.update_settings(settings);

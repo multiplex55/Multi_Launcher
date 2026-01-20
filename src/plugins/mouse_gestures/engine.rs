@@ -110,6 +110,7 @@ pub fn direction_sequence(
 
     let segment_threshold = settings.segment_threshold_px.max(0.0);
     let tolerance = settings.direction_tolerance_deg.max(0.0);
+    let sector_half = 22.5_f32;
     let mut dirs = Vec::new();
     let mut anchor = points[0];
     let mut last_direction: Option<GestureDirection> = None;
@@ -129,7 +130,7 @@ pub fn direction_sequence(
             let angle_deg = angle.to_degrees().rem_euclid(360.0);
             let last_angle = direction_center_angle_deg(last);
             let delta = angular_difference_deg(angle_deg, last_angle);
-            if delta < tolerance {
+            if delta <= sector_half + tolerance {
                 continue;
             }
         }
