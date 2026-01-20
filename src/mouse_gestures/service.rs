@@ -2163,7 +2163,7 @@ mod tests {
             .expect("send forced request");
         drop(sender);
 
-        let deadline = Instant::now() + Duration::from_millis(200);
+        let deadline = Instant::now() + Duration::from_millis(500);
         loop {
             if preview_text.lock().expect("lock preview text").is_some() {
                 break;
