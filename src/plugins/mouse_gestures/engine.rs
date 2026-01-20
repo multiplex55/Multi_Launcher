@@ -142,6 +142,54 @@ pub fn direction_sequence(
     dirs
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CanonicalDirectionResult {
+    pub directions: Vec<GestureDirection>,
+    pub straightness_override: Option<GestureDirection>,
+}
+
+pub fn canonical_directions(
+    points: &[Point],
+    settings: &crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings,
+) -> CanonicalDirectionResult {
+    canonical_directions_with_metrics(points, settings, None, None)
+}
+
+pub fn canonical_directions_with_metrics(
+    points: &[Point],
+    settings: &crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings,
+    displacement: Option<f32>,
+    straightness: Option<f32>,
+) -> CanonicalDirectionResult {
+    if points.len() < 2 {
+        return CanonicalDirectionResult {
+            directions: Vec::new(),
+            straightness_override: None,
+        };
+    }
+    let displacement = displacement.unwrap_or_else(|| track_displacement(points));
+    let straightness = straightness.unwrap_or_else(|| straightness_ratio(points));
+    if displacement >= settings.straightness_min_displacement_px
+        && straightness >= settings.straightness_threshold
+    {
+        let first = points[0];
+        let last = points[points.len() - 1];
+        let direction = direction_from_vector(Vector {
+            x: last.x - first.x,
+            y: last.y - first.y,
+        });
+        return CanonicalDirectionResult {
+            directions: vec![direction],
+            straightness_override: Some(direction),
+        };
+    }
+    let processed_points = preprocess_points_for_directions(points, settings);
+    CanonicalDirectionResult {
+        directions: direction_sequence(&processed_points, settings),
+        straightness_override: None,
+    }
+}
+
 pub fn direction_similarity(a: &[GestureDirection], b: &[GestureDirection]) -> f32 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
@@ -484,6 +532,15 @@ pub fn track_length(points: &[Point]) -> f32 {
         .windows(2)
         .map(|pair| distance(pair[0], pair[1]))
         .sum()
+}
+
+pub fn track_displacement(points: &[Point]) -> f32 {
+    if points.len() < 2 {
+        return 0.0;
+    }
+    let first = points[0];
+    let last = points[points.len() - 1];
+    ((last.x - first.x).powi(2) + (last.y - first.y).powi(2)).sqrt()
 }
 
 pub fn straightness_ratio(points: &[Point]) -> f32 {

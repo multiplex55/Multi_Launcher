@@ -4,9 +4,8 @@ use crate::plugins::mouse_gestures::db::{
     select_binding, select_profile, ForegroundWindowInfo, MouseGestureDb,
 };
 use crate::plugins::mouse_gestures::engine::{
-    direction_from_vector, direction_sequence, direction_similarity, parse_gesture,
-    preprocess_points_for_directions, straightness_ratio, track_length, GestureDirection, Point,
-    Vector,
+    canonical_directions_with_metrics, direction_similarity, parse_gesture, straightness_ratio,
+    track_displacement, track_length, GestureDirection, Point,
 };
 use crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
 use once_cell::sync::OnceCell;
@@ -519,15 +518,6 @@ fn hash_direction_sequence(directions: &[GestureDirection]) -> u64 {
     hash
 }
 
-fn track_displacement(points: &[Point]) -> f32 {
-    if points.len() < 2 {
-        return 0.0;
-    }
-    let first = points[0];
-    let last = points[points.len() - 1];
-    ((last.x - first.x).powi(2) + (last.y - first.y).powi(2)).sqrt()
-}
-
 fn is_tap_track(points: &[Point], tap_threshold_px: f32) -> bool {
     if tap_threshold_px <= 0.0 {
         return false;
@@ -563,20 +553,8 @@ fn track_directions_with_override(
     if points.len() < 2 {
         return Vec::new();
     }
-    let displacement = displacement.unwrap_or_else(|| track_displacement(points));
-    let straightness = straightness.unwrap_or_else(|| straightness_ratio(points));
-    if displacement >= settings.straightness_min_displacement_px
-        && straightness >= settings.straightness_threshold
-    {
-        let first = points[0];
-        let last = points[points.len() - 1];
-        return vec![direction_from_vector(Vector {
-            x: last.x - first.x,
-            y: last.y - first.y,
-        })];
-    }
-    let processed_points = preprocess_points_for_directions(points, settings);
-    direction_sequence(&processed_points, settings)
+    let canonical = canonical_directions_with_metrics(points, settings, displacement, straightness);
+    canonical.directions
 }
 
 fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
@@ -896,6 +874,13 @@ impl MouseGestureService {
             return;
         }
         self.backend.stop();
+    }
+
+    pub fn snapshot_settings(&self) -> MouseGesturePluginSettings {
+        self.snapshots
+            .read()
+            .map(|guard| guard.settings.clone())
+            .unwrap_or_default()
     }
 }
 

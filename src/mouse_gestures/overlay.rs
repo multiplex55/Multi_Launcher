@@ -130,7 +130,7 @@ fn should_invalidate(deadline: Instant, now: Instant, dirty: bool) -> bool {
     dirty || now >= deadline
 }
 
-fn decimate_points(points: &[Point], max_points: usize) -> Vec<Point> {
+pub fn decimate_points_for_overlay(points: &[Point], max_points: usize) -> Vec<Point> {
     if max_points == 0 || points.len() <= max_points {
         return points.to_vec();
     }
@@ -161,7 +161,7 @@ impl OverlaySnapshotPublisher {
     }
 
     fn update_settings(&mut self, settings: &MouseGestureOverlaySettings) {
-        let points = decimate_points(&self.raw_points, settings.max_render_points);
+        let points = decimate_points_for_overlay(&self.raw_points, settings.max_render_points);
         self.snapshot.update(|snapshot| {
             snapshot.settings = settings.clone();
             snapshot.points = points;
@@ -171,7 +171,7 @@ impl OverlaySnapshotPublisher {
     fn begin_stroke(&mut self, settings: &MouseGestureOverlaySettings, start: Point) {
         self.raw_points.clear();
         self.raw_points.push(start);
-        let points = decimate_points(&self.raw_points, settings.max_render_points);
+        let points = decimate_points_for_overlay(&self.raw_points, settings.max_render_points);
         self.snapshot.update(|snapshot| {
             snapshot.settings = settings.clone();
             snapshot.points = points;
@@ -183,7 +183,7 @@ impl OverlaySnapshotPublisher {
 
     fn push_point(&mut self, settings: &MouseGestureOverlaySettings, point: Point) {
         self.raw_points.push(point);
-        let points = decimate_points(&self.raw_points, settings.max_render_points);
+        let points = decimate_points_for_overlay(&self.raw_points, settings.max_render_points);
         self.snapshot.update(|snapshot| {
             snapshot.settings = settings.clone();
             snapshot.points = points;
@@ -192,7 +192,7 @@ impl OverlaySnapshotPublisher {
 
     fn end_stroke(&mut self, settings: &MouseGestureOverlaySettings) {
         let deadline = Instant::now() + Duration::from_millis(settings.fade);
-        let points = decimate_points(&self.raw_points, settings.max_render_points);
+        let points = decimate_points_for_overlay(&self.raw_points, settings.max_render_points);
         self.snapshot.update(|snapshot| {
             snapshot.settings = settings.clone();
             snapshot.points = points;

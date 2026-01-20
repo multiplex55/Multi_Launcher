@@ -1,10 +1,12 @@
-use crate::mouse_gestures::mouse_gesture_service;
+use crate::mouse_gestures::{decimate_points_for_overlay, mouse_gesture_service};
 use crate::plugins::mouse_gestures::db::{
     load_gestures, save_gestures, MouseGestureDb, MOUSE_GESTURES_FILE,
 };
 use crate::plugins::mouse_gestures::engine::{
-    parse_gesture, serialize_gesture, GestureDefinition, ParseError, Point,
+    canonical_directions, parse_gesture, serialize_gesture, CanonicalDirectionResult,
+    GestureDefinition, GestureDirection, ParseError, Point,
 };
+use crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
 use eframe::egui;
 use std::collections::BTreeMap;
 
@@ -24,6 +26,7 @@ pub struct MouseGesturesGestureDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
 
     #[test]
     fn apply_serialized_updates_state() {
@@ -44,6 +47,43 @@ mod tests {
             err.kind,
             crate::plugins::mouse_gestures::engine::ParseErrorKind::EmptyInput
         ));
+    }
+
+    fn test_settings() -> MouseGesturePluginSettings {
+        let mut settings = MouseGesturePluginSettings::default();
+        settings.sampling_enabled = false;
+        settings.smoothing_enabled = false;
+        settings.segment_threshold_px = 4.0;
+        settings.direction_tolerance_deg = 0.0;
+        settings
+    }
+
+    #[test]
+    fn straight_line_is_single_token() {
+        let settings = test_settings();
+        let points = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 0.0, y: -10.0 },
+            Point { x: 0.0, y: -20.0 },
+        ];
+
+        let tokens = canonical_direction_tokens(&points, &settings);
+
+        assert_eq!(tokens, vec![GestureDirection::Up]);
+    }
+
+    #[test]
+    fn l_shape_is_two_tokens() {
+        let settings = test_settings();
+        let points = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 12.0, y: 0.0 },
+            Point { x: 12.0, y: -12.0 },
+        ];
+
+        let tokens = canonical_direction_tokens(&points, &settings);
+
+        assert_eq!(tokens, vec![GestureDirection::Right, GestureDirection::Up]);
     }
 }
 
@@ -109,6 +149,7 @@ impl MouseGesturesGestureDialog {
         egui::Window::new("Mouse Gesture Recorder")
             .open(&mut open)
             .show(ctx, |ui| {
+                let settings = mouse_gesture_service().snapshot_settings();
                 ui.horizontal(|ui| {
                     ui.label("Gesture name");
                     ui.text_edit_singleline(&mut self.gesture_name);
@@ -132,7 +173,10 @@ impl MouseGesturesGestureDialog {
                         if self
                             .points
                             .last()
-                            .map(|p| (p.x - point.x).abs() + (p.y - point.y).abs() > 1.0)
+                            .map(|p| {
+                                let min_delta = settings.min_point_distance.max(1.0);
+                                (p.x - point.x).abs() + (p.y - point.y).abs() > min_delta
+                            })
                             .unwrap_or(true)
                         {
                             self.points.push(point);
@@ -144,6 +188,32 @@ impl MouseGesturesGestureDialog {
                 }
 
                 draw_points(&painter, &self.points, rect);
+
+                let canonical = canonical_directions(&self.points, &settings);
+                let render_points =
+                    decimate_points_for_overlay(&self.points, settings.overlay.max_render_points);
+                ui.separator();
+                ui.label(format!("Raw points: {}", self.points.len()));
+                if render_points.len() == self.points.len() {
+                    ui.label(format!("Render points: {}", render_points.len()));
+                } else {
+                    ui.label(format!(
+                        "Render points: {} (decimated)",
+                        render_points.len()
+                    ));
+                }
+                ui.label(format!(
+                    "Canonical directions: {}",
+                    format_direction_tokens(&canonical)
+                ));
+                if let Some(direction) = canonical.straightness_override {
+                    ui.label(format!(
+                        "Straightness override: {}",
+                        direction_label(direction)
+                    ));
+                } else {
+                    ui.label("Straightness override: none");
+                }
 
                 ui.horizontal(|ui| {
                     if ui.button("Clear").clicked() {
@@ -172,24 +242,27 @@ impl MouseGesturesGestureDialog {
 
                 ui.separator();
                 ui.label("Gesture library");
-                let labels = gesture_labels(&self.db);
+                let labels = gesture_labels(&self.db, &settings);
                 egui::ScrollArea::vertical()
                     .id_source("mg_gesture_library")
                     .max_height(140.0)
                     .show(ui, |ui| {
-                        for (gesture_id, label) in labels {
+                        for (gesture_id, label, tokens) in labels {
                             let selected = self
                                 .selected_gesture
                                 .as_deref()
                                 .map(|id| id == gesture_id)
                                 .unwrap_or(false);
-                            if ui
-                                .selectable_label(selected, format!("{label} ({gesture_id})"))
-                                .clicked()
-                            {
-                                self.selected_gesture = Some(gesture_id.clone());
-                                self.load_selected(&gesture_id);
-                            }
+                            ui.vertical(|ui| {
+                                if ui
+                                    .selectable_label(selected, format!("{label} ({gesture_id})"))
+                                    .clicked()
+                                {
+                                    self.selected_gesture = Some(gesture_id.clone());
+                                    self.load_selected(&gesture_id);
+                                }
+                                ui.label(format!("Directions: {tokens}"));
+                            });
                         }
                     });
 
@@ -266,16 +339,27 @@ fn apply_serialized_gesture(
     Ok(())
 }
 
-fn gesture_labels(db: &MouseGestureDb) -> Vec<(String, String)> {
+fn gesture_labels(
+    db: &MouseGestureDb,
+    settings: &MouseGesturePluginSettings,
+) -> Vec<(String, String, String)> {
     let mut labels = BTreeMap::new();
     for (id, serialized) in &db.bindings {
-        let label = parse_gesture(serialized)
-            .ok()
-            .and_then(|g| g.name)
+        let parsed = parse_gesture(serialized).ok();
+        let label = parsed
+            .as_ref()
+            .and_then(|g| g.name.clone())
             .unwrap_or_else(|| "(unnamed)".to_string());
-        labels.insert(id.clone(), label);
+        let directions = parsed
+            .map(|g| canonical_directions(&g.points, settings).directions)
+            .unwrap_or_default();
+        let tokens = format_direction_list(&directions);
+        labels.insert(id.clone(), (label, tokens));
     }
-    labels.into_iter().collect()
+    labels
+        .into_iter()
+        .map(|(id, (label, tokens))| (id, label, tokens))
+        .collect()
 }
 
 fn next_gesture_id(db: &MouseGestureDb) -> String {
@@ -293,6 +377,42 @@ fn sync_gesture_ids(db: &mut MouseGestureDb) {
     let mut ids: Vec<String> = db.bindings.keys().cloned().collect();
     ids.sort();
     db.gestures = ids;
+}
+
+#[cfg(test)]
+fn canonical_direction_tokens(
+    points: &[Point],
+    settings: &MouseGesturePluginSettings,
+) -> Vec<GestureDirection> {
+    canonical_directions(points, settings).directions
+}
+
+fn direction_label(direction: GestureDirection) -> &'static str {
+    match direction {
+        GestureDirection::Up => "Up",
+        GestureDirection::Down => "Down",
+        GestureDirection::Left => "Left",
+        GestureDirection::Right => "Right",
+        GestureDirection::UpRight => "UpRight",
+        GestureDirection::UpLeft => "UpLeft",
+        GestureDirection::DownRight => "DownRight",
+        GestureDirection::DownLeft => "DownLeft",
+    }
+}
+
+fn format_direction_tokens(result: &CanonicalDirectionResult) -> String {
+    format_direction_list(&result.directions)
+}
+
+fn format_direction_list(directions: &[GestureDirection]) -> String {
+    if directions.is_empty() {
+        return "(none)".to_string();
+    }
+    directions
+        .iter()
+        .map(|direction| direction_label(*direction))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn draw_points(painter: &egui::Painter, points: &[Point], rect: egui::Rect) {
