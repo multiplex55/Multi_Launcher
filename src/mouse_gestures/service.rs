@@ -1039,7 +1039,7 @@ fn spawn_sampler_worker(
 
 #[cfg(any(test, windows))]
 fn sampler_worker_loop(
-    runtime: MouseGestureRuntime,
+    _runtime: MouseGestureRuntime,
     receiver: Receiver<SamplerCommand>,
     preview_sender: SyncSender<PreviewRequest>,
     preview_text: Arc<Mutex<Option<String>>>,
@@ -1565,7 +1565,6 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                         }
                     }
 
-                    CallNextHookEx(None, code, wparam, lparam)
                 }));
 
                 match result {
