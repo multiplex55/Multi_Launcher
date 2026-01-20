@@ -170,8 +170,7 @@ impl MouseGestureRuntime {
         }
         let window_info = current_foreground_window();
         let profile = self.select_profile_cached(&snapshots.db, &window_info)?;
-        let binding =
-            select_binding(profile, &distances, snapshots.settings.max_distance)?;
+        let binding = select_binding(profile, &distances, snapshots.settings.max_distance)?;
         let similarity = 1.0 - binding.distance;
         let label = if binding.binding.label.trim().is_empty() {
             binding.binding.action.clone()
@@ -245,7 +244,7 @@ impl MouseGestureRuntime {
                 if let Some((index, (value, _))) = similarities
                     .iter()
                     .enumerate()
-                    .min_by(|a, b| a.1.0.partial_cmp(&b.1.0).unwrap_or(CmpOrdering::Equal))
+                    .min_by(|a, b| a.1 .0.partial_cmp(&b.1 .0).unwrap_or(CmpOrdering::Equal))
                 {
                     min_index = Some(index);
                     min_similarity = Some(*value);
@@ -263,8 +262,7 @@ impl MouseGestureRuntime {
             } else {
                 binding.label.as_str()
             };
-            let truncated =
-                truncate_with_ellipsis(label.trim(), PREVIEW_SIMILARITY_LABEL_MAX_LEN);
+            let truncated = truncate_with_ellipsis(label.trim(), PREVIEW_SIMILARITY_LABEL_MAX_LEN);
             if let Some(index) = min_index {
                 similarities[index] = (similarity, truncated);
             } else {
@@ -740,6 +738,36 @@ impl TriggerButton {
 }
 
 #[cfg(windows)]
+fn trigger_button_down(button: TriggerButton) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
+    };
+
+    let virtual_key = match button {
+        TriggerButton::Left => VK_LBUTTON,
+        TriggerButton::Right => VK_RBUTTON,
+        TriggerButton::Middle => VK_MBUTTON,
+    };
+    const KEY_PRESSED_MASK: i16 = 0x8000u16 as i16;
+    unsafe { (GetAsyncKeyState(virtual_key.0 as i32) & KEY_PRESSED_MASK) != 0 }
+}
+
+#[cfg(windows)]
+fn cursor_position() -> Point {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let mut pt = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut pt);
+    }
+    Point {
+        x: pt.x as f32,
+        y: pt.y as f32,
+    }
+}
+
+#[cfg(windows)]
 #[derive(Default)]
 pub struct WindowsMouseHookBackend {
     running: Arc<AtomicBool>,
@@ -826,10 +854,198 @@ fn preview_worker_loop(
 
 #[cfg(windows)]
 fn cached_preview_text(preview_text: &Arc<Mutex<Option<String>>>) -> Option<String> {
-    preview_text
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone())
+    preview_text.lock().ok().and_then(|guard| guard.clone())
+}
+
+#[cfg(any(test, windows))]
+#[derive(Clone, Copy)]
+struct SamplerConfig {
+    min_point_distance_sq: f32,
+    max_track_len: f32,
+    preview_enabled: bool,
+    preview_on_end_only: bool,
+    sample_interval: Duration,
+}
+
+#[cfg(any(test, windows))]
+enum SamplerCommand {
+    Start {
+        start_point: Point,
+        trigger_button: Option<TriggerButton>,
+        config: SamplerConfig,
+    },
+    Shutdown,
+}
+
+#[cfg(any(test, windows))]
+fn spawn_sampler_worker(
+    runtime: MouseGestureRuntime,
+    preview_sender: SyncSender<PreviewRequest>,
+    preview_text: Arc<Mutex<Option<String>>>,
+    tracking: Arc<Mutex<HookTrackingState>>,
+    tracking_active: Arc<AtomicBool>,
+    stop_flag: Arc<AtomicBool>,
+    cursor_provider: impl Fn() -> Point + Send + Sync + 'static,
+    trigger_down: impl Fn(TriggerButton) -> bool + Send + Sync + 'static,
+) -> SyncSender<SamplerCommand> {
+    let (sender, receiver) = mpsc::sync_channel(2);
+    std::thread::spawn(move || {
+        sampler_worker_loop(
+            runtime,
+            receiver,
+            preview_sender,
+            preview_text,
+            tracking,
+            tracking_active,
+            stop_flag,
+            cursor_provider,
+            trigger_down,
+        );
+    });
+    sender
+}
+
+#[cfg(any(test, windows))]
+fn sampler_worker_loop(
+    runtime: MouseGestureRuntime,
+    receiver: Receiver<SamplerCommand>,
+    preview_sender: SyncSender<PreviewRequest>,
+    preview_text: Arc<Mutex<Option<String>>>,
+    tracking: Arc<Mutex<HookTrackingState>>,
+    tracking_active: Arc<AtomicBool>,
+    stop_flag: Arc<AtomicBool>,
+    cursor_provider: impl Fn() -> Point + Send + Sync + 'static,
+    trigger_down: impl Fn(TriggerButton) -> bool + Send + Sync + 'static,
+) {
+    for command in receiver {
+        match command {
+            SamplerCommand::Start {
+                start_point,
+                trigger_button,
+                config,
+            } => {
+                stop_flag.store(false, Ordering::SeqCst);
+                if let Ok(mut guard) = tracking.lock() {
+                    guard.begin_stroke(trigger_button, start_point);
+                }
+                tracking_active.store(true, Ordering::SeqCst);
+                if let Ok(mut preview_guard) = preview_text.lock() {
+                    *preview_guard = None;
+                }
+                if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
+                    overlay.begin_stroke(start_point);
+                    overlay.update_preview(None, None);
+                }
+                let mut last_preview_at =
+                    Instant::now() - Duration::from_millis(PREVIEW_THROTTLE_MS);
+                loop {
+                    if stop_flag.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let now = Instant::now();
+                    let mut stored = None;
+                    if let Ok(mut guard) = tracking.lock() {
+                        if guard.active_button.is_none() {
+                            break;
+                        }
+                        if should_cancel(guard.started_at, now, MAX_TRACK_DURATION_MS) {
+                            let _ = guard.cancel_tracking();
+                            if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
+                                overlay.end_stroke();
+                                overlay.update_preview(None, None);
+                            }
+                            tracking_active.store(false, Ordering::SeqCst);
+                            break;
+                        }
+                        if let Some(button) = guard.active_button {
+                            if !trigger_down(button) {
+                                let _ = guard.cancel_tracking();
+                                if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
+                                    overlay.end_stroke();
+                                    overlay.update_preview(None, None);
+                                }
+                                tracking_active.store(false, Ordering::SeqCst);
+                                break;
+                            }
+                        }
+                        let point = cursor_provider();
+                        if guard.sample_point(
+                            point,
+                            config.min_point_distance_sq,
+                            config.max_track_len,
+                        ) {
+                            stored = Some((point, guard.points.clone()));
+                        }
+                    }
+                    if let Some((point, points)) = stored {
+                        if config.preview_enabled && !config.preview_on_end_only {
+                            let _ = preview_sender.try_send(PreviewRequest {
+                                points: points.clone(),
+                                force: false,
+                            });
+                        }
+                        if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
+                            overlay.push_point(point);
+                            if config.preview_enabled
+                                && !config.preview_on_end_only
+                                && should_compute_preview(last_preview_at, now, PREVIEW_THROTTLE_MS)
+                            {
+                                let text = cached_preview_text(&preview_text);
+                                overlay.update_preview(text, Some(point));
+                                last_preview_at = now;
+                            }
+                        }
+                    }
+                    std::thread::sleep(config.sample_interval);
+                }
+                tracking_active.store(false, Ordering::SeqCst);
+                if stop_flag.load(Ordering::SeqCst) {
+                    if let Ok(mut guard) = tracking.try_lock() {
+                        if guard.active_button.is_some() {
+                            let _ = guard.cancel_tracking();
+                            if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
+                                overlay.end_stroke();
+                                overlay.update_preview(None, None);
+                            }
+                        }
+                    }
+                }
+            }
+            SamplerCommand::Shutdown => break,
+        }
+    }
+}
+
+#[cfg(any(test, windows))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HookEventKind {
+    TriggerDown,
+    TriggerUp,
+    MouseMove,
+    Other,
+}
+
+#[cfg(any(test, windows))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HookAction {
+    Start,
+    Stop,
+    Ignore,
+}
+
+#[cfg(any(test, windows))]
+fn hook_action_for_event(
+    event_kind: HookEventKind,
+    event_button: Option<TriggerButton>,
+    trigger_button: Option<TriggerButton>,
+) -> HookAction {
+    match event_kind {
+        HookEventKind::TriggerDown if event_button == trigger_button => HookAction::Start,
+        HookEventKind::TriggerUp if event_button == trigger_button => HookAction::Stop,
+        HookEventKind::MouseMove => HookAction::Ignore,
+        HookEventKind::Other => HookAction::Ignore,
+        _ => HookAction::Ignore,
+    }
 }
 
 impl Default for HookTrackingState {
@@ -939,6 +1155,15 @@ impl HookTrackingState {
         self.store_point(point)
     }
 
+    pub fn sample_point(
+        &mut self,
+        point: Point,
+        min_point_distance_sq: f32,
+        max_track_len: f32,
+    ) -> bool {
+        self.handle_move(point, min_point_distance_sq, max_track_len)
+    }
+
     pub fn finish_stroke(
         &mut self,
         point: Point,
@@ -974,9 +1199,12 @@ impl HookTrackingState {
 #[cfg(windows)]
 struct HookState {
     runtime: MouseGestureRuntime,
-    tracking: Mutex<HookTrackingState>,
     preview_sender: SyncSender<PreviewRequest>,
     preview_text: Arc<Mutex<Option<String>>>,
+    tracking: Arc<Mutex<HookTrackingState>>,
+    tracking_active: Arc<AtomicBool>,
+    stop_flag: Arc<AtomicBool>,
+    sampler_sender: SyncSender<SamplerCommand>,
 }
 
 #[cfg(windows)]
@@ -991,16 +1219,34 @@ impl MouseHookBackend for WindowsMouseHookBackend {
         self.stop_flag.store(false, Ordering::SeqCst);
         let runtime_state = HOOK_STATE.get_or_init(|| {
             let (preview_sender, preview_text) = spawn_preview_worker(runtime.clone());
+            let tracking = Arc::new(Mutex::new(HookTrackingState::default()));
+            let tracking_active = Arc::new(AtomicBool::new(false));
+            let stop_flag = Arc::new(AtomicBool::new(false));
+            let sampler_sender = spawn_sampler_worker(
+                runtime.clone(),
+                preview_sender.clone(),
+                Arc::clone(&preview_text),
+                Arc::clone(&tracking),
+                Arc::clone(&tracking_active),
+                Arc::clone(&stop_flag),
+                cursor_position,
+                trigger_button_down,
+            );
             Arc::new(HookState {
                 runtime,
-                tracking: Mutex::new(HookTrackingState::default()),
                 preview_sender,
                 preview_text,
+                tracking,
+                tracking_active,
+                stop_flag,
+                sampler_sender,
             })
         });
         if let Ok(mut tracking) = runtime_state.tracking.lock() {
             *tracking = HookTrackingState::default();
         }
+        runtime_state.tracking_active.store(false, Ordering::SeqCst);
+        runtime_state.stop_flag.store(false, Ordering::SeqCst);
 
         let stop_flag = Arc::clone(&self.stop_flag);
         let thread_id = Arc::clone(&self.thread_id);
@@ -1018,20 +1264,6 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                 wparam: WPARAM,
                 lparam: LPARAM,
             ) -> LRESULT {
-                fn trigger_button_down(button: TriggerButton) -> bool {
-                    use windows::Win32::UI::Input::KeyboardAndMouse::{
-                        GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
-                    };
-
-                    let virtual_key = match button {
-                        TriggerButton::Left => VK_LBUTTON,
-                        TriggerButton::Right => VK_RBUTTON,
-                        TriggerButton::Middle => VK_MBUTTON,
-                    };
-                    const KEY_PRESSED_MASK: i16 = 0x8000u16 as i16;
-                    unsafe { (GetAsyncKeyState(virtual_key.0 as i32) & KEY_PRESSED_MASK) != 0 }
-                }
-
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if code != HC_ACTION as i32 {
                         return CallNextHookEx(None, code, wparam, lparam);
@@ -1054,28 +1286,25 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                         max_track_len,
                         preview_enabled,
                         preview_on_end_only,
-                    ) =
-                        state
-                            .runtime
-                            .snapshots
-                            .read()
-                            .ok()
-                            .map(|snap| {
-                                (
-                                    TriggerButton::from_setting(&snap.settings.trigger_button),
-                                    snap.settings.min_point_distance.max(0.0),
-                                    snap.settings.max_track_len.max(0.0),
-                                    snap.settings.preview_enabled,
-                                    snap.settings.preview_on_end_only,
-                                )
-                            })
-                            .unwrap_or((None, 0.0, 0.0, false, false));
+                        sample_interval,
+                    ) = state
+                        .runtime
+                        .snapshots
+                        .try_read()
+                        .ok()
+                        .map(|snap| {
+                            let settings = &snap.settings;
+                            (
+                                TriggerButton::from_setting(&settings.trigger_button),
+                                settings.min_point_distance.max(0.0),
+                                settings.max_track_len.max(0.0),
+                                settings.preview_enabled,
+                                settings.preview_on_end_only,
+                                Duration::from_millis(settings.sample_interval_ms()),
+                            )
+                        })
+                        .unwrap_or((None, 0.0, 0.0, false, false, Duration::from_millis(16)));
                     let min_point_distance_sq = min_point_distance * min_point_distance;
-
-                    let mut tracking = match state.tracking.lock() {
-                        Ok(guard) => guard,
-                        Err(poisoned) => poisoned.into_inner(),
-                    };
 
                     let event_button = match event {
                         WM_LBUTTONDOWN | WM_LBUTTONUP => Some(TriggerButton::Left),
@@ -1084,94 +1313,67 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                         _ => None,
                     };
 
-                    if matches!(event, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN)
-                        && event_button == trigger_button
-                    {
-                        tracking.begin_stroke(event_button, point);
-                        if let Ok(mut preview_guard) = state.preview_text.lock() {
-                            *preview_guard = None;
+                    let event_kind = match event {
+                        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
+                            HookEventKind::TriggerDown
                         }
-                        if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
-                            overlay.begin_stroke(point);
-                            overlay.update_preview(None, None);
-                        }
-                        return CallNextHookEx(None, code, wparam, lparam);
-                    }
+                        WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => HookEventKind::TriggerUp,
+                        WM_MOUSEMOVE => HookEventKind::MouseMove,
+                        _ => HookEventKind::Other,
+                    };
 
-                    if event == WM_MOUSEMOVE && tracking.active_button.is_some() {
-                        if should_cancel(tracking.started_at, Instant::now(), MAX_TRACK_DURATION_MS)
-                        {
-                            let _ = tracking.cancel_tracking();
-                            if let Ok(mut preview_guard) = state.preview_text.lock() {
-                                *preview_guard = None;
+                    match hook_action_for_event(event_kind, event_button, trigger_button) {
+                        HookAction::Start => {
+                            if !state.tracking_active.load(Ordering::SeqCst) {
+                                let config = SamplerConfig {
+                                    min_point_distance_sq,
+                                    max_track_len,
+                                    preview_enabled,
+                                    preview_on_end_only,
+                                    sample_interval,
+                                };
+                                state.stop_flag.store(false, Ordering::SeqCst);
+                                let _ = state.sampler_sender.try_send(SamplerCommand::Start {
+                                    start_point: point,
+                                    trigger_button: event_button,
+                                    config,
+                                });
                             }
+                            return CallNextHookEx(None, code, wparam, lparam);
+                        }
+                        HookAction::Stop => {
+                            state.stop_flag.store(true, Ordering::SeqCst);
+                            let Ok(mut tracking) = state.tracking.try_lock() else {
+                                return CallNextHookEx(None, code, wparam, lparam);
+                            };
+                            if tracking.active_button != event_button {
+                                return CallNextHookEx(None, code, wparam, lparam);
+                            }
+                            let (points, too_long) =
+                                tracking.finish_stroke(point, min_point_distance_sq, max_track_len);
+
+                            if preview_enabled {
+                                let _ = state.preview_sender.try_send(PreviewRequest {
+                                    points: points.clone(),
+                                    force: true,
+                                });
+                            }
+
                             if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
                                 overlay.end_stroke();
                                 overlay.update_preview(None, None);
                             }
+
+                            let outcome =
+                                state.runtime.evaluate_track_with_limit(&points, too_long);
+                            if outcome.matched {
+                                return LRESULT(1);
+                            }
                             return CallNextHookEx(None, code, wparam, lparam);
                         }
-
-                        if let Some(active_button) = tracking.active_button {
-                            if !trigger_button_down(active_button) {
-                                let _ = tracking.cancel_tracking();
-                                if let Ok(mut preview_guard) = state.preview_text.lock() {
-                                    *preview_guard = None;
-                                }
-                                if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
-                                    overlay.end_stroke();
-                                    overlay.update_preview(None, None);
-                                }
-                                return CallNextHookEx(None, code, wparam, lparam);
-                            }
+                        HookAction::Ignore => {
+                            return CallNextHookEx(None, code, wparam, lparam);
                         }
-
-                        let stored =
-                            tracking.handle_move(point, min_point_distance_sq, max_track_len);
-                        if stored {
-                            if preview_enabled && !preview_on_end_only {
-                                let _ = state.preview_sender.try_send(PreviewRequest {
-                                    points: tracking.points.clone(),
-                                    force: false,
-                                });
-                            }
-                            if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
-                                overlay.push_point(point);
-                                if preview_enabled && !preview_on_end_only {
-                                    let text = cached_preview_text(&state.preview_text);
-                                    overlay.update_preview(text, Some(point));
-                                } else {
-                                    overlay.update_preview(None, None);
-                                }
-                            }
-                        }
-                        return CallNextHookEx(None, code, wparam, lparam);
-                    }
-
-                    if matches!(event, WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP)
-                        && tracking.active_button == event_button
-                    {
-                        let (points, too_long) =
-                            tracking.finish_stroke(point, min_point_distance_sq, max_track_len);
-                        drop(tracking);
-
-                        if preview_enabled {
-                            let _ = state.preview_sender.try_send(PreviewRequest {
-                                points: points.clone(),
-                                force: true,
-                            });
-                        }
-
-                        if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
-                            overlay.end_stroke();
-                            overlay.update_preview(None, None);
-                        }
-
-                        let outcome = state.runtime.evaluate_track_with_limit(&points, too_long);
-                        if outcome.matched {
-                            return LRESULT(1);
-                        }
-                        return CallNextHookEx(None, code, wparam, lparam);
                     }
 
                     CallNextHookEx(None, code, wparam, lparam)
@@ -1344,20 +1546,23 @@ impl MouseHookBackend for MockMouseHookBackend {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_gesture_templates, hash_direction_sequence, preview_worker_loop,
-        sequence_changed, should_cancel, should_compute_preview, truncate_with_ellipsis,
+        build_gesture_templates, hash_direction_sequence, hook_action_for_event,
+        preview_worker_loop, sampler_worker_loop, sequence_changed, should_cancel,
+        should_compute_preview, truncate_with_ellipsis, HookAction, HookEventKind,
         HookTrackingState, MouseGestureEventSink, MouseGestureRuntime, MouseGestureService,
-        MouseGestureSnapshots, PreviewRequest, ProfileCache, TrackOutcome, MAX_TRACK_DURATION_MS,
-        PREVIEW_SIMILARITY_LABEL_MAX_LEN, PREVIEW_SIMILARITY_MAX_LEN, PREVIEW_SIMILARITY_TOP_N,
+        MouseGestureSnapshots, PreviewRequest, ProfileCache, SamplerCommand, SamplerConfig,
+        TrackOutcome, TriggerButton, MAX_TRACK_DURATION_MS, PREVIEW_SIMILARITY_LABEL_MAX_LEN,
+        PREVIEW_SIMILARITY_MAX_LEN, PREVIEW_SIMILARITY_TOP_N,
     };
-    use crate::mouse_gestures::MouseHookBackend;
     use crate::gui::MouseGestureEvent;
+    use crate::mouse_gestures::MouseHookBackend;
     use crate::plugins::mouse_gestures::db::{
         ForegroundWindowInfo, MouseGestureBinding, MouseGestureDb, MouseGestureProfile,
     };
     use crate::plugins::mouse_gestures::engine::{GestureDirection, Point};
     use crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{mpsc, Arc, Mutex, RwLock};
     use std::time::{Duration, Instant};
 
@@ -1401,7 +1606,10 @@ mod tests {
         }
     }
 
-    fn make_runtime(db: MouseGestureDb, settings: MouseGesturePluginSettings) -> MouseGestureRuntime {
+    fn make_runtime(
+        db: MouseGestureDb,
+        settings: MouseGesturePluginSettings,
+    ) -> MouseGestureRuntime {
         MouseGestureRuntime {
             snapshots: Arc::new(RwLock::new(make_snapshots(db, settings))),
             event_sink: Arc::new(TestEventSink),
@@ -1432,13 +1640,119 @@ mod tests {
     }
 
     #[test]
+    fn sampler_stops_when_stop_flag_set() {
+        let runtime = make_runtime(
+            MouseGestureDb::default(),
+            MouseGesturePluginSettings::default(),
+        );
+        let (preview_sender, _preview_receiver) = mpsc::sync_channel(1);
+        let preview_text = Arc::new(Mutex::new(None));
+        let tracking = Arc::new(Mutex::new(HookTrackingState::default()));
+        let tracking_active = Arc::new(AtomicBool::new(false));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::sync_channel(1);
+
+        let tracking_handle = Arc::clone(&tracking);
+        let tracking_active_handle = Arc::clone(&tracking_active);
+        let stop_flag_handle = Arc::clone(&stop_flag);
+        let preview_text_handle = Arc::clone(&preview_text);
+        let runtime_handle = runtime.clone();
+
+        let worker = std::thread::spawn(move || {
+            sampler_worker_loop(
+                runtime_handle,
+                receiver,
+                preview_sender,
+                preview_text_handle,
+                tracking_handle,
+                tracking_active_handle,
+                stop_flag_handle,
+                || Point { x: 1.0, y: 1.0 },
+                |_| true,
+            );
+        });
+
+        let config = SamplerConfig {
+            min_point_distance_sq: 0.0,
+            max_track_len: 0.0,
+            preview_enabled: false,
+            preview_on_end_only: false,
+            sample_interval: Duration::from_millis(5),
+        };
+        sender
+            .send(SamplerCommand::Start {
+                start_point: Point { x: 0.0, y: 0.0 },
+                trigger_button: Some(TriggerButton::Right),
+                config,
+            })
+            .expect("send start command");
+
+        let start_deadline = Instant::now() + Duration::from_millis(200);
+        while !tracking_active.load(Ordering::SeqCst) {
+            if Instant::now() >= start_deadline {
+                panic!("sampler never reported active tracking");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        stop_flag.store(true, Ordering::SeqCst);
+        let stop_deadline = Instant::now() + Duration::from_millis(200);
+        while tracking_active.load(Ordering::SeqCst) {
+            if Instant::now() >= stop_deadline {
+                panic!("sampler did not stop after stop flag");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        drop(sender);
+        worker.join().expect("sampler worker exits");
+    }
+
+    #[test]
+    fn hook_ignores_mouse_move_when_sampling_enabled() {
+        let mut tracking = HookTrackingState::default();
+        tracking.begin_track(Point { x: 1.0, y: 1.0 });
+        let points_before = tracking.points.clone();
+
+        let action = hook_action_for_event(
+            HookEventKind::MouseMove,
+            Some(TriggerButton::Right),
+            Some(TriggerButton::Right),
+        );
+
+        assert_eq!(action, HookAction::Ignore);
+        assert_eq!(tracking.points, points_before);
+    }
+
+    #[test]
+    fn sample_interval_is_clamped() {
+        let mut settings = MouseGesturePluginSettings::default();
+        settings.sample_interval_ms = 1;
+        assert_eq!(settings.sample_interval_ms(), 5);
+
+        settings.sample_interval_ms = 80;
+        assert_eq!(settings.sample_interval_ms(), 50);
+
+        settings.sample_interval_ms = 20;
+        assert_eq!(settings.sample_interval_ms(), 20);
+    }
+
+    #[test]
     fn tracking_max_duration_cancels() {
         let started_at = Instant::now();
         let before_deadline = started_at + Duration::from_millis(MAX_TRACK_DURATION_MS - 1);
         let after_deadline = started_at + Duration::from_millis(MAX_TRACK_DURATION_MS + 1);
 
-        assert!(!should_cancel(started_at, before_deadline, MAX_TRACK_DURATION_MS));
-        assert!(should_cancel(started_at, after_deadline, MAX_TRACK_DURATION_MS));
+        assert!(!should_cancel(
+            started_at,
+            before_deadline,
+            MAX_TRACK_DURATION_MS
+        ));
+        assert!(should_cancel(
+            started_at,
+            after_deadline,
+            MAX_TRACK_DURATION_MS
+        ));
         assert!(!should_cancel(started_at, after_deadline, 0));
     }
 
@@ -1535,7 +1849,10 @@ mod tests {
         ];
 
         let mut bindings_map = HashMap::new();
-        bindings_map.insert("g1".to_string(), make_gesture(&[(0.0, 0.0), (10.0, 0.0), (10.0, -10.0)]));
+        bindings_map.insert(
+            "g1".to_string(),
+            make_gesture(&[(0.0, 0.0), (10.0, 0.0), (10.0, -10.0)]),
+        );
         bindings_map.insert("g2".to_string(), make_gesture(&[(0.0, 0.0), (10.0, 0.0)]));
         bindings_map.insert("g3".to_string(), make_gesture(&[(0.0, 0.0), (0.0, -10.0)]));
         bindings_map.insert("g4".to_string(), make_gesture(&[(0.0, 0.0), (-10.0, 0.0)]));
@@ -1644,7 +1961,10 @@ mod tests {
         ];
 
         let mut bindings_map = HashMap::new();
-        bindings_map.insert("g1".to_string(), make_gesture(&[(0.0, 0.0), (10.0, 0.0), (10.0, -10.0)]));
+        bindings_map.insert(
+            "g1".to_string(),
+            make_gesture(&[(0.0, 0.0), (10.0, 0.0), (10.0, -10.0)]),
+        );
         bindings_map.insert("g2".to_string(), make_gesture(&[(0.0, 0.0), (10.0, 0.0)]));
         bindings_map.insert("g3".to_string(), make_gesture(&[(0.0, 0.0), (0.0, -10.0)]));
 
@@ -1740,11 +2060,7 @@ mod tests {
         };
         let points = make_right_points();
 
-        let snapshots = runtime
-            .snapshots
-            .read()
-            .expect("read snapshots")
-            .clone();
+        let snapshots = runtime.snapshots.read().expect("read snapshots").clone();
         let text = runtime
             .preview_similarity_text(&points, &snapshots)
             .expect("preview text");
@@ -1752,11 +2068,7 @@ mod tests {
 
         service.update_db(make_db_with_right_gesture());
 
-        let snapshots = runtime
-            .snapshots
-            .read()
-            .expect("read snapshots")
-            .clone();
+        let snapshots = runtime.snapshots.read().expect("read snapshots").clone();
         let text = runtime
             .preview_similarity_text(&points, &snapshots)
             .expect("preview text after update");
