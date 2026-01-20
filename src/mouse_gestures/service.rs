@@ -2156,7 +2156,7 @@ mod tests {
         reset_template_build_counter, sequence_changed, should_cancel, should_compute_preview,
         template_build_count, truncate_with_ellipsis, HookAction, HookEventKind,
         clear_overlay_and_preview, HookDiagnostics, HookTrackingState, MouseGestureEventSink,
-        MouseGestureRuntime,
+        MouseGestureRuntime, TRACKING_START_DISTANCE_SQ,
         MouseGestureService, MouseGestureSnapshots, PreviewRequest, ProfileCache, SamplerCommand,
         SamplerConfig, TrackOutcome, TrackingState, TriggerButton,
         PREVIEW_SIMILARITY_LABEL_MAX_LEN, PREVIEW_SIMILARITY_MAX_LEN,
