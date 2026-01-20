@@ -161,10 +161,11 @@ impl MouseGesturesGestureDialog {
                 let painter = ui.painter_at(rect);
                 painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
 
-                if response.drag_started() {
+                let trigger_button = pointer_button_from_setting(&settings.trigger_button);
+                if response.drag_started_by(trigger_button) {
                     self.points.clear();
                 }
-                if response.dragged() {
+                if response.dragged_by(trigger_button) {
                     if let Some(pos) = response.interact_pointer_pos() {
                         let point = Point {
                             x: pos.x - rect.left(),
@@ -183,7 +184,7 @@ impl MouseGesturesGestureDialog {
                         }
                     }
                 }
-                if response.drag_stopped() {
+                if response.drag_stopped_by(trigger_button) {
                     self.update_serialized();
                 }
 
@@ -413,6 +414,14 @@ fn format_direction_list(directions: &[GestureDirection]) -> String {
         .map(|direction| direction_label(*direction))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn pointer_button_from_setting(value: &str) -> egui::PointerButton {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "right" => egui::PointerButton::Secondary,
+        "middle" => egui::PointerButton::Middle,
+        _ => egui::PointerButton::Primary,
+    }
 }
 
 fn draw_points(painter: &egui::Painter, points: &[Point], rect: egui::Rect) {
