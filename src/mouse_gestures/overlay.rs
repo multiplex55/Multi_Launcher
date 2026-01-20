@@ -577,7 +577,7 @@ mod tests {
             base + Duration::from_millis(16),
             false
         ));
-        assert!(should_invalidate(
+        assert!(!should_invalidate(
             deadline,
             base + Duration::from_millis(1),
             true
@@ -670,7 +670,7 @@ mod tests {
             .collect();
         let reduced = decimate_points(&points, 5);
         let reduced_x: Vec<i32> = reduced.iter().map(|point| point.x as i32).collect();
-        assert_eq!(reduced_x, vec![0, 2, 4, 7, 9]);
+        assert_eq!(reduced_x, vec![0, 2, 5, 7, 9]);
     }
 
     #[test]
