@@ -83,16 +83,15 @@ pub fn preprocess_points_for_directions(
     points: &[Point],
     settings: &crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings,
 ) -> Vec<Point> {
-    if points.len() < 2 || (!settings.sampling_enabled && !settings.smoothing_enabled) {
+    if points.len() < 2 {
         return points.to_vec();
     }
 
-    let mut processed = if settings.sampling_enabled {
-        let sample_count = DIRECTION_SAMPLE_COUNT.min(points.len().max(2));
-        resample_points(points, sample_count)
-    } else {
-        points.to_vec()
-    };
+    let mut processed = points.to_vec();
+    if settings.sampling_enabled {
+        let sample_count = DIRECTION_SAMPLE_COUNT.min(processed.len().max(2));
+        processed = resample_points(&processed, sample_count);
+    }
 
     if settings.smoothing_enabled {
         processed = smooth_points(&processed, DIRECTION_SMOOTHING_WINDOW);
@@ -101,20 +100,43 @@ pub fn preprocess_points_for_directions(
     processed
 }
 
-pub fn direction_sequence(points: &[Point], min_segment_len: f32) -> Vec<GestureDirection> {
+pub fn direction_sequence(
+    points: &[Point],
+    settings: &crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings,
+) -> Vec<GestureDirection> {
+    if points.len() < 2 {
+        return Vec::new();
+    }
+
+    let segment_threshold = settings.segment_threshold_px.max(0.0);
+    let tolerance = settings.direction_tolerance_deg.max(0.0);
+    let sector_half = 22.5_f32;
     let mut dirs = Vec::new();
-    for pair in points.windows(2) {
-        let dx = pair[1].x - pair[0].x;
-        let dy = pair[1].y - pair[0].y;
+    let mut anchor = points[0];
+    let mut last_direction: Option<GestureDirection> = None;
+    for point in points.iter().skip(1) {
+        let dx = point.x - anchor.x;
+        let dy = point.y - anchor.y;
         let len = (dx * dx + dy * dy).sqrt();
-        if len < min_segment_len {
+        if len < segment_threshold {
             continue;
         }
         let angle = (-dy).atan2(dx);
         let direction = direction_from_angle(angle);
-        if dirs.last().copied() != Some(direction) {
-            dirs.push(direction);
+        if let Some(last) = last_direction {
+            if direction == last {
+                continue;
+            }
+            let angle_deg = angle.to_degrees().rem_euclid(360.0);
+            let last_angle = direction_center_angle_deg(last);
+            let delta = angular_difference_deg(angle_deg, last_angle);
+            if delta <= sector_half + tolerance {
+                continue;
+            }
         }
+        dirs.push(direction);
+        last_direction = Some(direction);
+        anchor = *point;
     }
     dirs
 }
@@ -228,6 +250,24 @@ fn direction_from_angle(angle: f32) -> GestureDirection {
     }
 }
 
+fn direction_center_angle_deg(direction: GestureDirection) -> f32 {
+    match direction {
+        GestureDirection::Right => 0.0,
+        GestureDirection::UpRight => 45.0,
+        GestureDirection::Up => 90.0,
+        GestureDirection::UpLeft => 135.0,
+        GestureDirection::Left => 180.0,
+        GestureDirection::DownLeft => 225.0,
+        GestureDirection::Down => 270.0,
+        GestureDirection::DownRight => 315.0,
+    }
+}
+
+fn angular_difference_deg(a: f32, b: f32) -> f32 {
+    let diff = (a - b).abs();
+    diff.min(360.0 - diff)
+}
+
 pub fn parse_gesture(input: &str) -> Result<GestureDefinition, ParseError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -256,7 +296,8 @@ pub fn parse_gesture(input: &str) -> Result<GestureDefinition, ParseError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{direction_similarity, GestureDirection};
+    use super::{direction_sequence, direction_similarity, GestureDirection, Point};
+    use crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
 
     #[test]
     fn direction_similarity_prefers_smaller_angular_difference() {
@@ -351,6 +392,75 @@ mod tests {
         let similarity = direction_similarity(&gesture, &template);
 
         assert!(similarity > 0.8, "expected {similarity} to be above 0.8");
+    }
+
+    fn settings_with_thresholds(
+        segment_threshold_px: f32,
+        direction_tolerance_deg: f32,
+    ) -> MouseGesturePluginSettings {
+        let mut settings = MouseGesturePluginSettings::default();
+        settings.segment_threshold_px = segment_threshold_px;
+        settings.direction_tolerance_deg = direction_tolerance_deg;
+        settings
+    }
+
+    #[test]
+    fn direction_sequence_long_up_is_single_token() {
+        let points = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 0.0, y: -30.0 },
+            Point { x: 0.0, y: -60.0 },
+        ];
+        let settings = settings_with_thresholds(5.0, 5.0);
+
+        let dirs = direction_sequence(&points, &settings);
+
+        assert_eq!(dirs, vec![GestureDirection::Up]);
+    }
+
+    #[test]
+    fn direction_sequence_ignores_jitter_below_threshold() {
+        let points = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 3.0, y: -2.0 },
+            Point { x: -1.0, y: 4.0 },
+            Point { x: 2.0, y: -3.0 },
+        ];
+        let settings = settings_with_thresholds(10.0, 5.0);
+
+        let dirs = direction_sequence(&points, &settings);
+
+        assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn direction_sequence_diagonal_stays_stable_with_tolerance() {
+        let points = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 10.0, y: -8.0 },
+            Point { x: 12.0, y: -28.0 },
+            Point { x: 24.0, y: -36.0 },
+        ];
+        let settings = settings_with_thresholds(5.0, 30.0);
+
+        let dirs = direction_sequence(&points, &settings);
+
+        assert_eq!(dirs, vec![GestureDirection::UpRight]);
+    }
+
+    #[test]
+    fn direction_sequence_compresses_repeated_tokens() {
+        let points = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 15.0, y: 0.0 },
+            Point { x: 30.0, y: 0.0 },
+            Point { x: 45.0, y: 0.0 },
+        ];
+        let settings = settings_with_thresholds(5.0, 0.0);
+
+        let dirs = direction_sequence(&points, &settings);
+
+        assert_eq!(dirs, vec![GestureDirection::Right]);
     }
 }
 
