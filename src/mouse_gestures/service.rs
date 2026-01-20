@@ -571,18 +571,32 @@ struct GestureTemplate {
     directions: Vec<GestureDirection>,
 }
 
+#[cfg(test)]
+static TEMPLATE_BUILD_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
 fn build_gesture_templates(
     db: &MouseGestureDb,
     settings: &MouseGesturePluginSettings,
 ) -> HashMap<String, GestureTemplate> {
+    #[cfg(test)]
+    {
+        TEMPLATE_BUILD_COUNTER.fetch_add(1, Ordering::SeqCst);
+    }
+
     let mut templates = HashMap::new();
     for (gesture_id, serialized) in &db.bindings {
         let parsed = match parse_gesture(serialized) {
             Ok(def) => def,
             Err(_) => continue,
         };
-        let processed_points = preprocess_points_for_directions(&parsed.points, settings);
-        let directions = direction_sequence(&processed_points, settings);
+        let displacement = track_displacement(&parsed.points);
+        let straightness = straightness_ratio(&parsed.points);
+        let directions = track_directions_with_override(
+            &parsed.points,
+            settings,
+            Some(displacement),
+            Some(straightness),
+        );
         if directions.is_empty() {
             continue;
         }
@@ -597,6 +611,20 @@ fn build_gesture_templates(
     templates
 }
 
+fn rebuild_gesture_templates(snapshots: &mut MouseGestureSnapshots) {
+    snapshots.gesture_templates = build_gesture_templates(&snapshots.db, &snapshots.settings);
+}
+
+#[cfg(test)]
+fn reset_template_build_counter() {
+    TEMPLATE_BUILD_COUNTER.store(0, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn template_build_count() -> usize {
+    TEMPLATE_BUILD_COUNTER.load(Ordering::SeqCst)
+}
+
 fn should_refresh_gesture_templates(
     current: &MouseGesturePluginSettings,
     updated: &MouseGesturePluginSettings,
@@ -604,6 +632,8 @@ fn should_refresh_gesture_templates(
     current.min_point_distance != updated.min_point_distance
         || current.segment_threshold_px != updated.segment_threshold_px
         || current.direction_tolerance_deg != updated.direction_tolerance_deg
+        || current.straightness_threshold != updated.straightness_threshold
+        || current.straightness_min_displacement_px != updated.straightness_min_displacement_px
         || current.sampling_enabled != updated.sampling_enabled
         || current.smoothing_enabled != updated.smoothing_enabled
 }
@@ -764,9 +794,11 @@ impl MouseGestureService {
     pub fn update_settings(&self, settings: MouseGesturePluginSettings) {
         if let Ok(mut guard) = self.snapshots.write() {
             if should_refresh_gesture_templates(&guard.settings, &settings) {
-                guard.gesture_templates = build_gesture_templates(&guard.db, &settings);
+                guard.settings = settings.clone();
+                rebuild_gesture_templates(&mut guard);
+            } else {
+                guard.settings = settings.clone();
             }
-            guard.settings = settings.clone();
         }
         if let Ok(mut overlay) = mouse_gesture_overlay().lock() {
             overlay.update_settings(&settings);
@@ -785,7 +817,7 @@ impl MouseGestureService {
     pub fn update_db(&self, db: MouseGestureDb) {
         if let Ok(mut guard) = self.snapshots.write() {
             guard.db = db;
-            guard.gesture_templates = build_gesture_templates(&guard.db, &guard.settings);
+            rebuild_gesture_templates(&mut guard);
         }
         if let Ok(mut cache) = self.profile_cache.lock() {
             cache.clear();
@@ -934,9 +966,8 @@ fn preview_worker_loop(
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default();
-        let processed_points =
-            preprocess_points_for_directions(&request.points, &snapshots.settings);
-        let directions = direction_sequence(&processed_points, &snapshots.settings);
+        let directions =
+            track_directions_with_override(&request.points, &snapshots.settings, None, None);
         let sequence_hash = hash_direction_sequence(&directions);
 
         if snapshots.settings.preview_on_end_only && !request.force {
@@ -1736,10 +1767,11 @@ mod tests {
     use super::{
         build_gesture_templates, finalize_hook_outcome, hash_direction_sequence,
         hook_action_for_event, is_tap_track, preview_worker_loop, sampler_worker_loop,
-        sequence_changed, should_cancel, should_compute_preview, truncate_with_ellipsis,
-        HookAction, HookEventKind, HookTrackingState, MouseGestureEventSink, MouseGestureRuntime,
-        MouseGestureService, MouseGestureSnapshots, PreviewRequest, ProfileCache, SamplerCommand,
-        SamplerConfig, TrackOutcome, TriggerButton,
+        reset_template_build_counter, sequence_changed, should_cancel, should_compute_preview,
+        template_build_count, truncate_with_ellipsis, HookAction, HookEventKind,
+        HookTrackingState, MouseGestureEventSink, MouseGestureRuntime, MouseGestureService,
+        MouseGestureSnapshots, PreviewRequest, ProfileCache, SamplerCommand, SamplerConfig,
+        TrackOutcome, TriggerButton,
         PREVIEW_SIMILARITY_LABEL_MAX_LEN, PREVIEW_SIMILARITY_MAX_LEN,
         PREVIEW_SIMILARITY_TOP_N, track_directions_with_override,
     };
@@ -2514,6 +2546,94 @@ mod tests {
         assert!(
             text.contains("Swipe Right"),
             "expected updated templates in text: {text}"
+        );
+    }
+
+    #[test]
+    fn update_settings_rebuilds_templates_on_segment_threshold_change() {
+        let service = MouseGestureService::new_with_backend_and_sink(
+            Arc::new(TestBackend),
+            Arc::new(TestEventSink),
+        );
+        reset_template_build_counter();
+
+        let mut settings = MouseGesturePluginSettings::default();
+        settings.segment_threshold_px = 2.0;
+        service.update_settings(settings.clone());
+        let builds_after_first = template_build_count();
+
+        settings.segment_threshold_px = 12.0;
+        service.update_settings(settings);
+        let builds_after_second = template_build_count();
+
+        assert!(
+            builds_after_second > builds_after_first,
+            "expected template rebuild when segment threshold changes"
+        );
+    }
+
+    #[test]
+    fn update_settings_rebuilds_templates_on_direction_tolerance_change() {
+        let service = MouseGestureService::new_with_backend_and_sink(
+            Arc::new(TestBackend),
+            Arc::new(TestEventSink),
+        );
+        reset_template_build_counter();
+
+        let mut settings = MouseGesturePluginSettings::default();
+        settings.direction_tolerance_deg = 10.0;
+        service.update_settings(settings.clone());
+        let builds_after_first = template_build_count();
+
+        settings.direction_tolerance_deg = 45.0;
+        service.update_settings(settings);
+        let builds_after_second = template_build_count();
+
+        assert!(
+            builds_after_second > builds_after_first,
+            "expected template rebuild when direction tolerance changes"
+        );
+    }
+
+    #[test]
+    fn preview_worker_uses_cached_templates() {
+        let db = make_db_with_right_gesture();
+        let settings = MouseGesturePluginSettings {
+            min_point_distance: 0.0,
+            segment_threshold_px: 0.0,
+            direction_tolerance_deg: 0.0,
+            ..MouseGesturePluginSettings::default()
+        };
+        let runtime = make_runtime(db, settings);
+        reset_template_build_counter();
+
+        let preview_text = Arc::new(Mutex::new(None));
+        let preview_text_handle = Arc::clone(&preview_text);
+        let (sender, receiver) = mpsc::sync_channel(2);
+        let points = make_right_points();
+
+        let worker = std::thread::spawn(move || {
+            preview_worker_loop(runtime, receiver, preview_text_handle);
+        });
+
+        sender
+            .send(PreviewRequest {
+                points,
+                force: true,
+            })
+            .expect("send preview request");
+        drop(sender);
+
+        worker.join().expect("preview worker finished");
+
+        assert_eq!(
+            template_build_count(),
+            0,
+            "preview worker should use cached templates"
+        );
+        assert!(
+            preview_text.lock().expect("lock preview text").is_some(),
+            "expected preview text to be updated"
         );
     }
 
