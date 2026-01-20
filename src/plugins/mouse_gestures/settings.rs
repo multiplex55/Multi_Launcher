@@ -7,6 +7,8 @@ pub struct MouseGestureOverlaySettings {
     pub fade: u64,
     #[serde(default)]
     pub max_render_points: usize,
+    #[serde(default)]
+    pub max_raw_points: usize,
 }
 
 impl Default for MouseGestureOverlaySettings {
@@ -16,6 +18,7 @@ impl Default for MouseGestureOverlaySettings {
             thickness: 2.0,
             fade: 300,
             max_render_points: 512,
+            max_raw_points: 2048,
         }
     }
 }
@@ -183,6 +186,7 @@ mod tests {
             thickness: 3.5,
             fade: 450,
             max_render_points: 256,
+            max_raw_points: 1024,
         };
         let value = serde_json::to_value(&settings).expect("serialize overlay settings");
         let parsed: MouseGestureOverlaySettings =
