@@ -462,6 +462,35 @@ mod tests {
 
         assert_eq!(dirs, vec![GestureDirection::Right]);
     }
+
+    #[test]
+    fn straightness_ratio_is_one_for_straight_line() {
+        let points = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 10.0, y: 0.0 },
+            Point { x: 20.0, y: 0.0 },
+        ];
+
+        let ratio = super::straightness_ratio(&points);
+
+        assert!((ratio - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn straightness_ratio_drops_for_turns() {
+        let points = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 10.0, y: 0.0 },
+            Point { x: 10.0, y: 10.0 },
+        ];
+
+        let ratio = super::straightness_ratio(&points);
+
+        assert!(
+            ratio < 0.9,
+            "expected ratio to drop below 0.9, got {ratio}"
+        );
+    }
 }
 
 pub fn serialize_gesture(gesture: &GestureDefinition) -> String {
@@ -484,6 +513,23 @@ pub fn track_length(points: &[Point]) -> f32 {
         .windows(2)
         .map(|pair| distance(pair[0], pair[1]))
         .sum()
+}
+
+pub fn straightness_ratio(points: &[Point]) -> f32 {
+    if points.len() < 2 {
+        return 0.0;
+    }
+    let length = track_length(points);
+    if length == 0.0 {
+        return 0.0;
+    }
+    let displacement = distance(points[0], points[points.len() - 1]);
+    (displacement / length).clamp(0.0, 1.0)
+}
+
+pub fn direction_from_vector(vector: Vector) -> GestureDirection {
+    let angle = (-vector.y).atan2(vector.x);
+    direction_from_angle(angle)
 }
 
 pub fn meets_min_track_len(points: &[Point], min_track_len: f32) -> bool {
