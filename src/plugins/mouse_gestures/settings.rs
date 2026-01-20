@@ -41,6 +41,10 @@ pub struct MouseGesturePluginSettings {
     pub sampling_enabled: bool,
     #[serde(default = "default_sample_interval_ms")]
     pub sample_interval_ms: u64,
+    #[serde(default = "default_segment_threshold_px")]
+    pub segment_threshold_px: f32,
+    #[serde(default = "default_direction_tolerance_deg")]
+    pub direction_tolerance_deg: f32,
     #[serde(default)]
     pub preview_enabled: bool,
     #[serde(default)]
@@ -65,6 +69,8 @@ impl Default for MouseGesturePluginSettings {
             smoothing_enabled: true,
             sampling_enabled: true,
             sample_interval_ms: default_sample_interval_ms(),
+            segment_threshold_px: default_segment_threshold_px(),
+            direction_tolerance_deg: default_direction_tolerance_deg(),
             preview_enabled: false,
             preview_on_end_only: false,
             debug_show_similarity: false,
@@ -84,6 +90,14 @@ fn default_match_threshold() -> f32 {
 
 fn default_sample_interval_ms() -> u64 {
     16
+}
+
+fn default_segment_threshold_px() -> f32 {
+    8.0
+}
+
+fn default_direction_tolerance_deg() -> f32 {
+    30.0
 }
 
 fn clamp_sample_interval_ms(value: u64) -> u64 {

@@ -151,8 +151,7 @@ impl MouseGestureRuntime {
             return None;
         }
         let processed_points = preprocess_points_for_directions(points, &snapshots.settings);
-        let track_dirs =
-            direction_sequence(&processed_points, snapshots.settings.min_point_distance);
+        let track_dirs = direction_sequence(&processed_points, &snapshots.settings);
         if track_dirs.is_empty() {
             return None;
         }
@@ -214,8 +213,7 @@ impl MouseGestureRuntime {
         snapshots: &MouseGestureSnapshots,
     ) -> Option<String> {
         let processed_points = preprocess_points_for_directions(points, &snapshots.settings);
-        let track_dirs =
-            direction_sequence(&processed_points, snapshots.settings.min_point_distance);
+        let track_dirs = direction_sequence(&processed_points, &snapshots.settings);
         if track_dirs.is_empty() {
             return Some("No match".to_string());
         }
@@ -335,8 +333,7 @@ impl MouseGestureRuntime {
         }
 
         let processed_points = preprocess_points_for_directions(points, &snapshots.settings);
-        let track_dirs =
-            direction_sequence(&processed_points, snapshots.settings.min_point_distance);
+        let track_dirs = direction_sequence(&processed_points, &snapshots.settings);
         if track_dirs.is_empty() {
             return if passthrough_on_no_match {
                 TrackOutcome::passthrough()
@@ -476,7 +473,7 @@ fn build_gesture_templates(
             Err(_) => continue,
         };
         let processed_points = preprocess_points_for_directions(&parsed.points, settings);
-        let directions = direction_sequence(&processed_points, settings.min_point_distance);
+        let directions = direction_sequence(&processed_points, settings);
         if directions.is_empty() {
             continue;
         }
@@ -496,6 +493,8 @@ fn should_refresh_gesture_templates(
     updated: &MouseGesturePluginSettings,
 ) -> bool {
     current.min_point_distance != updated.min_point_distance
+        || current.segment_threshold_px != updated.segment_threshold_px
+        || current.direction_tolerance_deg != updated.direction_tolerance_deg
         || current.sampling_enabled != updated.sampling_enabled
         || current.smoothing_enabled != updated.smoothing_enabled
 }
@@ -826,8 +825,7 @@ fn preview_worker_loop(
             .unwrap_or_default();
         let processed_points =
             preprocess_points_for_directions(&request.points, &snapshots.settings);
-        let min_point_distance = snapshots.settings.min_point_distance.max(0.0);
-        let directions = direction_sequence(&processed_points, min_point_distance);
+        let directions = direction_sequence(&processed_points, &snapshots.settings);
         let sequence_hash = hash_direction_sequence(&directions);
 
         if snapshots.settings.preview_on_end_only && !request.force {

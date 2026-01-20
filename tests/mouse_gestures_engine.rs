@@ -122,14 +122,19 @@ fn preprocess_for_directions_smooths_jittery_input() {
         Point { x: 50.0, y: 0.0 },
     ];
 
-    let raw_dirs = direction_sequence(&points, 0.0);
+    let mut raw_settings = MouseGesturePluginSettings::default();
+    raw_settings.segment_threshold_px = 0.0;
+    raw_settings.direction_tolerance_deg = 0.0;
+    let raw_dirs = direction_sequence(&points, &raw_settings);
 
     let mut settings = MouseGesturePluginSettings::default();
     settings.sampling_enabled = true;
     settings.smoothing_enabled = true;
+    settings.segment_threshold_px = 0.0;
+    settings.direction_tolerance_deg = 0.0;
 
     let processed = preprocess_points_for_directions(&points, &settings);
-    let processed_dirs = direction_sequence(&processed, 0.0);
+    let processed_dirs = direction_sequence(&processed, &settings);
 
     assert!(!raw_dirs.is_empty());
     assert!(!processed_dirs.is_empty());
