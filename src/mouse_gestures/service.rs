@@ -1902,6 +1902,8 @@ mod tests {
             direction_tolerance_deg: 0.0,
             single_dir_match_threshold: 0.9,
             multi_dir_match_threshold: 0.8,
+            sampling_enabled: false,
+            smoothing_enabled: false,
             ..MouseGesturePluginSettings::default()
         };
         let runtime = make_runtime(db, settings);
@@ -1953,6 +1955,8 @@ mod tests {
             direction_tolerance_deg: 0.0,
             single_dir_match_threshold: 0.8,
             multi_dir_match_threshold: 0.9,
+            sampling_enabled: false,
+            smoothing_enabled: false,
             ..MouseGesturePluginSettings::default()
         };
         let runtime = make_runtime(db, settings);

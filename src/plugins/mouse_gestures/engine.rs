@@ -146,7 +146,14 @@ pub fn direction_similarity(a: &[GestureDirection], b: &[GestureDirection]) -> f
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }
-    let distance = levenshtein_distance_weighted(a, b);
+    let distance = if a.len() == b.len() {
+        a.iter()
+            .zip(b.iter())
+            .map(|(&left, &right)| substitution_cost(left, right))
+            .sum()
+    } else {
+        levenshtein_distance_weighted(a, b)
+    };
     let max_len = a.len().max(b.len()) as f32;
     if max_len == 0.0 {
         0.0
