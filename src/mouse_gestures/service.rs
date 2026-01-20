@@ -4,8 +4,9 @@ use crate::plugins::mouse_gestures::db::{
     select_binding, select_profile, ForegroundWindowInfo, MouseGestureDb,
 };
 use crate::plugins::mouse_gestures::engine::{
-    direction_sequence, direction_similarity, parse_gesture, preprocess_points_for_directions,
-    track_length, GestureDirection, Point,
+    direction_from_vector, direction_sequence, direction_similarity, parse_gesture,
+    preprocess_points_for_directions, straightness_ratio, track_length, GestureDirection, Point,
+    Vector,
 };
 use crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
 use once_cell::sync::OnceCell;
@@ -150,8 +151,7 @@ impl MouseGestureRuntime {
         if snapshots.settings.max_track_len > 0.0 && length > snapshots.settings.max_track_len {
             return None;
         }
-        let processed_points = preprocess_points_for_directions(points, &snapshots.settings);
-        let track_dirs = direction_sequence(&processed_points, &snapshots.settings);
+        let track_dirs = track_directions_with_override(points, &snapshots.settings, None, None);
         if track_dirs.is_empty() {
             return None;
         }
@@ -212,8 +212,7 @@ impl MouseGestureRuntime {
         points: &[Point],
         snapshots: &MouseGestureSnapshots,
     ) -> Option<String> {
-        let processed_points = preprocess_points_for_directions(points, &snapshots.settings);
-        let track_dirs = direction_sequence(&processed_points, &snapshots.settings);
+        let track_dirs = track_directions_with_override(points, &snapshots.settings, None, None);
         if track_dirs.is_empty() {
             return Some("No match".to_string());
         }
@@ -321,6 +320,8 @@ impl MouseGestureRuntime {
             return TrackOutcome::passthrough();
         }
         let length = track_length(points);
+        let displacement = track_displacement(points);
+        let straightness = straightness_ratio(points);
         if length < snapshots.settings.min_track_len {
             return TrackOutcome::passthrough();
         }
@@ -332,8 +333,12 @@ impl MouseGestureRuntime {
             };
         }
 
-        let processed_points = preprocess_points_for_directions(points, &snapshots.settings);
-        let track_dirs = direction_sequence(&processed_points, &snapshots.settings);
+        let track_dirs = track_directions_with_override(
+            points,
+            &snapshots.settings,
+            Some(displacement),
+            Some(straightness),
+        );
         if track_dirs.is_empty() {
             return if passthrough_on_no_match {
                 TrackOutcome::passthrough()
@@ -437,6 +442,40 @@ fn hash_direction_sequence(directions: &[GestureDirection]) -> u64 {
         hash = hash.wrapping_mul(31).wrapping_add(value);
     }
     hash
+}
+
+fn track_displacement(points: &[Point]) -> f32 {
+    if points.len() < 2 {
+        return 0.0;
+    }
+    let first = points[0];
+    let last = points[points.len() - 1];
+    ((last.x - first.x).powi(2) + (last.y - first.y).powi(2)).sqrt()
+}
+
+fn track_directions_with_override(
+    points: &[Point],
+    settings: &MouseGesturePluginSettings,
+    displacement: Option<f32>,
+    straightness: Option<f32>,
+) -> Vec<GestureDirection> {
+    if points.len() < 2 {
+        return Vec::new();
+    }
+    let displacement = displacement.unwrap_or_else(|| track_displacement(points));
+    let straightness = straightness.unwrap_or_else(|| straightness_ratio(points));
+    if displacement >= settings.straightness_min_displacement_px
+        && straightness >= settings.straightness_threshold
+    {
+        let first = points[0];
+        let last = points[points.len() - 1];
+        return vec![direction_from_vector(Vector {
+            x: last.x - first.x,
+            y: last.y - first.y,
+        })];
+    }
+    let processed_points = preprocess_points_for_directions(points, settings);
+    direction_sequence(&processed_points, settings)
 }
 
 fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
@@ -1550,7 +1589,7 @@ mod tests {
         HookTrackingState, MouseGestureEventSink, MouseGestureRuntime, MouseGestureService,
         MouseGestureSnapshots, PreviewRequest, ProfileCache, SamplerCommand, SamplerConfig,
         TrackOutcome, TriggerButton, MAX_TRACK_DURATION_MS, PREVIEW_SIMILARITY_LABEL_MAX_LEN,
-        PREVIEW_SIMILARITY_MAX_LEN, PREVIEW_SIMILARITY_TOP_N,
+        PREVIEW_SIMILARITY_MAX_LEN, PREVIEW_SIMILARITY_TOP_N, track_directions_with_override,
     };
     use crate::gui::MouseGestureEvent;
     use crate::mouse_gestures::MouseHookBackend;
@@ -2016,6 +2055,50 @@ mod tests {
             .expect("summary");
 
         assert!(summary.chars().count() <= PREVIEW_SIMILARITY_MAX_LEN);
+    }
+
+    #[test]
+    fn straight_line_collapses_to_single_direction() {
+        let points = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 50.0, y: 0.0 },
+            Point { x: 120.0, y: 0.0 },
+        ];
+        let settings = MouseGesturePluginSettings {
+            segment_threshold_px: 0.0,
+            direction_tolerance_deg: 0.0,
+            smoothing_enabled: false,
+            sampling_enabled: false,
+            straightness_threshold: 0.9,
+            straightness_min_displacement_px: 20.0,
+            ..MouseGesturePluginSettings::default()
+        };
+
+        let directions = track_directions_with_override(&points, &settings, None, None);
+
+        assert_eq!(directions, vec![GestureDirection::Right]);
+    }
+
+    #[test]
+    fn l_shape_does_not_trigger_straightness_override() {
+        let points = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 60.0, y: 0.0 },
+            Point { x: 60.0, y: 60.0 },
+        ];
+        let settings = MouseGesturePluginSettings {
+            segment_threshold_px: 0.0,
+            direction_tolerance_deg: 0.0,
+            smoothing_enabled: false,
+            sampling_enabled: false,
+            straightness_threshold: 0.9,
+            straightness_min_displacement_px: 20.0,
+            ..MouseGesturePluginSettings::default()
+        };
+
+        let directions = track_directions_with_override(&points, &settings, None, None);
+
+        assert_eq!(directions, vec![GestureDirection::Right, GestureDirection::Down]);
     }
 
     fn make_right_points() -> Vec<Point> {

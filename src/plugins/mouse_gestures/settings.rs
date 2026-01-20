@@ -45,6 +45,10 @@ pub struct MouseGesturePluginSettings {
     pub segment_threshold_px: f32,
     #[serde(default = "default_direction_tolerance_deg")]
     pub direction_tolerance_deg: f32,
+    #[serde(default = "default_straightness_threshold")]
+    pub straightness_threshold: f32,
+    #[serde(default = "default_straightness_min_displacement_px")]
+    pub straightness_min_displacement_px: f32,
     #[serde(default)]
     pub preview_enabled: bool,
     #[serde(default)]
@@ -71,6 +75,8 @@ impl Default for MouseGesturePluginSettings {
             sample_interval_ms: default_sample_interval_ms(),
             segment_threshold_px: default_segment_threshold_px(),
             direction_tolerance_deg: default_direction_tolerance_deg(),
+            straightness_threshold: default_straightness_threshold(),
+            straightness_min_displacement_px: default_straightness_min_displacement_px(),
             preview_enabled: false,
             preview_on_end_only: false,
             debug_show_similarity: false,
@@ -98,6 +104,14 @@ fn default_segment_threshold_px() -> f32 {
 
 fn default_direction_tolerance_deg() -> f32 {
     30.0
+}
+
+fn default_straightness_threshold() -> f32 {
+    0.9
+}
+
+fn default_straightness_min_displacement_px() -> f32 {
+    80.0
 }
 
 fn clamp_sample_interval_ms(value: u64) -> u64 {
