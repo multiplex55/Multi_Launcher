@@ -147,6 +147,10 @@ fn decimate_points(points: &[Point], max_points: usize) -> Vec<Point> {
     reduced
 }
 
+fn snapshot_has_visible_stroke(snapshot: &OverlaySnapshot) -> bool {
+    snapshot.visible && !snapshot.points.is_empty()
+}
+
 struct OverlaySnapshotPublisher {
     snapshot: Arc<OverlaySnapshotBuffer>,
     raw_points: Vec<Point>,
@@ -248,9 +252,10 @@ impl GdiOverlayWindow {
             use windows::core::{w, PCWSTR};
             use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
             use windows::Win32::Graphics::Gdi::{
-                BeginPaint, CreatePen, DeleteObject, EndPaint, FillRect, GetStockObject, LineTo,
-                MoveToEx, RedrawWindow, SelectObject, SetBkMode, SetDCPenColor, SetTextColor,
-                TextOutW, BLACK_BRUSH, HBRUSH, PAINTSTRUCT, PS_SOLID, RDW_INVALIDATE, TRANSPARENT,
+                BeginPaint, CreatePen, CreateSolidBrush, DeleteObject, Ellipse, EndPaint, FillRect,
+                GetStockObject, LineTo, MoveToEx, RedrawWindow, SelectObject, SetBkMode,
+                SetDCPenColor, SetTextColor, TextOutW, BLACK_BRUSH, HBRUSH, PAINTSTRUCT, PS_SOLID,
+                RDW_INVALIDATE, TRANSPARENT,
             };
             use windows::Win32::System::LibraryLoader::GetModuleHandleW;
             use windows::Win32::UI::WindowsAndMessaging::{
@@ -300,19 +305,36 @@ impl GdiOverlayWindow {
                         FillRect(hdc, &rect, HBRUSH(GetStockObject(BLACK_BRUSH).0));
                         let snapshot = clone_snapshot(&state.snapshot);
                         if let Some(snapshot) = snapshot {
-                            if snapshot.visible && snapshot.points.len() >= 2 {
+                            if snapshot_has_visible_stroke(&snapshot) {
                                 let color = parse_color(&snapshot.settings.color);
                                 let pen =
                                     CreatePen(PS_SOLID, snapshot.settings.thickness as i32, color);
-                                let old = SelectObject(hdc, pen);
+                                let brush = CreateSolidBrush(color);
+                                let old_pen = SelectObject(hdc, pen);
+                                let old_brush = SelectObject(hdc, brush);
                                 SetBkMode(hdc, TRANSPARENT);
                                 SetDCPenColor(hdc, color);
-                                let first = snapshot.points[0];
-                                let _ = MoveToEx(hdc, first.x as i32, first.y as i32, None);
-                                for point in snapshot.points.iter().skip(1) {
-                                    let _ = LineTo(hdc, point.x as i32, point.y as i32);
+                                if snapshot.points.len() == 1 {
+                                    let point = snapshot.points[0];
+                                    let radius =
+                                        (snapshot.settings.thickness.max(2.0) * 1.5) as i32;
+                                    let _ = Ellipse(
+                                        hdc,
+                                        point.x as i32 - radius,
+                                        point.y as i32 - radius,
+                                        point.x as i32 + radius,
+                                        point.y as i32 + radius,
+                                    );
+                                } else {
+                                    let first = snapshot.points[0];
+                                    let _ = MoveToEx(hdc, first.x as i32, first.y as i32, None);
+                                    for point in snapshot.points.iter().skip(1) {
+                                        let _ = LineTo(hdc, point.x as i32, point.y as i32);
+                                    }
                                 }
-                                SelectObject(hdc, old);
+                                SelectObject(hdc, old_brush);
+                                SelectObject(hdc, old_pen);
+                                let _ = DeleteObject(brush);
                                 let _ = DeleteObject(pen);
                             }
                             if let Some((text, point)) = &snapshot.preview {
@@ -606,5 +628,18 @@ mod tests {
         assert!(snapshot.points.is_empty());
         assert!(snapshot.preview.is_none());
         assert!(snapshot.fade_deadline.is_none());
+    }
+
+    #[test]
+    fn snapshot_single_point_is_visible() {
+        let settings = MouseGestureOverlaySettings::default();
+        let buffer = Arc::new(OverlaySnapshotBuffer::new(settings.clone()));
+        let mut publisher = OverlaySnapshotPublisher::new(Arc::clone(&buffer));
+
+        publisher.begin_stroke(&settings, Point { x: 5.0, y: 6.0 });
+
+        let snapshot = buffer.snapshot().expect("snapshot");
+        assert_eq!(snapshot.points.len(), 1);
+        assert!(snapshot_has_visible_stroke(&snapshot));
     }
 }
