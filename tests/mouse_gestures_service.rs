@@ -143,7 +143,8 @@ fn mouse_gesture_service_respects_max_distance_threshold() {
     let mut settings = MouseGesturePluginSettings::default();
     settings.enabled = true;
     settings.max_distance = 0.5;
-    settings.match_threshold = 0.0;
+    settings.single_dir_match_threshold = 0.0;
+    settings.multi_dir_match_threshold = 0.0;
     settings.min_track_len = 1.0;
     settings.sampling_enabled = false;
     settings.smoothing_enabled = false;
