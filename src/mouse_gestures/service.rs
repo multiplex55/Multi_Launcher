@@ -2892,6 +2892,7 @@ mod tests {
             min_point_distance: 0.0,
             segment_threshold_px: 0.0,
             direction_tolerance_deg: 0.0,
+            preview_enabled: true,
             ..MouseGesturePluginSettings::default()
         };
         let runtime = make_runtime(db, settings);
