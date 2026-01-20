@@ -3,8 +3,11 @@ use crate::plugins::mouse_gestures::db::{
     load_gestures, save_gestures, MouseGestureDb, MOUSE_GESTURES_FILE,
 };
 use crate::plugins::mouse_gestures::engine::{
-    parse_gesture, serialize_gesture, GestureDefinition, ParseError, Point,
+    direction_from_vector, direction_sequence, parse_gesture, preprocess_points_for_directions,
+    serialize_gesture, straightness_ratio, GestureDefinition, GestureDirection, ParseError, Point,
+    Vector,
 };
+use crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
 use eframe::egui;
 use std::collections::BTreeMap;
 
@@ -44,6 +47,55 @@ mod tests {
             err.kind,
             crate::plugins::mouse_gestures::engine::ParseErrorKind::EmptyInput
         ));
+    }
+
+    #[test]
+    fn canonical_direction_straight_line_is_single_token() {
+        let settings = MouseGesturePluginSettings {
+            straightness_threshold: 0.0,
+            straightness_min_displacement_px: 0.0,
+            segment_threshold_px: 0.0,
+            direction_tolerance_deg: 0.0,
+            sampling_enabled: false,
+            smoothing_enabled: false,
+            ..Default::default()
+        };
+        let points = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 0.0, y: -40.0 },
+            Point { x: 0.0, y: -80.0 },
+        ];
+
+        let info = canonical_direction_info(&points, &settings);
+
+        assert_eq!(info.directions, vec![GestureDirection::Up]);
+        assert_eq!(info.override_direction, Some(GestureDirection::Up));
+    }
+
+    #[test]
+    fn canonical_direction_l_shape_is_two_tokens() {
+        let settings = MouseGesturePluginSettings {
+            straightness_threshold: 1.1,
+            straightness_min_displacement_px: 0.0,
+            segment_threshold_px: 0.0,
+            direction_tolerance_deg: 0.0,
+            sampling_enabled: false,
+            smoothing_enabled: false,
+            ..Default::default()
+        };
+        let points = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 40.0, y: 0.0 },
+            Point { x: 40.0, y: -40.0 },
+        ];
+
+        let info = canonical_direction_info(&points, &settings);
+
+        assert_eq!(
+            info.directions,
+            vec![GestureDirection::Right, GestureDirection::Up]
+        );
+        assert_eq!(info.override_direction, None);
     }
 }
 
@@ -105,6 +157,7 @@ impl MouseGesturesGestureDialog {
             }
         }
 
+        let settings_snapshot = mouse_gesture_service().settings_snapshot();
         let mut open = self.open;
         egui::Window::new("Mouse Gesture Recorder")
             .open(&mut open)
@@ -144,6 +197,23 @@ impl MouseGesturesGestureDialog {
                 }
 
                 draw_points(&painter, &self.points, rect);
+
+                let canonical_info = canonical_direction_info(&self.points, &settings_snapshot);
+                let raw_count = self.points.len();
+                let processed_count = canonical_info.processed_points.len();
+                let direction_tokens = format_direction_tokens(&canonical_info.directions);
+                ui.add_space(4.0);
+                ui.label(format!("Raw points: {raw_count}"));
+                if processed_count != raw_count {
+                    ui.label(format!("Processed points: {processed_count}"));
+                }
+                ui.label(format!("Canonical directions: {direction_tokens}"));
+                if let Some(direction) = canonical_info.override_direction {
+                    ui.label(format!(
+                        "Straightness override: {}",
+                        direction_label(direction)
+                    ));
+                }
 
                 ui.horizontal(|ui| {
                     if ui.button("Clear").clicked() {
@@ -192,6 +262,31 @@ impl MouseGesturesGestureDialog {
                             }
                         }
                     });
+                if let Some(selected_id) = &self.selected_gesture {
+                    if let Some(serialized) = self.db.bindings.get(selected_id) {
+                        match parse_gesture(serialized) {
+                            Ok(definition) => {
+                                let info = canonical_direction_info(
+                                    &definition.points,
+                                    &settings_snapshot,
+                                );
+                                ui.label(format!(
+                                    "Selected directions: {}",
+                                    format_direction_tokens(&info.directions)
+                                ));
+                                if let Some(direction) = info.override_direction {
+                                    ui.label(format!(
+                                        "Straightness override: {}",
+                                        direction_label(direction)
+                                    ));
+                                }
+                            }
+                            Err(_) => {
+                                ui.label("Selected directions: (invalid gesture)");
+                            }
+                        }
+                    }
+                }
 
                 ui.horizontal(|ui| {
                     if ui.button("New").clicked() {
@@ -253,6 +348,79 @@ impl MouseGesturesGestureDialog {
         };
         self.gesture_text = serialize_gesture(&gesture);
     }
+}
+
+struct CanonicalDirectionInfo {
+    directions: Vec<GestureDirection>,
+    override_direction: Option<GestureDirection>,
+    processed_points: Vec<Point>,
+}
+
+fn canonical_direction_info(
+    points: &[Point],
+    settings: &MouseGesturePluginSettings,
+) -> CanonicalDirectionInfo {
+    let mut info = CanonicalDirectionInfo {
+        directions: Vec::new(),
+        override_direction: None,
+        processed_points: points.to_vec(),
+    };
+    if points.len() < 2 {
+        return info;
+    }
+
+    let displacement = track_displacement(points);
+    let straightness = straightness_ratio(points);
+    let processed_points = preprocess_points_for_directions(points, settings);
+    if displacement >= settings.straightness_min_displacement_px
+        && straightness >= settings.straightness_threshold
+    {
+        let first = points[0];
+        let last = points[points.len() - 1];
+        let direction = direction_from_vector(Vector {
+            x: last.x - first.x,
+            y: last.y - first.y,
+        });
+        info.directions = vec![direction];
+        info.override_direction = Some(direction);
+    } else {
+        info.directions = direction_sequence(&processed_points, settings);
+    }
+    info.processed_points = processed_points;
+    info
+}
+
+fn format_direction_tokens(directions: &[GestureDirection]) -> String {
+    if directions.is_empty() {
+        return "(none)".to_string();
+    }
+    directions
+        .iter()
+        .map(|direction| direction_label(*direction))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn direction_label(direction: GestureDirection) -> &'static str {
+    match direction {
+        GestureDirection::Up => "Up",
+        GestureDirection::Down => "Down",
+        GestureDirection::Left => "Left",
+        GestureDirection::Right => "Right",
+        GestureDirection::UpRight => "UpRight",
+        GestureDirection::UpLeft => "UpLeft",
+        GestureDirection::DownRight => "DownRight",
+        GestureDirection::DownLeft => "DownLeft",
+    }
+}
+
+fn track_displacement(points: &[Point]) -> f32 {
+    if points.len() < 2 {
+        return 0.0;
+    }
+    let first = points[0];
+    let last = points[points.len() - 1];
+    ((last.x - first.x).powi(2) + (last.y - first.y).powi(2)).sqrt()
 }
 
 fn apply_serialized_gesture(

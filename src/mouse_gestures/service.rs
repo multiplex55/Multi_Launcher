@@ -876,6 +876,13 @@ impl MouseGestureService {
         }
     }
 
+    pub fn settings_snapshot(&self) -> MouseGesturePluginSettings {
+        self.snapshots
+            .read()
+            .map(|guard| guard.settings.clone())
+            .unwrap_or_default()
+    }
+
     pub fn start(&self) {
         if self.running.swap(true, Ordering::SeqCst) {
             return;
