@@ -39,6 +39,8 @@ pub struct MouseGesturePluginSettings {
     pub no_match_action: String,
     pub smoothing_enabled: bool,
     pub sampling_enabled: bool,
+    #[serde(default = "default_sample_interval_ms")]
+    pub sample_interval_ms: u64,
     #[serde(default)]
     pub preview_enabled: bool,
     #[serde(default)]
@@ -62,6 +64,7 @@ impl Default for MouseGesturePluginSettings {
             no_match_action: "none".to_string(),
             smoothing_enabled: true,
             sampling_enabled: true,
+            sample_interval_ms: default_sample_interval_ms(),
             preview_enabled: false,
             preview_on_end_only: false,
             debug_show_similarity: false,
@@ -69,8 +72,22 @@ impl Default for MouseGesturePluginSettings {
     }
 }
 
+impl MouseGesturePluginSettings {
+    pub fn sample_interval_ms(&self) -> u64 {
+        clamp_sample_interval_ms(self.sample_interval_ms)
+    }
+}
+
 fn default_match_threshold() -> f32 {
     0.7
+}
+
+fn default_sample_interval_ms() -> u64 {
+    16
+}
+
+fn clamp_sample_interval_ms(value: u64) -> u64 {
+    value.clamp(5, 50)
 }
 
 #[cfg(test)]
