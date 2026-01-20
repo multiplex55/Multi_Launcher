@@ -25,7 +25,6 @@ const PREVIEW_SIMILARITY_LABEL_MAX_LEN: usize = 40;
 const PREVIEW_SIMILARITY_MAX_LEN: usize = 140;
 const PREVIEW_SIMILARITY_PREFIX: &str = "Similarity: ";
 const PREVIEW_SIMILARITY_ELLIPSIS: &str = "…";
-const MAX_TRACK_DURATION_MS: u64 = 2_000;
 
 #[cfg(windows)]
 pub fn should_ignore_event(flags: u32, extra_info: usize) -> bool {
@@ -972,6 +971,8 @@ fn cached_preview_text(preview_text: &Arc<Mutex<Option<String>>>) -> Option<Stri
 struct SamplerConfig {
     min_point_distance_sq: f32,
     max_track_len: f32,
+    max_gesture_duration_ms: u64,
+    max_sample_count: usize,
     preview_enabled: bool,
     preview_on_end_only: bool,
     sample_interval: Duration,
@@ -985,6 +986,27 @@ enum SamplerCommand {
         config: SamplerConfig,
     },
     Shutdown,
+}
+
+#[cfg(any(test, windows))]
+fn cancel_tracking_state(
+    tracking: &Arc<Mutex<HookTrackingState>>,
+    preview_text: &Arc<Mutex<Option<String>>>,
+    tracking_active: &Arc<AtomicBool>,
+) -> TrackOutcome {
+    let outcome = tracking
+        .lock()
+        .map(|mut guard| guard.cancel_tracking())
+        .unwrap_or_else(|_| TrackOutcome::no_match());
+    if let Ok(mut preview_guard) = preview_text.lock() {
+        *preview_guard = None;
+    }
+    if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
+        overlay.end_stroke();
+        overlay.update_preview(None, None);
+    }
+    tracking_active.store(false, Ordering::SeqCst);
+    outcome
 }
 
 #[cfg(any(test, windows))]
@@ -1017,7 +1039,7 @@ fn spawn_sampler_worker(
 
 #[cfg(any(test, windows))]
 fn sampler_worker_loop(
-    runtime: MouseGestureRuntime,
+    _runtime: MouseGestureRuntime,
     receiver: Receiver<SamplerCommand>,
     preview_sender: SyncSender<PreviewRequest>,
     preview_text: Arc<Mutex<Option<String>>>,
@@ -1054,38 +1076,39 @@ fn sampler_worker_loop(
                     }
                     let now = Instant::now();
                     let mut stored = None;
+                    let mut should_cancel_tracking = false;
                     if let Ok(mut guard) = tracking.lock() {
                         if guard.active_button.is_none() {
                             break;
                         }
-                        if should_cancel(guard.started_at, now, MAX_TRACK_DURATION_MS) {
-                            let _ = guard.cancel_tracking();
-                            if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
-                                overlay.end_stroke();
-                                overlay.update_preview(None, None);
-                            }
-                            tracking_active.store(false, Ordering::SeqCst);
-                            break;
-                        }
-                        if let Some(button) = guard.active_button {
+                        if should_cancel(guard.started_at, now, config.max_gesture_duration_ms) {
+                            should_cancel_tracking = true;
+                        } else if let Some(button) = guard.active_button {
                             if !trigger_down(button) {
-                                let _ = guard.cancel_tracking();
-                                if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
-                                    overlay.end_stroke();
-                                    overlay.update_preview(None, None);
-                                }
-                                tracking_active.store(false, Ordering::SeqCst);
-                                break;
+                                should_cancel_tracking = true;
                             }
                         }
-                        let point = cursor_provider();
-                        if guard.sample_point(
-                            point,
-                            config.min_point_distance_sq,
-                            config.max_track_len,
-                        ) {
-                            stored = Some((point, guard.points.clone()));
+                        if should_cancel_tracking {
+                            // Fall through to cancellation outside the tracking lock.
+                        } else {
+                            let point = cursor_provider();
+                            if guard.sample_point(
+                                point,
+                                config.min_point_distance_sq,
+                                config.max_track_len,
+                                config.max_sample_count,
+                            ) {
+                                stored = Some((point, guard.points.clone()));
+                            }
                         }
+                    }
+                    if should_cancel_tracking {
+                        let _ = cancel_tracking_state(
+                            &tracking,
+                            &preview_text,
+                            &tracking_active,
+                        );
+                        break;
                     }
                     if let Some((point, points)) = stored {
                         if config.preview_enabled && !config.preview_on_end_only {
@@ -1110,14 +1133,13 @@ fn sampler_worker_loop(
                 }
                 tracking_active.store(false, Ordering::SeqCst);
                 if stop_flag.load(Ordering::SeqCst) {
-                    if let Ok(mut guard) = tracking.try_lock() {
-                        if guard.active_button.is_some() {
-                            let _ = guard.cancel_tracking();
-                            if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
-                                overlay.end_stroke();
-                                overlay.update_preview(None, None);
-                            }
-                        }
+                    if tracking
+                        .try_lock()
+                        .ok()
+                        .is_some_and(|guard| guard.active_button.is_some())
+                    {
+                        let _ =
+                            cancel_tracking_state(&tracking, &preview_text, &tracking_active);
                     }
                 }
             }
@@ -1221,9 +1243,18 @@ impl HookTrackingState {
         }
     }
 
-    fn store_point(&mut self, point: Point) -> bool {
+    fn max_allowed_points(max_sample_count: usize) -> usize {
+        if max_sample_count == 0 {
+            MAX_TRACK_POINTS
+        } else {
+            max_sample_count.min(MAX_TRACK_POINTS)
+        }
+    }
+
+    fn store_point(&mut self, point: Point, max_sample_count: usize) -> bool {
+        let max_points = Self::max_allowed_points(max_sample_count);
         self.stored_points = self.stored_points.saturating_add(1);
-        if self.points.len() < MAX_TRACK_POINTS {
+        if self.points.len() < max_points {
             self.points.push(point);
             self.last_stored_point = Some(point);
             return true;
@@ -1262,6 +1293,7 @@ impl HookTrackingState {
         point: Point,
         min_point_distance_sq: f32,
         max_track_len: f32,
+        max_sample_count: usize,
     ) -> bool {
         self.update_length(point);
         if max_track_len > 0.0 && self.acc_len > max_track_len {
@@ -1271,7 +1303,7 @@ impl HookTrackingState {
         if self.too_long || !self.should_store_point(point, min_point_distance_sq) {
             return false;
         }
-        self.store_point(point)
+        self.store_point(point, max_sample_count)
     }
 
     pub fn sample_point(
@@ -1279,8 +1311,9 @@ impl HookTrackingState {
         point: Point,
         min_point_distance_sq: f32,
         max_track_len: f32,
+        max_sample_count: usize,
     ) -> bool {
-        self.handle_move(point, min_point_distance_sq, max_track_len)
+        self.handle_move(point, min_point_distance_sq, max_track_len, max_sample_count)
     }
 
     pub fn finish_stroke(
@@ -1288,13 +1321,14 @@ impl HookTrackingState {
         point: Point,
         min_point_distance_sq: f32,
         max_track_len: f32,
+        max_sample_count: usize,
     ) -> (Vec<Point>, bool) {
         self.update_length(point);
         if max_track_len > 0.0 && self.acc_len > max_track_len {
             self.too_long = true;
         }
         if !self.too_long && self.should_store_point(point, min_point_distance_sq) {
-            let _ = self.store_point(point);
+            let _ = self.store_point(point, max_sample_count);
         }
         let points = std::mem::take(&mut self.points);
         let too_long = self.too_long;
@@ -1403,6 +1437,8 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                         trigger_button,
                         min_point_distance,
                         max_track_len,
+                        max_gesture_duration_ms,
+                        max_sample_count,
                         preview_enabled,
                         preview_on_end_only,
                         sample_interval,
@@ -1418,6 +1454,8 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                                 TriggerButton::from_setting(&settings.trigger_button),
                                 settings.min_point_distance.max(0.0),
                                 settings.max_track_len.max(0.0),
+                                settings.max_gesture_duration_ms,
+                                settings.max_sample_count,
                                 settings.preview_enabled,
                                 settings.preview_on_end_only,
                                 Duration::from_millis(settings.sample_interval_ms()),
@@ -1428,6 +1466,8 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                             None,
                             0.0,
                             0.0,
+                            0,
+                            0,
                             false,
                             false,
                             Duration::from_millis(16),
@@ -1457,6 +1497,8 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                                 let config = SamplerConfig {
                                     min_point_distance_sq,
                                     max_track_len,
+                                    max_gesture_duration_ms,
+                                    max_sample_count,
                                     preview_enabled,
                                     preview_on_end_only,
                                     sample_interval,
@@ -1482,7 +1524,12 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                                 return CallNextHookEx(None, code, wparam, lparam);
                             }
                             let (points, too_long) =
-                                tracking.finish_stroke(point, min_point_distance_sq, max_track_len);
+                                tracking.finish_stroke(
+                                    point,
+                                    min_point_distance_sq,
+                                    max_track_len,
+                                    max_sample_count,
+                                );
 
                             if preview_enabled {
                                 let _ = state.preview_sender.try_send(PreviewRequest {
@@ -1518,7 +1565,6 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                         }
                     }
 
-                    CallNextHookEx(None, code, wparam, lparam)
                 }));
 
                 match result {
@@ -1693,7 +1739,7 @@ mod tests {
         sequence_changed, should_cancel, should_compute_preview, truncate_with_ellipsis,
         HookAction, HookEventKind, HookTrackingState, MouseGestureEventSink, MouseGestureRuntime,
         MouseGestureService, MouseGestureSnapshots, PreviewRequest, ProfileCache, SamplerCommand,
-        SamplerConfig, TrackOutcome, TriggerButton, MAX_TRACK_DURATION_MS,
+        SamplerConfig, TrackOutcome, TriggerButton,
         PREVIEW_SIMILARITY_LABEL_MAX_LEN, PREVIEW_SIMILARITY_MAX_LEN,
         PREVIEW_SIMILARITY_TOP_N, track_directions_with_override,
     };
@@ -1705,7 +1751,7 @@ mod tests {
     use crate::plugins::mouse_gestures::engine::{GestureDirection, Point};
     use crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc, Mutex, RwLock};
     use std::time::{Duration, Instant};
 
@@ -1821,6 +1867,8 @@ mod tests {
         let config = SamplerConfig {
             min_point_distance_sq: 0.0,
             max_track_len: 0.0,
+            max_gesture_duration_ms: 0,
+            max_sample_count: 0,
             preview_enabled: false,
             preview_on_end_only: false,
             sample_interval: Duration::from_millis(5),
@@ -1849,6 +1897,92 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+
+        drop(sender);
+        worker.join().expect("sampler worker exits");
+    }
+
+    #[test]
+    fn sampler_cancels_when_trigger_released() {
+        let runtime = make_runtime(
+            MouseGestureDb::default(),
+            MouseGesturePluginSettings::default(),
+        );
+        let (preview_sender, _preview_receiver) = mpsc::sync_channel(1);
+        let preview_text = Arc::new(Mutex::new(None));
+        let tracking = Arc::new(Mutex::new(HookTrackingState::default()));
+        let tracking_active = Arc::new(AtomicBool::new(false));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let trigger_checks = Arc::new(AtomicUsize::new(0));
+
+        let tracking_handle = Arc::clone(&tracking);
+        let tracking_active_handle = Arc::clone(&tracking_active);
+        let stop_flag_handle = Arc::clone(&stop_flag);
+        let preview_text_handle = Arc::clone(&preview_text);
+        let runtime_handle = runtime.clone();
+        let trigger_checks_handle = Arc::clone(&trigger_checks);
+
+        let worker = std::thread::spawn(move || {
+            sampler_worker_loop(
+                runtime_handle,
+                receiver,
+                preview_sender,
+                preview_text_handle,
+                tracking_handle,
+                tracking_active_handle,
+                stop_flag_handle,
+                || Point { x: 1.0, y: 1.0 },
+                move |_| trigger_checks_handle.fetch_add(1, Ordering::SeqCst) < 3,
+            );
+        });
+
+        let config = SamplerConfig {
+            min_point_distance_sq: 0.0,
+            max_track_len: 0.0,
+            max_gesture_duration_ms: 0,
+            max_sample_count: 0,
+            preview_enabled: false,
+            preview_on_end_only: false,
+            sample_interval: Duration::from_millis(5),
+        };
+        sender
+            .send(SamplerCommand::Start {
+                start_point: Point { x: 0.0, y: 0.0 },
+                trigger_button: Some(TriggerButton::Right),
+                config,
+            })
+            .expect("send start command");
+
+        let start_deadline = Instant::now() + Duration::from_millis(200);
+        while !tracking_active.load(Ordering::SeqCst) {
+            if Instant::now() >= start_deadline {
+                panic!("sampler never reported active tracking");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        if let Ok(mut preview_guard) = preview_text.lock() {
+            *preview_guard = Some("Preview".into());
+        }
+
+        let cancel_deadline = Instant::now() + Duration::from_millis(200);
+        while tracking_active.load(Ordering::SeqCst) {
+            if Instant::now() >= cancel_deadline {
+                panic!("sampler did not cancel after trigger release");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let guard = tracking.lock().expect("lock tracking");
+        assert_eq!(guard.points_len(), 0);
+        assert_eq!(guard.active_button, None);
+        drop(guard);
+
+        assert!(
+            preview_text.lock().expect("lock preview text").is_none(),
+            "preview text should be cleared after cancellation"
+        );
 
         drop(sender);
         worker.join().expect("sampler worker exits");
@@ -1885,28 +2019,85 @@ mod tests {
 
     #[test]
     fn tracking_max_duration_cancels() {
+        let settings = MouseGesturePluginSettings::default();
         let started_at = Instant::now();
-        let before_deadline = started_at + Duration::from_millis(MAX_TRACK_DURATION_MS - 1);
-        let after_deadline = started_at + Duration::from_millis(MAX_TRACK_DURATION_MS + 1);
+        let before_deadline =
+            started_at + Duration::from_millis(settings.max_gesture_duration_ms - 1);
+        let after_deadline =
+            started_at + Duration::from_millis(settings.max_gesture_duration_ms + 1);
 
         assert!(!should_cancel(
             started_at,
             before_deadline,
-            MAX_TRACK_DURATION_MS
+            settings.max_gesture_duration_ms
         ));
         assert!(should_cancel(
             started_at,
             after_deadline,
-            MAX_TRACK_DURATION_MS
+            settings.max_gesture_duration_ms
         ));
         assert!(!should_cancel(started_at, after_deadline, 0));
+    }
+
+    #[test]
+    fn max_duration_cancel_returns_no_match() {
+        let settings = MouseGesturePluginSettings {
+            max_gesture_duration_ms: 5,
+            ..MouseGesturePluginSettings::default()
+        };
+        let mut tracking = HookTrackingState::default();
+        tracking.begin_track(Point { x: 0.0, y: 0.0 });
+        tracking.started_at = Instant::now()
+            - Duration::from_millis(settings.max_gesture_duration_ms + 1);
+
+        assert!(should_cancel(
+            tracking.started_at,
+            Instant::now(),
+            settings.max_gesture_duration_ms
+        ));
+
+        let outcome = tracking.cancel_tracking();
+        assert!(!outcome.matched);
+        assert!(!outcome.passthrough_click);
+    }
+
+    #[test]
+    fn max_sample_count_clamps_points_and_finishes() {
+        let mut tracking = HookTrackingState::default();
+        tracking.begin_track(Point { x: 0.0, y: 0.0 });
+        let max_sample_count = 3;
+
+        for index in 1..10 {
+            tracking.handle_move(
+                Point {
+                    x: index as f32,
+                    y: 0.0,
+                },
+                0.0,
+                0.0,
+                max_sample_count,
+            );
+        }
+
+        assert_eq!(tracking.points_len(), max_sample_count);
+
+        let (points, too_long) = tracking.finish_stroke(
+            Point { x: 10.0, y: 0.0 },
+            0.0,
+            0.0,
+            max_sample_count,
+        );
+
+        assert_eq!(points.len(), max_sample_count);
+        assert!(!too_long);
+        assert_eq!(tracking.points_len(), 0);
     }
 
     #[test]
     fn canceling_tracking_resets_state() {
         let mut tracking = HookTrackingState::default();
         tracking.begin_track(Point { x: 1.0, y: 1.0 });
-        tracking.handle_move(Point { x: 2.0, y: 2.0 }, 0.0, 0.0);
+        tracking.handle_move(Point { x: 2.0, y: 2.0 }, 0.0, 0.0, 0);
 
         let outcome = tracking.cancel_tracking();
 
@@ -1972,7 +2163,7 @@ mod tests {
             .expect("send forced request");
         drop(sender);
 
-        let deadline = Instant::now() + Duration::from_millis(200);
+        let deadline = Instant::now() + Duration::from_millis(500);
         loop {
             if preview_text.lock().expect("lock preview text").is_some() {
                 break;

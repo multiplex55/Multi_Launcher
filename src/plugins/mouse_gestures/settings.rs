@@ -33,6 +33,10 @@ pub struct MouseGesturePluginSettings {
     pub match_threshold: f32,
     #[serde(default)]
     pub max_track_len: f32,
+    #[serde(default = "default_max_gesture_duration_ms")]
+    pub max_gesture_duration_ms: u64,
+    #[serde(default = "default_max_sample_count")]
+    pub max_sample_count: usize,
     pub overlay: MouseGestureOverlaySettings,
     #[serde(default)]
     pub passthrough_on_no_match: bool,
@@ -69,6 +73,8 @@ impl Default for MouseGesturePluginSettings {
             max_distance: 24.0,
             match_threshold: default_match_threshold(),
             max_track_len: 0.0,
+            max_gesture_duration_ms: default_max_gesture_duration_ms(),
+            max_sample_count: default_max_sample_count(),
             overlay: MouseGestureOverlaySettings::default(),
             passthrough_on_no_match: false,
             no_match_action: "none".to_string(),
@@ -95,6 +101,14 @@ impl MouseGesturePluginSettings {
 
 fn default_match_threshold() -> f32 {
     0.7
+}
+
+fn default_max_gesture_duration_ms() -> u64 {
+    2_000
+}
+
+fn default_max_sample_count() -> usize {
+    4096
 }
 
 fn default_sample_interval_ms() -> u64 {

@@ -163,13 +163,13 @@ fn tracking_state_sets_too_long_and_stops_storing_points() {
     let mut tracking = HookTrackingState::default();
     tracking.begin_track(Point { x: 0.0, y: 0.0 });
 
-    let stored = tracking.handle_move(Point { x: 10.0, y: 0.0 }, 0.0, 5.0);
+    let stored = tracking.handle_move(Point { x: 10.0, y: 0.0 }, 0.0, 5.0, 0);
     assert!(!stored);
     assert!(tracking.too_long());
     assert!(tracking.acc_len() > 5.0);
     assert_eq!(tracking.points_len(), 1);
 
-    let stored = tracking.handle_move(Point { x: 20.0, y: 0.0 }, 0.0, 5.0);
+    let stored = tracking.handle_move(Point { x: 20.0, y: 0.0 }, 0.0, 5.0, 0);
     assert!(!stored);
     assert_eq!(tracking.points_len(), 1);
 }
@@ -224,7 +224,7 @@ fn tracking_state_caps_point_buffer_with_decimation() {
 
     for index in 1..(MAX_TRACK_POINTS * 3) {
         let position = index as f32 * 3.0;
-        let _ = tracking.handle_move(Point { x: position, y: 0.0 }, 0.0, 0.0);
+        let _ = tracking.handle_move(Point { x: position, y: 0.0 }, 0.0, 0.0, 0);
     }
 
     assert!(!tracking.too_long());
