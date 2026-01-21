@@ -1489,13 +1489,6 @@ impl HookTrackingState {
         self.decimation_stride = 1;
     }
 
-    fn record_trigger_start(&mut self, point: Point) {
-        self.clear_tracking_buffers();
-        self.tracking_state = TrackingState::Armed;
-        self.trigger_started_at = Some(Instant::now());
-        self.trigger_start_point = Some(point);
-    }
-
     fn update_tracking_started(&mut self, point: Point, threshold_sq: f32, now: Instant) {
         if self.tracking_started_at.is_some() {
             return;
@@ -1895,12 +1888,29 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                         _ => HookEventKind::Other,
                     };
 
+                    if event_kind == HookEventKind::MouseMove {
+                        if let Ok(mut tracking) = state.tracking.try_lock() {
+                            if tracking.tracking_state == TrackingState::Armed {
+                                tracking.update_tracking_started(
+                                    point,
+                                    TRACKING_START_DISTANCE_SQ,
+                                    Instant::now(),
+                                );
+                            }
+                            if tracking.active_button.is_some() {
+                                if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
+                                    overlay.push_point(point);
+                                }
+                            }
+                        }
+                    }
+
                     match hook_action_for_event(event_kind, event_button, trigger_button) {
                         HookAction::Start => {
                             let should_start = if let Ok(mut tracking) = state.tracking.try_lock()
                             {
                                 if tracking.tracking_state == TrackingState::Idle {
-                                    tracking.record_trigger_start(point);
+                                    tracking.begin_stroke(event_button, point);
                                     true
                                 } else {
                                     false
@@ -1909,6 +1919,13 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                                 false
                             };
                             if should_start {
+                                if let Ok(mut preview_guard) = state.preview_text.lock() {
+                                    *preview_guard = None;
+                                }
+                                if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
+                                    overlay.begin_stroke(point);
+                                    overlay.update_preview(None, None);
+                                }
                                 let config = SamplerConfig {
                                     min_point_distance_sq,
                                     visual_point_distance_sq: VISUAL_POINT_DISTANCE_SQ,
@@ -2151,11 +2168,11 @@ impl MouseHookBackend for MockMouseHookBackend {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_gesture_templates, finalize_hook_outcome, hash_direction_sequence,
-        hook_action_for_event, is_tap_track, preview_worker_loop, sampler_worker_loop,
-        reset_template_build_counter, sequence_changed, should_cancel, should_compute_preview,
-        template_build_count, truncate_with_ellipsis, HookAction, HookEventKind,
-        clear_overlay_and_preview, HookDiagnostics, HookTrackingState, MouseGestureEventSink,
+        build_gesture_templates, clear_overlay_and_preview, finalize_hook_outcome,
+        hash_direction_sequence, hook_action_for_event, is_tap_track, mouse_gesture_overlay,
+        preview_worker_loop, sampler_worker_loop, reset_template_build_counter, sequence_changed,
+        should_cancel, should_compute_preview, template_build_count, truncate_with_ellipsis,
+        HookAction, HookEventKind, HookDiagnostics, HookTrackingState, MouseGestureEventSink,
         MouseGestureRuntime, TRACKING_START_DISTANCE_SQ,
         MouseGestureService, MouseGestureSnapshots, PreviewRequest, ProfileCache, SamplerCommand,
         SamplerConfig, TrackOutcome, TrackingState, TriggerButton,
@@ -2164,6 +2181,7 @@ mod tests {
     };
     use crate::gui::MouseGestureEvent;
     use crate::mouse_gestures::MouseHookBackend;
+    use crate::mouse_gestures::overlay::overlay_test_counters;
     use crate::plugins::mouse_gestures::db::{
         ForegroundWindowInfo, MouseGestureBinding, MouseGestureDb, MouseGestureProfile,
     };
@@ -2717,6 +2735,39 @@ mod tests {
 
         assert_eq!(action, HookAction::Ignore);
         assert_eq!(tracking.points, points_before);
+    }
+
+    #[test]
+    fn trigger_down_up_finishes_overlay_and_resets_tracking() {
+        let counters = overlay_test_counters();
+        counters.reset();
+        let tracking = Arc::new(Mutex::new(HookTrackingState::default()));
+        let preview_text = Arc::new(Mutex::new(None));
+        let point = Point { x: 10.0, y: 20.0 };
+        let trigger_button = Some(TriggerButton::Right);
+
+        {
+            let mut guard = tracking.lock().expect("lock tracking");
+            guard.begin_stroke(trigger_button, point);
+            assert_eq!(guard.tracking_state, TrackingState::Armed);
+        }
+        if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
+            overlay.begin_stroke(point);
+            overlay.update_preview(None, None);
+        }
+
+        {
+            let mut guard = tracking.lock().expect("lock tracking");
+            let _ = guard.finish_stroke(point, 0.0, 0.0, 0);
+        }
+        clear_overlay_and_preview(&preview_text);
+
+        let guard = tracking.lock().expect("lock tracking");
+        assert_eq!(guard.tracking_state, TrackingState::Idle);
+        assert_eq!(guard.active_button, None);
+
+        assert!(counters.begin_calls() >= 1);
+        assert_eq!(counters.end_calls(), 1);
     }
 
     #[test]

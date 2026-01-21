@@ -4,6 +4,8 @@ use crate::plugins::mouse_gestures::settings::{
 };
 use once_cell::sync::OnceCell;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -525,6 +527,10 @@ impl StrokeOverlay {
     }
 
     pub fn begin_stroke(&mut self, start: Point) {
+        #[cfg(test)]
+        {
+            overlay_test_counters().record_begin();
+        }
         self.window.begin_stroke(&self.settings, start);
     }
 
@@ -533,6 +539,10 @@ impl StrokeOverlay {
     }
 
     pub fn end_stroke(&mut self) {
+        #[cfg(test)]
+        {
+            overlay_test_counters().record_end();
+        }
         self.window.end_stroke(&self.settings);
     }
 
@@ -556,6 +566,53 @@ static OVERLAY: OnceCell<Arc<Mutex<StrokeOverlay>>> = OnceCell::new();
 pub fn mouse_gesture_overlay() -> Arc<Mutex<StrokeOverlay>> {
     OVERLAY
         .get_or_init(|| Arc::new(Mutex::new(StrokeOverlay::new())))
+        .clone()
+}
+
+#[cfg(test)]
+pub struct OverlayTestCounters {
+    begin_calls: AtomicUsize,
+    end_calls: AtomicUsize,
+}
+
+#[cfg(test)]
+impl OverlayTestCounters {
+    fn new() -> Self {
+        Self {
+            begin_calls: AtomicUsize::new(0),
+            end_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn record_begin(&self) {
+        self.begin_calls.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn record_end(&self) {
+        self.end_calls.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn reset(&self) {
+        self.begin_calls.store(0, Ordering::SeqCst);
+        self.end_calls.store(0, Ordering::SeqCst);
+    }
+
+    pub fn begin_calls(&self) -> usize {
+        self.begin_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn end_calls(&self) -> usize {
+        self.end_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+static OVERLAY_TEST_COUNTERS: OnceCell<Arc<OverlayTestCounters>> = OnceCell::new();
+
+#[cfg(test)]
+pub fn overlay_test_counters() -> Arc<OverlayTestCounters> {
+    OVERLAY_TEST_COUNTERS
+        .get_or_init(|| Arc::new(OverlayTestCounters::new()))
         .clone()
 }
 
