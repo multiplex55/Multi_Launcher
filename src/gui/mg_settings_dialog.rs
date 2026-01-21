@@ -1,10 +1,11 @@
-use crate::mouse_gestures::mouse_gesture_service;
+use crate::mouse_gestures::{format_mouse_gesture_hook_status, mouse_gesture_service};
 use crate::plugins::mouse_gestures::settings::{
     MouseGestureOverlaySettings, MouseGesturePluginSettings,
 };
 use crate::settings::Settings;
 use eframe::egui;
 use serde_json::Value;
+use std::time::Instant;
 
 #[derive(Default)]
 pub struct MouseGesturesSettingsDialog {
@@ -212,6 +213,11 @@ impl MouseGesturesSettingsDialog {
                 ui.separator();
                 ui.label("Overlay");
                 overlay_settings_ui(ui, &mut self.settings.overlay, &mut changed);
+
+                ui.separator();
+                let status = mouse_gesture_service().hook_status();
+                let status_line = format_mouse_gesture_hook_status(&status, Instant::now());
+                ui.small(status_line);
 
                 if changed {
                     self.apply_settings(app);
