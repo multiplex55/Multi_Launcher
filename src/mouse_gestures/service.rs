@@ -1165,10 +1165,10 @@ pub struct HookTrackingState {
     tracking_state: TrackingState,
     active_button: Option<TriggerButton>,
     points: Vec<Point>,
+    visual_points: Vec<Point>,
     last_point: Option<Point>,
     last_stored_point: Option<Point>,
     last_visual_point: Option<Point>,
-    visual_points: usize,
     trigger_started_at: Option<Instant>,
     trigger_start_point: Option<Point>,
     tracking_started_at: Option<Instant>,
@@ -1437,13 +1437,10 @@ fn sampler_worker_loop(
                                 config.max_track_len,
                                 config.max_sample_count,
                             );
-                            if recognition_stored && !visual_stored {
-                                guard.force_visual_point(point);
-                            }
                             if recognition_stored {
-                                stored = Some((point, guard.points.clone()));
+                                stored = Some((guard.points.clone(), guard.last_visual_point()));
                             }
-                            if visual_stored || recognition_stored {
+                            if visual_stored {
                                 overlay_point = Some(point);
                             }
                         }
@@ -1470,7 +1467,7 @@ fn sampler_worker_loop(
                             overlay.push_point(point);
                         }
                     }
-                    if let Some((point, points)) = stored {
+                    if let Some((points, point)) = stored {
                         if config.preview_enabled && !config.preview_on_end_only {
                             let _ = preview_sender.try_send(PreviewRequest {
                                 points: points.clone(),
@@ -1487,7 +1484,7 @@ fn sampler_worker_loop(
                                 )
                             {
                                 let text = cached_preview_text(&preview_text);
-                                overlay.update_preview(text, Some(point));
+                                overlay.update_preview(text, point);
                                 last_preview_at = now;
                             }
                         }
@@ -1555,10 +1552,10 @@ impl Default for HookTrackingState {
             tracking_state: TrackingState::Idle,
             active_button: None,
             points: Vec::new(),
+            visual_points: Vec::new(),
             last_point: None,
             last_stored_point: None,
             last_visual_point: None,
-            visual_points: 0,
             trigger_started_at: None,
             trigger_start_point: None,
             tracking_started_at: None,
@@ -1580,10 +1577,10 @@ impl HookTrackingState {
         self.tracking_state = TrackingState::Idle;
         self.active_button = None;
         self.points.clear();
+        self.visual_points.clear();
         self.last_point = None;
         self.last_stored_point = None;
         self.last_visual_point = None;
-        self.visual_points = 0;
         self.trigger_started_at = None;
         self.trigger_start_point = None;
         self.tracking_started_at = None;
@@ -1596,10 +1593,10 @@ impl HookTrackingState {
     fn clear_tracking_buffers(&mut self) {
         self.active_button = None;
         self.points.clear();
+        self.visual_points.clear();
         self.last_point = None;
         self.last_stored_point = None;
         self.last_visual_point = None;
-        self.visual_points = 0;
         self.tracking_started_at = None;
         self.acc_len = 0.0;
         self.too_long = false;
@@ -1677,14 +1674,14 @@ impl HookTrackingState {
         if !self.should_store_visual_point(point, min_visual_distance_sq) {
             return false;
         }
+        self.visual_points.push(point);
         self.last_visual_point = Some(point);
-        self.visual_points = self.visual_points.saturating_add(1);
         true
     }
 
     fn force_visual_point(&mut self, point: Point) {
+        self.visual_points.push(point);
         self.last_visual_point = Some(point);
-        self.visual_points = self.visual_points.saturating_add(1);
     }
 
     fn max_allowed_points(max_sample_count: usize) -> usize {
@@ -1730,8 +1727,8 @@ impl HookTrackingState {
         }
         self.trigger_start_point = Some(point);
         self.points.push(point);
+        self.visual_points.push(point);
         self.stored_points = 1;
-        self.visual_points = 1;
     }
 
     pub fn begin_track(&mut self, point: Point) {
@@ -1806,7 +1803,11 @@ impl HookTrackingState {
 
     #[cfg(test)]
     fn visual_points_len(&self) -> usize {
-        self.visual_points
+        self.visual_points.len()
+    }
+
+    fn last_visual_point(&self) -> Option<Point> {
+        self.last_visual_point
     }
 
     pub fn acc_len(&self) -> f32 {
@@ -3036,6 +3037,107 @@ mod tests {
     }
 
     #[test]
+    fn sampler_visual_points_update_even_when_recognition_gated() {
+        let counters = overlay_test_counters();
+        counters.reset();
+        let runtime = make_runtime(
+            MouseGestureDb::default(),
+            MouseGesturePluginSettings::default(),
+        );
+        let (preview_sender, _preview_receiver) = mpsc::sync_channel(1);
+        let preview_text = Arc::new(Mutex::new(None));
+        let tracking = Arc::new(Mutex::new(HookTrackingState::default()));
+        let diagnostics = Arc::new(HookDiagnostics::default());
+        if let Ok(mut guard) = tracking.lock() {
+            guard.attach_diagnostics(Arc::clone(&diagnostics));
+        }
+        let tracking_active = Arc::new(AtomicBool::new(false));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let point_counter = Arc::new(AtomicUsize::new(0));
+
+        let tracking_handle = Arc::clone(&tracking);
+        let tracking_active_handle = Arc::clone(&tracking_active);
+        let stop_flag_handle = Arc::clone(&stop_flag);
+        let preview_text_handle = Arc::clone(&preview_text);
+        let runtime_handle = runtime.clone();
+        let point_counter_handle = Arc::clone(&point_counter);
+
+        let worker = std::thread::spawn(move || {
+            sampler_worker_loop(
+                runtime_handle,
+                receiver,
+                preview_sender,
+                preview_text_handle,
+                tracking_handle,
+                tracking_active_handle,
+                stop_flag_handle,
+                Arc::clone(&diagnostics),
+                move || {
+                    let step = point_counter_handle.fetch_add(1, Ordering::SeqCst) as f32;
+                    Point {
+                        x: step * 3.0,
+                        y: 0.0,
+                    }
+                },
+                |_| true,
+            );
+        });
+
+        let config = SamplerConfig {
+            min_point_distance_sq: 400.0,
+            visual_point_distance_sq: VISUAL_POINT_DISTANCE_SQ,
+            max_track_len: 0.0,
+            max_gesture_duration_ms: 0,
+            max_sample_count: 0,
+            preview_enabled: false,
+            preview_on_end_only: false,
+            preview_throttle_ms: crate::plugins::mouse_gestures::settings::PREVIEW_THROTTLE_MS,
+            sample_interval: Duration::from_millis(5),
+        };
+        sender
+            .send(SamplerCommand::Start {
+                start_point: Point { x: 0.0, y: 0.0 },
+                trigger_button: Some(TriggerButton::Right),
+                config,
+            })
+            .expect("send start command");
+
+        let start_deadline = Instant::now() + Duration::from_millis(200);
+        while !tracking_active.load(Ordering::SeqCst) {
+            if Instant::now() >= start_deadline {
+                panic!("sampler never reported active tracking");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let visual_deadline = Instant::now() + Duration::from_millis(200);
+        loop {
+            if tracking
+                .lock()
+                .expect("lock tracking")
+                .visual_points_len()
+                >= 3
+                && counters.push_calls() >= 2
+            {
+                break;
+            }
+            if Instant::now() >= visual_deadline {
+                panic!("visual points did not increase during sampling");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let guard = tracking.lock().expect("lock tracking");
+        assert_eq!(guard.points_len(), 1);
+        drop(guard);
+
+        stop_flag.store(true, Ordering::SeqCst);
+        drop(sender);
+        worker.join().expect("sampler worker exits");
+    }
+
+    #[test]
     fn hook_ignores_mouse_move_when_sampling_enabled() {
         let mut tracking = HookTrackingState::default();
         tracking.begin_track(Point { x: 1.0, y: 1.0 });
@@ -3230,6 +3332,28 @@ mod tests {
 
         assert_eq!(tracking.points_len(), 1);
         assert_eq!(tracking.visual_points_len(), 4);
+    }
+
+    #[test]
+    fn visual_points_exceed_recognition_points_when_decimated() {
+        let mut tracking = HookTrackingState::default();
+        tracking.begin_track(Point { x: 0.0, y: 0.0 });
+        let min_point_distance_sq = 36.0;
+        let visual_point_distance_sq = 1.0;
+
+        for step in 1..=6 {
+            let point = Point {
+                x: step as f32,
+                y: 0.0,
+            };
+            let _ = tracking.record_visual_point(point, visual_point_distance_sq);
+            let _ = tracking.sample_point(point, min_point_distance_sq, 0.0, 0);
+        }
+
+        assert!(
+            tracking.visual_points_len() > tracking.points_len(),
+            "expected visual buffer to exceed recognition buffer"
+        );
     }
 
     #[test]
