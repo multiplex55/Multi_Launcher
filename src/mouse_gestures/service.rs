@@ -12,7 +12,7 @@ use crate::plugins::mouse_gestures::settings::MouseGesturePluginSettings;
 use once_cell::sync::OnceCell;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -35,9 +35,9 @@ pub fn should_ignore_event(flags: u32, extra_info: usize) -> bool {
 #[cfg(windows)]
 fn send_passthrough_click(button: TriggerButton) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEINPUT, MOUSEEVENTF_LEFTDOWN,
-        MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
-        MOUSEEVENTF_RIGHTUP,
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+        MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+        MOUSEINPUT,
     };
 
     let (down_flag, up_flag) = match button {
@@ -211,10 +211,9 @@ impl MouseGestureRuntime {
         let mut distances = HashMap::new();
         for (gesture_id, template) in gesture_templates {
             let similarity = direction_similarity(&track_dirs, &template.directions);
-            let threshold =
-                snapshots
-                    .settings
-                    .match_threshold_for_template_len(template.directions.len());
+            let threshold = snapshots
+                .settings
+                .match_threshold_for_template_len(template.directions.len());
             if similarity < threshold {
                 continue;
             }
@@ -307,10 +306,9 @@ impl MouseGestureRuntime {
                 continue;
             };
             let similarity = direction_similarity(&track_dirs, &template.directions);
-            let threshold =
-                snapshots
-                    .settings
-                    .match_threshold_for_template_len(template.directions.len());
+            let threshold = snapshots
+                .settings
+                .match_threshold_for_template_len(template.directions.len());
             if similarity < threshold {
                 continue;
             }
@@ -432,10 +430,9 @@ impl MouseGestureRuntime {
         let mut distances = HashMap::new();
         for (gesture_id, template) in gesture_templates {
             let similarity = direction_similarity(&track_dirs, &template.directions);
-            let threshold =
-                snapshots
-                    .settings
-                    .match_threshold_for_template_len(template.directions.len());
+            let threshold = snapshots
+                .settings
+                .match_threshold_for_template_len(template.directions.len());
             if similarity < threshold {
                 continue;
             }
@@ -886,6 +883,19 @@ impl MouseGestureService {
             .unwrap_or_default()
     }
 
+    pub fn hook_status(&self) -> MouseGestureHookStatus {
+        let hook_active = self.running.load(Ordering::SeqCst);
+        #[cfg(windows)]
+        if let Some(state) = HOOK_STATE.get() {
+            return state.diagnostics.status(hook_active);
+        }
+        MouseGestureHookStatus {
+            hook_active,
+            overlay_ready: false,
+            last_event_at: None,
+        }
+    }
+
     pub fn start(&self) {
         if self.running.swap(true, Ordering::SeqCst) {
             return;
@@ -993,6 +1003,8 @@ struct HookDiagnosticsSnapshot {
     tracking_canceled_timeout: usize,
     tracking_ended: usize,
     stored_point_accepted: usize,
+    overlay_ready: bool,
+    last_event_ms: Option<u64>,
 }
 
 struct HookDiagnostics {
@@ -1005,6 +1017,8 @@ struct HookDiagnostics {
     tracking_ended: AtomicUsize,
     stored_point_accepted: AtomicUsize,
     last_log_ms: AtomicUsize,
+    last_event_ms: AtomicU64,
+    overlay_ready: AtomicBool,
     started_at: Instant,
 }
 
@@ -1020,6 +1034,8 @@ impl Default for HookDiagnostics {
             tracking_ended: AtomicUsize::new(0),
             stored_point_accepted: AtomicUsize::new(0),
             last_log_ms: AtomicUsize::new(0),
+            last_event_ms: AtomicU64::new(0),
+            overlay_ready: AtomicBool::new(false),
             started_at: Instant::now(),
         }
     }
@@ -1036,6 +1052,36 @@ impl HookDiagnostics {
             tracking_canceled_timeout: self.tracking_canceled_timeout.load(Ordering::SeqCst),
             tracking_ended: self.tracking_ended.load(Ordering::SeqCst),
             stored_point_accepted: self.stored_point_accepted.load(Ordering::SeqCst),
+            overlay_ready: self.overlay_ready.load(Ordering::SeqCst),
+            last_event_ms: self.last_event_at().map(|instant| {
+                instant
+                    .saturating_duration_since(self.started_at)
+                    .as_millis() as u64
+            }),
+        }
+    }
+
+    fn record_hook_event(&self, overlay_ready: bool) {
+        let elapsed_ms = self.started_at.elapsed().as_millis() as u64;
+        self.last_event_ms
+            .store(elapsed_ms.saturating_add(1), Ordering::SeqCst);
+        self.overlay_ready.store(overlay_ready, Ordering::SeqCst);
+    }
+
+    fn last_event_at(&self) -> Option<Instant> {
+        let stored = self.last_event_ms.load(Ordering::SeqCst);
+        if stored == 0 {
+            None
+        } else {
+            Some(self.started_at + Duration::from_millis(stored.saturating_sub(1)))
+        }
+    }
+
+    fn status(&self, hook_active: bool) -> MouseGestureHookStatus {
+        MouseGestureHookStatus {
+            hook_active,
+            overlay_ready: self.overlay_ready.load(Ordering::SeqCst),
+            last_event_at: self.last_event_at(),
         }
     }
 
@@ -1065,9 +1111,30 @@ impl HookDiagnostics {
             tracking_canceled_timeout = snapshot.tracking_canceled_timeout,
             tracking_ended = snapshot.tracking_ended,
             stored_point_accepted = snapshot.stored_point_accepted,
+            overlay_ready = snapshot.overlay_ready,
+            last_event_ms = snapshot.last_event_ms,
             "mouse gesture hook diagnostics"
         );
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MouseGestureHookStatus {
+    pub hook_active: bool,
+    pub overlay_ready: bool,
+    pub last_event_at: Option<Instant>,
+}
+
+pub fn format_mouse_gesture_hook_status(status: &MouseGestureHookStatus, now: Instant) -> String {
+    let hook_active = if status.hook_active { "yes" } else { "no" };
+    let overlay_ready = if status.overlay_ready { "yes" } else { "no" };
+    let last_event = match status.last_event_at {
+        Some(at) => format!("{}s ago", now.saturating_duration_since(at).as_secs()),
+        None => "never".to_string(),
+    };
+    format!(
+        "Hook active: {hook_active} • Last event: {last_event} • Overlay ready: {overlay_ready}"
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1274,9 +1341,7 @@ fn sampler_worker_loop(
                     }
                     guard.begin_stroke(trigger_button, start_point);
                 }
-                diagnostics
-                    .tracking_started
-                    .fetch_add(1, Ordering::SeqCst);
+                diagnostics.tracking_started.fetch_add(1, Ordering::SeqCst);
                 stop_flag.store(false, Ordering::SeqCst);
                 tracking_active.store(true, Ordering::SeqCst);
                 if let Ok(mut preview_guard) = preview_text.lock() {
@@ -1653,7 +1718,12 @@ impl HookTrackingState {
         max_track_len: f32,
         max_sample_count: usize,
     ) -> bool {
-        self.handle_move(point, min_point_distance_sq, max_track_len, max_sample_count)
+        self.handle_move(
+            point,
+            min_point_distance_sq,
+            max_track_len,
+            max_sample_count,
+        )
     }
 
     pub fn finish_stroke(
@@ -1791,6 +1861,11 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                     };
                     let event = wparam.0 as u32;
                     let data = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+                    let overlay_ready = mouse_gesture_overlay()
+                        .try_lock()
+                        .map(|_| true)
+                        .unwrap_or(false);
+                    state.diagnostics.record_hook_event(overlay_ready);
                     if should_ignore_event(data.flags, data.dwExtraInfo) {
                         return CallNextHookEx(None, code, wparam, lparam);
                     }
@@ -1857,14 +1932,9 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                             .fetch_add(1, Ordering::SeqCst);
                     }
                     if event == WM_RBUTTONUP {
-                        state
-                            .diagnostics
-                            .rbutton_up
-                            .fetch_add(1, Ordering::SeqCst);
+                        state.diagnostics.rbutton_up.fetch_add(1, Ordering::SeqCst);
                     }
-                    if event == WM_MOUSEMOVE
-                        && state.tracking_active.load(Ordering::SeqCst)
-                    {
+                    if event == WM_MOUSEMOVE && state.tracking_active.load(Ordering::SeqCst) {
                         state
                             .diagnostics
                             .mousemove_while_tracking
@@ -1907,8 +1977,7 @@ impl MouseHookBackend for WindowsMouseHookBackend {
 
                     match hook_action_for_event(event_kind, event_button, trigger_button) {
                         HookAction::Start => {
-                            let should_start = if let Ok(mut tracking) = state.tracking.try_lock()
-                            {
+                            let should_start = if let Ok(mut tracking) = state.tracking.try_lock() {
                                 if tracking.tracking_state == TrackingState::Idle {
                                     tracking.begin_stroke(event_button, point);
                                     true
@@ -1956,13 +2025,12 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                             {
                                 return CallNextHookEx(None, code, wparam, lparam);
                             }
-                            let (points, too_long) =
-                                tracking.finish_stroke(
-                                    point,
-                                    min_point_distance_sq,
-                                    max_track_len,
-                                    max_sample_count,
-                                );
+                            let (points, too_long) = tracking.finish_stroke(
+                                point,
+                                min_point_distance_sq,
+                                max_track_len,
+                                max_sample_count,
+                            );
                             state
                                 .diagnostics
                                 .tracking_ended
@@ -1998,7 +2066,6 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                             return CallNextHookEx(None, code, wparam, lparam);
                         }
                     }
-
                 }));
 
                 match result {
@@ -2169,19 +2236,19 @@ impl MouseHookBackend for MockMouseHookBackend {
 mod tests {
     use super::{
         build_gesture_templates, clear_overlay_and_preview, finalize_hook_outcome,
-        hash_direction_sequence, hook_action_for_event, is_tap_track, mouse_gesture_overlay,
-        preview_worker_loop, sampler_worker_loop, reset_template_build_counter, sequence_changed,
-        should_cancel, should_compute_preview, template_build_count, truncate_with_ellipsis,
-        HookAction, HookEventKind, HookDiagnostics, HookTrackingState, MouseGestureEventSink,
-        MouseGestureRuntime, TRACKING_START_DISTANCE_SQ,
-        MouseGestureService, MouseGestureSnapshots, PreviewRequest, ProfileCache, SamplerCommand,
-        SamplerConfig, TrackOutcome, TrackingState, TriggerButton,
-        PREVIEW_SIMILARITY_LABEL_MAX_LEN, PREVIEW_SIMILARITY_MAX_LEN,
-        PREVIEW_SIMILARITY_TOP_N, track_directions_with_override, VISUAL_POINT_DISTANCE_SQ,
+        format_mouse_gesture_hook_status, hash_direction_sequence, hook_action_for_event,
+        is_tap_track, mouse_gesture_overlay, preview_worker_loop, reset_template_build_counter,
+        sampler_worker_loop, sequence_changed, should_cancel, should_compute_preview,
+        template_build_count, track_directions_with_override, truncate_with_ellipsis, HookAction,
+        HookDiagnostics, HookEventKind, HookTrackingState, MouseGestureEventSink,
+        MouseGestureRuntime, MouseGestureService, MouseGestureSnapshots, PreviewRequest,
+        ProfileCache, SamplerCommand, SamplerConfig, TrackOutcome, TrackingState, TriggerButton,
+        PREVIEW_SIMILARITY_LABEL_MAX_LEN, PREVIEW_SIMILARITY_MAX_LEN, PREVIEW_SIMILARITY_TOP_N,
+        TRACKING_START_DISTANCE_SQ, VISUAL_POINT_DISTANCE_SQ,
     };
     use crate::gui::MouseGestureEvent;
-    use crate::mouse_gestures::MouseHookBackend;
     use crate::mouse_gestures::overlay::overlay_test_counters;
+    use crate::mouse_gestures::MouseHookBackend;
     use crate::plugins::mouse_gestures::db::{
         ForegroundWindowInfo, MouseGestureBinding, MouseGestureDb, MouseGestureProfile,
     };
@@ -2260,10 +2327,8 @@ mod tests {
     #[test]
     fn match_thresholds_prefer_multi_template_when_single_is_stricter() {
         let mut db = MouseGestureDb::default();
-        db.bindings.insert(
-            "single".into(),
-            make_gesture(&[(0.0, 0.0), (0.0, -20.0)]),
-        );
+        db.bindings
+            .insert("single".into(), make_gesture(&[(0.0, 0.0), (0.0, -20.0)]));
         db.bindings.insert(
             "multi".into(),
             make_gesture(&[(0.0, 0.0), (0.0, -20.0), (20.0, -20.0)]),
@@ -2303,9 +2368,7 @@ mod tests {
             Point { x: 20.0, y: -20.0 },
         ];
 
-        let (label, _similarity) = runtime
-            .best_match(&points)
-            .expect("expected multi match");
+        let (label, _similarity) = runtime.best_match(&points).expect("expected multi match");
 
         assert_eq!(label, "Multi");
     }
@@ -2313,10 +2376,8 @@ mod tests {
     #[test]
     fn match_thresholds_prefer_single_template_when_multi_is_stricter() {
         let mut db = MouseGestureDb::default();
-        db.bindings.insert(
-            "single".into(),
-            make_gesture(&[(0.0, 0.0), (0.0, -20.0)]),
-        );
+        db.bindings
+            .insert("single".into(), make_gesture(&[(0.0, 0.0), (0.0, -20.0)]));
         db.bindings.insert(
             "multi".into(),
             make_gesture(&[(0.0, 0.0), (0.0, -20.0), (20.0, -20.0)]),
@@ -2350,16 +2411,26 @@ mod tests {
             ..MouseGesturePluginSettings::default()
         };
         let runtime = make_runtime(db, settings);
-        let points = vec![
-            Point { x: 0.0, y: 0.0 },
-            Point { x: 0.0, y: -20.0 },
-        ];
+        let points = vec![Point { x: 0.0, y: 0.0 }, Point { x: 0.0, y: -20.0 }];
 
-        let (label, _similarity) = runtime
-            .best_match(&points)
-            .expect("expected single match");
+        let (label, _similarity) = runtime.best_match(&points).expect("expected single match");
 
         assert_eq!(label, "Single");
+    }
+
+    #[test]
+    fn hook_status_line_reflects_diagnostics() {
+        let diagnostics = HookDiagnostics::default();
+        diagnostics.record_hook_event(true);
+        let status = diagnostics.status(true);
+        let last_event_at = status.last_event_at.expect("expected last event");
+        let now = last_event_at + Duration::from_secs(5);
+
+        let line = format_mouse_gesture_hook_status(&status, now);
+
+        assert!(line.contains("Hook active: yes"));
+        assert!(line.contains("Last event: 5s ago"));
+        assert!(line.contains("Overlay ready: yes"));
     }
 
     #[test]
@@ -2806,7 +2877,11 @@ mod tests {
             settings.max_gesture_duration_ms
         ));
         assert!(!should_cancel(Some(started_at), after_deadline, 0));
-        assert!(!should_cancel(None, after_deadline, settings.max_gesture_duration_ms));
+        assert!(!should_cancel(
+            None,
+            after_deadline,
+            settings.max_gesture_duration_ms
+        ));
     }
 
     #[test]
@@ -2847,9 +2922,8 @@ mod tests {
         };
         let mut tracking = HookTrackingState::default();
         tracking.begin_track(Point { x: 0.0, y: 0.0 });
-        tracking.tracking_started_at = Some(
-            Instant::now() - Duration::from_millis(settings.max_gesture_duration_ms + 1),
-        );
+        tracking.tracking_started_at =
+            Some(Instant::now() - Duration::from_millis(settings.max_gesture_duration_ms + 1));
 
         assert!(should_cancel(
             tracking.tracking_started_at,
@@ -2882,12 +2956,8 @@ mod tests {
 
         assert_eq!(tracking.points_len(), max_sample_count);
 
-        let (points, too_long) = tracking.finish_stroke(
-            Point { x: 10.0, y: 0.0 },
-            0.0,
-            0.0,
-            max_sample_count,
-        );
+        let (points, too_long) =
+            tracking.finish_stroke(Point { x: 10.0, y: 0.0 }, 0.0, 0.0, max_sample_count);
 
         assert_eq!(points.len(), max_sample_count);
         assert!(!too_long);
@@ -2906,8 +2976,7 @@ mod tests {
                 x: step as f32,
                 y: 0.0,
             };
-            let visual_stored =
-                tracking.record_visual_point(point, visual_point_distance_sq);
+            let visual_stored = tracking.record_visual_point(point, visual_point_distance_sq);
             let recognition_stored = tracking.sample_point(point, min_point_distance_sq, 0.0, 0);
             if recognition_stored && !visual_stored {
                 tracking.force_visual_point(point);
@@ -3378,7 +3447,10 @@ mod tests {
 
         let directions = track_directions_with_override(&points, &settings, None, None);
 
-        assert_eq!(directions, vec![GestureDirection::Right, GestureDirection::Down]);
+        assert_eq!(
+            directions,
+            vec![GestureDirection::Right, GestureDirection::Down]
+        );
     }
 
     fn make_right_points() -> Vec<Point> {
@@ -3415,10 +3487,8 @@ mod tests {
 
     fn make_db_with_right_and_up_gestures() -> MouseGestureDb {
         let mut db = make_db_with_right_gesture();
-        db.bindings.insert(
-            "gesture-up".to_string(),
-            "Swipe Up: 0,0|0,-80".to_string(),
-        );
+        db.bindings
+            .insert("gesture-up".to_string(), "Swipe Up: 0,0|0,-80".to_string());
         if let Some(profile) = db.profiles.first_mut() {
             profile.bindings.push(MouseGestureBinding {
                 gesture_id: "gesture-up".to_string(),
