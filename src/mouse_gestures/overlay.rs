@@ -535,6 +535,10 @@ impl StrokeOverlay {
     }
 
     pub fn push_point(&mut self, point: Point) {
+        #[cfg(test)]
+        {
+            overlay_test_counters().record_push();
+        }
         self.window.push_point(&self.settings, point);
     }
 
@@ -573,6 +577,7 @@ pub fn mouse_gesture_overlay() -> Arc<Mutex<StrokeOverlay>> {
 pub struct OverlayTestCounters {
     begin_calls: AtomicUsize,
     end_calls: AtomicUsize,
+    push_calls: AtomicUsize,
 }
 
 #[cfg(test)]
@@ -581,6 +586,7 @@ impl OverlayTestCounters {
         Self {
             begin_calls: AtomicUsize::new(0),
             end_calls: AtomicUsize::new(0),
+            push_calls: AtomicUsize::new(0),
         }
     }
 
@@ -592,9 +598,14 @@ impl OverlayTestCounters {
         self.end_calls.fetch_add(1, Ordering::SeqCst);
     }
 
+    fn record_push(&self) {
+        self.push_calls.fetch_add(1, Ordering::SeqCst);
+    }
+
     pub fn reset(&self) {
         self.begin_calls.store(0, Ordering::SeqCst);
         self.end_calls.store(0, Ordering::SeqCst);
+        self.push_calls.store(0, Ordering::SeqCst);
     }
 
     pub fn begin_calls(&self) -> usize {
@@ -603,6 +614,10 @@ impl OverlayTestCounters {
 
     pub fn end_calls(&self) -> usize {
         self.end_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn push_calls(&self) -> usize {
+        self.push_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -728,6 +743,23 @@ mod tests {
         let reduced = decimate_points(&points, 5);
         let reduced_x: Vec<i32> = reduced.iter().map(|point| point.x as i32).collect();
         assert_eq!(reduced_x, vec![0, 2, 5, 7, 9]);
+    }
+
+    #[test]
+    fn overlay_push_point_increments_counter() {
+        let counters = overlay_test_counters();
+        counters.reset();
+
+        let mut overlay = StrokeOverlay::new();
+        overlay.begin_stroke(Point { x: 1.0, y: 2.0 });
+        for index in 0..3 {
+            overlay.push_point(Point {
+                x: 3.0 + index as f32,
+                y: 4.0,
+            });
+        }
+
+        assert_eq!(counters.push_calls(), 3);
     }
 
     #[test]
