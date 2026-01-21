@@ -1897,6 +1897,11 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                                     Instant::now(),
                                 );
                             }
+                            if tracking.active_button.is_some() {
+                                if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
+                                    overlay.push_point(point);
+                                }
+                            }
                         }
                     }
 
