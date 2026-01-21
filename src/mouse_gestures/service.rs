@@ -188,29 +188,18 @@ impl MouseGestureRuntime {
         self.best_match_with_snapshots(points, &snapshots)
     }
 
-    fn best_match_with_snapshots(
+    fn best_match_with_directions(
         &self,
-        points: &[Point],
+        directions: &[GestureDirection],
         snapshots: &MouseGestureSnapshots,
     ) -> Option<(String, f32)> {
-        if points.len() < 2 {
-            return None;
-        }
-        let length = track_length(points);
-        if length < snapshots.settings.min_track_len {
-            return None;
-        }
-        if snapshots.settings.max_track_len > 0.0 && length > snapshots.settings.max_track_len {
-            return None;
-        }
-        let track_dirs = track_directions_with_override(points, &snapshots.settings, None, None);
-        if track_dirs.is_empty() {
+        if directions.is_empty() {
             return None;
         }
         let gesture_templates = &snapshots.gesture_templates;
         let mut distances = HashMap::new();
         for (gesture_id, template) in gesture_templates {
-            let similarity = direction_similarity(&track_dirs, &template.directions);
+            let similarity = direction_similarity(directions, &template.directions);
             let threshold = snapshots
                 .settings
                 .match_threshold_for_template_len(template.directions.len());
@@ -234,6 +223,25 @@ impl MouseGestureRuntime {
         Some((label, similarity))
     }
 
+    fn best_match_with_snapshots(
+        &self,
+        points: &[Point],
+        snapshots: &MouseGestureSnapshots,
+    ) -> Option<(String, f32)> {
+        if points.len() < 2 {
+            return None;
+        }
+        let length = track_length(points);
+        if length < snapshots.settings.min_track_len {
+            return None;
+        }
+        if snapshots.settings.max_track_len > 0.0 && length > snapshots.settings.max_track_len {
+            return None;
+        }
+        let track_dirs = track_directions_with_override(points, &snapshots.settings, None, None);
+        self.best_match_with_directions(&track_dirs, snapshots)
+    }
+
     fn preview_text(&self, points: &[Point]) -> Option<String> {
         let snapshots = self
             .snapshots
@@ -254,6 +262,17 @@ impl MouseGestureRuntime {
             return None;
         }
         let length = track_length(points);
+        let directions = track_directions_with_override(points, &snapshots.settings, None, None);
+        self.preview_text_with_directions(&directions, length, snapshots, encoder)
+    }
+
+    fn preview_text_with_directions(
+        &self,
+        directions: &[GestureDirection],
+        length: f32,
+        snapshots: &MouseGestureSnapshots,
+        encoder: &PreviewTextEncoder,
+    ) -> Option<String> {
         if length < snapshots.settings.min_track_len {
             return Some("Keep drawing".to_string());
         }
@@ -261,9 +280,9 @@ impl MouseGestureRuntime {
             return Some("Too long".to_string());
         }
         if snapshots.settings.debug_show_similarity {
-            return self.preview_similarity_text_with_encoder(points, snapshots, encoder);
+            return self.preview_similarity_text_with_directions(directions, snapshots, encoder);
         }
-        let Some((label, similarity)) = self.best_match_with_snapshots(points, snapshots) else {
+        let Some((label, similarity)) = self.best_match_with_directions(directions, snapshots) else {
             return Some("No match".to_string());
         };
         Some(format!(
@@ -288,7 +307,16 @@ impl MouseGestureRuntime {
         encoder: &PreviewTextEncoder,
     ) -> Option<String> {
         let track_dirs = track_directions_with_override(points, &snapshots.settings, None, None);
-        if track_dirs.is_empty() {
+        self.preview_similarity_text_with_directions(&track_dirs, snapshots, encoder)
+    }
+
+    fn preview_similarity_text_with_directions(
+        &self,
+        directions: &[GestureDirection],
+        snapshots: &MouseGestureSnapshots,
+        encoder: &PreviewTextEncoder,
+    ) -> Option<String> {
+        if directions.is_empty() {
             return Some("No match".to_string());
         }
         let gesture_templates = &snapshots.gesture_templates;
@@ -305,7 +333,7 @@ impl MouseGestureRuntime {
             let Some(template) = gesture_templates.get(&binding.gesture_id) else {
                 continue;
             };
-            let similarity = direction_similarity(&track_dirs, &template.directions);
+            let similarity = direction_similarity(directions, &template.directions);
             let threshold = snapshots
                 .settings
                 .match_threshold_for_template_len(template.directions.len());
@@ -1182,8 +1210,27 @@ pub struct HookTrackingState {
 #[cfg(any(test, windows))]
 #[derive(Clone)]
 struct PreviewRequest {
-    points: Vec<Point>,
+    directions: Vec<GestureDirection>,
+    length: f32,
+    sequence_hash: u64,
     force: bool,
+}
+
+#[cfg(any(test, windows))]
+fn preview_request_from_points(
+    points: &[Point],
+    settings: &MouseGesturePluginSettings,
+    force: bool,
+) -> PreviewRequest {
+    let directions = track_directions_with_override(points, settings, None, None);
+    let length = track_length(points);
+    let sequence_hash = hash_direction_sequence(&directions);
+    PreviewRequest {
+        directions,
+        length,
+        sequence_hash,
+        force,
+    }
 }
 
 #[cfg(any(test, windows))]
@@ -1217,16 +1264,12 @@ fn preview_worker_loop(
         if !snapshots.settings.preview_enabled {
             continue;
         }
-        let directions =
-            track_directions_with_override(&request.points, &snapshots.settings, None, None);
-        let sequence_hash = hash_direction_sequence(&directions);
-
         if snapshots.settings.preview_on_end_only && !request.force {
             continue;
         }
 
         if !request.force {
-            if !sequence_changed(last_sequence_hash, sequence_hash) {
+            if !sequence_changed(last_sequence_hash, request.sequence_hash) {
                 continue;
             }
             if last_preview_at.is_some_and(|last| !should_compute_preview(last, now, throttle_ms)) {
@@ -1234,12 +1277,17 @@ fn preview_worker_loop(
             }
         }
 
-        let text = runtime.preview_text_with_snapshots(&request.points, &snapshots, &encoder);
+        let text = runtime.preview_text_with_directions(
+            &request.directions,
+            request.length,
+            &snapshots,
+            &encoder,
+        );
         if let Ok(mut guard) = preview_text.lock() {
             *guard = text;
         }
         last_preview_at = Some(now);
-        last_sequence_hash = Some(sequence_hash);
+        last_sequence_hash = Some(request.sequence_hash);
     }
 }
 
@@ -1357,7 +1405,7 @@ fn spawn_sampler_worker(
 
 #[cfg(any(test, windows))]
 fn sampler_worker_loop(
-    _runtime: MouseGestureRuntime,
+    runtime: MouseGestureRuntime,
     receiver: Receiver<SamplerCommand>,
     preview_sender: SyncSender<PreviewRequest>,
     preview_text: Arc<Mutex<Option<String>>>,
@@ -1400,6 +1448,9 @@ fn sampler_worker_loop(
                 }
                 let mut last_preview_at =
                     Instant::now() - Duration::from_millis(config.preview_throttle_ms);
+                let mut last_preview_request_at =
+                    Instant::now() - Duration::from_millis(config.preview_throttle_ms);
+                let mut last_preview_sequence_hash = None;
                 loop {
                     if stop_flag.load(Ordering::SeqCst) {
                         break;
@@ -1408,6 +1459,7 @@ fn sampler_worker_loop(
                     let point = cursor_provider();
                     let mut stored = None;
                     let mut overlay_point = None;
+                    let mut preview_request = None;
                     let mut should_cancel_tracking = false;
                     let mut timed_out = false;
                     let mut active_button = None;
@@ -1438,7 +1490,37 @@ fn sampler_worker_loop(
                                 config.max_sample_count,
                             );
                             if recognition_stored {
-                                stored = Some((guard.points.clone(), guard.last_visual_point()));
+                                stored = guard.last_visual_point();
+                                if config.preview_enabled
+                                    && !config.preview_on_end_only
+                                    && should_compute_preview(
+                                        last_preview_request_at,
+                                        now,
+                                        config.preview_throttle_ms,
+                                    )
+                                {
+                                    let settings = runtime
+                                        .snapshots
+                                        .read()
+                                        .map(|snapshots| snapshots.settings.clone())
+                                        .unwrap_or_default();
+                                    let directions = track_directions_with_override(
+                                        &guard.points,
+                                        &settings,
+                                        None,
+                                        None,
+                                    );
+                                    let sequence_hash = hash_direction_sequence(&directions);
+                                    if sequence_changed(last_preview_sequence_hash, sequence_hash) {
+                                        let length = track_length(&guard.points);
+                                        preview_request = Some(PreviewRequest {
+                                            directions,
+                                            length,
+                                            sequence_hash,
+                                            force: false,
+                                        });
+                                    }
+                                }
                             }
                             if visual_stored {
                                 overlay_point = Some(point);
@@ -1467,12 +1549,12 @@ fn sampler_worker_loop(
                             overlay.push_point(point);
                         }
                     }
-                    if let Some((points, point)) = stored {
-                        if config.preview_enabled && !config.preview_on_end_only {
-                            let _ = preview_sender.try_send(PreviewRequest {
-                                points: points.clone(),
-                                force: false,
-                            });
+                    if let Some(point) = stored {
+                        if let Some(request) = preview_request {
+                            let sequence_hash = request.sequence_hash;
+                            let _ = preview_sender.try_send(request);
+                            last_preview_request_at = now;
+                            last_preview_sequence_hash = Some(sequence_hash);
                         }
                         if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
                             if config.preview_enabled
@@ -2060,10 +2142,15 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                                 .fetch_add(1, Ordering::SeqCst);
 
                             if preview_enabled {
-                                let _ = state.preview_sender.try_send(PreviewRequest {
-                                    points: points.clone(),
-                                    force: true,
-                                });
+                                let settings = state
+                                    .runtime
+                                    .snapshots
+                                    .try_read()
+                                    .map(|snapshots| snapshots.settings.clone())
+                                    .unwrap_or_default();
+                                let _ = state.preview_sender.try_send(preview_request_from_points(
+                                    &points, &settings, true,
+                                ));
                             }
 
                             clear_overlay_and_preview(&state.preview_text);
@@ -2384,7 +2471,7 @@ mod tests {
             smoothing_enabled: false,
             ..MouseGesturePluginSettings::default()
         };
-        let runtime = make_runtime(db, settings);
+        let runtime = make_runtime(db, settings.clone());
         let points = vec![
             Point { x: 0.0, y: 0.0 },
             Point { x: 0.0, y: -20.0 },
@@ -2433,7 +2520,7 @@ mod tests {
             smoothing_enabled: false,
             ..MouseGesturePluginSettings::default()
         };
-        let runtime = make_runtime(db, settings);
+        let runtime = make_runtime(db, settings.clone());
         let points = vec![Point { x: 0.0, y: 0.0 }, Point { x: 0.0, y: -20.0 }];
 
         let (label, _similarity) = runtime.best_match(&points).expect("expected single match");
@@ -2465,6 +2552,107 @@ mod tests {
 
         assert!(!should_compute_preview(too_soon, now, throttle_ms));
         assert!(should_compute_preview(on_time, now, throttle_ms));
+    }
+
+    #[test]
+    fn sampler_preview_requests_are_throttled_vs_samples() {
+        let settings = MouseGesturePluginSettings {
+            min_point_distance: 0.0,
+            segment_threshold_px: 0.0,
+            direction_tolerance_deg: 0.0,
+            preview_enabled: true,
+            preview_throttle_ms: 200,
+            ..MouseGesturePluginSettings::default()
+        };
+        let runtime = make_runtime(MouseGestureDb::default(), settings);
+        let (preview_sender, preview_receiver) = mpsc::sync_channel(10);
+        let preview_text = Arc::new(Mutex::new(None));
+        let tracking = Arc::new(Mutex::new(HookTrackingState::default()));
+        let tracking_active = Arc::new(AtomicBool::new(false));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let diagnostics = Arc::new(HookDiagnostics::default());
+        if let Ok(mut guard) = tracking.lock() {
+            guard.attach_diagnostics(Arc::clone(&diagnostics));
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let point_counter = Arc::new(AtomicUsize::new(0));
+
+        let tracking_handle = Arc::clone(&tracking);
+        let tracking_active_handle = Arc::clone(&tracking_active);
+        let stop_flag_handle = Arc::clone(&stop_flag);
+        let preview_text_handle = Arc::clone(&preview_text);
+        let runtime_handle = runtime.clone();
+        let point_counter_handle = Arc::clone(&point_counter);
+        let diagnostics_handle = Arc::clone(&diagnostics);
+
+        let worker = std::thread::spawn(move || {
+            sampler_worker_loop(
+                runtime_handle,
+                receiver,
+                preview_sender,
+                preview_text_handle,
+                tracking_handle,
+                tracking_active_handle,
+                stop_flag_handle,
+                diagnostics_handle,
+                move || {
+                    let step = point_counter_handle.fetch_add(1, Ordering::SeqCst) as f32;
+                    Point { x: step, y: 0.0 }
+                },
+                |_| true,
+            );
+        });
+
+        let config = SamplerConfig {
+            min_point_distance_sq: 0.0,
+            visual_point_distance_sq: VISUAL_POINT_DISTANCE_SQ,
+            max_track_len: 0.0,
+            max_gesture_duration_ms: 0,
+            max_sample_count: 0,
+            preview_enabled: true,
+            preview_on_end_only: false,
+            preview_throttle_ms: 200,
+            sample_interval: Duration::from_millis(5),
+        };
+        sender
+            .send(SamplerCommand::Start {
+                start_point: Point { x: 0.0, y: 0.0 },
+                trigger_button: Some(TriggerButton::Right),
+                config,
+            })
+            .expect("send start command");
+
+        let stored_deadline = Instant::now() + Duration::from_millis(200);
+        while diagnostics.snapshot().stored_point_accepted < 3 {
+            if Instant::now() >= stored_deadline {
+                panic!("sampler never stored enough points");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        stop_flag.store(true, Ordering::SeqCst);
+        let stop_deadline = Instant::now() + Duration::from_millis(200);
+        while tracking_active.load(Ordering::SeqCst) {
+            if Instant::now() >= stop_deadline {
+                panic!("sampler did not stop after stop flag");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        drop(sender);
+        worker.join().expect("sampler worker exits");
+
+        let stored_count = diagnostics.snapshot().stored_point_accepted;
+        let mut preview_count = 0;
+        while preview_receiver.try_recv().is_ok() {
+            preview_count += 1;
+        }
+
+        assert!(stored_count > 1, "expected multiple stored points");
+        assert!(
+            preview_count < stored_count,
+            "preview requests should be fewer than stored samples"
+        );
     }
 
     #[test]
@@ -3397,7 +3585,7 @@ mod tests {
             preview_on_end_only: true,
             ..MouseGesturePluginSettings::default()
         };
-        let runtime = make_runtime(db, settings);
+        let runtime = make_runtime(db, settings.clone());
         let preview_text = Arc::new(Mutex::new(None));
         let preview_text_handle = Arc::clone(&preview_text);
         let (sender, receiver) = mpsc::sync_channel(2);
@@ -3408,10 +3596,11 @@ mod tests {
         });
 
         sender
-            .send(PreviewRequest {
-                points: points.clone(),
-                force: false,
-            })
+            .send(preview_request_from_points(
+                &points,
+                &settings,
+                false,
+            ))
             .expect("send non-force request");
 
         std::thread::sleep(Duration::from_millis(30));
@@ -3421,10 +3610,7 @@ mod tests {
         );
 
         sender
-            .send(PreviewRequest {
-                points,
-                force: true,
-            })
+            .send(preview_request_from_points(&points, &settings, true))
             .expect("send forced request");
         drop(sender);
 
@@ -3450,7 +3636,7 @@ mod tests {
             preview_enabled: false,
             ..MouseGesturePluginSettings::default()
         };
-        let runtime = make_runtime(db, settings);
+        let runtime = make_runtime(db, settings.clone());
         let preview_text = Arc::new(Mutex::new(None));
         let preview_text_handle = Arc::clone(&preview_text);
         let (sender, receiver) = mpsc::sync_channel(2);
@@ -3461,10 +3647,7 @@ mod tests {
         });
 
         sender
-            .send(PreviewRequest {
-                points,
-                force: true,
-            })
+            .send(preview_request_from_points(&points, &settings, true))
             .expect("send preview request");
         drop(sender);
 
@@ -3497,7 +3680,7 @@ mod tests {
             preview_throttle_ms: 200,
             ..MouseGesturePluginSettings::default()
         };
-        let runtime = make_runtime(db, settings);
+        let runtime = make_runtime(db, settings.clone());
         let preview_text = Arc::new(Mutex::new(None));
         let preview_text_handle = Arc::clone(&preview_text);
         let (sender, receiver) = mpsc::sync_channel(2);
@@ -3506,11 +3689,13 @@ mod tests {
             preview_worker_loop(runtime, receiver, preview_text_handle);
         });
 
+        let right_points = make_right_points();
         sender
-            .send(PreviewRequest {
-                points: make_right_points(),
-                force: false,
-            })
+            .send(preview_request_from_points(
+                &right_points,
+                &settings,
+                false,
+            ))
             .expect("send preview request");
 
         let deadline = Instant::now() + Duration::from_millis(500);
@@ -3524,11 +3709,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         };
 
+        let up_points = make_up_points();
         sender
-            .send(PreviewRequest {
-                points: make_up_points(),
-                force: false,
-            })
+            .send(preview_request_from_points(&up_points, &settings, false))
             .expect("send second preview request");
 
         std::thread::sleep(Duration::from_millis(60));
@@ -3541,6 +3724,49 @@ mod tests {
         );
 
         drop(sender);
+        worker.join().expect("preview worker finished");
+    }
+
+    #[test]
+    fn preview_worker_uses_compact_similarity_sequences() {
+        let db = make_db_with_right_gesture();
+        let settings = MouseGesturePluginSettings {
+            min_point_distance: 0.0,
+            segment_threshold_px: 0.0,
+            direction_tolerance_deg: 0.0,
+            preview_enabled: true,
+            debug_show_similarity: true,
+            ..MouseGesturePluginSettings::default()
+        };
+        let runtime = make_runtime(db, settings.clone());
+        let preview_text = Arc::new(Mutex::new(None));
+        let preview_text_handle = Arc::clone(&preview_text);
+        let (sender, receiver) = mpsc::sync_channel(2);
+        let points = make_right_points();
+
+        let worker = std::thread::spawn(move || {
+            preview_worker_loop(runtime, receiver, preview_text_handle);
+        });
+
+        sender
+            .send(preview_request_from_points(&points, &settings, true))
+            .expect("send preview request");
+        drop(sender);
+
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let text = loop {
+            if let Some(text) = preview_text.lock().expect("lock preview text").clone() {
+                break text;
+            }
+            if Instant::now() >= deadline {
+                panic!("preview text not computed for compact request");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        assert!(text.contains(PREVIEW_SIMILARITY_PREFIX));
+        assert!(text.contains("Swipe Right"));
+
         worker.join().expect("preview worker finished");
     }
 
@@ -3655,7 +3881,7 @@ mod tests {
             direction_tolerance_deg: 0.0,
             ..MouseGesturePluginSettings::default()
         };
-        let runtime = make_runtime(db, settings);
+        let runtime = make_runtime(db, settings.clone());
         let points = make_right_points();
 
         let (outcome, should_inject) = finalize_hook_outcome(&runtime, &points, false, 5.0);
@@ -3965,7 +4191,7 @@ mod tests {
             preview_enabled: true,
             ..MouseGesturePluginSettings::default()
         };
-        let runtime = make_runtime(db, settings);
+        let runtime = make_runtime(db, settings.clone());
         reset_template_build_counter();
 
         let preview_text = Arc::new(Mutex::new(None));
@@ -3978,10 +4204,7 @@ mod tests {
         });
 
         sender
-            .send(PreviewRequest {
-                points,
-                force: true,
-            })
+            .send(preview_request_from_points(&points, &settings, true))
             .expect("send preview request");
         drop(sender);
 
