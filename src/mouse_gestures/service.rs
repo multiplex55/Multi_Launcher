@@ -999,6 +999,9 @@ struct HookDiagnosticsSnapshot {
     rbutton_down: usize,
     rbutton_up: usize,
     mousemove_while_tracking: usize,
+    start_requested: usize,
+    start_failed: usize,
+    start_received: usize,
     tracking_started: usize,
     tracking_canceled_timeout: usize,
     tracking_ended: usize,
@@ -1012,6 +1015,9 @@ struct HookDiagnostics {
     rbutton_down: AtomicUsize,
     rbutton_up: AtomicUsize,
     mousemove_while_tracking: AtomicUsize,
+    start_requested: AtomicUsize,
+    start_failed: AtomicUsize,
+    start_received: AtomicUsize,
     tracking_started: AtomicUsize,
     tracking_canceled_timeout: AtomicUsize,
     tracking_ended: AtomicUsize,
@@ -1029,6 +1035,9 @@ impl Default for HookDiagnostics {
             rbutton_down: AtomicUsize::new(0),
             rbutton_up: AtomicUsize::new(0),
             mousemove_while_tracking: AtomicUsize::new(0),
+            start_requested: AtomicUsize::new(0),
+            start_failed: AtomicUsize::new(0),
+            start_received: AtomicUsize::new(0),
             tracking_started: AtomicUsize::new(0),
             tracking_canceled_timeout: AtomicUsize::new(0),
             tracking_ended: AtomicUsize::new(0),
@@ -1048,6 +1057,9 @@ impl HookDiagnostics {
             rbutton_down: self.rbutton_down.load(Ordering::SeqCst),
             rbutton_up: self.rbutton_up.load(Ordering::SeqCst),
             mousemove_while_tracking: self.mousemove_while_tracking.load(Ordering::SeqCst),
+            start_requested: self.start_requested.load(Ordering::SeqCst),
+            start_failed: self.start_failed.load(Ordering::SeqCst),
+            start_received: self.start_received.load(Ordering::SeqCst),
             tracking_started: self.tracking_started.load(Ordering::SeqCst),
             tracking_canceled_timeout: self.tracking_canceled_timeout.load(Ordering::SeqCst),
             tracking_ended: self.tracking_ended.load(Ordering::SeqCst),
@@ -1107,6 +1119,9 @@ impl HookDiagnostics {
             rbutton_down = snapshot.rbutton_down,
             rbutton_up = snapshot.rbutton_up,
             mousemove_while_tracking = snapshot.mousemove_while_tracking,
+            start_requested = snapshot.start_requested,
+            start_failed = snapshot.start_failed,
+            start_received = snapshot.start_received,
             tracking_started = snapshot.tracking_started,
             tracking_canceled_timeout = snapshot.tracking_canceled_timeout,
             tracking_ended = snapshot.tracking_ended,
@@ -1280,6 +1295,37 @@ fn cancel_tracking_state(
 }
 
 #[cfg(any(test, windows))]
+fn request_sampler_start(
+    sampler_sender: &SyncSender<SamplerCommand>,
+    tracking: &Arc<Mutex<HookTrackingState>>,
+    preview_text: &Arc<Mutex<Option<String>>>,
+    tracking_active: &Arc<AtomicBool>,
+    stop_flag: &Arc<AtomicBool>,
+    diagnostics: &Arc<HookDiagnostics>,
+    start_point: Point,
+    trigger_button: Option<TriggerButton>,
+    config: SamplerConfig,
+) -> bool {
+    diagnostics.start_requested.fetch_add(1, Ordering::SeqCst);
+    stop_flag.store(false, Ordering::SeqCst);
+    match sampler_sender.try_send(SamplerCommand::Start {
+        start_point,
+        trigger_button,
+        config,
+    }) {
+        Ok(()) => {
+            tracking_active.store(true, Ordering::SeqCst);
+            true
+        }
+        Err(_) => {
+            diagnostics.start_failed.fetch_add(1, Ordering::SeqCst);
+            let _ = cancel_tracking_state(tracking, preview_text, tracking_active, diagnostics, false);
+            false
+        }
+    }
+}
+
+#[cfg(any(test, windows))]
 fn spawn_sampler_worker(
     runtime: MouseGestureRuntime,
     preview_sender: SyncSender<PreviewRequest>,
@@ -1329,6 +1375,7 @@ fn sampler_worker_loop(
                 trigger_button,
                 config,
             } => {
+                diagnostics.start_received.fetch_add(1, Ordering::SeqCst);
                 {
                     let Ok(mut guard) = tracking.lock() else {
                         continue;
@@ -1977,18 +2024,17 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                                 preview_throttle_ms,
                                 sample_interval,
                             };
-                            state.stop_flag.store(false, Ordering::SeqCst);
-                            if state
-                                .sampler_sender
-                                .try_send(SamplerCommand::Start {
-                                    start_point: point,
-                                    trigger_button: event_button,
-                                    config,
-                                })
-                                .is_ok()
-                            {
-                                state.tracking_active.store(true, Ordering::SeqCst);
-                            }
+                            request_sampler_start(
+                                &state.sampler_sender,
+                                &state.tracking,
+                                &state.preview_text,
+                                &state.tracking_active,
+                                &state.stop_flag,
+                                &state.diagnostics,
+                                point,
+                                event_button,
+                                config,
+                            );
                             return LRESULT(1);
                         }
                         HookAction::Stop => {
@@ -2766,6 +2812,133 @@ mod tests {
         assert!(snapshot.tracking_started >= 1);
         assert!(snapshot.stored_point_accepted >= 1);
         assert_eq!(snapshot.tracking_canceled_timeout, 1);
+    }
+
+    #[test]
+    fn diagnostics_start_fails_when_sender_disconnected() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        drop(receiver);
+
+        let preview_text = Arc::new(Mutex::new(None));
+        let tracking = Arc::new(Mutex::new(HookTrackingState::default()));
+        let tracking_active = Arc::new(AtomicBool::new(false));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let diagnostics = Arc::new(HookDiagnostics::default());
+        if let Ok(mut guard) = tracking.lock() {
+            guard.attach_diagnostics(Arc::clone(&diagnostics));
+        }
+
+        let config = SamplerConfig {
+            min_point_distance_sq: 0.0,
+            visual_point_distance_sq: VISUAL_POINT_DISTANCE_SQ,
+            max_track_len: 0.0,
+            max_gesture_duration_ms: 0,
+            max_sample_count: 0,
+            preview_enabled: false,
+            preview_on_end_only: false,
+            preview_throttle_ms: crate::plugins::mouse_gestures::settings::PREVIEW_THROTTLE_MS,
+            sample_interval: Duration::from_millis(5),
+        };
+
+        let started = request_sampler_start(
+            &sender,
+            &tracking,
+            &preview_text,
+            &tracking_active,
+            &stop_flag,
+            &diagnostics,
+            Point { x: 0.0, y: 0.0 },
+            Some(TriggerButton::Right),
+            config,
+        );
+
+        assert!(!started);
+        assert!(!tracking_active.load(Ordering::SeqCst));
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.start_requested, 1);
+        assert_eq!(snapshot.start_failed, 1);
+    }
+
+    #[test]
+    fn diagnostics_start_counters_increment_on_start() {
+        let runtime = make_runtime(
+            MouseGestureDb::default(),
+            MouseGesturePluginSettings::default(),
+        );
+        let (preview_sender, _preview_receiver) = mpsc::sync_channel(1);
+        let preview_text = Arc::new(Mutex::new(None));
+        let tracking = Arc::new(Mutex::new(HookTrackingState::default()));
+        let tracking_active = Arc::new(AtomicBool::new(false));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let diagnostics = Arc::new(HookDiagnostics::default());
+        if let Ok(mut guard) = tracking.lock() {
+            guard.attach_diagnostics(Arc::clone(&diagnostics));
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
+
+        let tracking_handle = Arc::clone(&tracking);
+        let tracking_active_handle = Arc::clone(&tracking_active);
+        let stop_flag_handle = Arc::clone(&stop_flag);
+        let preview_text_handle = Arc::clone(&preview_text);
+        let runtime_handle = runtime.clone();
+        let diagnostics_handle = Arc::clone(&diagnostics);
+
+        let worker = std::thread::spawn(move || {
+            sampler_worker_loop(
+                runtime_handle,
+                receiver,
+                preview_sender,
+                preview_text_handle,
+                tracking_handle,
+                tracking_active_handle,
+                stop_flag_handle,
+                diagnostics_handle,
+                || Point { x: 1.0, y: 1.0 },
+                |_| true,
+            );
+        });
+
+        let config = SamplerConfig {
+            min_point_distance_sq: 0.0,
+            visual_point_distance_sq: VISUAL_POINT_DISTANCE_SQ,
+            max_track_len: 0.0,
+            max_gesture_duration_ms: 0,
+            max_sample_count: 0,
+            preview_enabled: false,
+            preview_on_end_only: false,
+            preview_throttle_ms: crate::plugins::mouse_gestures::settings::PREVIEW_THROTTLE_MS,
+            sample_interval: Duration::from_millis(5),
+        };
+
+        let started = request_sampler_start(
+            &sender,
+            &tracking,
+            &preview_text,
+            &tracking_active,
+            &stop_flag,
+            &diagnostics,
+            Point { x: 0.0, y: 0.0 },
+            Some(TriggerButton::Right),
+            config,
+        );
+
+        assert!(started);
+
+        let receive_deadline = Instant::now() + Duration::from_millis(200);
+        while diagnostics.snapshot().start_received == 0 {
+            if Instant::now() >= receive_deadline {
+                panic!("sampler never received start command");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        stop_flag.store(true, Ordering::SeqCst);
+        drop(sender);
+        worker.join().expect("sampler worker exits");
+
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.start_requested, 1);
+        assert_eq!(snapshot.start_received, 1);
     }
 
     #[test]
