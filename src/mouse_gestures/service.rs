@@ -1363,10 +1363,12 @@ fn sampler_worker_loop(
                     let mut overlay_point = None;
                     let mut should_cancel_tracking = false;
                     let mut timed_out = false;
+                    let mut active_button = None;
                     if let Ok(mut guard) = tracking.lock() {
                         if guard.active_button.is_none() {
                             break;
                         }
+                        active_button = guard.active_button;
                         guard.update_tracking_started(point, TRACKING_START_DISTANCE_SQ, now);
                         let watchdog_limit_ms = if config.max_gesture_duration_ms > 0 {
                             config.max_gesture_duration_ms
@@ -1376,10 +1378,6 @@ fn sampler_worker_loop(
                         if guard.should_watchdog_cancel(now, watchdog_limit_ms) {
                             timed_out = true;
                             should_cancel_tracking = true;
-                        } else if let Some(button) = guard.active_button {
-                            if !trigger_down(button) {
-                                should_cancel_tracking = true;
-                            }
                         }
                         if should_cancel_tracking {
                             // Fall through to cancellation outside the tracking lock.
@@ -1400,6 +1398,13 @@ fn sampler_worker_loop(
                             }
                             if visual_stored || recognition_stored {
                                 overlay_point = Some(point);
+                            }
+                        }
+                    }
+                    if !should_cancel_tracking {
+                        if let Some(button) = active_button {
+                            if !trigger_down(button) {
+                                should_cancel_tracking = true;
                             }
                         }
                     }
@@ -1490,6 +1495,7 @@ fn hook_action_for_event(
     match event_kind {
         HookEventKind::TriggerDown if event_button == trigger_button => HookAction::Start,
         HookEventKind::TriggerUp if event_button == trigger_button => HookAction::Stop,
+        // Mouse moves are ignored here; the sampler thread updates tracking + overlay visuals.
         HookEventKind::MouseMove => HookAction::Ignore,
         HookEventKind::Other => HookAction::Ignore,
         _ => HookAction::Ignore,
@@ -1958,60 +1964,30 @@ impl MouseHookBackend for WindowsMouseHookBackend {
                         _ => HookEventKind::Other,
                     };
 
-                    if event_kind == HookEventKind::MouseMove {
-                        if let Ok(mut tracking) = state.tracking.try_lock() {
-                            if tracking.tracking_state == TrackingState::Armed {
-                                tracking.update_tracking_started(
-                                    point,
-                                    TRACKING_START_DISTANCE_SQ,
-                                    Instant::now(),
-                                );
-                            }
-                            if tracking.active_button.is_some() {
-                                if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
-                                    overlay.push_point(point);
-                                }
-                            }
-                        }
-                    }
-
                     match hook_action_for_event(event_kind, event_button, trigger_button) {
                         HookAction::Start => {
-                            let should_start = if let Ok(mut tracking) = state.tracking.try_lock() {
-                                if tracking.tracking_state == TrackingState::Idle {
-                                    tracking.begin_stroke(event_button, point);
-                                    true
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
+                            let config = SamplerConfig {
+                                min_point_distance_sq,
+                                visual_point_distance_sq: VISUAL_POINT_DISTANCE_SQ,
+                                max_track_len,
+                                max_gesture_duration_ms,
+                                max_sample_count,
+                                preview_enabled,
+                                preview_on_end_only,
+                                preview_throttle_ms,
+                                sample_interval,
                             };
-                            if should_start {
-                                if let Ok(mut preview_guard) = state.preview_text.lock() {
-                                    *preview_guard = None;
-                                }
-                                if let Ok(mut overlay) = mouse_gesture_overlay().try_lock() {
-                                    overlay.begin_stroke(point);
-                                    overlay.update_preview(None, None);
-                                }
-                                let config = SamplerConfig {
-                                    min_point_distance_sq,
-                                    visual_point_distance_sq: VISUAL_POINT_DISTANCE_SQ,
-                                    max_track_len,
-                                    max_gesture_duration_ms,
-                                    max_sample_count,
-                                    preview_enabled,
-                                    preview_on_end_only,
-                                    preview_throttle_ms,
-                                    sample_interval,
-                                };
-                                state.stop_flag.store(false, Ordering::SeqCst);
-                                let _ = state.sampler_sender.try_send(SamplerCommand::Start {
+                            state.stop_flag.store(false, Ordering::SeqCst);
+                            if state
+                                .sampler_sender
+                                .try_send(SamplerCommand::Start {
                                     start_point: point,
                                     trigger_button: event_button,
                                     config,
-                                });
+                                })
+                                .is_ok()
+                            {
+                                state.tracking_active.store(true, Ordering::SeqCst);
                             }
                             return LRESULT(1);
                         }
@@ -2793,10 +2769,105 @@ mod tests {
     }
 
     #[test]
+    fn sampler_updates_visual_points_over_time() {
+        let runtime = make_runtime(
+            MouseGestureDb::default(),
+            MouseGesturePluginSettings::default(),
+        );
+        let (preview_sender, _preview_receiver) = mpsc::sync_channel(1);
+        let preview_text = Arc::new(Mutex::new(None));
+        let tracking = Arc::new(Mutex::new(HookTrackingState::default()));
+        let diagnostics = Arc::new(HookDiagnostics::default());
+        if let Ok(mut guard) = tracking.lock() {
+            guard.attach_diagnostics(Arc::clone(&diagnostics));
+        }
+        let tracking_active = Arc::new(AtomicBool::new(false));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let point_counter = Arc::new(AtomicUsize::new(0));
+
+        let tracking_handle = Arc::clone(&tracking);
+        let tracking_active_handle = Arc::clone(&tracking_active);
+        let stop_flag_handle = Arc::clone(&stop_flag);
+        let preview_text_handle = Arc::clone(&preview_text);
+        let runtime_handle = runtime.clone();
+        let point_counter_handle = Arc::clone(&point_counter);
+
+        let worker = std::thread::spawn(move || {
+            sampler_worker_loop(
+                runtime_handle,
+                receiver,
+                preview_sender,
+                preview_text_handle,
+                tracking_handle,
+                tracking_active_handle,
+                stop_flag_handle,
+                Arc::clone(&diagnostics),
+                move || {
+                    let step = point_counter_handle.fetch_add(1, Ordering::SeqCst) as f32;
+                    Point {
+                        x: step * 3.0,
+                        y: 0.0,
+                    }
+                },
+                |_| true,
+            );
+        });
+
+        let config = SamplerConfig {
+            min_point_distance_sq: 25.0,
+            visual_point_distance_sq: VISUAL_POINT_DISTANCE_SQ,
+            max_track_len: 0.0,
+            max_gesture_duration_ms: 0,
+            max_sample_count: 0,
+            preview_enabled: false,
+            preview_on_end_only: false,
+            preview_throttle_ms: crate::plugins::mouse_gestures::settings::PREVIEW_THROTTLE_MS,
+            sample_interval: Duration::from_millis(5),
+        };
+        sender
+            .send(SamplerCommand::Start {
+                start_point: Point { x: 0.0, y: 0.0 },
+                trigger_button: Some(TriggerButton::Right),
+                config,
+            })
+            .expect("send start command");
+
+        let start_deadline = Instant::now() + Duration::from_millis(200);
+        while !tracking_active.load(Ordering::SeqCst) {
+            if Instant::now() >= start_deadline {
+                panic!("sampler never reported active tracking");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let visual_deadline = Instant::now() + Duration::from_millis(200);
+        loop {
+            if tracking
+                .lock()
+                .expect("lock tracking")
+                .visual_points_len()
+                >= 3
+            {
+                break;
+            }
+            if Instant::now() >= visual_deadline {
+                panic!("visual points did not increase during sampling");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        stop_flag.store(true, Ordering::SeqCst);
+        drop(sender);
+        worker.join().expect("sampler worker exits");
+    }
+
+    #[test]
     fn hook_ignores_mouse_move_when_sampling_enabled() {
         let mut tracking = HookTrackingState::default();
         tracking.begin_track(Point { x: 1.0, y: 1.0 });
         let points_before = tracking.points.clone();
+        let visual_points_before = tracking.visual_points_len();
 
         let action = hook_action_for_event(
             HookEventKind::MouseMove,
@@ -2806,6 +2877,7 @@ mod tests {
 
         assert_eq!(action, HookAction::Ignore);
         assert_eq!(tracking.points, points_before);
+        assert_eq!(tracking.visual_points_len(), visual_points_before);
     }
 
     #[test]
