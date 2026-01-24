@@ -730,6 +730,7 @@ impl LauncherApp {
         if let Some(v) = show_dashboard_diagnostics {
             self.show_dashboard_diagnostics = v;
         }
+        crate::plugins::mouse_gestures::sync_enabled_plugins(self.enabled_plugins.as_ref());
     }
 
     pub fn new(
@@ -1163,6 +1164,7 @@ impl LauncherApp {
         app.update_action_cache();
         app.update_command_cache();
         app.search();
+        crate::plugins::mouse_gestures::sync_enabled_plugins(app.enabled_plugins.as_ref());
         app
     }
 

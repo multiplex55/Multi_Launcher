@@ -148,6 +148,17 @@ fn main() -> anyhow::Result<()> {
     multi_launcher::settings::set_settings_path("settings.json");
     logging::init(settings.debug_logging, settings.log_file_path());
     tracing::debug!(?settings, "settings loaded");
+    multi_launcher::plugins::mouse_gestures::sync_enabled_plugins(
+        settings.enabled_plugins.as_ref(),
+    );
+    if let Some(value) = settings.plugin_settings.get("mouse_gestures") {
+        if let Ok(cfg) = serde_json::from_value::<
+            multi_launcher::plugins::mouse_gestures::MouseGestureSettings,
+        >(value.clone())
+        {
+            multi_launcher::plugins::mouse_gestures::apply_runtime_settings(cfg);
+        }
+    }
     let mut actions_vec = load_actions("actions.json").unwrap_or_default();
     let custom_len = actions_vec.len();
     tracing::debug!("{} actions loaded", actions_vec.len());
