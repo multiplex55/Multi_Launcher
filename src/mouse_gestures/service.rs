@@ -241,8 +241,7 @@ fn get_cursor_position() -> Option<(f32, f32)> {
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
     let mut point = POINT { x: 0, y: 0 };
-    let ok = unsafe { GetCursorPos(&mut point).as_bool() };
-    if ok {
+    if unsafe { GetCursorPos(&mut point).is_ok() } {
         Some((point.x as f32, point.y as f32))
     } else {
         None
@@ -301,6 +300,9 @@ pub struct DefaultHookBackend {
 }
 
 #[cfg(windows)]
+unsafe impl Send for DefaultHookBackend {}
+
+#[cfg(windows)]
 impl HookBackend for DefaultHookBackend {
     fn install(&mut self, sender: Sender<HookEvent>) -> anyhow::Result<()> {
         if self.hook.is_some() {
@@ -314,8 +316,8 @@ impl HookBackend for DefaultHookBackend {
         use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WH_MOUSE_LL};
 
         let hmodule = unsafe { GetModuleHandleW(None) }?;
-        let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), hmodule, 0) };
-        if hook.0 == 0 {
+        let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), hmodule, 0) }?;
+        if hook.0.is_null() {
             hook_dispatch().set_enabled(false);
             hook_dispatch().set_sender(None);
             return Err(anyhow!(windows::core::Error::from_win32()));
@@ -496,7 +498,7 @@ unsafe extern "system" fn mouse_hook_proc(
     }
 
     CallNextHookEx(
-        windows::Win32::UI::WindowsAndMessaging::HHOOK(0),
+        windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
         n_code,
         w_param,
         l_param,
