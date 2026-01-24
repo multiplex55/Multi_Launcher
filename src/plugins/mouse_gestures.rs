@@ -1,4 +1,5 @@
 use crate::actions::Action;
+use crate::mouse_gestures::service::{with_service as with_gesture_service, MouseGestureConfig};
 use crate::plugin::Plugin;
 use eframe::egui;
 use once_cell::sync::OnceCell;
@@ -48,67 +49,49 @@ fn default_require_button() -> bool {
 }
 
 #[derive(Debug)]
-struct MouseGestureService {
+struct MouseGestureRuntime {
     settings: MouseGestureSettings,
     plugin_enabled: bool,
-    running: bool,
 }
 
-impl Default for MouseGestureService {
+impl Default for MouseGestureRuntime {
     fn default() -> Self {
         Self {
             settings: MouseGestureSettings::default(),
             plugin_enabled: true,
-            running: false,
         }
     }
 }
 
-impl MouseGestureService {
+impl MouseGestureRuntime {
     fn update_settings(&mut self, settings: MouseGestureSettings) {
         self.settings = settings;
-        self.update_state();
+        self.apply();
     }
 
     fn set_plugin_enabled(&mut self, enabled: bool) {
         self.plugin_enabled = enabled;
-        self.update_state();
+        self.apply();
     }
 
-    fn update_state(&mut self) {
-        let should_run = self.settings.enabled && self.plugin_enabled;
-        if should_run {
-            self.start();
-        } else {
-            self.stop();
-        }
-    }
-
-    fn start(&mut self) {
-        if !self.running {
-            self.running = true;
-            tracing::info!("mouse gestures service started");
-        }
-    }
-
-    fn stop(&mut self) {
-        if self.running {
-            self.running = false;
-            tracing::info!("mouse gestures service stopped");
-        }
+    fn apply(&self) {
+        let mut config = MouseGestureConfig::default();
+        config.enabled = self.settings.enabled && self.plugin_enabled;
+        config.deadzone_px = self.settings.min_distance_px;
+        with_gesture_service(|svc| svc.update_config(config));
     }
 }
 
-static SERVICE: OnceCell<Mutex<MouseGestureService>> = OnceCell::new();
+static SERVICE: OnceCell<Mutex<MouseGestureRuntime>> = OnceCell::new();
 
 fn with_service<F>(f: F)
 where
-    F: FnOnce(&mut MouseGestureService),
+    F: FnOnce(&mut MouseGestureRuntime),
 {
-    let service = SERVICE.get_or_init(|| Mutex::new(MouseGestureService::default()));
+    let service = SERVICE.get_or_init(|| Mutex::new(MouseGestureRuntime::default()));
     match service.lock() {
         Ok(mut guard) => f(&mut guard),
-        Err(e) => tracing::error!(?e, "failed to lock mouse gestures service"),
+        Err(e) => tracing::error!(?e, "failed to lock mouse gestures runtime"),
     }
 }
 
