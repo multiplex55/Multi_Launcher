@@ -90,8 +90,9 @@ impl MgBindingDialog {
         }
         let mut close = false;
         let mut save_now = false;
+        let mut open = self.open;
         egui::Window::new("Mouse Gesture Bindings")
-            .open(&mut self.open)
+            .open(&mut open)
             .show(ctx, |ui| {
                 if self.db.gestures.is_empty() {
                     ui.label("No gestures found. Add a gesture first.");
@@ -234,6 +235,8 @@ impl MgBindingDialog {
         }
         if close {
             self.open = false;
+        } else {
+            self.open = open;
         }
     }
 }
