@@ -1,4 +1,5 @@
 use crate::mouse_gestures::engine::{DirMode, GestureTracker};
+use crate::mouse_gestures::overlay::{DefaultOverlayBackend, HintOverlay, TrailOverlay};
 use anyhow::anyhow;
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
@@ -16,6 +17,12 @@ pub struct MouseGestureConfig {
     pub trail_interval_ms: u64,
     pub recognition_interval_ms: u64,
     pub deadzone_px: f32,
+    pub trail_start_move_px: f32,
+    pub show_trail: bool,
+    pub trail_color: [u8; 4],
+    pub trail_width: f32,
+    pub show_hint: bool,
+    pub hint_offset: (f32, f32),
     pub dir_mode: DirMode,
     pub threshold_px: f32,
     pub long_threshold_x: f32,
@@ -30,6 +37,12 @@ impl Default for MouseGestureConfig {
             trail_interval_ms: 16,
             recognition_interval_ms: 40,
             deadzone_px: 12.0,
+            trail_start_move_px: 8.0,
+            show_trail: true,
+            trail_color: [0xff, 0x00, 0x00, 0xff],
+            trail_width: 2.0,
+            show_hint: true,
+            hint_offset: (16.0, 16.0),
             dir_mode: DirMode::Four,
             threshold_px: 8.0,
             long_threshold_x: 30.0,
@@ -133,7 +146,8 @@ impl MouseGestureService {
         }
 
         let config = self.config.clone();
-        let join = thread::spawn(move || worker_loop(config, event_rx, stop_rx));
+        let db = self.db.clone();
+        let join = thread::spawn(move || worker_loop(config, db, event_rx, stop_rx));
         self.worker = Some(WorkerHandle { stop_tx, join });
     }
 
@@ -166,7 +180,12 @@ where
     }
 }
 
-fn worker_loop(config: MouseGestureConfig, event_rx: Receiver<HookEvent>, stop_rx: Receiver<()>) {
+fn worker_loop(
+    config: MouseGestureConfig,
+    db: Option<SharedGestureDb>,
+    event_rx: Receiver<HookEvent>,
+    stop_rx: Receiver<()>,
+) {
     let mut tracker = GestureTracker::new(
         config.dir_mode,
         config.threshold_px,
@@ -174,6 +193,14 @@ fn worker_loop(config: MouseGestureConfig, event_rx: Receiver<HookEvent>, stop_r
         config.long_threshold_y,
         config.max_tokens,
     );
+    let mut trail_overlay = TrailOverlay::new(
+        DefaultOverlayBackend,
+        config.show_trail,
+        config.trail_color,
+        config.trail_width,
+        config.trail_start_move_px,
+    );
+    let mut hint_overlay = HintOverlay::new(DefaultOverlayBackend, config.show_hint, config.hint_offset);
     let poll_interval = Duration::from_millis(config.trail_interval_ms.max(1));
     let recognition_interval = Duration::from_millis(config.recognition_interval_ms.max(1));
     let mut active = false;
@@ -198,6 +225,8 @@ fn worker_loop(config: MouseGestureConfig, event_rx: Receiver<HookEvent>, stop_r
                     start_pos = pos;
                     let ms = start_time.elapsed().as_millis() as u64;
                     tracker.feed_point(pos, ms);
+                    trail_overlay.reset(pos);
+                    hint_overlay.reset();
                     last_trail = Instant::now();
                     last_recognition = last_trail;
                 }
@@ -208,6 +237,7 @@ fn worker_loop(config: MouseGestureConfig, event_rx: Receiver<HookEvent>, stop_r
                         }
                         active = false;
                         tracker.reset();
+                        hint_overlay.reset();
                     }
                 }
             },
@@ -224,15 +254,39 @@ fn worker_loop(config: MouseGestureConfig, event_rx: Receiver<HookEvent>, stop_r
                     exceeded_deadzone = true;
                 }
 
+                trail_overlay.update_position(pos);
+
                 if last_recognition.elapsed() >= recognition_interval {
                     let ms = start_time.elapsed().as_millis() as u64;
-                    tracker.feed_point(pos, ms);
+                    let token = tracker.feed_point(pos, ms);
+                    if token.is_some() {
+                        let tokens = tracker.tokens_string();
+                        let best_match = best_match_name(&db, &tokens);
+                        hint_overlay.update(&tokens, best_match.as_deref(), pos);
+                    }
                     last_recognition = Instant::now();
                 }
             }
             last_trail = Instant::now();
         }
     }
+}
+
+fn best_match_name(db: &Option<SharedGestureDb>, tokens: &str) -> Option<String> {
+    let db = db.as_ref()?;
+    let guard = db.lock().ok()?;
+    if tokens.is_empty() {
+        return None;
+    }
+    if let Some(name) = guard.actions.get(tokens) {
+        return Some(name.clone());
+    }
+    guard
+        .actions
+        .iter()
+        .filter(|(key, _)| key.starts_with(tokens))
+        .min_by_key(|(key, _)| key.len())
+        .map(|(_, name)| name.clone())
 }
 
 #[cfg(windows)]
