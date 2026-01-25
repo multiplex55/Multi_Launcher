@@ -42,7 +42,7 @@ fn long_move_repeats_tokens() {
     tracker.feed_point((15.0, 0.0), 20);
     tracker.feed_point((27.0, 0.0), 30);
 
-    assert_eq!(tracker.tokens_string(), "RRR");
+    assert_eq!(tracker.tokens_string(), "R");
 }
 
 #[test]

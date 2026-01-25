@@ -86,6 +86,7 @@ pub struct HintOverlay<B: OverlayBackend> {
     offset: (f32, f32),
     last_tokens: String,
     last_match: Option<String>,
+    last_position: Option<(f32, f32)>,
     visible: bool,
 }
 
@@ -97,6 +98,7 @@ impl<B: OverlayBackend> HintOverlay<B> {
             offset,
             last_tokens: String::new(),
             last_match: None,
+            last_position: None,
             visible: false,
         }
     }
@@ -107,6 +109,7 @@ impl<B: OverlayBackend> HintOverlay<B> {
             self.hide();
             self.last_tokens.clear();
             self.last_match = None;
+            self.last_position = None;
         }
     }
 
@@ -114,6 +117,7 @@ impl<B: OverlayBackend> HintOverlay<B> {
         self.hide();
         self.last_tokens.clear();
         self.last_match = None;
+        self.last_position = None;
     }
 
     pub fn update(&mut self, tokens: &str, best_match: Option<&str>, cursor: (f32, f32)) {
@@ -125,12 +129,13 @@ impl<B: OverlayBackend> HintOverlay<B> {
         }
 
         let match_owned = best_match.map(|value| value.to_string());
-        if tokens == self.last_tokens && match_owned.as_deref() == self.last_match.as_deref() {
-            return;
-        }
-
-        self.last_tokens = tokens.to_string();
-        self.last_match = match_owned;
+        let position = (cursor.0 + self.offset.0, cursor.1 + self.offset.1);
+        let same_tokens = tokens == self.last_tokens;
+        let same_match = match_owned.as_deref() == self.last_match.as_deref();
+        let same_position = self
+            .last_position
+            .map(|pos| pos == position)
+            .unwrap_or(false);
 
         let mut text = tokens.to_string();
         if let Some(name) = best_match {
@@ -145,7 +150,13 @@ impl<B: OverlayBackend> HintOverlay<B> {
             return;
         }
 
-        let position = (cursor.0 + self.offset.0, cursor.1 + self.offset.1);
+        if same_tokens && same_match && same_position {
+            return;
+        }
+
+        self.last_tokens = tokens.to_string();
+        self.last_match = match_owned;
+        self.last_position = Some(position);
         self.backend.show_hint(&text, position);
         self.visible = true;
     }
@@ -159,7 +170,10 @@ impl<B: OverlayBackend> HintOverlay<B> {
 }
 
 #[cfg(windows)]
-pub struct DefaultOverlayBackend;
+#[derive(Default, Debug)]
+pub struct DefaultOverlayBackend {
+    last_rect: Option<windows::Win32::Foundation::RECT>,
+}
 
 #[cfg(windows)]
 impl OverlayBackend for DefaultOverlayBackend {
@@ -194,11 +208,13 @@ impl OverlayBackend for DefaultOverlayBackend {
     fn show_hint(&mut self, text: &str, position: (f32, f32)) {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
-        use windows::Win32::Foundation::COLORREF;
+        use windows::Win32::Foundation::{COLORREF, RECT};
         use windows::Win32::Graphics::Gdi::{
-            GetDC, ReleaseDC, SetBkMode, SetTextColor, TextOutW, TRANSPARENT,
+            GetDC, GetTextExtentPoint32W, ReleaseDC, SetBkMode, SetTextColor, TextOutW, TRANSPARENT,
         };
-        use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetDesktopWindow, RedrawWindow, RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW,
+        };
 
         let hwnd = unsafe { GetDesktopWindow() };
         let hdc = unsafe { GetDC(hwnd) };
@@ -207,18 +223,55 @@ impl OverlayBackend for DefaultOverlayBackend {
         }
 
         let wide: Vec<u16> = OsStr::new(text).encode_wide().collect();
+        if let Some(rect) = self.last_rect.take() {
+            unsafe {
+                RedrawWindow(
+                    hwnd,
+                    Some(&rect),
+                    None,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
+                );
+            }
+        }
+        let mut size = windows::Win32::Foundation::SIZE { cx: 0, cy: 0 };
+        unsafe {
+            let _ = GetTextExtentPoint32W(hdc, &wide, &mut size);
+        }
+        let rect = RECT {
+            left: position.0 as i32,
+            top: position.1 as i32,
+            right: position.0 as i32 + size.cx.max(1),
+            bottom: position.1 as i32 + size.cy.max(1),
+        };
         unsafe {
             SetBkMode(hdc, TRANSPARENT);
             SetTextColor(hdc, COLORREF(0x00ffffff));
             let _ = TextOutW(hdc, position.0 as i32, position.1 as i32, &wide);
             ReleaseDC(hwnd, hdc);
         }
+        self.last_rect = Some(rect);
     }
 
-    fn hide_hint(&mut self) {}
+    fn hide_hint(&mut self) {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetDesktopWindow, RedrawWindow, RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW,
+        };
+        if let Some(rect) = self.last_rect.take() {
+            let hwnd = unsafe { GetDesktopWindow() };
+            unsafe {
+                RedrawWindow(
+                    hwnd,
+                    Some(&rect),
+                    None,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
+                );
+            }
+        }
+    }
 }
 
 #[cfg(not(windows))]
+#[derive(Default, Debug)]
 pub struct DefaultOverlayBackend;
 
 #[cfg(not(windows))]

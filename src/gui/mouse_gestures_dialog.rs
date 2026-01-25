@@ -57,6 +57,7 @@ pub struct GestureRecorder {
     config: RecorderConfig,
     tracker: GestureTracker,
     points: Vec<egui::Pos2>,
+    draw_points: Vec<egui::Pos2>,
     next_time_ms: u64,
 }
 
@@ -67,6 +68,7 @@ impl GestureRecorder {
             config,
             tracker,
             points: Vec::new(),
+            draw_points: Vec::new(),
             next_time_ms: 0,
         }
     }
@@ -76,6 +78,7 @@ impl GestureRecorder {
             config,
             tracker,
             points: Vec::new(),
+            draw_points: Vec::new(),
             next_time_ms: 0,
         }
     }
@@ -85,12 +88,13 @@ impl GestureRecorder {
     }
 
     pub fn points(&self) -> &[egui::Pos2] {
-        &self.points
+        &self.draw_points
     }
 
     pub fn reset(&mut self) {
         self.tracker.reset();
         self.points.clear();
+        self.draw_points.clear();
         self.next_time_ms = 0;
     }
 
@@ -101,9 +105,26 @@ impl GestureRecorder {
 
     pub fn push_point(&mut self, pos: egui::Pos2) -> Option<char> {
         self.points.push(pos);
+        self.extend_draw_points(pos);
         let time = self.next_time_ms;
         self.next_time_ms = self.next_time_ms.saturating_add(16);
         self.tracker.feed_point((pos.x, pos.y), time)
+    }
+
+    fn extend_draw_points(&mut self, pos: egui::Pos2) {
+        let step = 4.0;
+        if let Some(last) = self.draw_points.last().copied() {
+            let delta = pos - last;
+            let distance = delta.length();
+            if distance > step {
+                let steps = (distance / step).ceil() as usize;
+                for i in 1..steps {
+                    let t = i as f32 / steps as f32;
+                    self.draw_points.push(last + delta * t);
+                }
+            }
+        }
+        self.draw_points.push(pos);
     }
 }
 
@@ -196,6 +217,10 @@ impl MgGesturesDialog {
         let mut save_now = false;
         let mut open = self.open;
         egui::Window::new("Mouse Gestures")
+            .default_size(egui::vec2(720.0, 420.0))
+            .min_size(egui::vec2(520.0, 320.0))
+            .max_size(egui::vec2(980.0, 760.0))
+            .resizable(true)
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -347,11 +372,11 @@ impl MgGesturesDialog {
                                         self.recorder.push_point(pos);
                                     }
                                 }
-                                for segment in self.recorder.points().windows(2) {
-                                    painter.line_segment(
-                                        [segment[0], segment[1]],
+                                if self.recorder.points().len() >= 2 {
+                                    painter.add(egui::Shape::line(
+                                        self.recorder.points().to_vec(),
                                         egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
-                                    );
+                                    ));
                                 }
                                 ui.separator();
                                 ui.horizontal(|ui| {

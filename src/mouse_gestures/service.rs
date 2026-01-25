@@ -189,14 +189,17 @@ fn worker_loop(
         config.max_tokens,
     );
     let mut trail_overlay = TrailOverlay::new(
-        DefaultOverlayBackend,
+        DefaultOverlayBackend::default(),
         config.show_trail,
         config.trail_color,
         config.trail_width,
         config.trail_start_move_px,
     );
-    let mut hint_overlay =
-        HintOverlay::new(DefaultOverlayBackend, config.show_hint, config.hint_offset);
+    let mut hint_overlay = HintOverlay::new(
+        DefaultOverlayBackend::default(),
+        config.show_hint,
+        config.hint_offset,
+    );
     let poll_interval = Duration::from_millis(config.trail_interval_ms.max(1));
     let recognition_interval = Duration::from_millis(config.recognition_interval_ms.max(1));
     let mut active = false;
