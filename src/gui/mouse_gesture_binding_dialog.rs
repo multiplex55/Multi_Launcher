@@ -14,6 +14,9 @@ pub struct MgBindingDialog {
     args: String,
     enabled: bool,
     use_query: bool,
+    add_plugin: String,
+    add_filter: String,
+    add_args: String,
 }
 
 impl Default for MgBindingDialog {
@@ -28,6 +31,9 @@ impl Default for MgBindingDialog {
             args: String::new(),
             enabled: true,
             use_query: false,
+            add_plugin: String::new(),
+            add_filter: String::new(),
+            add_args: String::new(),
         }
     }
 }
@@ -51,6 +57,9 @@ impl MgBindingDialog {
         self.args.clear();
         self.enabled = true;
         self.use_query = false;
+        self.add_plugin.clear();
+        self.add_filter.clear();
+        self.add_args.clear();
     }
 
     fn start_edit(&mut self, binding: Option<&BindingEntry>, idx: usize) {
@@ -73,6 +82,9 @@ impl MgBindingDialog {
             self.use_query = false;
         }
         self.edit_idx = Some(idx);
+        self.add_plugin.clear();
+        self.add_filter.clear();
+        self.add_args.clear();
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
@@ -139,13 +151,137 @@ impl MgBindingDialog {
                             ui.text_edit_singleline(&mut self.action);
                         });
                         ui.horizontal(|ui| {
-                            ui.checkbox(&mut self.use_query, "Use query action");
-                            ui.checkbox(&mut self.enabled, "Enabled");
-                        });
-                        ui.horizontal(|ui| {
                             ui.label("Args");
                             ui.text_edit_singleline(&mut self.args);
                         });
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.use_query, "Use query action");
+                            ui.checkbox(&mut self.enabled, "Enabled");
+                        });
+                        ui.separator();
+                        ui.label("Pick an action");
+                        ui.horizontal(|ui| {
+                            ui.label("Category");
+                            let mut plugin_names: Vec<_> =
+                                app.plugins.iter().map(|p| p.name().to_string()).collect();
+                            plugin_names.push("app".to_string());
+                            plugin_names.sort_unstable();
+                            egui::ComboBox::from_id_source("mg_binding_category")
+                                .selected_text(if self.add_plugin.is_empty() {
+                                    "Select".to_string()
+                                } else {
+                                    self.add_plugin.clone()
+                                })
+                                .show_ui(ui, |ui| {
+                                    for name in plugin_names.iter() {
+                                        ui.selectable_value(
+                                            &mut self.add_plugin,
+                                            name.to_string(),
+                                            name,
+                                        );
+                                    }
+                                });
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Filter");
+                            ui.text_edit_singleline(&mut self.add_filter);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Args");
+                            ui.text_edit_singleline(&mut self.add_args);
+                        });
+                        if self.add_plugin == "app" {
+                            let filter = self.add_filter.trim().to_lowercase();
+                            egui::ScrollArea::vertical()
+                                .id_source("mg_binding_app_list")
+                                .max_height(120.0)
+                                .show(ui, |ui| {
+                                    for act in app.actions.iter() {
+                                        if !filter.is_empty()
+                                            && !act.label.to_lowercase().contains(&filter)
+                                            && !act.desc.to_lowercase().contains(&filter)
+                                            && !act.action.to_lowercase().contains(&filter)
+                                        {
+                                            continue;
+                                        }
+                                        if ui
+                                            .button(format!("{} - {}", act.label, act.desc))
+                                            .clicked()
+                                        {
+                                            self.label = act.label.clone();
+                                            self.use_query = false;
+                                            self.action = act.action.clone();
+                                            self.args = act.args.clone().unwrap_or_default();
+                                            self.add_args.clear();
+                                        }
+                                    }
+                                });
+                        } else if let Some(plugin) =
+                            app.plugins.iter().find(|p| p.name() == self.add_plugin)
+                        {
+                            let filter = self.add_filter.trim().to_lowercase();
+                            let mut actions = if plugin.name() == "folders" {
+                                plugin.search(&format!("f list {}", self.add_filter))
+                            } else if plugin.name() == "bookmarks" {
+                                plugin.search(&format!("bm list {}", self.add_filter))
+                            } else {
+                                plugin.commands()
+                            };
+                            egui::ScrollArea::vertical()
+                                .id_source("mg_binding_action_list")
+                                .max_height(120.0)
+                                .show(ui, |ui| {
+                                    for act in actions.drain(..) {
+                                        if !filter.is_empty()
+                                            && !act.label.to_lowercase().contains(&filter)
+                                            && !act.desc.to_lowercase().contains(&filter)
+                                            && !act.action.to_lowercase().contains(&filter)
+                                        {
+                                            continue;
+                                        }
+                                        if ui
+                                            .button(format!("{} - {}", act.label, act.desc))
+                                            .clicked()
+                                        {
+                                            let mut command = act.action.clone();
+                                            let mut args = if self.add_args.trim().is_empty() {
+                                                None
+                                            } else {
+                                                Some(self.add_args.clone())
+                                            };
+
+                                            if let Some(q) = command.strip_prefix("query:") {
+                                                let mut q = q.to_string();
+                                                if let Some(ref a) = args {
+                                                    q.push_str(a);
+                                                }
+                                                if let Some(res) =
+                                                    plugin.search(&q).into_iter().next()
+                                                {
+                                                    command = res.action;
+                                                    args = res.args;
+                                                } else {
+                                                    command = q;
+                                                    args = None;
+                                                }
+                                            }
+
+                                            let (action, use_query) = if let Some(rest) =
+                                                command.strip_prefix("query:")
+                                            {
+                                                (rest.to_string(), true)
+                                            } else {
+                                                (command, false)
+                                            };
+                                            self.label = act.label.clone();
+                                            self.use_query = use_query;
+                                            self.action = action;
+                                            self.args = args.unwrap_or_default();
+                                            self.add_args.clear();
+                                        }
+                                    }
+                                });
+                        }
                         ui.horizontal(|ui| {
                             if ui.button("Save").clicked() {
                                 if self.label.trim().is_empty() || self.action.trim().is_empty() {
