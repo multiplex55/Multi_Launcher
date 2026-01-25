@@ -19,6 +19,18 @@ pub struct MouseGestureSettings {
     pub max_duration_ms: u64,
     #[serde(default = "default_require_button")]
     pub require_button: bool,
+    #[serde(default = "default_show_trail")]
+    pub show_trail: bool,
+    #[serde(default = "default_trail_color")]
+    pub trail_color: [u8; 4],
+    #[serde(default = "default_trail_width")]
+    pub trail_width: f32,
+    #[serde(default = "default_trail_start_move_px")]
+    pub trail_start_move_px: f32,
+    #[serde(default = "default_show_hint")]
+    pub show_hint: bool,
+    #[serde(default = "default_hint_offset")]
+    pub hint_offset: (f32, f32),
 }
 
 impl Default for MouseGestureSettings {
@@ -28,6 +40,12 @@ impl Default for MouseGestureSettings {
             min_distance_px: default_min_distance_px(),
             max_duration_ms: default_max_duration_ms(),
             require_button: default_require_button(),
+            show_trail: default_show_trail(),
+            trail_color: default_trail_color(),
+            trail_width: default_trail_width(),
+            trail_start_move_px: default_trail_start_move_px(),
+            show_hint: default_show_hint(),
+            hint_offset: default_hint_offset(),
         }
     }
 }
@@ -46,6 +64,30 @@ fn default_max_duration_ms() -> u64 {
 
 fn default_require_button() -> bool {
     true
+}
+
+fn default_show_trail() -> bool {
+    true
+}
+
+fn default_trail_color() -> [u8; 4] {
+    [0xff, 0x00, 0x00, 0xff]
+}
+
+fn default_trail_width() -> f32 {
+    2.0
+}
+
+fn default_trail_start_move_px() -> f32 {
+    8.0
+}
+
+fn default_show_hint() -> bool {
+    true
+}
+
+fn default_hint_offset() -> (f32, f32) {
+    (16.0, 16.0)
 }
 
 #[derive(Debug)]
@@ -78,6 +120,12 @@ impl MouseGestureRuntime {
         let mut config = MouseGestureConfig::default();
         config.enabled = self.settings.enabled && self.plugin_enabled;
         config.deadzone_px = self.settings.min_distance_px;
+        config.trail_start_move_px = self.settings.trail_start_move_px;
+        config.show_trail = self.settings.show_trail;
+        config.trail_color = self.settings.trail_color;
+        config.trail_width = self.settings.trail_width;
+        config.show_hint = self.settings.show_hint;
+        config.hint_offset = self.settings.hint_offset;
         with_gesture_service(|svc| svc.update_config(config));
     }
 }
@@ -203,6 +251,41 @@ impl Plugin for MouseGesturesPlugin {
                 egui::DragValue::new(&mut cfg.max_duration_ms)
                     .clamp_range(50..=10_000)
                     .speed(10),
+            );
+        });
+        ui.checkbox(&mut cfg.show_trail, "Show trail overlay");
+        ui.horizontal(|ui| {
+            ui.label("Trail color");
+            let mut color = egui::Color32::from_rgba_unmultiplied(
+                cfg.trail_color[0],
+                cfg.trail_color[1],
+                cfg.trail_color[2],
+                cfg.trail_color[3],
+            );
+            if ui.color_edit_button_srgba(&mut color).changed() {
+                cfg.trail_color = [color.r(), color.g(), color.b(), color.a()];
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Trail width");
+            ui.add(
+                egui::DragValue::new(&mut cfg.trail_width)
+                    .clamp_range(1.0..=20.0)
+                    .speed(0.5),
+            );
+        });
+        ui.checkbox(&mut cfg.show_hint, "Show hint overlay");
+        ui.horizontal(|ui| {
+            ui.label("Hint offset (x, y)");
+            ui.add(
+                egui::DragValue::new(&mut cfg.hint_offset.0)
+                    .clamp_range(-200.0..=200.0)
+                    .speed(1.0),
+            );
+            ui.add(
+                egui::DragValue::new(&mut cfg.hint_offset.1)
+                    .clamp_range(-200.0..=200.0)
+                    .speed(1.0),
             );
         });
         match serde_json::to_value(&cfg) {
