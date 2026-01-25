@@ -14,6 +14,8 @@ mod dashboard_editor_dialog;
 mod fav_dialog;
 mod image_panel;
 mod macro_dialog;
+mod mouse_gesture_binding_dialog;
+mod mouse_gestures_dialog;
 mod note_panel;
 mod notes_dialog;
 mod screenshot_editor;
@@ -44,6 +46,8 @@ pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
 pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
+pub use mouse_gesture_binding_dialog::MgBindingDialog;
+pub use mouse_gestures_dialog::{GestureRecorder, MgGesturesDialog, RecorderConfig};
 pub use note_panel::{
     build_nvim_command, build_wezterm_command, extract_links, show_wiki_link, spawn_external,
     NotePanel,
@@ -281,6 +285,8 @@ pub enum Panel {
     ShellCmdDialog,
     SnippetDialog,
     MacroDialog,
+    MouseGesturesDialog,
+    MouseGestureBindingDialog,
     FavDialog,
     NotesDialog,
     UnusedAssetsDialog,
@@ -317,6 +323,8 @@ struct PanelStates {
     shell_cmd_dialog: bool,
     snippet_dialog: bool,
     macro_dialog: bool,
+    mouse_gestures_dialog: bool,
+    mouse_gesture_binding_dialog: bool,
     fav_dialog: bool,
     notes_dialog: bool,
     unused_assets_dialog: bool,
@@ -419,6 +427,8 @@ pub struct LauncherApp {
     shell_cmd_dialog: ShellCmdDialog,
     snippet_dialog: SnippetDialog,
     macro_dialog: MacroDialog,
+    mouse_gestures_dialog: MgGesturesDialog,
+    mouse_gesture_binding_dialog: MgBindingDialog,
     fav_dialog: FavDialog,
     notes_dialog: NotesDialog,
     unused_assets_dialog: UnusedAssetsDialog,
@@ -1225,6 +1235,8 @@ impl LauncherApp {
             shell_cmd_dialog: ShellCmdDialog::default(),
             snippet_dialog: SnippetDialog::default(),
             macro_dialog: MacroDialog::default(),
+            mouse_gestures_dialog: MgGesturesDialog::default(),
+            mouse_gesture_binding_dialog: MgBindingDialog::default(),
             fav_dialog: FavDialog::default(),
             notes_dialog: NotesDialog::default(),
             unused_assets_dialog: UnusedAssetsDialog::default(),
@@ -2387,6 +2399,12 @@ impl LauncherApp {
             self.snippet_dialog.open_edit(alias);
         } else if a.action == "macro:dialog" {
             self.macro_dialog.open();
+        } else if a.action == "mg:dialog" {
+            self.mouse_gestures_dialog.open();
+        } else if a.action == "mg:dialog:add" {
+            self.mouse_gestures_dialog.open_add();
+        } else if a.action == "mg:dialog:binding" {
+            self.mouse_gesture_binding_dialog.open();
         } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
             if label.is_empty() {
                 self.fav_dialog.open();
@@ -2781,6 +2799,8 @@ impl LauncherApp {
             || self.shell_cmd_dialog.open
             || self.snippet_dialog.open
             || self.macro_dialog.open
+            || self.mouse_gestures_dialog.open
+            || self.mouse_gesture_binding_dialog.open
             || self.fav_dialog.open
             || self.notes_dialog.open
             || self.unused_assets_dialog.open
@@ -2896,6 +2916,14 @@ impl LauncherApp {
             Panel::MacroDialog => {
                 self.macro_dialog.open = false;
                 self.panel_states.macro_dialog = false;
+            }
+            Panel::MouseGesturesDialog => {
+                self.mouse_gestures_dialog.open = false;
+                self.panel_states.mouse_gestures_dialog = false;
+            }
+            Panel::MouseGestureBindingDialog => {
+                self.mouse_gesture_binding_dialog.open = false;
+                self.panel_states.mouse_gesture_binding_dialog = false;
             }
             Panel::FavDialog => {
                 self.fav_dialog.open = false;
@@ -3035,6 +3063,14 @@ impl LauncherApp {
                 self.macro_dialog.open = false;
                 self.panel_states.macro_dialog = false;
             }
+            Panel::MouseGesturesDialog => {
+                self.mouse_gestures_dialog.open = false;
+                self.panel_states.mouse_gestures_dialog = false;
+            }
+            Panel::MouseGestureBindingDialog => {
+                self.mouse_gesture_binding_dialog.open = false;
+                self.panel_states.mouse_gesture_binding_dialog = false;
+            }
             Panel::FavDialog => {
                 self.fav_dialog.open = false;
                 self.panel_states.fav_dialog = false;
@@ -3137,6 +3173,8 @@ impl LauncherApp {
             Panel::ShellCmdDialog => self.shell_cmd_dialog.open = true,
             Panel::SnippetDialog => self.snippet_dialog.open = true,
             Panel::MacroDialog => self.macro_dialog.open = true,
+            Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open = true,
+            Panel::MouseGestureBindingDialog => self.mouse_gesture_binding_dialog.open = true,
             Panel::FavDialog => self.fav_dialog.open = true,
             Panel::NotesDialog => self.notes_dialog.open = true,
             Panel::UnusedAssetsDialog => self.unused_assets_dialog.open = true,
@@ -3254,6 +3292,16 @@ impl LauncherApp {
             Panel::SnippetDialog
         );
         check!(self.macro_dialog.open, macro_dialog, Panel::MacroDialog);
+        check!(
+            self.mouse_gestures_dialog.open,
+            mouse_gestures_dialog,
+            Panel::MouseGesturesDialog
+        );
+        check!(
+            self.mouse_gesture_binding_dialog.open,
+            mouse_gesture_binding_dialog,
+            Panel::MouseGestureBindingDialog
+        );
         check!(self.fav_dialog.open, fav_dialog, Panel::FavDialog);
         check!(self.notes_dialog.open, notes_dialog, Panel::NotesDialog);
         check!(
@@ -4262,6 +4310,12 @@ impl eframe::App for LauncherApp {
         let mut macro_dlg = std::mem::take(&mut self.macro_dialog);
         macro_dlg.ui(ctx, self);
         self.macro_dialog = macro_dlg;
+        let mut mg_dlg = std::mem::take(&mut self.mouse_gestures_dialog);
+        mg_dlg.ui(ctx, self);
+        self.mouse_gestures_dialog = mg_dlg;
+        let mut mg_bind_dlg = std::mem::take(&mut self.mouse_gesture_binding_dialog);
+        mg_bind_dlg.ui(ctx, self);
+        self.mouse_gesture_binding_dialog = mg_bind_dlg;
         let mut fav_dlg = std::mem::take(&mut self.fav_dialog);
         fav_dlg.ui(ctx, self);
         self.fav_dialog = fav_dlg;

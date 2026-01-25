@@ -164,6 +164,9 @@ impl GestureTracker {
         self.anchor_point = Some(point);
         self.last_dir = Some(dir);
         let token = dir.token(self.dir_mode);
+        if self.tokens.last().copied() == Some(token) {
+            return None;
+        }
         if self.tokens.len() < self.max_tokens {
             self.tokens.push(token);
             return Some(token);

@@ -11,6 +11,7 @@ pub struct TrailOverlay<B: OverlayBackend> {
     color: [u8; 4],
     width: f32,
     start_move_px: f32,
+    segment_step_px: f32,
     start_point: Option<(f32, f32)>,
     last_point: Option<(f32, f32)>,
     started: bool,
@@ -24,6 +25,7 @@ impl<B: OverlayBackend> TrailOverlay<B> {
             color,
             width,
             start_move_px,
+            segment_step_px: 4.0,
             start_point: None,
             last_point: None,
             started: false,
@@ -73,8 +75,23 @@ impl<B: OverlayBackend> TrailOverlay<B> {
         }
 
         let last = self.last_point.unwrap_or(point);
-        self.backend
-            .draw_trail_segment(last, point, self.color, self.width);
+        let dx = point.0 - last.0;
+        let dy = point.1 - last.1;
+        let distance = (dx * dx + dy * dy).sqrt();
+        if distance > self.segment_step_px {
+            let steps = (distance / self.segment_step_px).ceil() as usize;
+            for i in 1..=steps {
+                let t0 = (i - 1) as f32 / steps as f32;
+                let t1 = i as f32 / steps as f32;
+                let from = (last.0 + dx * t0, last.1 + dy * t0);
+                let to = (last.0 + dx * t1, last.1 + dy * t1);
+                self.backend
+                    .draw_trail_segment(from, to, self.color, self.width);
+            }
+        } else {
+            self.backend
+                .draw_trail_segment(last, point, self.color, self.width);
+        }
         self.last_point = Some(point);
     }
 }
@@ -86,6 +103,7 @@ pub struct HintOverlay<B: OverlayBackend> {
     offset: (f32, f32),
     last_tokens: String,
     last_match: Option<String>,
+    last_position: Option<(f32, f32)>,
     visible: bool,
 }
 
@@ -97,6 +115,7 @@ impl<B: OverlayBackend> HintOverlay<B> {
             offset,
             last_tokens: String::new(),
             last_match: None,
+            last_position: None,
             visible: false,
         }
     }
@@ -107,6 +126,7 @@ impl<B: OverlayBackend> HintOverlay<B> {
             self.hide();
             self.last_tokens.clear();
             self.last_match = None;
+            self.last_position = None;
         }
     }
 
@@ -114,6 +134,7 @@ impl<B: OverlayBackend> HintOverlay<B> {
         self.hide();
         self.last_tokens.clear();
         self.last_match = None;
+        self.last_position = None;
     }
 
     pub fn update(&mut self, tokens: &str, best_match: Option<&str>, cursor: (f32, f32)) {
@@ -125,12 +146,13 @@ impl<B: OverlayBackend> HintOverlay<B> {
         }
 
         let match_owned = best_match.map(|value| value.to_string());
-        if tokens == self.last_tokens && match_owned.as_deref() == self.last_match.as_deref() {
-            return;
-        }
-
-        self.last_tokens = tokens.to_string();
-        self.last_match = match_owned;
+        let position = (cursor.0 + self.offset.0, cursor.1 + self.offset.1);
+        let same_tokens = tokens == self.last_tokens;
+        let same_match = match_owned.as_deref() == self.last_match.as_deref();
+        let same_position = self
+            .last_position
+            .map(|pos| pos == position)
+            .unwrap_or(false);
 
         let mut text = tokens.to_string();
         if let Some(name) = best_match {
@@ -145,7 +167,13 @@ impl<B: OverlayBackend> HintOverlay<B> {
             return;
         }
 
-        let position = (cursor.0 + self.offset.0, cursor.1 + self.offset.1);
+        if same_tokens && same_match && same_position {
+            return;
+        }
+
+        self.last_tokens = tokens.to_string();
+        self.last_match = match_owned;
+        self.last_position = Some(position);
         self.backend.show_hint(&text, position);
         self.visible = true;
     }
@@ -159,7 +187,10 @@ impl<B: OverlayBackend> HintOverlay<B> {
 }
 
 #[cfg(windows)]
-pub struct DefaultOverlayBackend;
+#[derive(Default, Debug)]
+pub struct DefaultOverlayBackend {
+    last_rect: Option<windows::Win32::Foundation::RECT>,
+}
 
 #[cfg(windows)]
 impl OverlayBackend for DefaultOverlayBackend {
@@ -194,9 +225,10 @@ impl OverlayBackend for DefaultOverlayBackend {
     fn show_hint(&mut self, text: &str, position: (f32, f32)) {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
-        use windows::Win32::Foundation::COLORREF;
+        use windows::Win32::Foundation::{COLORREF, RECT};
+        use windows::Win32::Graphics::Gdi::InvalidateRect;
         use windows::Win32::Graphics::Gdi::{
-            GetDC, ReleaseDC, SetBkMode, SetTextColor, TextOutW, TRANSPARENT,
+            GetDC, GetTextExtentPoint32W, ReleaseDC, SetBkMode, SetTextColor, TextOutW, TRANSPARENT,
         };
         use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
 
@@ -207,18 +239,44 @@ impl OverlayBackend for DefaultOverlayBackend {
         }
 
         let wide: Vec<u16> = OsStr::new(text).encode_wide().collect();
+        if let Some(rect) = self.last_rect.take() {
+            unsafe {
+                let _ = InvalidateRect(hwnd, Some(&rect), true);
+            }
+        }
+        let mut size = windows::Win32::Foundation::SIZE { cx: 0, cy: 0 };
+        unsafe {
+            let _ = GetTextExtentPoint32W(hdc, &wide, &mut size);
+        }
+        let rect = RECT {
+            left: position.0 as i32,
+            top: position.1 as i32,
+            right: position.0 as i32 + size.cx.max(1),
+            bottom: position.1 as i32 + size.cy.max(1),
+        };
         unsafe {
             SetBkMode(hdc, TRANSPARENT);
             SetTextColor(hdc, COLORREF(0x00ffffff));
             let _ = TextOutW(hdc, position.0 as i32, position.1 as i32, &wide);
             ReleaseDC(hwnd, hdc);
         }
+        self.last_rect = Some(rect);
     }
 
-    fn hide_hint(&mut self) {}
+    fn hide_hint(&mut self) {
+        use windows::Win32::Graphics::Gdi::InvalidateRect;
+        use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+        if let Some(rect) = self.last_rect.take() {
+            let hwnd = unsafe { GetDesktopWindow() };
+            unsafe {
+                let _ = InvalidateRect(hwnd, Some(&rect), true);
+            }
+        }
+    }
 }
 
 #[cfg(not(windows))]
+#[derive(Default, Debug)]
 pub struct DefaultOverlayBackend;
 
 #[cfg(not(windows))]
