@@ -1,6 +1,8 @@
 use eframe::egui;
 use multi_launcher::actions::{save_actions, Action};
-use multi_launcher::gui::{send_event, LauncherApp, WatchEvent, EXECUTE_ACTION_COUNT};
+use multi_launcher::gui::{
+    send_event, set_execute_action_hook, LauncherApp, WatchEvent, EXECUTE_ACTION_COUNT,
+};
 use multi_launcher::mouse_gestures::db::{
     load_gestures, save_gestures, BindingEntry, GestureDb, GestureEntry, SCHEMA_VERSION,
 };
@@ -173,6 +175,10 @@ fn watch_event_executes_action() {
     let mut app = new_app(&ctx, Vec::new());
 
     EXECUTE_ACTION_COUNT.store(0, Ordering::SeqCst);
+    set_execute_action_hook(Some(Box::new(|_action| {
+        EXECUTE_ACTION_COUNT.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    })));
     send_event(WatchEvent::ExecuteAction(Action {
         label: "Test".into(),
         desc: "".into(),
@@ -180,6 +186,7 @@ fn watch_event_executes_action() {
         args: None,
     }));
     app.process_watch_events();
+    set_execute_action_hook(None);
 
     assert_eq!(EXECUTE_ACTION_COUNT.load(Ordering::SeqCst), 1);
 }

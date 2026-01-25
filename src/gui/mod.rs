@@ -246,17 +246,25 @@ pub static OPEN_LINK_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[allow(dead_code)]
 pub static EXECUTE_ACTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+static EXECUTE_ACTION_HOOK: Lazy<
+    Mutex<Option<Box<dyn Fn(&Action) -> anyhow::Result<()> + Send + Sync>>>,
+> = Lazy::new(|| Mutex::new(None));
+
+pub fn set_execute_action_hook(
+    hook: Option<Box<dyn Fn(&Action) -> anyhow::Result<()> + Send + Sync>>,
+) {
+    if let Ok(mut guard) = EXECUTE_ACTION_HOOK.lock() {
+        *guard = hook;
+    }
+}
+
 fn execute_action(action: &Action) -> anyhow::Result<()> {
-    #[cfg(test)]
-    {
-        let _ = action;
-        EXECUTE_ACTION_COUNT.fetch_add(1, Ordering::SeqCst);
-        return Ok(());
+    if let Ok(guard) = EXECUTE_ACTION_HOOK.lock() {
+        if let Some(ref hook) = *guard {
+            return hook(action);
+        }
     }
-    #[cfg(not(test))]
-    {
-        launch_action(action)
-    }
+    launch_action(action)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
