@@ -95,12 +95,10 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Mutex;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 use std::time::{Duration, Instant};
