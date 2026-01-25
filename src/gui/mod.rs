@@ -245,7 +245,7 @@ fn open_link(_url: &str) -> std::io::Result<()> {
 #[cfg(test)]
 pub static OPEN_LINK_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-#[cfg(test)]
+#[allow(dead_code)]
 pub static EXECUTE_ACTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 fn execute_action(action: &Action) -> anyhow::Result<()> {
@@ -3442,7 +3442,10 @@ impl eframe::App for LauncherApp {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         self.unregister_all_hotkeys();
                         self.visible_flag.store(false, Ordering::SeqCst);
-                        self.last_visible = false;
+                        #[allow(unused_assignments)]
+                        {
+                            self.last_visible = false;
+                        }
                         #[cfg(not(test))]
                         std::process::exit(0);
                     }

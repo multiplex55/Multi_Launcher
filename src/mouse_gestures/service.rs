@@ -397,7 +397,9 @@ impl HookBackend for DefaultHookBackend {
         use windows::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx;
 
         if let Some(hook) = self.hook.take() {
-            unsafe { UnhookWindowsHookEx(hook) };
+            unsafe {
+                let _ = UnhookWindowsHookEx(hook);
+            }
         }
         Ok(())
     }
