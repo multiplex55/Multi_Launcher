@@ -1,11 +1,13 @@
 use crate::actions::Action;
+use crate::common::json_watch::watch_json;
+use crate::mouse_gestures::db::{load_gestures, SharedGestureDb, GESTURES_FILE};
 use crate::mouse_gestures::service::{with_service as with_gesture_service, MouseGestureConfig};
 use crate::plugin::Plugin;
 use eframe::egui;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 const PLUGIN_NAME: &str = "mouse_gestures";
 
@@ -94,13 +96,28 @@ fn default_hint_offset() -> (f32, f32) {
 struct MouseGestureRuntime {
     settings: MouseGestureSettings,
     plugin_enabled: bool,
+    db: SharedGestureDb,
+    #[allow(dead_code)]
+    watcher: Option<crate::common::json_watch::JsonWatcher>,
 }
 
 impl Default for MouseGestureRuntime {
     fn default() -> Self {
+        let db = Arc::new(Mutex::new(load_gestures(GESTURES_FILE).unwrap_or_default()));
+        let db_clone = db.clone();
+        let watcher = watch_json(GESTURES_FILE, move || {
+            if let Ok(next) = load_gestures(GESTURES_FILE) {
+                if let Ok(mut guard) = db_clone.lock() {
+                    *guard = next;
+                }
+            }
+        })
+        .ok();
         Self {
             settings: MouseGestureSettings::default(),
             plugin_enabled: true,
+            db,
+            watcher,
         }
     }
 }
@@ -126,7 +143,10 @@ impl MouseGestureRuntime {
         config.trail_width = self.settings.trail_width;
         config.show_hint = self.settings.show_hint;
         config.hint_offset = self.settings.hint_offset;
-        with_gesture_service(|svc| svc.update_config(config));
+        with_gesture_service(|svc| {
+            svc.update_config(config);
+            svc.update_db(Some(self.db.clone()));
+        });
     }
 }
 
@@ -233,8 +253,8 @@ impl Plugin for MouseGesturesPlugin {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
-        let mut cfg = serde_json::from_value::<MouseGestureSettings>(value.clone())
-            .unwrap_or_default();
+        let mut cfg =
+            serde_json::from_value::<MouseGestureSettings>(value.clone()).unwrap_or_default();
         ui.checkbox(&mut cfg.enabled, "Enable mouse gestures");
         ui.checkbox(&mut cfg.require_button, "Require gesture button held");
         ui.horizontal(|ui| {

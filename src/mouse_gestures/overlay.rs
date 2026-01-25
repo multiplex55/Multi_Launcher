@@ -1,11 +1,5 @@
 pub trait OverlayBackend: Send {
-    fn draw_trail_segment(
-        &mut self,
-        from: (f32, f32),
-        to: (f32, f32),
-        color: [u8; 4],
-        width: f32,
-    );
+    fn draw_trail_segment(&mut self, from: (f32, f32), to: (f32, f32), color: [u8; 4], width: f32);
     fn show_hint(&mut self, text: &str, position: (f32, f32));
     fn hide_hint(&mut self);
 }
@@ -23,13 +17,7 @@ pub struct TrailOverlay<B: OverlayBackend> {
 }
 
 impl<B: OverlayBackend> TrailOverlay<B> {
-    pub fn new(
-        backend: B,
-        enabled: bool,
-        color: [u8; 4],
-        width: f32,
-        start_move_px: f32,
-    ) -> Self {
+    pub fn new(backend: B, enabled: bool, color: [u8; 4], width: f32, start_move_px: f32) -> Self {
         Self {
             backend,
             enabled,
@@ -137,9 +125,7 @@ impl<B: OverlayBackend> HintOverlay<B> {
         }
 
         let match_owned = best_match.map(|value| value.to_string());
-        if tokens == self.last_tokens
-            && match_owned.as_deref() == self.last_match.as_deref()
-        {
+        if tokens == self.last_tokens && match_owned.as_deref() == self.last_match.as_deref() {
             return;
         }
 
@@ -177,13 +163,7 @@ pub struct DefaultOverlayBackend;
 
 #[cfg(windows)]
 impl OverlayBackend for DefaultOverlayBackend {
-    fn draw_trail_segment(
-        &mut self,
-        from: (f32, f32),
-        to: (f32, f32),
-        color: [u8; 4],
-        width: f32,
-    ) {
+    fn draw_trail_segment(&mut self, from: (f32, f32), to: (f32, f32), color: [u8; 4], width: f32) {
         use windows::Win32::Foundation::COLORREF;
         use windows::Win32::Graphics::Gdi::{
             CreatePen, DeleteObject, GetDC, LineTo, MoveToEx, ReleaseDC, SelectObject, PS_SOLID,
@@ -196,11 +176,8 @@ impl OverlayBackend for DefaultOverlayBackend {
             return;
         }
 
-        let colorref = COLORREF(
-            (color[0] as u32)
-            | ((color[1] as u32) << 8)
-            | ((color[2] as u32) << 16),
-        );
+        let colorref =
+            COLORREF((color[0] as u32) | ((color[1] as u32) << 8) | ((color[2] as u32) << 16));
         let pen = unsafe { CreatePen(PS_SOLID, width.max(1.0) as i32, colorref) };
         let old_pen = unsafe { SelectObject(hdc, pen) };
 
@@ -209,7 +186,7 @@ impl OverlayBackend for DefaultOverlayBackend {
 
         unsafe {
             SelectObject(hdc, old_pen);
-            DeleteObject(pen);
+            let _ = DeleteObject(pen);
             ReleaseDC(hwnd, hdc);
         }
     }
