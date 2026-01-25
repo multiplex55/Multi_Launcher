@@ -230,10 +230,9 @@ fn worker_loop(
                     if active {
                         if exceeded_deadzone {
                             let tokens = tracker.tokens_string();
-                            if let Some((gesture, binding)) =
-                                match_binding(&db, &tokens, config.dir_mode)
+                            if let Some(action) =
+                                match_binding_action(&db, &tokens, config.dir_mode)
                             {
-                                let action = binding.to_action(&gesture.label);
                                 send_event(WatchEvent::ExecuteAction(action));
                             }
                         } else {
@@ -276,17 +275,16 @@ fn worker_loop(
     }
 }
 
-fn match_binding<'a>(
-    db: &'a Option<SharedGestureDb>,
+fn match_binding_action(
+    db: &Option<SharedGestureDb>,
     tokens: &str,
     dir_mode: DirMode,
-) -> Option<(
-    &'a crate::mouse_gestures::db::GestureEntry,
-    &'a crate::mouse_gestures::db::BindingEntry,
-)> {
+) -> Option<crate::actions::Action> {
     let db = db.as_ref()?;
     let guard = db.lock().ok()?;
-    guard.match_binding(tokens, dir_mode)
+    guard
+        .match_binding_owned(tokens, dir_mode)
+        .map(|(label, binding)| binding.to_action(&label))
 }
 
 fn best_match_name(
@@ -297,8 +295,8 @@ fn best_match_name(
     let db = db.as_ref()?;
     let guard = db.lock().ok()?;
     guard
-        .match_binding(tokens, dir_mode)
-        .map(|(gesture, binding)| format!("{}: {}", gesture.label, binding.label))
+        .match_binding_owned(tokens, dir_mode)
+        .map(|(label, binding)| format!("{}: {}", label, binding.label))
 }
 
 #[cfg(windows)]

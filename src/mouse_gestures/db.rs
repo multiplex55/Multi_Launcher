@@ -68,6 +68,29 @@ impl GestureDb {
                     .next()
             })
     }
+
+    pub fn match_binding_owned(
+        &self,
+        tokens: &str,
+        dir_mode: DirMode,
+    ) -> Option<(String, BindingEntry)> {
+        if tokens.is_empty() {
+            return None;
+        }
+        for gesture in self
+            .gestures
+            .iter()
+            .filter(|gesture| gesture.enabled && gesture.dir_mode == dir_mode)
+        {
+            if gesture.tokens != tokens {
+                continue;
+            }
+            if let Some(binding) = gesture.bindings.iter().find(|binding| binding.enabled) {
+                return Some((gesture.label.clone(), binding.clone()));
+            }
+        }
+        None
+    }
 }
 
 impl BindingEntry {

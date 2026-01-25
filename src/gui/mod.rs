@@ -251,6 +251,7 @@ pub static EXECUTE_ACTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 fn execute_action(action: &Action) -> anyhow::Result<()> {
     #[cfg(test)]
     {
+        let _ = action;
         EXECUTE_ACTION_COUNT.fetch_add(1, Ordering::SeqCst);
         return Ok(());
     }
