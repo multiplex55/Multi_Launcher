@@ -213,7 +213,7 @@ impl OverlayBackend for DefaultOverlayBackend {
             GetDC, GetTextExtentPoint32W, ReleaseDC, SetBkMode, SetTextColor, TextOutW, TRANSPARENT,
         };
         use windows::Win32::UI::WindowsAndMessaging::{
-            GetDesktopWindow, RedrawWindow, RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW,
+            GetDesktopWindow, InvalidateRect, UpdateWindow,
         };
 
         let hwnd = unsafe { GetDesktopWindow() };
@@ -225,12 +225,8 @@ impl OverlayBackend for DefaultOverlayBackend {
         let wide: Vec<u16> = OsStr::new(text).encode_wide().collect();
         if let Some(rect) = self.last_rect.take() {
             unsafe {
-                RedrawWindow(
-                    hwnd,
-                    Some(&rect),
-                    None,
-                    RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
-                );
+                let _ = InvalidateRect(hwnd, Some(&rect), true);
+                let _ = UpdateWindow(hwnd);
             }
         }
         let mut size = windows::Win32::Foundation::SIZE { cx: 0, cy: 0 };
@@ -254,17 +250,13 @@ impl OverlayBackend for DefaultOverlayBackend {
 
     fn hide_hint(&mut self) {
         use windows::Win32::UI::WindowsAndMessaging::{
-            GetDesktopWindow, RedrawWindow, RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW,
+            GetDesktopWindow, InvalidateRect, UpdateWindow,
         };
         if let Some(rect) = self.last_rect.take() {
             let hwnd = unsafe { GetDesktopWindow() };
             unsafe {
-                RedrawWindow(
-                    hwnd,
-                    Some(&rect),
-                    None,
-                    RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
-                );
+                let _ = InvalidateRect(hwnd, Some(&rect), true);
+                let _ = UpdateWindow(hwnd);
             }
         }
     }
