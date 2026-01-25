@@ -184,20 +184,23 @@ impl OverlayBackend for DefaultOverlayBackend {
         color: [u8; 4],
         width: f32,
     ) {
+        use windows::Win32::Foundation::COLORREF;
         use windows::Win32::Graphics::Gdi::{
-            CreatePen, DeleteObject, LineTo, MoveToEx, SelectObject, GetDC, ReleaseDC, PS_SOLID,
+            CreatePen, DeleteObject, GetDC, LineTo, MoveToEx, ReleaseDC, SelectObject, PS_SOLID,
         };
         use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
 
         let hwnd = unsafe { GetDesktopWindow() };
         let hdc = unsafe { GetDC(hwnd) };
-        if hdc.0 == 0 {
+        if hdc.0.is_null() {
             return;
         }
 
-        let colorref = (color[0] as u32)
+        let colorref = COLORREF(
+            (color[0] as u32)
             | ((color[1] as u32) << 8)
-            | ((color[2] as u32) << 16);
+            | ((color[2] as u32) << 16),
+        );
         let pen = unsafe { CreatePen(PS_SOLID, width.max(1.0) as i32, colorref) };
         let old_pen = unsafe { SelectObject(hdc, pen) };
 
@@ -214,6 +217,7 @@ impl OverlayBackend for DefaultOverlayBackend {
     fn show_hint(&mut self, text: &str, position: (f32, f32)) {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Foundation::COLORREF;
         use windows::Win32::Graphics::Gdi::{
             GetDC, ReleaseDC, SetBkMode, SetTextColor, TextOutW, TRANSPARENT,
         };
@@ -221,21 +225,15 @@ impl OverlayBackend for DefaultOverlayBackend {
 
         let hwnd = unsafe { GetDesktopWindow() };
         let hdc = unsafe { GetDC(hwnd) };
-        if hdc.0 == 0 {
+        if hdc.0.is_null() {
             return;
         }
 
         let wide: Vec<u16> = OsStr::new(text).encode_wide().collect();
         unsafe {
             SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, 0x00ffffff);
-            let _ = TextOutW(
-                hdc,
-                position.0 as i32,
-                position.1 as i32,
-                windows::core::PCWSTR(wide.as_ptr()),
-                wide.len() as i32,
-            );
+            SetTextColor(hdc, COLORREF(0x00ffffff));
+            let _ = TextOutW(hdc, position.0 as i32, position.1 as i32, &wide);
             ReleaseDC(hwnd, hdc);
         }
     }
