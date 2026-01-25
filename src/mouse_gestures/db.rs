@@ -127,6 +127,34 @@ pub fn save_gestures(path: &str, db: &GestureDb) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn format_gesture_label(gesture: &GestureEntry) -> String {
+    let tokens = if gesture.tokens.trim().is_empty() {
+        "∅"
+    } else {
+        gesture.tokens.as_str()
+    };
+    let status = if gesture.enabled { "" } else { " (disabled)" };
+    let binding_labels = format_binding_labels(&gesture.bindings);
+    let base = format!("{}{} [{tokens}]", gesture.label, status);
+    if binding_labels.is_empty() {
+        base
+    } else {
+        format!("{base} → {}", binding_labels.join(", "))
+    }
+}
+
+pub fn format_binding_labels(bindings: &[BindingEntry]) -> Vec<String> {
+    bindings.iter().map(format_binding_label).collect()
+}
+
+fn format_binding_label(binding: &BindingEntry) -> String {
+    if binding.enabled {
+        binding.label.clone()
+    } else {
+        format!("{} (disabled)", binding.label)
+    }
+}
+
 fn default_enabled() -> bool {
     true
 }

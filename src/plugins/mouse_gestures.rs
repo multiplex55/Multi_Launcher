@@ -1,9 +1,14 @@
 use crate::actions::Action;
 use crate::common::json_watch::watch_json;
-use crate::mouse_gestures::db::{load_gestures, SharedGestureDb, GESTURES_FILE};
+use crate::common::strip_prefix_ci;
+use crate::mouse_gestures::db::{
+    format_gesture_label, load_gestures, SharedGestureDb, GESTURES_FILE,
+};
 use crate::mouse_gestures::service::{with_service as with_gesture_service, MouseGestureConfig};
 use crate::plugin::Plugin;
 use eframe::egui;
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -191,19 +196,19 @@ impl MouseGesturesPlugin {
             Action {
                 label: "mg settings".into(),
                 desc: "Mouse gestures".into(),
-                action: "query:mg settings".into(),
+                action: "settings:dialog".into(),
                 args: None,
             },
             Action {
                 label: "mg edit".into(),
                 desc: "Mouse gestures".into(),
-                action: "query:mg edit".into(),
+                action: "mg:dialog".into(),
                 args: None,
             },
             Action {
                 label: "mg add".into(),
                 desc: "Mouse gestures".into(),
-                action: "query:mg add".into(),
+                action: "mg:dialog:binding".into(),
                 args: None,
             },
             Action {
@@ -214,6 +219,28 @@ impl MouseGesturesPlugin {
             },
         ]
     }
+
+    fn list_gestures(filter: &str) -> Vec<Action> {
+        let db = load_gestures(GESTURES_FILE).unwrap_or_default();
+        let matcher = SkimMatcherV2::default();
+        let filter = filter.trim().to_lowercase();
+        db.gestures
+            .iter()
+            .filter(|gesture| {
+                if filter.is_empty() {
+                    return true;
+                }
+                let label = format_gesture_label(gesture).to_lowercase();
+                matcher.fuzzy_match(&label, &filter).is_some()
+            })
+            .map(|gesture| Action {
+                label: format_gesture_label(gesture),
+                desc: "Mouse gestures".into(),
+                action: "mg:dialog".into(),
+                args: None,
+            })
+            .collect()
+    }
 }
 
 impl Plugin for MouseGesturesPlugin {
@@ -221,6 +248,36 @@ impl Plugin for MouseGesturesPlugin {
         let trimmed = query.trim();
         if trimmed.eq_ignore_ascii_case("mg") {
             return Self::command_actions();
+        }
+        if strip_prefix_ci(trimmed, "mg settings").is_some() {
+            return vec![Action {
+                label: "Open mouse gesture settings".into(),
+                desc: "Mouse gestures".into(),
+                action: "settings:dialog".into(),
+                args: None,
+            }];
+        }
+        if strip_prefix_ci(trimmed, "mg edit").is_some() {
+            return vec![Action {
+                label: "Edit mouse gestures".into(),
+                desc: "Mouse gestures".into(),
+                action: "mg:dialog".into(),
+                args: None,
+            }];
+        }
+        if strip_prefix_ci(trimmed, "mg add").is_some() {
+            return vec![Action {
+                label: "Add mouse gesture binding".into(),
+                desc: "Mouse gestures".into(),
+                action: "mg:dialog:binding".into(),
+                args: None,
+            }];
+        }
+        if let Some(rest) = strip_prefix_ci(trimmed, "mg list") {
+            return Self::list_gestures(rest);
+        }
+        if let Some(rest) = strip_prefix_ci(trimmed, "mg ") {
+            return Self::list_gestures(rest);
         }
         Vec::new()
     }
