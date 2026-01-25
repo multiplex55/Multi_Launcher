@@ -264,12 +264,10 @@ fn worker_loop(
 
                 if last_recognition.elapsed() >= recognition_interval {
                     let ms = start_time.elapsed().as_millis() as u64;
-                    let token = tracker.feed_point(pos, ms);
-                    if token.is_some() {
-                        let tokens = tracker.tokens_string();
-                        let best_match = best_match_name(&db, &tokens, config.dir_mode);
-                        hint_overlay.update(&tokens, best_match.as_deref(), pos);
-                    }
+                    let _ = tracker.feed_point(pos, ms);
+                    let tokens = tracker.tokens_string();
+                    let best_match = best_match_name(&db, &tokens, config.dir_mode);
+                    hint_overlay.update(&tokens, best_match.as_deref(), pos);
                     last_recognition = Instant::now();
                 }
             }

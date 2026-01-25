@@ -224,19 +224,21 @@ impl MgGesturesDialog {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    if ui.button("Add Gesture").clicked() {
+                        self.add_gesture();
+                        save_now = true;
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            if ui.button("Add Gesture").clicked() {
-                                self.add_gesture();
-                                save_now = true;
-                            }
-                            if ui.button("Close").clicked() {
-                                close = true;
-                            }
-                        });
-                        ui.separator();
+                        ui.set_min_width(220.0);
+                        ui.label("Gestures");
                         egui::ScrollArea::vertical()
-                            .max_height(300.0)
+                            .max_height(320.0)
                             .show(ui, |ui| {
                                 let mut remove_idx: Option<usize> = None;
                                 for idx in 0..self.db.gestures.len() {
@@ -296,8 +298,10 @@ impl MgGesturesDialog {
                     });
                     ui.separator();
                     ui.vertical(|ui| {
+                        ui.set_min_width(320.0);
                         if let Some(idx) = self.selected_idx {
                             if let Some(entry) = self.db.gestures.get_mut(idx) {
+                                ui.label("Recorder");
                                 ui.horizontal(|ui| {
                                     ui.label("Direction mode");
                                     let mut dir_mode = entry.dir_mode;
@@ -351,10 +355,10 @@ impl MgGesturesDialog {
                                         self.recorder.reset();
                                     }
                                 });
-                                let (rect, response) = ui.allocate_exact_size(
-                                    egui::vec2(240.0, 240.0),
-                                    egui::Sense::drag(),
-                                );
+                                let available = ui.available_width();
+                                let size = egui::vec2(available.max(320.0), 260.0);
+                                let (rect, response) =
+                                    ui.allocate_exact_size(size, egui::Sense::drag());
                                 let painter = ui.painter_at(rect);
                                 painter.rect_stroke(
                                     rect,
