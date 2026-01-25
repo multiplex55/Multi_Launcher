@@ -209,12 +209,11 @@ impl OverlayBackend for DefaultOverlayBackend {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
         use windows::Win32::Foundation::{COLORREF, RECT};
+        use windows::Win32::Graphics::Gdi::InvalidateRect;
         use windows::Win32::Graphics::Gdi::{
             GetDC, GetTextExtentPoint32W, ReleaseDC, SetBkMode, SetTextColor, TextOutW, TRANSPARENT,
         };
-        use windows::Win32::UI::WindowsAndMessaging::{
-            GetDesktopWindow, InvalidateRect, UpdateWindow,
-        };
+        use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
 
         let hwnd = unsafe { GetDesktopWindow() };
         let hdc = unsafe { GetDC(hwnd) };
@@ -226,7 +225,6 @@ impl OverlayBackend for DefaultOverlayBackend {
         if let Some(rect) = self.last_rect.take() {
             unsafe {
                 let _ = InvalidateRect(hwnd, Some(&rect), true);
-                let _ = UpdateWindow(hwnd);
             }
         }
         let mut size = windows::Win32::Foundation::SIZE { cx: 0, cy: 0 };
@@ -249,14 +247,12 @@ impl OverlayBackend for DefaultOverlayBackend {
     }
 
     fn hide_hint(&mut self) {
-        use windows::Win32::UI::WindowsAndMessaging::{
-            GetDesktopWindow, InvalidateRect, UpdateWindow,
-        };
+        use windows::Win32::Graphics::Gdi::InvalidateRect;
+        use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
         if let Some(rect) = self.last_rect.take() {
             let hwnd = unsafe { GetDesktopWindow() };
             unsafe {
                 let _ = InvalidateRect(hwnd, Some(&rect), true);
-                let _ = UpdateWindow(hwnd);
             }
         }
     }
