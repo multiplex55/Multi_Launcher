@@ -1,6 +1,8 @@
 use crate::mouse_gestures::db::SharedGestureDb;
 use crate::mouse_gestures::engine::{DirMode, GestureTracker};
-use crate::mouse_gestures::overlay::{DefaultOverlayBackend, HintOverlay, TrailOverlay};
+use crate::mouse_gestures::overlay::{
+    DefaultOverlayBackend, HintOverlay, OverlayBackend, TrailOverlay,
+};
 use anyhow::anyhow;
 use once_cell::sync::OnceCell;
 #[cfg(windows)]
@@ -14,7 +16,8 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone)]
 pub struct MouseGestureConfig {
     pub enabled: bool,
-    pub trail_interval_ms: u64,
+    pub draw_interval_ms: u64,
+    pub draw_min_distance_px: f32,
     pub recognition_interval_ms: u64,
     pub deadzone_px: f32,
     pub trail_start_move_px: f32,
@@ -34,7 +37,8 @@ impl Default for MouseGestureConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            trail_interval_ms: 16,
+            draw_interval_ms: 5,
+            draw_min_distance_px: 2.0,
             recognition_interval_ms: 40,
             deadzone_px: 12.0,
             trail_start_move_px: 8.0,
@@ -181,6 +185,45 @@ fn worker_loop(
     event_rx: Receiver<HookEvent>,
     stop_rx: Receiver<()>,
 ) {
+    let trail_overlay = TrailOverlay::new(
+        DefaultOverlayBackend::default(),
+        config.show_trail,
+        config.trail_color,
+        config.trail_width,
+        config.trail_start_move_px,
+    );
+    let hint_overlay = HintOverlay::new(
+        DefaultOverlayBackend::default(),
+        config.show_hint,
+        config.hint_offset,
+    );
+    worker_loop_with_overlays(
+        config,
+        db,
+        event_rx,
+        stop_rx,
+        trail_overlay,
+        hint_overlay,
+        || get_cursor_position(),
+        None::<fn((f32, f32), u64)>,
+    );
+}
+
+pub fn worker_loop_with_overlays<B1, B2, P, R>(
+    config: MouseGestureConfig,
+    db: Option<SharedGestureDb>,
+    event_rx: Receiver<HookEvent>,
+    stop_rx: Receiver<()>,
+    mut trail_overlay: TrailOverlay<B1>,
+    mut hint_overlay: HintOverlay<B2>,
+    mut position_provider: P,
+    mut recognition_observer: Option<R>,
+) where
+    B1: OverlayBackend + Send + 'static,
+    B2: OverlayBackend + Send + 'static,
+    P: FnMut() -> Option<(f32, f32)> + Send + 'static,
+    R: FnMut((f32, f32), u64) + Send + 'static,
+{
     let mut tracker = GestureTracker::new(
         config.dir_mode,
         config.threshold_px,
@@ -188,24 +231,14 @@ fn worker_loop(
         config.long_threshold_y,
         config.max_tokens,
     );
-    let mut trail_overlay = TrailOverlay::new(
-        DefaultOverlayBackend::default(),
-        config.show_trail,
-        config.trail_color,
-        config.trail_width,
-        config.trail_start_move_px,
-    );
-    let mut hint_overlay = HintOverlay::new(
-        DefaultOverlayBackend::default(),
-        config.show_hint,
-        config.hint_offset,
-    );
-    let poll_interval = Duration::from_millis(config.trail_interval_ms.max(1));
+    let draw_interval = Duration::from_millis(config.draw_interval_ms.max(1));
     let recognition_interval = Duration::from_millis(config.recognition_interval_ms.max(1));
+    let draw_min_distance_sq = config.draw_min_distance_px * config.draw_min_distance_px;
     let mut active = false;
     let mut exceeded_deadzone = false;
     let mut start_pos = (0.0_f32, 0.0_f32);
-    let mut last_trail = Instant::now();
+    let mut last_draw_point: Option<(f32, f32)> = None;
+    let mut last_draw = Instant::now();
     let mut last_recognition = Instant::now();
     let start_time = Instant::now();
 
@@ -214,20 +247,21 @@ fn worker_loop(
             break;
         }
 
-        match event_rx.recv_timeout(poll_interval) {
+        match event_rx.recv_timeout(draw_interval) {
             Ok(event) => match event {
                 HookEvent::RButtonDown => {
                     active = true;
                     exceeded_deadzone = false;
                     tracker.reset();
-                    let pos = get_cursor_position().unwrap_or(start_pos);
+                    let pos = position_provider().unwrap_or(start_pos);
                     start_pos = pos;
                     let ms = start_time.elapsed().as_millis() as u64;
                     tracker.feed_point(pos, ms);
                     trail_overlay.reset(pos);
                     hint_overlay.reset();
-                    last_trail = Instant::now();
-                    last_recognition = last_trail;
+                    last_draw_point = Some(pos);
+                    last_draw = Instant::now();
+                    last_recognition = last_draw;
                 }
                 HookEvent::RButtonUp => {
                     if active {
@@ -244,6 +278,7 @@ fn worker_loop(
                         active = false;
                         tracker.reset();
                         hint_overlay.reset();
+                        last_draw_point = None;
                     }
                 }
             },
@@ -251,27 +286,55 @@ fn worker_loop(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        if active && last_trail.elapsed() >= poll_interval {
-            if let Some(pos) = get_cursor_position() {
-                let dx = pos.0 - start_pos.0;
-                let dy = pos.1 - start_pos.1;
-                let dist_sq = dx * dx + dy * dy;
-                if dist_sq >= config.deadzone_px * config.deadzone_px {
-                    exceeded_deadzone = true;
-                }
+        if active {
+            let draw_due = last_draw.elapsed() >= draw_interval;
+            let recognition_due = last_recognition.elapsed() >= recognition_interval;
+            if draw_due || recognition_due {
+                if let Some(pos) = position_provider() {
+                    let dx = pos.0 - start_pos.0;
+                    let dy = pos.1 - start_pos.1;
+                    let dist_sq = dx * dx + dy * dy;
+                    if dist_sq >= config.deadzone_px * config.deadzone_px {
+                        exceeded_deadzone = true;
+                    }
 
-                trail_overlay.update_position(pos);
+                    if draw_due {
+                        let draw_allowed = match last_draw_point {
+                            Some(prev) => {
+                                let dx = pos.0 - prev.0;
+                                let dy = pos.1 - prev.1;
+                                let dist_sq = dx * dx + dy * dy;
+                                dist_sq >= draw_min_distance_sq
+                            }
+                            None => true,
+                        };
+                        if draw_allowed {
+                            trail_overlay.update_position(pos);
+                            last_draw_point = Some(pos);
+                        }
+                        last_draw = Instant::now();
+                    }
 
-                if last_recognition.elapsed() >= recognition_interval {
-                    let ms = start_time.elapsed().as_millis() as u64;
-                    let _ = tracker.feed_point(pos, ms);
-                    let tokens = tracker.tokens_string();
-                    let best_match = best_match_name(&db, &tokens, config.dir_mode);
-                    hint_overlay.update(&tokens, best_match.as_deref(), pos);
-                    last_recognition = Instant::now();
+                    if recognition_due {
+                        let ms = start_time.elapsed().as_millis() as u64;
+                        let _ = tracker.feed_point(pos, ms);
+                        if let Some(observer) = recognition_observer.as_mut() {
+                            observer(pos, ms);
+                        }
+                        let tokens = tracker.tokens_string();
+                        let best_match = best_match_name(&db, &tokens, config.dir_mode);
+                        hint_overlay.update(&tokens, best_match.as_deref(), pos);
+                        last_recognition = Instant::now();
+                    }
+                } else {
+                    if draw_due {
+                        last_draw = Instant::now();
+                    }
+                    if recognition_due {
+                        last_recognition = Instant::now();
+                    }
                 }
             }
-            last_trail = Instant::now();
         }
     }
 }

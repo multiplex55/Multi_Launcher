@@ -20,6 +20,10 @@ const PLUGIN_NAME: &str = "mouse_gestures";
 pub struct MouseGestureSettings {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_draw_interval_ms")]
+    pub draw_interval_ms: u64,
+    #[serde(default = "default_draw_min_distance_px")]
+    pub draw_min_distance_px: f32,
     #[serde(default = "default_min_distance_px")]
     pub min_distance_px: f32,
     #[serde(default = "default_max_duration_ms")]
@@ -44,6 +48,8 @@ impl Default for MouseGestureSettings {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
+            draw_interval_ms: default_draw_interval_ms(),
+            draw_min_distance_px: default_draw_min_distance_px(),
             min_distance_px: default_min_distance_px(),
             max_duration_ms: default_max_duration_ms(),
             require_button: default_require_button(),
@@ -59,6 +65,14 @@ impl Default for MouseGestureSettings {
 
 fn default_enabled() -> bool {
     true
+}
+
+fn default_draw_interval_ms() -> u64 {
+    5
+}
+
+fn default_draw_min_distance_px() -> f32 {
+    2.0
 }
 
 fn default_min_distance_px() -> f32 {
@@ -141,6 +155,8 @@ impl MouseGestureRuntime {
     fn apply(&self) {
         let mut config = MouseGestureConfig::default();
         config.enabled = self.settings.enabled && self.plugin_enabled;
+        config.draw_interval_ms = self.settings.draw_interval_ms;
+        config.draw_min_distance_px = self.settings.draw_min_distance_px;
         config.deadzone_px = self.settings.min_distance_px;
         config.trail_start_move_px = self.settings.trail_start_move_px;
         config.show_trail = self.settings.show_trail;
