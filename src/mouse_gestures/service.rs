@@ -1,8 +1,8 @@
+use crate::mouse_gestures::db::SharedGestureDb;
 use crate::mouse_gestures::engine::{DirMode, GestureTracker};
 use crate::mouse_gestures::overlay::{DefaultOverlayBackend, HintOverlay, TrailOverlay};
 use anyhow::anyhow;
 use once_cell::sync::OnceCell;
-use std::collections::HashMap;
 #[cfg(windows)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -52,12 +52,7 @@ impl Default for MouseGestureConfig {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct GestureDb {
-    pub actions: HashMap<String, String>,
-}
-
-pub type SharedGestureDb = Arc<Mutex<GestureDb>>;
+use crate::gui::{send_event, WatchEvent};
 
 #[derive(Debug, Clone, Copy)]
 pub enum HookEvent {
@@ -200,7 +195,8 @@ fn worker_loop(
         config.trail_width,
         config.trail_start_move_px,
     );
-    let mut hint_overlay = HintOverlay::new(DefaultOverlayBackend, config.show_hint, config.hint_offset);
+    let mut hint_overlay =
+        HintOverlay::new(DefaultOverlayBackend, config.show_hint, config.hint_offset);
     let poll_interval = Duration::from_millis(config.trail_interval_ms.max(1));
     let recognition_interval = Duration::from_millis(config.recognition_interval_ms.max(1));
     let mut active = false;
@@ -232,7 +228,15 @@ fn worker_loop(
                 }
                 HookEvent::RButtonUp => {
                     if active {
-                        if !exceeded_deadzone {
+                        if exceeded_deadzone {
+                            let tokens = tracker.tokens_string();
+                            if let Some((gesture, binding)) =
+                                match_binding(&db, &tokens, config.dir_mode)
+                            {
+                                let action = binding.to_action(&gesture.label);
+                                send_event(WatchEvent::ExecuteAction(action));
+                            }
+                        } else {
                             send_right_click();
                         }
                         active = false;
@@ -261,7 +265,7 @@ fn worker_loop(
                     let token = tracker.feed_point(pos, ms);
                     if token.is_some() {
                         let tokens = tracker.tokens_string();
-                        let best_match = best_match_name(&db, &tokens);
+                        let best_match = best_match_name(&db, &tokens, config.dir_mode);
                         hint_overlay.update(&tokens, best_match.as_deref(), pos);
                     }
                     last_recognition = Instant::now();
@@ -272,21 +276,29 @@ fn worker_loop(
     }
 }
 
-fn best_match_name(db: &Option<SharedGestureDb>, tokens: &str) -> Option<String> {
+fn match_binding<'a>(
+    db: &'a Option<SharedGestureDb>,
+    tokens: &str,
+    dir_mode: DirMode,
+) -> Option<(
+    &'a crate::mouse_gestures::db::GestureEntry,
+    &'a crate::mouse_gestures::db::BindingEntry,
+)> {
     let db = db.as_ref()?;
     let guard = db.lock().ok()?;
-    if tokens.is_empty() {
-        return None;
-    }
-    if let Some(name) = guard.actions.get(tokens) {
-        return Some(name.clone());
-    }
+    guard.match_binding(tokens, dir_mode)
+}
+
+fn best_match_name(
+    db: &Option<SharedGestureDb>,
+    tokens: &str,
+    dir_mode: DirMode,
+) -> Option<String> {
+    let db = db.as_ref()?;
+    let guard = db.lock().ok()?;
     guard
-        .actions
-        .iter()
-        .filter(|(key, _)| key.starts_with(tokens))
-        .min_by_key(|(key, _)| key.len())
-        .map(|(_, name)| name.clone())
+        .match_binding(tokens, dir_mode)
+        .map(|(gesture, binding)| format!("{}: {}", gesture.label, binding.label))
 }
 
 #[cfg(windows)]

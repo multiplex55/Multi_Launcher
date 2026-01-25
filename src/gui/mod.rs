@@ -142,6 +142,7 @@ pub enum WatchEvent {
     Favorites,
     Dashboard(DashboardEvent),
     Recycle(Result<(), String>),
+    ExecuteAction(Action),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,6 +179,7 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::Favorites => TestWatchEvent::Actions,
             WatchEvent::Dashboard(_) => TestWatchEvent::Actions,
             WatchEvent::Recycle(_) => unreachable!(),
+            WatchEvent::ExecuteAction(_) => TestWatchEvent::Actions,
         }
     }
 }
@@ -242,6 +244,21 @@ fn open_link(_url: &str) -> std::io::Result<()> {
 
 #[cfg(test)]
 pub static OPEN_LINK_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+pub static EXECUTE_ACTION_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+fn execute_action(action: &Action) -> anyhow::Result<()> {
+    #[cfg(test)]
+    {
+        EXECUTE_ACTION_COUNT.fetch_add(1, Ordering::SeqCst);
+        return Ok(());
+    }
+    #[cfg(not(test))]
+    {
+        launch_action(action)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Panel {
@@ -500,6 +517,156 @@ impl LauncherApp {
         cmds.sort_by_cached_key(|a| a.label.to_lowercase());
         self.command_cache = cmds;
         self.update_completion_index();
+    }
+
+    pub fn process_watch_events(&mut self) {
+        while let Ok(ev) = self.rx.try_recv() {
+            match ev {
+                WatchEvent::Actions => {
+                    if let Ok(mut acts) = load_actions(&self.actions_path) {
+                        let custom_len = acts.len();
+                        if let Some(paths) = &self.index_paths {
+                            match indexer::index_paths(paths) {
+                                Ok(idx) => acts.extend(idx),
+                                Err(e) => {
+                                    tracing::error!(error = %e, "failed to index paths");
+                                    self.set_error(format!("Failed to index paths: {e}"));
+                                }
+                            }
+                        }
+                        self.actions = Arc::new(acts);
+                        self.custom_len = custom_len;
+                        self.update_action_cache();
+                        self.search();
+                        crate::actions::bump_actions_version();
+                        tracing::info!("actions reloaded");
+                    }
+                }
+                WatchEvent::Folders => {
+                    self.folder_aliases = crate::plugins::folders::load_folders(
+                        crate::plugins::folders::FOLDERS_FILE,
+                    )
+                    .unwrap_or_else(|_| crate::plugins::folders::default_folders())
+                    .into_iter()
+                    .map(|f| (f.path, f.alias))
+                    .collect();
+                }
+                WatchEvent::Bookmarks => {
+                    self.bookmark_aliases = crate::plugins::bookmarks::load_bookmarks(
+                        crate::plugins::bookmarks::BOOKMARKS_FILE,
+                    )
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|b| (b.url, b.alias))
+                    .collect();
+                }
+                WatchEvent::Clipboard => {
+                    self.dashboard_data_cache.refresh_clipboard();
+                }
+                WatchEvent::Snippets => {
+                    self.dashboard_data_cache.refresh_snippets();
+                }
+                WatchEvent::Notes => {
+                    self.dashboard_data_cache.refresh_notes();
+                }
+                WatchEvent::Todos => {
+                    self.dashboard_data_cache.refresh_todos();
+                }
+                WatchEvent::Favorites => {
+                    self.dashboard_data_cache.refresh_favorites();
+                }
+                WatchEvent::Dashboard(_) => {
+                    self.dashboard.reload();
+                    for warn in &self.dashboard.warnings {
+                        tracing::warn!("dashboard: {}", warn);
+                        if self.enable_toasts {
+                            push_toast(
+                                &mut self.toasts,
+                                Toast {
+                                    text: warn.clone().into(),
+                                    kind: ToastKind::Warning,
+                                    options: ToastOptions::default()
+                                        .duration_in_seconds(self.toast_duration as f64),
+                                },
+                            );
+                        }
+                    }
+                }
+                WatchEvent::Recycle(res) => match res {
+                    Ok(()) => {
+                        if self.enable_toasts {
+                            push_toast(
+                                &mut self.toasts,
+                                Toast {
+                                    text: "Emptied Recycle Bin".into(),
+                                    kind: ToastKind::Success,
+                                    options: ToastOptions::default()
+                                        .duration_in_seconds(self.toast_duration as f64),
+                                },
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        let msg = format!("Failed to empty recycle bin: {e}");
+                        self.set_error(msg.clone());
+                        if self.enable_toasts {
+                            push_toast(
+                                &mut self.toasts,
+                                Toast {
+                                    text: msg.into(),
+                                    kind: ToastKind::Error,
+                                    options: ToastOptions::default()
+                                        .duration_in_seconds(self.toast_duration as f64),
+                                },
+                            );
+                        }
+                    }
+                },
+                WatchEvent::ExecuteAction(action) => {
+                    let resolved = self.resolve_query_action(&action);
+                    if let Err(e) = execute_action(&resolved) {
+                        tracing::error!(error = %e, "failed to execute action from watcher");
+                        self.set_error(format!("Failed to execute action: {e}"));
+                    }
+                }
+            }
+        }
+    }
+
+    fn resolve_query_action(&self, action: &Action) -> Action {
+        if let Some(query) = action.action.strip_prefix("query:") {
+            let mut query = query.to_string();
+            if let Some(ref args) = action.args {
+                if !query.ends_with(' ') {
+                    query.push(' ');
+                }
+                query.push_str(args);
+            }
+            if let Some(res) = self
+                .plugins
+                .search_filtered(
+                    &query,
+                    self.enabled_plugins.as_ref(),
+                    self.enabled_capabilities.as_ref(),
+                )
+                .into_iter()
+                .next()
+            {
+                return Action {
+                    label: action.label.clone(),
+                    desc: action.desc.clone(),
+                    action: res.action,
+                    args: res.args,
+                };
+            }
+            return Action {
+                label: action.label.clone(),
+                desc: action.desc.clone(),
+                action: query,
+                args: None,
+            };
+        }
+        action.clone()
     }
 
     fn update_completion_index(&mut self) {
@@ -1525,7 +1692,9 @@ impl LauncherApp {
             return Some(action.clone());
         }
 
-        let commands = self.plugins.commands_filtered(self.enabled_plugins.as_ref());
+        let commands = self
+            .plugins
+            .commands_filtered(self.enabled_plugins.as_ref());
         if let Some(action) = commands.into_iter().find(|action| {
             action.action == pin.action_id && action.args.as_deref() == pin.args.as_deref()
         }) {
@@ -1539,9 +1708,11 @@ impl LauncherApp {
             return Some(action.clone());
         }
 
-        if let Some(fav) = snapshot.favorites.iter().find(|fav| {
-            fav.action == pin.action_id && fav.args.as_deref() == pin.args.as_deref()
-        }) {
+        if let Some(fav) = snapshot
+            .favorites
+            .iter()
+            .find(|fav| fav.action == pin.action_id && fav.args.as_deref() == pin.args.as_deref())
+        {
             return Some(Action {
                 label: fav.label.clone(),
                 desc: "Fav".into(),
@@ -1694,11 +1865,9 @@ impl LauncherApp {
             }
         } else {
             if ui.button("Unpin result").clicked() {
-                if let Err(e) = history::remove_pin(
-                    HISTORY_PINS_FILE,
-                    &action.action,
-                    action.args.as_deref(),
-                ) {
+                if let Err(e) =
+                    history::remove_pin(HISTORY_PINS_FILE, &action.action, action.args.as_deref())
+                {
                     self.error = Some(format!("Failed to unpin result: {e}"));
                 } else if self.enable_toasts {
                     push_toast(
@@ -3315,110 +3484,7 @@ impl eframe::App for LauncherApp {
             });
         });
 
-        while let Ok(ev) = self.rx.try_recv() {
-            match ev {
-                WatchEvent::Actions => {
-                    if let Ok(mut acts) = load_actions(&self.actions_path) {
-                        let custom_len = acts.len();
-                        if let Some(paths) = &self.index_paths {
-                            match indexer::index_paths(paths) {
-                                Ok(idx) => acts.extend(idx),
-                                Err(e) => {
-                                    tracing::error!(error = %e, "failed to index paths");
-                                    self.set_error(format!("Failed to index paths: {e}"));
-                                }
-                            }
-                        }
-                        self.actions = Arc::new(acts);
-                        self.custom_len = custom_len;
-                        self.update_action_cache();
-                        self.search();
-                        crate::actions::bump_actions_version();
-                        tracing::info!("actions reloaded");
-                    }
-                }
-                WatchEvent::Folders => {
-                    self.folder_aliases = crate::plugins::folders::load_folders(
-                        crate::plugins::folders::FOLDERS_FILE,
-                    )
-                    .unwrap_or_else(|_| crate::plugins::folders::default_folders())
-                    .into_iter()
-                    .map(|f| (f.path, f.alias))
-                    .collect();
-                }
-                WatchEvent::Bookmarks => {
-                    self.bookmark_aliases = crate::plugins::bookmarks::load_bookmarks(
-                        crate::plugins::bookmarks::BOOKMARKS_FILE,
-                    )
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|b| (b.url, b.alias))
-                    .collect();
-                }
-                WatchEvent::Clipboard => {
-                    self.dashboard_data_cache.refresh_clipboard();
-                }
-                WatchEvent::Snippets => {
-                    self.dashboard_data_cache.refresh_snippets();
-                }
-                WatchEvent::Notes => {
-                    self.dashboard_data_cache.refresh_notes();
-                }
-                WatchEvent::Todos => {
-                    self.dashboard_data_cache.refresh_todos();
-                }
-                WatchEvent::Favorites => {
-                    self.dashboard_data_cache.refresh_favorites();
-                }
-                WatchEvent::Dashboard(_) => {
-                    self.dashboard.reload();
-                    for warn in &self.dashboard.warnings {
-                        tracing::warn!("dashboard: {}", warn);
-                        if self.enable_toasts {
-                            push_toast(
-                                &mut self.toasts,
-                                Toast {
-                                    text: warn.clone().into(),
-                                    kind: ToastKind::Warning,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(self.toast_duration as f64),
-                                },
-                            );
-                        }
-                    }
-                }
-                WatchEvent::Recycle(res) => match res {
-                    Ok(()) => {
-                        if self.enable_toasts {
-                            push_toast(
-                                &mut self.toasts,
-                                Toast {
-                                    text: "Emptied Recycle Bin".into(),
-                                    kind: ToastKind::Success,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(self.toast_duration as f64),
-                                },
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        let msg = format!("Failed to empty recycle bin: {e}");
-                        self.set_error(msg.clone());
-                        if self.enable_toasts {
-                            push_toast(
-                                &mut self.toasts,
-                                Toast {
-                                    text: msg.into(),
-                                    kind: ToastKind::Error,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(self.toast_duration as f64),
-                                },
-                            );
-                        }
-                    }
-                },
-            }
-        }
+        self.process_watch_events();
 
         let trimmed = self.query.trim().to_string();
         let use_dashboard = self.should_show_dashboard(trimmed.as_str());
@@ -4598,7 +4664,8 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
             | WatchEvent::Snippets
             | WatchEvent::Notes
             | WatchEvent::Todos
-            | WatchEvent::Favorites => {
+            | WatchEvent::Favorites
+            | WatchEvent::ExecuteAction(_) => {
                 continue;
             }
             WatchEvent::Recycle(_) => return Some(ev.into()),
