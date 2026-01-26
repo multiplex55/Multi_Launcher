@@ -219,7 +219,7 @@ impl TrailOverlaySurface {
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, RegisterClassW, SetLayeredWindowAttributes, SetWindowLongPtrW,
-            ShowWindow, GWLP_USERDATA, LWA_ALPHA, SW_SHOW, WNDCLASSW, WS_EX_LAYERED,
+            ShowWindow, GWLP_USERDATA, LWA_COLORKEY, SW_SHOW, WNDCLASSW, WS_EX_LAYERED,
             WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
         };
         use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
@@ -302,7 +302,7 @@ impl TrailOverlaySurface {
 
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, mem_dc.0 as isize);
-            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_COLORKEY);
             let _ = ShowWindow(hwnd, SW_SHOW);
             if !bits.is_null() {
                 ptr::write_bytes(bits as *mut u8, 0, size_bytes);
@@ -361,8 +361,8 @@ unsafe extern "system" fn trail_overlay_wndproc(
     lparam: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
     use windows::Win32::Foundation::{LRESULT, RECT};
-    use windows::Win32::Graphics::Gdi::{AlphaBlend, BeginPaint, EndPaint, PAINTSTRUCT};
-    use windows::Win32::Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION};
+    use windows::Win32::Graphics::Gdi::PAINTSTRUCT;
+    use windows::Win32::Graphics::Gdi::{BeginPaint, BitBlt, EndPaint, SRCCOPY};
     use windows::Win32::UI::WindowsAndMessaging::GWLP_USERDATA;
     use windows::Win32::UI::WindowsAndMessaging::{
         DefWindowProcW, GetClientRect, GetWindowLongPtrW, HTTRANSPARENT, WM_ERASEBKGND,
@@ -386,15 +386,7 @@ unsafe extern "system" fn trail_overlay_wndproc(
                         let _ = GetClientRect(hwnd, &mut rect);
                         let width = rect.right - rect.left;
                         let height = rect.bottom - rect.top;
-                        let blend = BLENDFUNCTION {
-                            BlendOp: AC_SRC_OVER as u8,
-                            BlendFlags: 0,
-                            SourceConstantAlpha: 255,
-                            AlphaFormat: AC_SRC_ALPHA as u8,
-                        };
-                        let _ = AlphaBlend(
-                            hdc, 0, 0, width, height, mem_dc, 0, 0, width, height, blend,
-                        );
+                        let _ = BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
                     }
                 }
                 EndPaint(hwnd, &paint);
