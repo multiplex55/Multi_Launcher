@@ -191,6 +191,7 @@ impl<B: OverlayBackend> HintOverlay<B> {
 }
 
 #[cfg(windows)]
+#[derive(Debug)]
 struct TrailOverlaySurface {
     hwnd: windows::Win32::Foundation::HWND,
     mem_dc: windows::Win32::Graphics::Gdi::HDC,
@@ -201,13 +202,16 @@ struct TrailOverlaySurface {
 }
 
 #[cfg(windows)]
+unsafe impl Send for TrailOverlaySurface {}
+
+#[cfg(windows)]
 impl TrailOverlaySurface {
     fn new() -> Option<Self> {
         use std::mem;
         use std::ptr;
         use std::sync::Once;
         use windows::core::PCWSTR;
-        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Foundation::{COLORREF, HWND};
         use windows::Win32::Graphics::Gdi::{
             CreateCompatibleDC, CreateDIBSection, DeleteDC, SelectObject, BITMAPINFO,
             BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
@@ -215,9 +219,8 @@ impl TrailOverlaySurface {
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, RegisterClassW, SetLayeredWindowAttributes, SetWindowLongPtrW,
-            ShowWindow, UpdateWindow, COLORREF, GWLP_USERDATA, LWA_ALPHA, SW_SHOW, WNDCLASSW,
-            WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-            WS_POPUP,
+            ShowWindow, GWLP_USERDATA, LWA_ALPHA, SW_SHOW, WNDCLASSW, WS_EX_LAYERED,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
         };
         use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
@@ -258,12 +261,10 @@ impl TrailOverlaySurface {
                 HWND::default(),
                 None,
                 hinstance,
-                ptr::null(),
+                None,
             )
-        };
-        if hwnd.0 == 0 {
-            return None;
         }
+        .ok()?;
 
         let mem_dc = unsafe { CreateCompatibleDC(None) };
         if mem_dc.0.is_null() {
@@ -287,8 +288,9 @@ impl TrailOverlaySurface {
         };
         let mut bits: *mut core::ffi::c_void = ptr::null_mut();
         let dib =
-            unsafe { CreateDIBSection(mem_dc, &mut info, DIB_RGB_COLORS, &mut bits, None, 0) };
-        if dib.0 == 0 || bits.is_null() {
+            unsafe { CreateDIBSection(mem_dc, &mut info, DIB_RGB_COLORS, &mut bits, None, 0) }
+                .ok()?;
+        if bits.is_null() {
             unsafe {
                 DeleteDC(mem_dc);
                 windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
@@ -302,7 +304,6 @@ impl TrailOverlaySurface {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, mem_dc.0 as isize);
             let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
             let _ = ShowWindow(hwnd, SW_SHOW);
-            let _ = UpdateWindow(hwnd);
             if !bits.is_null() {
                 ptr::write_bytes(bits as *mut u8, 0, size_bytes);
             }
@@ -336,16 +337,16 @@ impl Drop for TrailOverlaySurface {
         use windows::Win32::Graphics::Gdi::{DeleteDC, DeleteObject, SelectObject};
         use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
         unsafe {
-            if self.mem_dc.0.is_null() == false {
+            if !self.mem_dc.0.is_null() {
                 let _ = SelectObject(self.mem_dc, self.old_bitmap);
             }
-            if self.dib.0 != 0 {
+            if !self.dib.0.is_null() {
                 let _ = DeleteObject(self.dib);
             }
-            if self.mem_dc.0.is_null() == false {
+            if !self.mem_dc.0.is_null() {
                 DeleteDC(self.mem_dc);
             }
-            if self.hwnd.0 != 0 {
+            if !self.hwnd.0.is_null() {
                 let _ = DestroyWindow(self.hwnd);
             }
         }
@@ -353,20 +354,19 @@ impl Drop for TrailOverlaySurface {
 }
 
 #[cfg(windows)]
-fn trail_overlay_wndproc(
+unsafe extern "system" fn trail_overlay_wndproc(
     hwnd: windows::Win32::Foundation::HWND,
     msg: u32,
     wparam: windows::Win32::Foundation::WPARAM,
     lparam: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
     use windows::Win32::Foundation::{LRESULT, RECT};
-    use windows::Win32::Graphics::Gdi::{
-        AlphaBlend, BeginPaint, EndPaint, GetClientRect, PAINTSTRUCT,
-    };
+    use windows::Win32::Graphics::Gdi::{AlphaBlend, BeginPaint, EndPaint, PAINTSTRUCT};
     use windows::Win32::Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION};
     use windows::Win32::UI::WindowsAndMessaging::GWLP_USERDATA;
     use windows::Win32::UI::WindowsAndMessaging::{
-        DefWindowProcW, GetWindowLongPtrW, HTTRANSPARENT, WM_ERASEBKGND, WM_NCHITTEST, WM_PAINT,
+        DefWindowProcW, GetClientRect, GetWindowLongPtrW, HTTRANSPARENT, WM_ERASEBKGND,
+        WM_NCHITTEST, WM_PAINT,
     };
 
     unsafe {
@@ -377,10 +377,10 @@ fn trail_overlay_wndproc(
                 let mut paint = PAINTSTRUCT::default();
                 let hdc = BeginPaint(hwnd, &mut paint);
                 if !hdc.0.is_null() {
-                    let mem_dc = windows::Win32::Graphics::Gdi::HDC(GetWindowLongPtrW(
-                        hwnd,
-                        GWLP_USERDATA,
-                    ) as isize);
+                    let mem_dc =
+                        windows::Win32::Graphics::Gdi::HDC(
+                            GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut core::ffi::c_void
+                        );
                     if !mem_dc.0.is_null() {
                         let mut rect = RECT::default();
                         let _ = GetClientRect(hwnd, &mut rect);
