@@ -199,6 +199,8 @@ struct TrailOverlaySurface {
     old_bitmap: windows::Win32::Graphics::Gdi::HGDIOBJ,
     bits: *mut u8,
     size_bytes: usize,
+    origin_x: i32,
+    origin_y: i32,
 }
 
 #[cfg(windows)]
@@ -238,11 +240,14 @@ impl TrailOverlaySurface {
             let _ = RegisterClassW(&wnd_class);
         });
 
-        let width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-        let height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-        if width <= 0 || height <= 0 {
-            return None;
-        }
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+        };
+
+        let vx = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+        let vy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+        let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+        let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
 
         let hwnd = unsafe {
             CreateWindowExW(
@@ -254,8 +259,8 @@ impl TrailOverlaySurface {
                 PCWSTR(class_name.as_ptr()),
                 PCWSTR::null(),
                 WS_POPUP,
-                0,
-                0,
+                vx,
+                vy,
                 width,
                 height,
                 HWND::default(),
@@ -302,8 +307,9 @@ impl TrailOverlaySurface {
 
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, mem_dc.0 as isize);
-            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_COLORKEY);
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_COLORKEY);
             let _ = ShowWindow(hwnd, SW_SHOW);
+
             if !bits.is_null() {
                 ptr::write_bytes(bits as *mut u8, 0, size_bytes);
             }
@@ -316,6 +322,8 @@ impl TrailOverlaySurface {
             old_bitmap,
             bits: bits as *mut u8,
             size_bytes,
+            origin_x: vx,
+            origin_y: vy,
         })
     }
 
@@ -441,8 +449,13 @@ impl OverlayBackend for DefaultOverlayBackend {
         let pen = unsafe { CreatePen(PS_SOLID, width.max(1.0) as i32, colorref) };
         let old_pen = unsafe { SelectObject(surface.mem_dc, pen) };
 
-        let _ = unsafe { MoveToEx(surface.mem_dc, from.0 as i32, from.1 as i32, None) };
-        let _ = unsafe { LineTo(surface.mem_dc, to.0 as i32, to.1 as i32) };
+        let fx = from.0 as i32 - surface.origin_x;
+        let fy = from.1 as i32 - surface.origin_y;
+        let tx = to.0 as i32 - surface.origin_x;
+        let ty = to.1 as i32 - surface.origin_y;
+
+        let _ = unsafe { MoveToEx(surface.mem_dc, fx, fy, None) };
+        let _ = unsafe { LineTo(surface.mem_dc, tx, ty) };
 
         unsafe {
             SelectObject(surface.mem_dc, old_pen);

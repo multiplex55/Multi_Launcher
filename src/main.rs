@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+// #![windows_subsystem = "windows"]
 
 use multi_launcher::actions::{load_actions, Action};
 use multi_launcher::gui::LauncherApp;
