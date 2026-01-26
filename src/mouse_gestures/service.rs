@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MouseGestureConfig {
     pub enabled: bool,
     pub trail_interval_ms: u64,
@@ -106,9 +106,14 @@ impl MouseGestureService {
     }
 
     pub fn update_config(&mut self, config: MouseGestureConfig) {
+        if self.config == config {
+            return;
+        }
+
         let enabled = config.enabled;
         let should_restart = self.worker.is_some();
         self.config = config;
+
         if enabled {
             if should_restart {
                 self.stop_running();
@@ -245,7 +250,6 @@ fn worker_loop(
                 }
                 HookEvent::RButtonUp => {
                     if active {
-                        println!("DEBUG: RBUTTONUP active");
                         if exceeded_deadzone {
                             let tokens = tracker.tokens_string();
                             if let Some(action) =
@@ -261,8 +265,6 @@ fn worker_loop(
                             send_right_click();
                             continue; // optional: avoid any further processing this tick
                         }
-
-                        println!("DEBUG: RBUTTONUP active");
                         active = false;
                         tracker.reset();
                         hint_overlay.reset();
