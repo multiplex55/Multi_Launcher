@@ -118,12 +118,18 @@ impl Default for MouseGestureRuntime {
             }
         })
         .ok();
-        Self {
+
+        let mut runtime = Self {
             settings: MouseGestureSettings::default(),
             plugin_enabled: true,
             db,
             watcher,
-        }
+        };
+
+        // Critical: apply defaults once so mg starts without needing a settings.json touch.
+        runtime.apply();
+
+        runtime
     }
 }
 
@@ -312,25 +318,42 @@ impl Plugin for MouseGesturesPlugin {
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
         let mut cfg =
             serde_json::from_value::<MouseGestureSettings>(value.clone()).unwrap_or_default();
-        ui.checkbox(&mut cfg.enabled, "Enable mouse gestures");
-        ui.checkbox(&mut cfg.require_button, "Require gesture button held");
+
+        let mut changed = false;
+
+        changed |= ui
+            .checkbox(&mut cfg.enabled, "Enable mouse gestures")
+            .changed();
+        changed |= ui
+            .checkbox(&mut cfg.require_button, "Require gesture button held")
+            .changed();
+
         ui.horizontal(|ui| {
             ui.label("Minimum distance (px)");
-            ui.add(
-                egui::DragValue::new(&mut cfg.min_distance_px)
-                    .clamp_range(1.0..=500.0)
-                    .speed(1.0),
-            );
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut cfg.min_distance_px)
+                        .clamp_range(1.0..=500.0)
+                        .speed(1.0),
+                )
+                .changed();
         });
+
         ui.horizontal(|ui| {
             ui.label("Max duration (ms)");
-            ui.add(
-                egui::DragValue::new(&mut cfg.max_duration_ms)
-                    .clamp_range(50..=10_000)
-                    .speed(10),
-            );
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut cfg.max_duration_ms)
+                        .clamp_range(50..=10_000)
+                        .speed(10),
+                )
+                .changed();
         });
-        ui.checkbox(&mut cfg.show_trail, "Show trail overlay");
+
+        changed |= ui
+            .checkbox(&mut cfg.show_trail, "Show trail overlay")
+            .changed();
+
         ui.horizontal(|ui| {
             ui.label("Trail color");
             let mut color = egui::Color32::from_rgba_unmultiplied(
@@ -339,37 +362,55 @@ impl Plugin for MouseGesturesPlugin {
                 cfg.trail_color[2],
                 cfg.trail_color[3],
             );
-            if ui.color_edit_button_srgba(&mut color).changed() {
+
+            let resp = ui.color_edit_button_srgba(&mut color);
+            if resp.changed() {
                 cfg.trail_color = [color.r(), color.g(), color.b(), color.a()];
+                changed = true;
             }
         });
+
         ui.horizontal(|ui| {
             ui.label("Trail width");
-            ui.add(
-                egui::DragValue::new(&mut cfg.trail_width)
-                    .clamp_range(1.0..=20.0)
-                    .speed(0.5),
-            );
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut cfg.trail_width)
+                        .clamp_range(1.0..=20.0)
+                        .speed(0.5),
+                )
+                .changed();
         });
-        ui.checkbox(&mut cfg.show_hint, "Show hint overlay");
+
+        changed |= ui
+            .checkbox(&mut cfg.show_hint, "Show hint overlay")
+            .changed();
+
         ui.horizontal(|ui| {
             ui.label("Hint offset (x, y)");
-            ui.add(
-                egui::DragValue::new(&mut cfg.hint_offset.0)
-                    .clamp_range(-200.0..=200.0)
-                    .speed(1.0),
-            );
-            ui.add(
-                egui::DragValue::new(&mut cfg.hint_offset.1)
-                    .clamp_range(-200.0..=200.0)
-                    .speed(1.0),
-            );
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut cfg.hint_offset.0)
+                        .clamp_range(-200.0..=200.0)
+                        .speed(1.0),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut cfg.hint_offset.1)
+                        .clamp_range(-200.0..=200.0)
+                        .speed(1.0),
+                )
+                .changed();
         });
-        match serde_json::to_value(&cfg) {
-            Ok(v) => *value = v,
-            Err(e) => tracing::error!(?e, "failed to serialize mouse gesture settings"),
+
+        // Only write+apply when something changed.
+        if changed {
+            match serde_json::to_value(&cfg) {
+                Ok(v) => *value = v,
+                Err(e) => tracing::error!(?e, "failed to serialize mouse gesture settings"),
+            }
+            self.settings = cfg.clone();
+            apply_runtime_settings(cfg);
         }
-        self.settings = cfg.clone();
-        apply_runtime_settings(cfg);
     }
 }

@@ -71,6 +71,11 @@ fn spawn_gui(
         &settings.plugin_settings,
         Arc::clone(&actions),
     );
+    // Ensure MG service starts even when there is no settings.json/plugin_settings entry yet.
+    // Also ensures it is OFF if the plugin is disabled in enabled_plugins.
+    multi_launcher::plugins::mouse_gestures::sync_enabled_plugins(
+        settings.enabled_plugins.as_ref(),
+    );
 
     let actions_path = "actions.json".to_string();
     let settings_path_for_window = settings_path.clone();

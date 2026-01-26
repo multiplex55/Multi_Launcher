@@ -6,6 +6,7 @@ struct RecordedCalls {
     trails: Vec<TrailCall>,
     hints: Vec<HintCall>,
     hides: usize,
+    clears: usize,
 }
 
 #[derive(Debug, PartialEq)]
@@ -44,6 +45,12 @@ impl OverlayBackend for RecordingBackend {
         }
     }
 
+    fn clear_trail(&mut self) {
+        if let Ok(mut guard) = self.calls.lock() {
+            guard.clears += 1;
+        }
+    }
+
     fn show_hint(&mut self, text: &str, position: (f32, f32)) {
         if let Ok(mut guard) = self.calls.lock() {
             guard.hints.push(HintCall {
@@ -73,6 +80,7 @@ fn trail_starts_after_threshold() {
     {
         let guard = calls.lock().expect("lock calls");
         assert!(guard.trails.is_empty());
+        assert_eq!(guard.clears, 1);
     }
 
     overlay.update_position((12.0, 0.0));
@@ -92,6 +100,7 @@ fn trail_starts_after_threshold() {
             }
         ]
     );
+    assert_eq!(guard.clears, 1);
 }
 
 #[test]
@@ -126,4 +135,21 @@ fn hint_updates_on_tokens_and_hides_when_disabled() {
 
     let guard = calls.lock().expect("lock calls");
     assert_eq!(guard.hides, 1);
+}
+
+#[test]
+fn trail_draws_incrementally_without_redraws() {
+    let backend = RecordingBackend::default();
+    let calls = backend.calls();
+    let mut overlay = TrailOverlay::new(backend, true, [0, 0, 0, 0], 1.0, 0.0);
+
+    overlay.reset((0.0, 0.0));
+    let point_count = 100;
+    for idx in 1..=point_count {
+        overlay.update_position((idx as f32 * 2.0, 0.0));
+    }
+
+    let guard = calls.lock().expect("lock calls");
+    assert_eq!(guard.clears, 1);
+    assert_eq!(guard.trails.len(), point_count);
 }

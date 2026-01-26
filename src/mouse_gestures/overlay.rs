@@ -1,5 +1,6 @@
 pub trait OverlayBackend: Send {
     fn draw_trail_segment(&mut self, from: (f32, f32), to: (f32, f32), color: [u8; 4], width: f32);
+    fn clear_trail(&mut self);
     fn show_hint(&mut self, text: &str, position: (f32, f32));
     fn hide_hint(&mut self);
 }
@@ -42,6 +43,9 @@ impl<B: OverlayBackend> TrailOverlay<B> {
     }
 
     pub fn reset(&mut self, start_point: (f32, f32)) {
+        if self.enabled {
+            self.backend.clear_trail();
+        }
         self.start_point = Some(start_point);
         self.last_point = None;
         self.started = false;
@@ -187,38 +191,282 @@ impl<B: OverlayBackend> HintOverlay<B> {
 }
 
 #[cfg(windows)]
-#[derive(Default, Debug)]
+#[derive(Debug)]
+struct TrailOverlaySurface {
+    hwnd: windows::Win32::Foundation::HWND,
+    mem_dc: windows::Win32::Graphics::Gdi::HDC,
+    dib: windows::Win32::Graphics::Gdi::HBITMAP,
+    old_bitmap: windows::Win32::Graphics::Gdi::HGDIOBJ,
+    bits: *mut u8,
+    size_bytes: usize,
+    origin_x: i32,
+    origin_y: i32,
+}
+
+#[cfg(windows)]
+unsafe impl Send for TrailOverlaySurface {}
+
+#[cfg(windows)]
+impl TrailOverlaySurface {
+    fn new() -> Option<Self> {
+        use std::mem;
+        use std::ptr;
+        use std::sync::Once;
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{COLORREF, HWND};
+        use windows::Win32::Graphics::Gdi::{
+            CreateCompatibleDC, CreateDIBSection, DeleteDC, SelectObject, BITMAPINFO,
+            BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        };
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, RegisterClassW, SetLayeredWindowAttributes, SetWindowLongPtrW,
+            ShowWindow, GWLP_USERDATA, LWA_COLORKEY, SW_SHOW, WNDCLASSW, WS_EX_LAYERED,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+
+        static REGISTER: Once = Once::new();
+        let class_name = widestring("MultiLauncherTrailOverlay");
+        let hinstance = unsafe { GetModuleHandleW(PCWSTR::null()) }.ok()?;
+
+        REGISTER.call_once(|| unsafe {
+            let wnd_class = WNDCLASSW {
+                hInstance: hinstance.into(),
+                lpszClassName: PCWSTR(class_name.as_ptr()),
+                lpfnWndProc: Some(trail_overlay_wndproc),
+                ..Default::default()
+            };
+            let _ = RegisterClassW(&wnd_class);
+        });
+
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+        };
+
+        let vx = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+        let vy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+        let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+        let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_LAYERED
+                    | WS_EX_TRANSPARENT
+                    | WS_EX_TOOLWINDOW
+                    | WS_EX_TOPMOST
+                    | WS_EX_NOACTIVATE,
+                PCWSTR(class_name.as_ptr()),
+                PCWSTR::null(),
+                WS_POPUP,
+                vx,
+                vy,
+                width,
+                height,
+                HWND::default(),
+                None,
+                hinstance,
+                None,
+            )
+        }
+        .ok()?;
+
+        let mem_dc = unsafe { CreateCompatibleDC(None) };
+        if mem_dc.0.is_null() {
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+            }
+            return None;
+        }
+
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0 as u32,
+                ..Default::default()
+            },
+            bmiColors: [Default::default()],
+        };
+        let mut bits: *mut core::ffi::c_void = ptr::null_mut();
+        let dib =
+            unsafe { CreateDIBSection(mem_dc, &mut info, DIB_RGB_COLORS, &mut bits, None, 0) }
+                .ok()?;
+        if bits.is_null() {
+            unsafe {
+                DeleteDC(mem_dc);
+                windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+            }
+            return None;
+        }
+        let old_bitmap = unsafe { SelectObject(mem_dc, dib) };
+        let size_bytes = width as usize * height as usize * 4;
+
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, mem_dc.0 as isize);
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_COLORKEY);
+            let _ = ShowWindow(hwnd, SW_SHOW);
+
+            if !bits.is_null() {
+                ptr::write_bytes(bits as *mut u8, 0, size_bytes);
+            }
+        }
+
+        Some(Self {
+            hwnd,
+            mem_dc,
+            dib,
+            old_bitmap,
+            bits: bits as *mut u8,
+            size_bytes,
+            origin_x: vx,
+            origin_y: vy,
+        })
+    }
+
+    fn clear(&mut self) {
+        use std::ptr;
+        use windows::Win32::Graphics::Gdi::InvalidateRect;
+        if !self.bits.is_null() && self.size_bytes > 0 {
+            unsafe {
+                ptr::write_bytes(self.bits, 0, self.size_bytes);
+                let _ = InvalidateRect(self.hwnd, None, false);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for TrailOverlaySurface {
+    fn drop(&mut self) {
+        use windows::Win32::Graphics::Gdi::{DeleteDC, DeleteObject, SelectObject};
+        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+        unsafe {
+            if !self.mem_dc.0.is_null() {
+                let _ = SelectObject(self.mem_dc, self.old_bitmap);
+            }
+            if !self.dib.0.is_null() {
+                let _ = DeleteObject(self.dib);
+            }
+            if !self.mem_dc.0.is_null() {
+                DeleteDC(self.mem_dc);
+            }
+            if !self.hwnd.0.is_null() {
+                let _ = DestroyWindow(self.hwnd);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn trail_overlay_wndproc(
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::Foundation::{LRESULT, RECT};
+    use windows::Win32::Graphics::Gdi::PAINTSTRUCT;
+    use windows::Win32::Graphics::Gdi::{BeginPaint, BitBlt, EndPaint, SRCCOPY};
+    use windows::Win32::UI::WindowsAndMessaging::GWLP_USERDATA;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DefWindowProcW, GetClientRect, GetWindowLongPtrW, HTTRANSPARENT, WM_ERASEBKGND,
+        WM_NCHITTEST, WM_PAINT,
+    };
+
+    unsafe {
+        match msg {
+            WM_NCHITTEST => return LRESULT(HTTRANSPARENT as isize),
+            WM_ERASEBKGND => return LRESULT(1),
+            WM_PAINT => {
+                let mut paint = PAINTSTRUCT::default();
+                let hdc = BeginPaint(hwnd, &mut paint);
+                if !hdc.0.is_null() {
+                    let mem_dc =
+                        windows::Win32::Graphics::Gdi::HDC(
+                            GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut core::ffi::c_void
+                        );
+                    if !mem_dc.0.is_null() {
+                        let mut rect = RECT::default();
+                        let _ = GetClientRect(hwnd, &mut rect);
+                        let width = rect.right - rect.left;
+                        let height = rect.bottom - rect.top;
+                        let _ = BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
+                    }
+                }
+                EndPaint(hwnd, &paint);
+                return LRESULT(0);
+            }
+            _ => {}
+        }
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+}
+
+#[cfg(windows)]
+fn widestring(value: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    std::ffi::OsStr::new(value)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+#[cfg(windows)]
+#[derive(Debug, Default)]
 pub struct DefaultOverlayBackend {
+    trail_surface: Option<TrailOverlaySurface>,
     last_rect: Option<windows::Win32::Foundation::RECT>,
+}
+
+#[cfg(windows)]
+impl DefaultOverlayBackend {
+    fn ensure_trail_surface(&mut self) -> Option<&mut TrailOverlaySurface> {
+        if self.trail_surface.is_none() {
+            self.trail_surface = TrailOverlaySurface::new();
+        }
+        self.trail_surface.as_mut()
+    }
 }
 
 #[cfg(windows)]
 impl OverlayBackend for DefaultOverlayBackend {
     fn draw_trail_segment(&mut self, from: (f32, f32), to: (f32, f32), color: [u8; 4], width: f32) {
         use windows::Win32::Foundation::COLORREF;
+        use windows::Win32::Graphics::Gdi::InvalidateRect;
         use windows::Win32::Graphics::Gdi::{
-            CreatePen, DeleteObject, GetDC, LineTo, MoveToEx, ReleaseDC, SelectObject, PS_SOLID,
+            CreatePen, DeleteObject, LineTo, MoveToEx, SelectObject, PS_SOLID,
         };
-        use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
 
-        let hwnd = unsafe { GetDesktopWindow() };
-        let hdc = unsafe { GetDC(hwnd) };
-        if hdc.0.is_null() {
+        let Some(surface) = self.ensure_trail_surface() else {
             return;
-        }
-
+        };
         let colorref =
             COLORREF((color[0] as u32) | ((color[1] as u32) << 8) | ((color[2] as u32) << 16));
         let pen = unsafe { CreatePen(PS_SOLID, width.max(1.0) as i32, colorref) };
-        let old_pen = unsafe { SelectObject(hdc, pen) };
+        let old_pen = unsafe { SelectObject(surface.mem_dc, pen) };
 
-        let _ = unsafe { MoveToEx(hdc, from.0 as i32, from.1 as i32, None) };
-        let _ = unsafe { LineTo(hdc, to.0 as i32, to.1 as i32) };
+        let fx = from.0 as i32 - surface.origin_x;
+        let fy = from.1 as i32 - surface.origin_y;
+        let tx = to.0 as i32 - surface.origin_x;
+        let ty = to.1 as i32 - surface.origin_y;
+
+        let _ = unsafe { MoveToEx(surface.mem_dc, fx, fy, None) };
+        let _ = unsafe { LineTo(surface.mem_dc, tx, ty) };
 
         unsafe {
-            SelectObject(hdc, old_pen);
+            SelectObject(surface.mem_dc, old_pen);
             let _ = DeleteObject(pen);
-            ReleaseDC(hwnd, hdc);
+            let _ = InvalidateRect(surface.hwnd, None, false);
+        }
+    }
+
+    fn clear_trail(&mut self) {
+        if let Some(surface) = self.ensure_trail_surface() {
+            surface.clear();
         }
     }
 
@@ -289,6 +537,8 @@ impl OverlayBackend for DefaultOverlayBackend {
         _width: f32,
     ) {
     }
+
+    fn clear_trail(&mut self) {}
 
     fn show_hint(&mut self, _text: &str, _position: (f32, f32)) {}
 

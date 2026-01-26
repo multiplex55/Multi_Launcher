@@ -815,6 +815,9 @@ impl LauncherApp {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
         self.enabled_plugins = enabled_plugins;
+
+        // Keep MG hook in lockstep with whether the plugin is enabled in the UI/settings.
+        crate::plugins::mouse_gestures::sync_enabled_plugins(self.enabled_plugins.as_ref());
         if self.enabled_plugins.is_some() {
             self.update_command_cache();
         }

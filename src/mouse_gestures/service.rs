@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MouseGestureConfig {
     pub enabled: bool,
     pub trail_interval_ms: u64,
@@ -106,9 +106,14 @@ impl MouseGestureService {
     }
 
     pub fn update_config(&mut self, config: MouseGestureConfig) {
+        if self.config == config {
+            return;
+        }
+
         let enabled = config.enabled;
         let should_restart = self.worker.is_some();
         self.config = config;
+
         if enabled {
             if should_restart {
                 self.stop_running();
@@ -210,6 +215,20 @@ fn worker_loop(
     let start_time = Instant::now();
 
     loop {
+        #[cfg(windows)]
+        {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+            };
+
+            let mut msg = MSG::default();
+            while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() } {
+                unsafe {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+        }
         if stop_rx.try_recv().is_ok() {
             break;
         }
@@ -239,7 +258,12 @@ fn worker_loop(
                                 send_event(WatchEvent::ExecuteAction(action));
                             }
                         } else {
+                            // Reset state first, then inject.
+                            active = false;
+                            tracker.reset();
+                            hint_overlay.reset();
                             send_right_click();
+                            continue; // optional: avoid any further processing this tick
                         }
                         active = false;
                         tracker.reset();
@@ -319,11 +343,17 @@ fn get_cursor_position() -> Option<(f32, f32)> {
 }
 
 #[cfg(windows)]
+const MG_INJECT_TAG: usize = 0x4D47_494E_4A; // "MG_INJ"
+
+#[cfg(windows)]
 fn send_right_click() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
         MOUSEINPUT,
     };
+
+    // Prevent the hook from consuming the injected click (and re-triggering itself)
+    hook_dispatch().set_injecting(true);
 
     let down = INPUT {
         r#type: INPUT_MOUSE,
@@ -334,10 +364,11 @@ fn send_right_click() {
                 mouseData: 0,
                 dwFlags: MOUSEEVENTF_RIGHTDOWN,
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: MG_INJECT_TAG,
             },
         },
     };
+
     let up = INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
@@ -347,21 +378,29 @@ fn send_right_click() {
                 mouseData: 0,
                 dwFlags: MOUSEEVENTF_RIGHTUP,
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: MG_INJECT_TAG,
             },
         },
     };
 
     let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
+
+    hook_dispatch().set_injecting(false);
 }
 
 #[cfg(not(windows))]
 fn send_right_click() {}
 
 #[cfg(windows)]
+struct HookThread {
+    thread_id: u32,
+    join: std::thread::JoinHandle<()>,
+}
+
+#[cfg(windows)]
 #[derive(Default)]
 pub struct DefaultHookBackend {
-    hook: Option<windows::Win32::UI::WindowsAndMessaging::HHOOK>,
+    hook_thread: Option<HookThread>,
 }
 
 #[cfg(windows)]
@@ -370,43 +409,110 @@ unsafe impl Send for DefaultHookBackend {}
 #[cfg(windows)]
 impl HookBackend for DefaultHookBackend {
     fn install(&mut self, sender: Sender<HookEvent>) -> anyhow::Result<()> {
-        if self.hook.is_some() {
+        if self.hook_thread.is_some() {
             return Ok(());
         }
 
+        // Put the sender where the hook proc can see it.
         hook_dispatch().set_sender(Some(sender));
         hook_dispatch().set_enabled(true);
 
+        use std::time::Duration;
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-        use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WH_MOUSE_LL};
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW, TranslateMessage, MSG,
+            PM_NOREMOVE, WM_QUIT,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL,
+        };
 
-        let hmodule = unsafe { GetModuleHandleW(None) }?;
-        let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), hmodule, 0) }?;
-        if hook.0.is_null() {
-            hook_dispatch().set_enabled(false);
-            hook_dispatch().set_sender(None);
-            return Err(anyhow!(windows::core::Error::from_win32()));
-        }
-        self.hook = Some(hook);
+        // Handshake so install() only returns once the hook thread is actually ready.
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<anyhow::Result<u32>>(1);
+
+        let join = std::thread::spawn(move || {
+            // Ensure the thread has a message queue.
+            let mut msg = MSG::default();
+            unsafe {
+                PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+            }
+
+            let thread_id = unsafe { GetCurrentThreadId() };
+
+            let hmodule = match unsafe { GetModuleHandleW(None) } {
+                Ok(h) => h,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(anyhow!(e)));
+                    return;
+                }
+            };
+
+            let hook = match unsafe {
+                SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), hmodule, 0)
+            } {
+                Ok(h) if !h.0.is_null() => h,
+                Ok(_) => {
+                    let _ = ready_tx.send(Err(anyhow!(windows::core::Error::from_win32())));
+                    return;
+                }
+                Err(e) => {
+                    let _ = ready_tx.send(Err(anyhow!(e)));
+                    return;
+                }
+            };
+
+            let _ = ready_tx.send(Ok(thread_id));
+
+            // Message loop keeps WH_MOUSE_LL callbacks flowing.
+            loop {
+                let r = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+                if r.0 == 0 {
+                    // WM_QUIT
+                    break;
+                }
+                if r.0 == -1 {
+                    break;
+                }
+                unsafe {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+
+            unsafe {
+                let _ = UnhookWindowsHookEx(hook);
+            }
+        });
+
+        let thread_id = ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| anyhow!("hook thread did not signal readiness"))??;
+
+        self.hook_thread = Some(HookThread { thread_id, join });
         Ok(())
     }
 
     fn uninstall(&mut self) -> anyhow::Result<()> {
+        // Stop dispatch first to avoid any new work while shutting down.
         hook_dispatch().set_enabled(false);
         hook_dispatch().set_sender(None);
 
-        use windows::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx;
-
-        if let Some(hook) = self.hook.take() {
+        if let Some(th) = self.hook_thread.take() {
+            use windows::Win32::Foundation::{LPARAM, WPARAM};
+            use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
             unsafe {
-                let _ = UnhookWindowsHookEx(hook);
+                let _ = PostThreadMessageW(th.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
             }
+            let _ = th.join.join();
         }
+
         Ok(())
     }
 
     fn is_installed(&self) -> bool {
-        self.hook.is_some()
+        self.hook_thread.is_some()
     }
 }
 
@@ -507,6 +613,7 @@ impl MockHookHandle {
 #[cfg(windows)]
 struct HookDispatch {
     enabled: AtomicBool,
+    injecting: AtomicBool,
     sender: Mutex<Option<Sender<HookEvent>>>,
 }
 
@@ -514,6 +621,14 @@ struct HookDispatch {
 impl HookDispatch {
     fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Release);
+    }
+
+    fn set_injecting(&self, injecting: bool) {
+        self.injecting.store(injecting, Ordering::Release);
+    }
+
+    fn is_injecting(&self) -> bool {
+        self.injecting.load(Ordering::Acquire)
     }
 
     fn set_sender(&self, sender: Option<Sender<HookEvent>>) {
@@ -530,6 +645,7 @@ static HOOK_DISPATCH: OnceCell<HookDispatch> = OnceCell::new();
 fn hook_dispatch() -> &'static HookDispatch {
     HOOK_DISPATCH.get_or_init(|| HookDispatch {
         enabled: AtomicBool::new(false),
+        injecting: AtomicBool::new(false),
         sender: Mutex::new(None),
     })
 }
@@ -544,11 +660,31 @@ unsafe extern "system" fn mouse_hook_proc(
         CallNextHookEx, HC_ACTION, WM_RBUTTONDOWN, WM_RBUTTONUP,
     };
 
+    use windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
+
     if n_code == HC_ACTION as i32 {
         let msg = w_param.0 as u32;
+
         if msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP {
             let dispatch = hook_dispatch();
+
             if dispatch.enabled.load(Ordering::Acquire) {
+                // If we're injecting (or the event is injected), do NOT consume it and do NOT forward to worker.
+                let info = &*(l_param.0 as *const MSLLHOOKSTRUCT);
+
+                // Flags: 0x1 = LLMHF_INJECTED, 0x2 = LLMHF_LOWER_IL_INJECTED
+                let injected_flagged = (info.flags & 0x1) != 0 || (info.flags & 0x2) != 0;
+                let injected_tagged = info.dwExtraInfo == MG_INJECT_TAG;
+
+                if dispatch.is_injecting() || injected_flagged || injected_tagged {
+                    return CallNextHookEx(
+                        windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
+                        n_code,
+                        w_param,
+                        l_param,
+                    );
+                }
+
                 if let Ok(guard) = dispatch.sender.try_lock() {
                     if let Some(sender) = guard.as_ref() {
                         let event = if msg == WM_RBUTTONDOWN {
@@ -559,6 +695,8 @@ unsafe extern "system" fn mouse_hook_proc(
                         let _ = sender.send(event);
                     }
                 }
+
+                // Consume physical RMB while MG is enabled
                 return windows::Win32::Foundation::LRESULT(1);
             }
         }

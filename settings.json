@@ -51,6 +51,7 @@
   "disable_timer_updates": false,
   "preserve_command": false,
   "clear_query_after_run": true,
+  "require_confirm_destructive": true,
   "net_refresh": 1.0,
   "net_unit": "auto",
   "screenshot_dir": null,
@@ -58,12 +59,34 @@
   "screenshot_auto_save": true,
   "screenshot_use_editor": true,
   "plugin_settings": {
+    "calculator": {
+      "save_on_enter": false
+    },
+    "browser_tabs": {
+      "recalc_each_query": false
+    },
+    "screenshot": {
+      "screenshot_auto_save": true,
+      "screenshot_dir": "",
+      "screenshot_save_file": false,
+      "screenshot_use_editor": true
+    },
+    "clipboard": {
+      "max_entries": 20
+    },
+    "shell": {
+      "open_in_wezterm": false
+    },
+    "history": {
+      "max_entries": 100
+    },
     "network": {
       "refresh_rate": 1.0,
       "unit": "auto"
     },
-    "history": {
-      "max_entries": 100
+    "stopwatch": {
+      "precision": 2,
+      "refresh_rate": 1.0
     },
     "color_picker": {
       "color": [
@@ -72,29 +95,15 @@
         0,
         255
       ]
-    },
-    "browser_tabs": {
-      "recalc_each_query": false
-    },
-    "stopwatch": {
-      "precision": 2,
-      "refresh_rate": 1.0
-    },
-    "screenshot": {
-      "screenshot_auto_save": true,
-      "screenshot_dir": "",
-      "screenshot_save_file": false,
-      "screenshot_use_editor": true
-    },
-    "shell": {
-      "open_in_wezterm": false
-    },
-    "calculator": {
-      "save_on_enter": false
-    },
-    "clipboard": {
-      "max_entries": 20
     }
   },
-  "pinned_panels": []
+  "pinned_panels": [],
+  "reduce_dashboard_work_when_unfocused": true,
+  "show_dashboard_diagnostics": false,
+  "dashboard": {
+    "enabled": true,
+    "config_path": null,
+    "default_location": null,
+    "show_when_query_empty": true
+  }
 }
