@@ -1,4 +1,4 @@
-// #![windows_subsystem = "windows"]
+#![windows_subsystem = "windows"]
 
 use multi_launcher::actions::{load_actions, Action};
 use multi_launcher::gui::LauncherApp;
@@ -70,6 +70,11 @@ fn spawn_gui(
         true,
         &settings.plugin_settings,
         Arc::clone(&actions),
+    );
+    // Ensure MG service starts even when there is no settings.json/plugin_settings entry yet.
+    // Also ensures it is OFF if the plugin is disabled in enabled_plugins.
+    multi_launcher::plugins::mouse_gestures::sync_enabled_plugins(
+        settings.enabled_plugins.as_ref(),
     );
 
     let actions_path = "actions.json".to_string();

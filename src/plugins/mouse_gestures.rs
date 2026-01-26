@@ -118,12 +118,18 @@ impl Default for MouseGestureRuntime {
             }
         })
         .ok();
-        Self {
+
+        let mut runtime = Self {
             settings: MouseGestureSettings::default(),
             plugin_enabled: true,
             db,
             watcher,
-        }
+        };
+
+        // Critical: apply defaults once so mg starts without needing a settings.json touch.
+        runtime.apply();
+
+        runtime
     }
 }
 
