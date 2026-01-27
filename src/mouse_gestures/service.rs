@@ -58,6 +58,8 @@ use crate::gui::{send_event, WatchEvent};
 pub enum HookEvent {
     RButtonDown,
     RButtonUp,
+    WheelUp,
+    WheelDown,
 }
 
 pub trait HookBackend: Send {
@@ -225,6 +227,11 @@ fn worker_loop(
     let mut last_trail = Instant::now();
     let mut last_recognition = Instant::now();
     let mut start_time = Instant::now();
+    let mut selected_binding_idx: usize = 0;
+    let mut cached_tokens = String::new();
+    let mut cached_actions: Vec<crate::actions::Action> = Vec::new();
+    let mut cached_gesture_label: Option<String> = None;
+
 
     loop {
         #[cfg(windows)]
@@ -252,6 +259,12 @@ fn worker_loop(
                     active = true;
                     exceeded_deadzone = false;
                     tracker.reset();
+                    #[cfg(windows)]
+                    hook_dispatch().set_tracking(false);
+                    selected_binding_idx = 0;
+                    cached_tokens.clear();
+                    cached_actions.clear();
+                    cached_gesture_label = None;
                     start_time = Instant::now();
                     let pos = get_cursor_position().unwrap_or(start_pos);
                     start_pos = pos;
@@ -296,13 +309,19 @@ fn worker_loop(
 
                         // If we produced any tokens, treat it as a gesture (swallow right click).
                         if !tokens.is_empty() {
-                            if let Some(action) =
-                                match_binding_action(&db, &tokens, config.dir_mode)
+                            // Execute the currently selected binding (wheel-cycled) if there are multiple.
+                            if let Some((_gesture_label, actions)) =
+                                match_binding_actions(&db, &tokens, config.dir_mode)
                             {
-                                send_event(WatchEvent::ExecuteAction(action));
+                                if !actions.is_empty() {
+                                    let idx = selected_binding_idx % actions.len();
+                                    if let Some(action) = actions.get(idx).cloned() {
+                                        send_event(WatchEvent::ExecuteAction(action));
+                                    }
+                                }
                             } else {
-                                // Optional: leave as swallow-noop to avoid context menu on unknown gestures.
-                                // If you want fallback to right click on unknown gestures, call send_right_click() here.
+                                // No match -> swallow-noop (keeps context menu from popping).
+                                // If you prefer fallback to right click on unknown gestures, call send_right_click() here.
                             }
                         } else {
                             // No tokens => normal right click
@@ -317,8 +336,36 @@ fn worker_loop(
                         active = false;
                         exceeded_deadzone = false;
                         tracker.reset();
+                        selected_binding_idx = 0;
+                        cached_tokens.clear();
+                        cached_actions.clear();
+                        cached_gesture_label = None;
                     }
                 }
+
+                HookEvent::WheelUp | HookEvent::WheelDown => {
+                    if active && exceeded_deadzone && cached_actions.len() > 1 {
+                        let len = cached_actions.len();
+                        match event {
+                            HookEvent::WheelUp => {
+                                selected_binding_idx = (selected_binding_idx + 1) % len;
+                            }
+                            HookEvent::WheelDown => {
+                                selected_binding_idx = (selected_binding_idx + len - 1) % len;
+                            }
+                            _ => {}
+                        }
+
+                        if let Some(pos) = get_cursor_position() {
+                            cursor_pos = pos;
+                            let best_match = cached_gesture_label.as_deref().map(|label| {
+                                format_selected_hint(label, &cached_actions, selected_binding_idx)
+                            });
+                            hint_overlay.update(&cached_tokens, best_match.as_deref(), pos);
+                        }
+                    }
+                }
+
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -329,8 +376,10 @@ fn worker_loop(
                 let dx = pos.0 - start_pos.0;
                 let dy = pos.1 - start_pos.1;
                 let dist_sq = dx * dx + dy * dy;
-                if dist_sq >= config.deadzone_px * config.deadzone_px {
+                if !exceeded_deadzone && dist_sq >= config.deadzone_px * config.deadzone_px {
                     exceeded_deadzone = true;
+                    #[cfg(windows)]
+                    hook_dispatch().set_tracking(true);
                 }
 
                 trail_overlay.update_position(pos);
@@ -339,7 +388,24 @@ fn worker_loop(
                     let ms = start_time.elapsed().as_millis() as u64;
                     let _ = tracker.feed_point(pos, ms);
                     let tokens = tracker.tokens_string();
-                    let best_match = best_match_name(&db, &tokens, config.dir_mode);
+                    if tokens != cached_tokens {
+                        cached_tokens = tokens.to_string();
+                        selected_binding_idx = 0;
+                        if let Some((gesture_label, actions)) =
+                            match_binding_actions(&db, &tokens, config.dir_mode)
+                        {
+                            cached_gesture_label = Some(gesture_label);
+                            cached_actions = actions;
+                        } else {
+                            cached_gesture_label = None;
+                            cached_actions.clear();
+                        }
+                    }
+
+                    let best_match = cached_gesture_label.as_deref().map(|label| {
+                        format_selected_hint(label, &cached_actions, selected_binding_idx)
+                    });
+
                     hint_overlay.update(&tokens, best_match.as_deref(), pos);
                     last_recognition = Instant::now();
                 }
@@ -360,6 +426,43 @@ fn match_binding_action(
         .match_binding_owned(tokens, dir_mode)
         .map(|(label, binding)| binding.to_action(&label))
 }
+
+fn match_binding_actions(
+    db: &Option<SharedGestureDb>,
+    tokens: &str,
+    dir_mode: DirMode,
+) -> Option<(String, Vec<crate::actions::Action>)> {
+    let db = db.as_ref()?;
+    let guard = db.lock().ok()?;
+    let (gesture_label, bindings) = guard.match_bindings_owned(tokens, dir_mode)?;
+    let actions = bindings
+        .iter()
+        .map(|binding| binding.to_action(&gesture_label))
+        .collect::<Vec<_>>();
+    Some((gesture_label, actions))
+}
+
+fn format_selected_hint(
+    gesture_label: &str,
+    actions: &[crate::actions::Action],
+    selected_idx: usize,
+) -> String {
+    if actions.is_empty() {
+        return gesture_label.to_string();
+    }
+    let idx = selected_idx.min(actions.len().saturating_sub(1));
+    if actions.len() == 1 {
+        format!("{gesture_label}: {}", actions[idx].label)
+    } else {
+        format!(
+            "{gesture_label}: {} [{}/{}]",
+            actions[idx].label,
+            idx + 1,
+            actions.len()
+        )
+    }
+}
+
 
 fn best_match_name(
     db: &Option<SharedGestureDb>,
@@ -464,6 +567,7 @@ impl HookBackend for DefaultHookBackend {
 
         // Put the sender where the hook proc can see it.
         hook_dispatch().set_sender(Some(sender));
+        hook_dispatch().set_tracking(false);
         hook_dispatch().set_enabled(true);
 
         use std::time::Duration;
@@ -546,6 +650,7 @@ impl HookBackend for DefaultHookBackend {
     fn uninstall(&mut self) -> anyhow::Result<()> {
         // Stop dispatch first to avoid any new work while shutting down.
         hook_dispatch().set_enabled(false);
+        hook_dispatch().set_tracking(false);
         hook_dispatch().set_sender(None);
 
         if let Some(th) = self.hook_thread.take() {
@@ -662,6 +767,7 @@ impl MockHookHandle {
 #[cfg(windows)]
 struct HookDispatch {
     enabled: AtomicBool,
+    tracking: AtomicBool,
     injecting: AtomicBool,
     sender: Mutex<Option<Sender<HookEvent>>>,
 }
@@ -670,6 +776,14 @@ struct HookDispatch {
 impl HookDispatch {
     fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Release);
+    }
+
+    fn set_tracking(&self, tracking: bool) {
+        self.tracking.store(tracking, Ordering::Release);
+    }
+
+    fn is_tracking(&self) -> bool {
+        self.tracking.load(Ordering::Acquire)
     }
 
     fn set_injecting(&self, injecting: bool) {
@@ -694,6 +808,7 @@ static HOOK_DISPATCH: OnceCell<HookDispatch> = OnceCell::new();
 fn hook_dispatch() -> &'static HookDispatch {
     HOOK_DISPATCH.get_or_init(|| HookDispatch {
         enabled: AtomicBool::new(false),
+        tracking: AtomicBool::new(false),
         injecting: AtomicBool::new(false),
         sender: Mutex::new(None),
     })
@@ -706,7 +821,7 @@ unsafe extern "system" fn mouse_hook_proc(
     l_param: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, HC_ACTION, WM_RBUTTONDOWN, WM_RBUTTONUP,
+        CallNextHookEx, HC_ACTION, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
     };
 
     use windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
@@ -714,7 +829,7 @@ unsafe extern "system" fn mouse_hook_proc(
     if n_code == HC_ACTION as i32 {
         let msg = w_param.0 as u32;
 
-        if msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP {
+        if msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP || msg == WM_MOUSEWHEEL {
             let dispatch = hook_dispatch();
 
             if dispatch.enabled.load(Ordering::Acquire) {
@@ -734,18 +849,38 @@ unsafe extern "system" fn mouse_hook_proc(
                     );
                 }
 
+                // Only consume wheel events while a gesture is actively being tracked.
+                if msg == WM_MOUSEWHEEL && !dispatch.is_tracking() {
+                    return CallNextHookEx(
+                        windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
+                        n_code,
+                        w_param,
+                        l_param,
+                    );
+                }
+
                 if let Ok(guard) = dispatch.sender.try_lock() {
                     if let Some(sender) = guard.as_ref() {
-                        let event = if msg == WM_RBUTTONDOWN {
-                            HookEvent::RButtonDown
-                        } else {
-                            HookEvent::RButtonUp
-                        };
-                        let _ = sender.send(event);
+                        if msg == WM_RBUTTONDOWN {
+                            // Wheel-cycling is only enabled after worker exceeds deadzone.
+                            dispatch.set_tracking(false);
+                            let _ = sender.send(HookEvent::RButtonDown);
+                        } else if msg == WM_RBUTTONUP {
+                            dispatch.set_tracking(false);
+                            let _ = sender.send(HookEvent::RButtonUp);
+                        } else if msg == WM_MOUSEWHEEL {
+                            // mouseData high word contains signed wheel delta (WHEEL_DELTA multiples).
+                            let delta = ((info.mouseData >> 16) & 0xFFFF) as i16;
+                            if delta > 0 {
+                                let _ = sender.send(HookEvent::WheelUp);
+                            } else if delta < 0 {
+                                let _ = sender.send(HookEvent::WheelDown);
+                            }
+                        }
                     }
                 }
 
-                // Consume physical RMB while MG is enabled
+                // Consume while MG is enabled (RMB always, wheel only when tracking).
                 return windows::Win32::Foundation::LRESULT(1);
             }
         }

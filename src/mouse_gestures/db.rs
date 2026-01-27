@@ -91,6 +91,37 @@ impl GestureDb {
         }
         None
     }
+
+    pub fn match_bindings_owned(
+        &self,
+        tokens: &str,
+        dir_mode: DirMode,
+    ) -> Option<(String, Vec<BindingEntry>)> {
+        if tokens.is_empty() {
+            return None;
+        }
+        for gesture in self
+            .gestures
+            .iter()
+            .filter(|gesture| gesture.enabled && gesture.dir_mode == dir_mode)
+        {
+            if gesture.tokens != tokens {
+                continue;
+            }
+            let bindings: Vec<BindingEntry> = gesture
+                .bindings
+                .iter()
+                .filter(|binding| binding.enabled)
+                .cloned()
+                .collect();
+            if bindings.is_empty() {
+                return None;
+            }
+            return Some((gesture.label.clone(), bindings));
+        }
+        None
+    }
+
 }
 
 impl BindingEntry {
