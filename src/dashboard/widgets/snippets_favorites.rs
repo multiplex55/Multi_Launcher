@@ -39,17 +39,22 @@ impl SnippetsFavoritesWidget {
         value: &mut serde_json::Value,
         ctx: &WidgetSettingsContext<'_>,
     ) -> WidgetSettingsUiResult {
-        edit_typed_settings(ui, value, ctx, |ui, cfg: &mut SnippetsFavoritesConfig, _ctx| {
-            let mut changed = false;
-            ui.horizontal(|ui| {
-                ui.label("Show");
-                changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.count).clamp_range(1..=50))
-                    .changed();
-                ui.label("favorite snippets");
-            });
-            changed
-        })
+        edit_typed_settings(
+            ui,
+            value,
+            ctx,
+            |ui, cfg: &mut SnippetsFavoritesConfig, _ctx| {
+                let mut changed = false;
+                ui.horizontal(|ui| {
+                    ui.label("Show");
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut cfg.count).clamp_range(1..=50))
+                        .changed();
+                    ui.label("favorite snippets");
+                });
+                changed
+            },
+        )
     }
 
     fn is_snippet_favorite(entry: &FavEntry) -> bool {

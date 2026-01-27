@@ -1,4 +1,6 @@
-use super::{edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult};
+use super::{
+    edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+};
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use crate::history::{toggle_pin, HistoryEntry, HistoryPin, HISTORY_PINS_FILE};
@@ -258,11 +260,8 @@ impl CommandHistoryWidget {
     }
 
     fn entry_from_history(ctx: &DashboardContext<'_>, entry: &HistoryEntry) -> DisplayEntry {
-        let resolved = Self::resolve_action(
-            ctx,
-            &entry.action.action,
-            entry.action.args.as_deref(),
-        );
+        let resolved =
+            Self::resolve_action(ctx, &entry.action.action, entry.action.args.as_deref());
         let action = resolved.unwrap_or_else(|| entry.action.clone());
         DisplayEntry {
             action_id: entry.action.action.clone(),
@@ -323,8 +322,9 @@ impl Widget for CommandHistoryWidget {
             });
         }
 
-        let history_entries = crate::history::with_history(|h| h.iter().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
+        let history_entries =
+            crate::history::with_history(|h| h.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
 
         let mut entries: Vec<DisplayEntry> = Vec::new();
         if self.cfg.show_pinned_only {

@@ -66,7 +66,9 @@ fn search_add_without_text_opens_dialog() {
     let results = plugin.search("todo add");
     assert_eq!(results.len(), 2);
     assert!(results.iter().any(|action| action.action == "todo:dialog"));
-    assert!(results.iter().any(|action| action.label.starts_with("Usage: todo add")));
+    assert!(results
+        .iter()
+        .any(|action| action.label.starts_with("Usage: todo add")));
 }
 
 #[test]
@@ -117,7 +119,9 @@ fn search_plain_todo_opens_dialog() {
     let results = plugin.search("todo");
     assert_eq!(results.len(), 2);
     assert!(results.iter().any(|action| action.action == "todo:dialog"));
-    assert!(results.iter().any(|action| action.label.starts_with("Usage: todo")));
+    assert!(results
+        .iter()
+        .any(|action| action.label.starts_with("Usage: todo")));
 }
 
 #[test]

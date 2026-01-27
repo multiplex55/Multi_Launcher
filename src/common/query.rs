@@ -144,21 +144,36 @@ pub fn parse_query_filters(input: &str, tag_prefixes: &[&str]) -> QueryFilters {
 
         if let Some(tag) = strip_tag_prefix(token, tag_prefixes) {
             if !tag.is_empty() {
-                push_filter_value(tag, negated, &mut filters.include_tags, &mut filters.exclude_tags);
+                push_filter_value(
+                    tag,
+                    negated,
+                    &mut filters.include_tags,
+                    &mut filters.exclude_tags,
+                );
             }
             continue;
         }
 
         if let Some(kind) = strip_named_filter(token, "kind") {
             if !kind.is_empty() {
-                push_filter_value(kind, negated, &mut filters.include_kinds, &mut filters.exclude_kinds);
+                push_filter_value(
+                    kind,
+                    negated,
+                    &mut filters.include_kinds,
+                    &mut filters.exclude_kinds,
+                );
             }
             continue;
         }
 
         if let Some(id) = strip_named_filter(token, "id") {
             if !id.is_empty() {
-                push_filter_value(id, negated, &mut filters.include_ids, &mut filters.exclude_ids);
+                push_filter_value(
+                    id,
+                    negated,
+                    &mut filters.include_ids,
+                    &mut filters.exclude_ids,
+                );
             }
             continue;
         }
@@ -181,13 +196,23 @@ pub fn split_action_filters(input: &str) -> (String, QueryFilters) {
         let (token_value, negated) = split_negation(&token.value);
         if let Some(kind) = strip_named_filter(token_value, "kind") {
             if !kind.is_empty() {
-                push_filter_value(kind, negated, &mut filters.include_kinds, &mut filters.exclude_kinds);
+                push_filter_value(
+                    kind,
+                    negated,
+                    &mut filters.include_kinds,
+                    &mut filters.exclude_kinds,
+                );
             }
             continue;
         }
         if let Some(id) = strip_named_filter(token_value, "id") {
             if !id.is_empty() {
-                push_filter_value(id, negated, &mut filters.include_ids, &mut filters.exclude_ids);
+                push_filter_value(
+                    id,
+                    negated,
+                    &mut filters.include_ids,
+                    &mut filters.exclude_ids,
+                );
             }
             continue;
         }
@@ -201,7 +226,8 @@ pub fn rebuild_query(tokens: &[String]) -> String {
     tokens
         .iter()
         .map(|token| {
-            if token.chars().any(char::is_whitespace) || token.contains('"') || token.contains('\\') {
+            if token.chars().any(char::is_whitespace) || token.contains('"') || token.contains('\\')
+            {
                 let mut escaped = String::new();
                 for ch in token.chars() {
                     if ch == '\\' || ch == '"' {
@@ -246,12 +272,7 @@ fn action_matches_filters(action: &Action, filters: &QueryFilters) -> bool {
         return false;
     }
 
-    if !filters.include_ids.is_empty()
-        && !filters
-            .include_ids
-            .iter()
-            .any(|id| action_id == *id)
-    {
+    if !filters.include_ids.is_empty() && !filters.include_ids.iter().any(|id| action_id == *id) {
         return false;
     }
 
@@ -308,7 +329,12 @@ fn strip_named_filter<'a>(token: &'a str, name: &str) -> Option<&'a str> {
     None
 }
 
-fn push_filter_value(value: &str, negated: bool, include: &mut Vec<String>, exclude: &mut Vec<String>) {
+fn push_filter_value(
+    value: &str,
+    negated: bool,
+    include: &mut Vec<String>,
+    exclude: &mut Vec<String>,
+) {
     let normalized = value.trim().to_lowercase();
     if normalized.is_empty() {
         return;
@@ -351,9 +377,8 @@ mod tests {
 
     #[test]
     fn split_action_filters_preserves_query_tokens() {
-        let (query, filters) = split_action_filters(
-            r#"todo list tag:"high priority" kind:todo !id:todo:done:1"#,
-        );
+        let (query, filters) =
+            split_action_filters(r#"todo list tag:"high priority" kind:todo !id:todo:done:1"#);
         assert_eq!(query, r#"todo list tag:"high priority""#);
         assert_eq!(filters.include_kinds, vec!["todo"]);
         assert_eq!(filters.exclude_ids, vec!["todo:done:1"]);

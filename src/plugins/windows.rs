@@ -14,8 +14,7 @@ impl Plugin for WindowsPlugin {
         let filter = rest.to_lowercase();
         use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
         use windows::Win32::UI::WindowsAndMessaging::{
-            EnumWindows, GetWindowTextW, IsWindowVisible, GetWindow, GetWindowTextLengthW,
-            GW_OWNER,
+            EnumWindows, GetWindow, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible, GW_OWNER,
         };
         struct Ctx {
             filter: String,
@@ -49,7 +48,10 @@ impl Plugin for WindowsPlugin {
             }
             BOOL(1)
         }
-        let mut ctx = Ctx { filter, out: Vec::new() };
+        let mut ctx = Ctx {
+            filter,
+            out: Vec::new(),
+        };
         unsafe {
             let ctx_ptr = &mut ctx as *mut Ctx;
             let _ = EnumWindows(Some(enum_cb), LPARAM(ctx_ptr as isize));
@@ -70,7 +72,11 @@ impl Plugin for WindowsPlugin {
     }
 
     fn commands(&self) -> Vec<Action> {
-        vec![Action { label: "win".into(), desc: "Windows".into(), action: "query:win ".into(), args: None }]
+        vec![Action {
+            label: "win".into(),
+            desc: "Windows".into(),
+            action: "query:win ".into(),
+            args: None,
+        }]
     }
 }
-

@@ -1,6 +1,6 @@
+use crate::actions::Action;
 use crate::gui::LauncherApp;
 use crate::launcher::launch_action;
-use crate::actions::Action;
 use eframe::egui;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -20,7 +20,9 @@ impl BrightnessDialog {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
-        if !self.open { return; }
+        if !self.open {
+            return;
+        }
         if !self.value_loaded {
             self.value = get_main_display_brightness().unwrap_or(50);
             self.value_loaded = true;
@@ -47,17 +49,19 @@ impl BrightnessDialog {
                     }
                 });
             });
-        if close { self.open = false; }
+        if close {
+            self.open = false;
+        }
     }
 }
 
 fn get_main_display_brightness() -> Option<u8> {
+    use windows::Win32::Devices::Display::{
+        DestroyPhysicalMonitors, GetMonitorBrightness, GetNumberOfPhysicalMonitorsFromHMONITOR,
+        GetPhysicalMonitorsFromHMONITOR, PHYSICAL_MONITOR,
+    };
     use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
-    use windows::Win32::Devices::Display::{
-        DestroyPhysicalMonitors, GetNumberOfPhysicalMonitorsFromHMONITOR,
-        GetPhysicalMonitorsFromHMONITOR, GetMonitorBrightness, PHYSICAL_MONITOR,
-    };
 
     unsafe extern "system" fn enum_monitors(
         hmonitor: HMONITOR,
@@ -100,4 +104,3 @@ fn get_main_display_brightness() -> Option<u8> {
     BRIGHTNESS_QUERIES.fetch_add(1, Ordering::Relaxed);
     Some(percent as u8)
 }
-

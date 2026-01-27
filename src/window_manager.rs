@@ -189,7 +189,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 #[cfg(windows)]
 mod virtual_desktop {
-    use windows::core::{GUID, HRESULT, HSTRING, IUnknown, IUnknown_Vtbl, Interface};
+    use windows::core::{IUnknown, IUnknown_Vtbl, Interface, GUID, HRESULT, HSTRING};
     use windows::Win32::UI::Shell::Common::IObjectArray;
 
     #[repr(transparent)]
@@ -205,14 +205,14 @@ mod virtual_desktop {
     #[allow(non_snake_case)]
     pub struct IVirtualDesktop_Vtbl {
         pub base__: IUnknown_Vtbl,
-        pub IsViewVisible:
-            unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void, *mut i32)
-                -> HRESULT,
-        pub GetID:
-            unsafe extern "system" fn(*mut core::ffi::c_void, *mut GUID) -> HRESULT,
+        pub IsViewVisible: unsafe extern "system" fn(
+            *mut core::ffi::c_void,
+            *mut core::ffi::c_void,
+            *mut i32,
+        ) -> HRESULT,
+        pub GetID: unsafe extern "system" fn(*mut core::ffi::c_void, *mut GUID) -> HRESULT,
         pub Proc5: unsafe extern "system" fn(*mut core::ffi::c_void) -> HRESULT,
-        pub GetName:
-            unsafe extern "system" fn(*mut core::ffi::c_void, *mut HSTRING) -> HRESULT,
+        pub GetName: unsafe extern "system" fn(*mut core::ffi::c_void, *mut HSTRING) -> HRESULT,
         pub GetWallpaperPath:
             unsafe extern "system" fn(*mut core::ffi::c_void, *mut HSTRING) -> HRESULT,
     }
@@ -242,11 +242,7 @@ mod virtual_desktop {
     #[allow(non_snake_case)]
     pub struct IVirtualDesktopManagerInternal_Vtbl {
         pub base__: IUnknown_Vtbl,
-        pub GetCount: unsafe extern "system" fn(
-            *mut core::ffi::c_void,
-            isize,
-            *mut i32,
-        ) -> HRESULT,
+        pub GetCount: unsafe extern "system" fn(*mut core::ffi::c_void, isize, *mut i32) -> HRESULT,
         pub MoveViewToDesktop: unsafe extern "system" fn(
             *mut core::ffi::c_void,
             *mut core::ffi::c_void,
@@ -329,14 +325,13 @@ mod virtual_desktop {
     }
 
     impl IVirtualDesktopManagerInternal {
-        pub unsafe fn get_desktops(&self, hwnd_or_mon: isize) -> windows::core::Result<IObjectArray> {
+        pub unsafe fn get_desktops(
+            &self,
+            hwnd_or_mon: isize,
+        ) -> windows::core::Result<IObjectArray> {
             let mut result = core::ptr::null_mut();
-            (Interface::vtable(self).GetDesktops)(
-                Interface::as_raw(self),
-                hwnd_or_mon,
-                &mut result,
-            )
-            .and_then(|| windows::core::Type::from_abi(result))
+            (Interface::vtable(self).GetDesktops)(Interface::as_raw(self), hwnd_or_mon, &mut result)
+                .and_then(|| windows::core::Type::from_abi(result))
         }
     }
 }
@@ -394,13 +389,10 @@ fn parse_desktop_id(value: &str) -> Option<windows::core::GUID> {
     if trimmed.len() != 36 {
         return None;
     }
-    let is_valid = trimmed
-        .chars()
-        .enumerate()
-        .all(|(idx, ch)| match idx {
-            8 | 13 | 18 | 23 => ch == '-',
-            _ => ch.is_ascii_hexdigit(),
-        });
+    let is_valid = trimmed.chars().enumerate().all(|(idx, ch)| match idx {
+        8 | 13 | 18 | 23 => ch == '-',
+        _ => ch.is_ascii_hexdigit(),
+    });
     if !is_valid {
         return None;
     }
@@ -408,9 +400,7 @@ fn parse_desktop_id(value: &str) -> Option<windows::core::GUID> {
 }
 
 #[cfg(windows)]
-pub fn resolve_virtual_desktop_name(
-    desktop_id: &windows::core::GUID,
-) -> Option<String> {
+pub fn resolve_virtual_desktop_name(desktop_id: &windows::core::GUID) -> Option<String> {
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
     };
@@ -495,12 +485,9 @@ pub fn window_desktop_label(hwnd: windows::Win32::Foundation::HWND) -> Option<St
 
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let manager = CoCreateInstance::<_, IVirtualDesktopManager>(
-            &VirtualDesktopManager,
-            None,
-            CLSCTX_ALL,
-        )
-        .ok();
+        let manager =
+            CoCreateInstance::<_, IVirtualDesktopManager>(&VirtualDesktopManager, None, CLSCTX_ALL)
+                .ok();
         let desktop_id = manager.and_then(|manager| manager.GetWindowDesktopId(hwnd).ok());
         let label = desktop_id.map(|desktop_id| {
             resolve_virtual_desktop_name(&desktop_id)
@@ -512,29 +499,22 @@ pub fn window_desktop_label(hwnd: windows::Win32::Foundation::HWND) -> Option<St
 }
 
 #[cfg(windows)]
-pub fn move_window_to_desktop(
-    hwnd: windows::Win32::Foundation::HWND,
-    target: &str,
-) -> bool {
+pub fn move_window_to_desktop(hwnd: windows::Win32::Foundation::HWND, target: &str) -> bool {
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
     };
     use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
 
-    let target_id = parse_desktop_id(target)
-        .or_else(|| resolve_virtual_desktop_id_by_name(target));
+    let target_id = parse_desktop_id(target).or_else(|| resolve_virtual_desktop_id_by_name(target));
     let Some(target_id) = target_id else {
         return false;
     };
 
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let manager = CoCreateInstance::<_, IVirtualDesktopManager>(
-            &VirtualDesktopManager,
-            None,
-            CLSCTX_ALL,
-        )
-        .ok();
+        let manager =
+            CoCreateInstance::<_, IVirtualDesktopManager>(&VirtualDesktopManager, None, CLSCTX_ALL)
+                .ok();
         let moved = manager
             .and_then(|manager| {
                 let current = manager.GetWindowDesktopId(hwnd).ok()?;

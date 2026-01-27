@@ -1469,11 +1469,7 @@ mod tests {
             });
         });
         assert_eq!(
-            output
-                .platform_output
-                .open_url
-                .unwrap()
-                .url,
+            output.platform_output.open_url.unwrap().url,
             "https://www.example.com"
         );
     }

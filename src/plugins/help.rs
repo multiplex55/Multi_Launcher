@@ -8,12 +8,12 @@ impl Plugin for HelpPlugin {
         let q = query.trim();
         if let Some(rest) = crate::common::strip_prefix_ci(q, "help") {
             if rest.is_empty() || rest.starts_with(' ') {
-            return vec![Action {
-                label: "Show command list".into(),
-                desc: "Display available command prefixes".into(),
-                action: "help:show".into(),
-                args: None,
-            }];
+                return vec![Action {
+                    label: "Show command list".into(),
+                    desc: "Display available command prefixes".into(),
+                    action: "help:show".into(),
+                    args: None,
+                }];
             }
         }
         Vec::new()
@@ -40,4 +40,3 @@ impl Plugin for HelpPlugin {
         }]
     }
 }
-

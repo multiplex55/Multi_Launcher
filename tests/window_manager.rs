@@ -1,10 +1,6 @@
 use multi_launcher::window_manager::{
-    set_mock_mouse_position,
-    clear_mock_mouse_position,
-    current_mouse_position,
-    mock_mouse_position_is_set,
-    virtual_key_from_string,
-    MOCK_MOUSE_LOCK,
+    clear_mock_mouse_position, current_mouse_position, mock_mouse_position_is_set,
+    set_mock_mouse_position, virtual_key_from_string, MOCK_MOUSE_LOCK,
 };
 
 #[test]

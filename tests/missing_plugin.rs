@@ -1,8 +1,8 @@
 use multi_launcher::plugin::Plugin;
-use multi_launcher::plugins::missing::MissingPlugin;
 use multi_launcher::plugins::bookmarks::BOOKMARKS_FILE;
 use multi_launcher::plugins::fav::FAV_FILE;
 use multi_launcher::plugins::folders::FOLDERS_FILE;
+use multi_launcher::plugins::missing::MissingPlugin;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use tempfile::tempdir;

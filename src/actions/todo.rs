@@ -1,28 +1,15 @@
 pub fn add(text: &str, priority: u8, tags: &[String]) -> anyhow::Result<()> {
-    crate::plugins::todo::append_todo(
-        crate::plugins::todo::TODO_FILE,
-        text,
-        priority,
-        tags,
-    )?;
+    crate::plugins::todo::append_todo(crate::plugins::todo::TODO_FILE, text, priority, tags)?;
     Ok(())
 }
 
 pub fn set_priority(idx: usize, priority: u8) -> anyhow::Result<()> {
-    crate::plugins::todo::set_priority(
-        crate::plugins::todo::TODO_FILE,
-        idx,
-        priority,
-    )?;
+    crate::plugins::todo::set_priority(crate::plugins::todo::TODO_FILE, idx, priority)?;
     Ok(())
 }
 
 pub fn set_tags(idx: usize, tags: &[String]) -> anyhow::Result<()> {
-    crate::plugins::todo::set_tags(
-        crate::plugins::todo::TODO_FILE,
-        idx,
-        tags,
-    )?;
+    crate::plugins::todo::set_tags(crate::plugins::todo::TODO_FILE, idx, tags)?;
     Ok(())
 }
 

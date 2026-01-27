@@ -1,5 +1,5 @@
 use crate::gui::LauncherApp;
-use crate::plugins::folders::{set_alias, FOLDERS_FILE, load_folders};
+use crate::plugins::folders::{load_folders, set_alias, FOLDERS_FILE};
 use eframe::egui;
 
 pub struct AliasDialog {
@@ -10,7 +10,11 @@ pub struct AliasDialog {
 
 impl Default for AliasDialog {
     fn default() -> Self {
-        Self { open: false, path: String::new(), alias: String::new() }
+        Self {
+            open: false,
+            path: String::new(),
+            alias: String::new(),
+        }
     }
 }
 
@@ -60,4 +64,3 @@ impl AliasDialog {
         }
     }
 }
-

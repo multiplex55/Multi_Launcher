@@ -212,7 +212,7 @@ fn worker_loop(
     let mut start_pos = (0.0_f32, 0.0_f32);
     let mut last_trail = Instant::now();
     let mut last_recognition = Instant::now();
-    let start_time = Instant::now();
+    let mut start_time = Instant::now();
 
     loop {
         #[cfg(windows)]
@@ -233,12 +233,14 @@ fn worker_loop(
             break;
         }
 
+        let deadzone_sq = config.deadzone_px * config.deadzone_px;
         match event_rx.recv_timeout(poll_interval) {
             Ok(event) => match event {
                 HookEvent::RButtonDown => {
                     active = true;
                     exceeded_deadzone = false;
                     tracker.reset();
+                    start_time = Instant::now();
                     let pos = get_cursor_position().unwrap_or(start_pos);
                     start_pos = pos;
                     let ms = start_time.elapsed().as_millis() as u64;
@@ -248,9 +250,17 @@ fn worker_loop(
                     last_trail = Instant::now();
                     last_recognition = last_trail;
                 }
+
                 HookEvent::RButtonUp => {
                     if active {
+                        // Sample cursor pos once on release so we tokenize the final motion.
+                        let cursor_pos = get_cursor_position().unwrap_or(start_pos);
+
+                        // If we exceeded deadzone, swallow right click and evaluate gesture.
                         if exceeded_deadzone {
+                            let ms = start_time.elapsed().as_millis() as u64;
+                            let _ = tracker.feed_point(cursor_pos, ms);
+
                             let tokens = tracker.tokens_string();
                             if let Some(action) =
                                 match_binding_action(&db, &tokens, config.dir_mode)
@@ -258,16 +268,18 @@ fn worker_loop(
                                 send_event(WatchEvent::ExecuteAction(action));
                             }
                         } else {
-                            // Reset state first, then inject.
-                            active = false;
-                            tracker.reset();
-                            hint_overlay.reset();
+                            // Not a gesture -> pass through normal click
                             send_right_click();
-                            continue; // optional: avoid any further processing this tick
                         }
-                        active = false;
-                        tracker.reset();
+
+                        // Always clear visuals on release
+                        trail_overlay.clear();
                         hint_overlay.reset();
+
+                        // Reset state
+                        active = false;
+                        exceeded_deadzone = false;
+                        tracker.reset();
                     }
                 }
             },

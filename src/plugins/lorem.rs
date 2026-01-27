@@ -61,10 +61,24 @@ impl Plugin for LoremPlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![
-            Action { label: "lorem w <n>".into(), desc: "Lorem words".into(), action: "query:lorem w ".into(), args: None },
-            Action { label: "lorem s <n>".into(), desc: "Lorem sentences".into(), action: "query:lorem s ".into(), args: None },
-            Action { label: "lorem p <n>".into(), desc: "Lorem paragraphs".into(), action: "query:lorem p ".into(), args: None },
+            Action {
+                label: "lorem w <n>".into(),
+                desc: "Lorem words".into(),
+                action: "query:lorem w ".into(),
+                args: None,
+            },
+            Action {
+                label: "lorem s <n>".into(),
+                desc: "Lorem sentences".into(),
+                action: "query:lorem s ".into(),
+                args: None,
+            },
+            Action {
+                label: "lorem p <n>".into(),
+                desc: "Lorem paragraphs".into(),
+                action: "query:lorem p ".into(),
+                args: None,
+            },
         ]
     }
 }
-

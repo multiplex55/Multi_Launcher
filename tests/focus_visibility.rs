@@ -1,7 +1,10 @@
+use eframe::egui;
 use multi_launcher::hotkey::{Hotkey, HotkeyTrigger};
 use multi_launcher::visibility::handle_visibility_trigger;
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
-use eframe::egui;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 #[path = "mock_ctx.rs"]
 mod mock_ctx;
@@ -52,7 +55,7 @@ fn focus_when_becoming_visible() {
         _ => panic!("unexpected command"),
     }
     match cmds[3] {
-        egui::ViewportCommand::Focus => {},
+        egui::ViewportCommand::Focus => {}
         _ => panic!("unexpected command"),
     }
 }

@@ -49,4 +49,3 @@ impl Plugin for ConvertPanelPlugin {
         ]
     }
 }
-

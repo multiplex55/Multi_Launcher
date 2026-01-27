@@ -1,8 +1,6 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
-use crate::plugins::layouts_storage::{
-    get_layout, layouts_config_path, load_layouts, LayoutMatch,
-};
+use crate::plugins::layouts_storage::{get_layout, layouts_config_path, load_layouts, LayoutMatch};
 
 #[derive(Default, Debug, Clone)]
 struct LayoutFlags {
@@ -273,11 +271,8 @@ impl Plugin for LayoutPlugin {
                             .enumerate()
                             .map(|(idx, window)| {
                                 let rect = window.placement.rect;
-                                let monitor = window
-                                    .placement
-                                    .monitor
-                                    .as_deref()
-                                    .unwrap_or("any monitor");
+                                let monitor =
+                                    window.placement.monitor.as_deref().unwrap_or("any monitor");
                                 let desktop = window.desktop.as_deref().unwrap_or("any desktop");
                                 let match_label = format_match(&window.matcher);
                                 let group_label = window.group.as_deref().unwrap_or("ungrouped");

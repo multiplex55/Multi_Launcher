@@ -45,4 +45,3 @@ fn converts_specific_cases() {
     assert_eq!(bin.len(), 1);
     assert_eq!(bin[0].label, "01000001");
 }
-

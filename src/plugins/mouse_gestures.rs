@@ -62,7 +62,7 @@ fn default_enabled() -> bool {
 }
 
 fn default_min_distance_px() -> f32 {
-    40.0
+    12.0
 }
 
 fn default_max_duration_ms() -> u64 {
@@ -109,27 +109,23 @@ struct MouseGestureRuntime {
 impl Default for MouseGestureRuntime {
     fn default() -> Self {
         let db = Arc::new(Mutex::new(load_gestures(GESTURES_FILE).unwrap_or_default()));
-        let db_clone = db.clone();
+        let db_for_watcher = Arc::clone(&db);
+
         let watcher = watch_json(GESTURES_FILE, move || {
-            if let Ok(next) = load_gestures(GESTURES_FILE) {
-                if let Ok(mut guard) = db_clone.lock() {
-                    *guard = next;
+            if let Ok(new_db) = load_gestures(GESTURES_FILE) {
+                if let Ok(mut guard) = db_for_watcher.lock() {
+                    *guard = new_db;
                 }
             }
         })
         .ok();
 
-        let mut runtime = Self {
+        Self {
             settings: MouseGestureSettings::default(),
             plugin_enabled: true,
             db,
             watcher,
-        };
-
-        // Critical: apply defaults once so mg starts without needing a settings.json touch.
-        runtime.apply();
-
-        runtime
+        }
     }
 }
 

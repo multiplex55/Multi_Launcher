@@ -233,10 +233,8 @@ impl Widget for RecentNotesWidget {
                         clicked_row |= ui.add(egui::Button::new(display).wrap(false)).clicked();
                         if self.cfg.show_snippet {
                             ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(Self::snippet(note)).small(),
-                                )
-                                .wrap(false),
+                                egui::Label::new(egui::RichText::new(Self::snippet(note)).small())
+                                    .wrap(false),
                             );
                         }
                         if !note.tags.is_empty() {

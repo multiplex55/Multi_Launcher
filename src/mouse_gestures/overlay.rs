@@ -36,6 +36,7 @@ impl<B: OverlayBackend> TrailOverlay<B> {
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
         if !enabled {
+            self.backend.clear_trail();
             self.started = false;
             self.last_point = None;
             self.start_point = None;
@@ -49,6 +50,15 @@ impl<B: OverlayBackend> TrailOverlay<B> {
         self.start_point = Some(start_point);
         self.last_point = None;
         self.started = false;
+    }
+
+    pub fn clear(&mut self) {
+        if self.enabled {
+            self.backend.clear_trail();
+        }
+        self.started = false;
+        self.last_point = None;
+        self.start_point = None;
     }
 
     pub fn update_position(&mut self, point: (f32, f32)) {
@@ -128,9 +138,6 @@ impl<B: OverlayBackend> HintOverlay<B> {
         self.enabled = enabled;
         if !enabled {
             self.hide();
-            self.last_tokens.clear();
-            self.last_match = None;
-            self.last_position = None;
         }
     }
 
@@ -190,6 +197,250 @@ impl<B: OverlayBackend> HintOverlay<B> {
     }
 }
 
+#[cfg(windows)]
+#[derive(Debug)]
+struct HintOverlaySurface {
+    hwnd: windows::Win32::Foundation::HWND,
+    mem_dc: windows::Win32::Graphics::Gdi::HDC,
+    dib: windows::Win32::Graphics::Gdi::HBITMAP,
+    old_bitmap: windows::Win32::Graphics::Gdi::HGDIOBJ,
+    bits: *mut u8,
+    width: i32,
+    height: i32,
+    size_bytes: usize,
+    last_text: String,
+    visible: bool,
+}
+
+#[cfg(windows)]
+unsafe impl Send for HintOverlaySurface {}
+
+#[cfg(windows)]
+impl HintOverlaySurface {
+    fn new() -> Option<Self> {
+        use std::sync::Once;
+        use std::{mem, ptr};
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{COLORREF, HWND};
+        use windows::Win32::Graphics::Gdi::{
+            CreateCompatibleDC, CreateDIBSection, DeleteDC, SelectObject, BITMAPINFO,
+            BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        };
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, RegisterClassW, SetLayeredWindowAttributes, SetWindowLongPtrW,
+            ShowWindow, GWLP_USERDATA, LWA_COLORKEY, SW_HIDE, WNDCLASSW, WS_EX_LAYERED,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+        };
+
+        static REGISTER: Once = Once::new();
+        let class_name = widestring("MultiLauncherHintOverlay");
+        let hinstance = unsafe { GetModuleHandleW(PCWSTR::null()) }.ok()?;
+
+        REGISTER.call_once(|| unsafe {
+            let wnd_class = WNDCLASSW {
+                hInstance: hinstance.into(),
+                lpszClassName: PCWSTR(class_name.as_ptr()),
+                lpfnWndProc: Some(trail_overlay_wndproc), // reuse existing blit wndproc
+                ..Default::default()
+            };
+            let _ = RegisterClassW(&wnd_class);
+        });
+
+        let width = 320;
+        let height = 64;
+
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_LAYERED
+                    | WS_EX_TRANSPARENT
+                    | WS_EX_TOOLWINDOW
+                    | WS_EX_TOPMOST
+                    | WS_EX_NOACTIVATE,
+                PCWSTR(class_name.as_ptr()),
+                PCWSTR::null(),
+                WS_POPUP,
+                0,
+                0,
+                width,
+                height,
+                HWND::default(),
+                None,
+                hinstance,
+                None,
+            )
+        }
+        .ok()?;
+
+        let mem_dc = unsafe { CreateCompatibleDC(None) };
+        if mem_dc.0.is_null() {
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+            }
+            return None;
+        }
+
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0 as u32,
+                ..Default::default()
+            },
+            bmiColors: [Default::default()],
+        };
+
+        let mut bits: *mut core::ffi::c_void = ptr::null_mut();
+        let dib =
+            unsafe { CreateDIBSection(mem_dc, &mut info, DIB_RGB_COLORS, &mut bits, None, 0) }
+                .ok()?;
+        if bits.is_null() {
+            unsafe {
+                DeleteDC(mem_dc);
+                windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+            }
+            return None;
+        }
+
+        let old_bitmap = unsafe { SelectObject(mem_dc, dib) };
+        let size_bytes = width as usize * height as usize * 4;
+
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, mem_dc.0 as isize);
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_COLORKEY);
+            ptr::write_bytes(bits as *mut u8, 0, size_bytes);
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+
+        Some(Self {
+            hwnd,
+            mem_dc,
+            dib,
+            old_bitmap,
+            bits: bits as *mut u8,
+            width,
+            height,
+            size_bytes,
+            last_text: String::new(),
+            visible: false,
+        })
+    }
+
+    fn clear(&mut self) {
+        use std::ptr;
+        use windows::Win32::Graphics::Gdi::InvalidateRect;
+
+        unsafe {
+            ptr::write_bytes(self.bits, 0, self.size_bytes);
+            let _ = InvalidateRect(self.hwnd, None, false);
+        }
+    }
+
+    fn move_to(&mut self, position: (f32, f32)) {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+        };
+
+        let x = position.0 as i32;
+        let y = position.1 as i32;
+
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                None,
+                x,
+                y,
+                0,
+                0,
+                SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+
+    fn set_text(&mut self, text: &str) {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use std::ptr;
+        use windows::Win32::Foundation::COLORREF;
+        use windows::Win32::Graphics::Gdi::{
+            CreateFontW, DeleteObject, InvalidateRect, SelectObject, SetBkMode, SetTextColor,
+            TextOutW, TRANSPARENT,
+        };
+
+        if text == self.last_text {
+            return;
+        }
+        self.last_text = text.to_string();
+
+        unsafe {
+            // Clear backing buffer
+            ptr::write_bytes(self.bits, 0, self.size_bytes);
+
+            let wide: Vec<u16> = OsStr::new(text).encode_wide().collect();
+
+            let font = CreateFontW(
+                18,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                windows::core::PCWSTR::null(),
+            );
+            let old_font = SelectObject(self.mem_dc, font);
+
+            let _ = SetBkMode(self.mem_dc, TRANSPARENT);
+            let _ = SetTextColor(self.mem_dc, COLORREF(0x00FFFFFF));
+            let _ = TextOutW(self.mem_dc, 0, 0, &wide);
+
+            let _ = SelectObject(self.mem_dc, old_font);
+            let _ = DeleteObject(font);
+
+            let _ = InvalidateRect(self.hwnd, None, false);
+        }
+    }
+
+    fn hide(&mut self) {
+        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+        }
+        self.visible = false;
+    }
+}
+
+#[cfg(windows)]
+impl Drop for HintOverlaySurface {
+    fn drop(&mut self) {
+        use windows::Win32::Graphics::Gdi::{DeleteDC, DeleteObject, SelectObject};
+        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+
+        unsafe {
+            if !self.mem_dc.0.is_null() {
+                let _ = SelectObject(self.mem_dc, self.old_bitmap);
+            }
+            if !self.dib.0.is_null() {
+                let _ = DeleteObject(self.dib);
+            }
+            if !self.mem_dc.0.is_null() {
+                DeleteDC(self.mem_dc);
+            }
+            if !self.hwnd.0.is_null() {
+                let _ = DestroyWindow(self.hwnd);
+            }
+        }
+    }
+}
 #[cfg(windows)]
 #[derive(Debug)]
 struct TrailOverlaySurface {
@@ -416,19 +667,19 @@ fn widestring(value: &str) -> Vec<u16> {
 }
 
 #[cfg(windows)]
-#[derive(Debug, Default)]
-pub struct DefaultOverlayBackend {
-    trail_surface: Option<TrailOverlaySurface>,
-    last_rect: Option<windows::Win32::Foundation::RECT>,
-}
-
-#[cfg(windows)]
 impl DefaultOverlayBackend {
     fn ensure_trail_surface(&mut self) -> Option<&mut TrailOverlaySurface> {
         if self.trail_surface.is_none() {
             self.trail_surface = TrailOverlaySurface::new();
         }
         self.trail_surface.as_mut()
+    }
+
+    fn ensure_hint_tooltip(&mut self) -> Option<&mut HintTooltip> {
+        if self.hint_tooltip.is_none() {
+            self.hint_tooltip = HintTooltip::new();
+        }
+        self.hint_tooltip.as_mut()
     }
 }
 
@@ -471,54 +722,216 @@ impl OverlayBackend for DefaultOverlayBackend {
     }
 
     fn show_hint(&mut self, text: &str, position: (f32, f32)) {
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
-        use windows::Win32::Foundation::{COLORREF, RECT};
-        use windows::Win32::Graphics::Gdi::InvalidateRect;
-        use windows::Win32::Graphics::Gdi::{
-            GetDC, GetTextExtentPoint32W, ReleaseDC, SetBkMode, SetTextColor, TextOutW, TRANSPARENT,
-        };
-        use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+        // Decide + update cached text BEFORE borrowing tooltip mutably.
+        let text_changed = self.last_hint_text != text;
+        if text_changed {
+            self.last_hint_text.clear();
+            self.last_hint_text.push_str(text);
+        }
 
-        let hwnd = unsafe { GetDesktopWindow() };
-        let hdc = unsafe { GetDC(hwnd) };
-        if hdc.0.is_null() {
+        let Some(tt) = self.ensure_hint_tooltip() else {
             return;
+        };
+
+        // Always follow cursor (cheap)
+        tt.move_to(position);
+
+        // Only change text when it actually changes (prevents flicker/churn)
+        if text_changed {
+            tt.set_text(text);
         }
 
-        let wide: Vec<u16> = OsStr::new(text).encode_wide().collect();
-        if let Some(rect) = self.last_rect.take() {
-            unsafe {
-                let _ = InvalidateRect(hwnd, Some(&rect), true);
-            }
-        }
-        let mut size = windows::Win32::Foundation::SIZE { cx: 0, cy: 0 };
-        unsafe {
-            let _ = GetTextExtentPoint32W(hdc, &wide, &mut size);
-        }
-        let rect = RECT {
-            left: position.0 as i32,
-            top: position.1 as i32,
-            right: position.0 as i32 + size.cx.max(1),
-            bottom: position.1 as i32 + size.cy.max(1),
-        };
-        unsafe {
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, COLORREF(0x00ffffff));
-            let _ = TextOutW(hdc, position.0 as i32, position.1 as i32, &wide);
-            ReleaseDC(hwnd, hdc);
-        }
-        self.last_rect = Some(rect);
+        tt.show();
     }
 
     fn hide_hint(&mut self) {
-        use windows::Win32::Graphics::Gdi::InvalidateRect;
-        use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
-        if let Some(rect) = self.last_rect.take() {
-            let hwnd = unsafe { GetDesktopWindow() };
-            unsafe {
-                let _ = InvalidateRect(hwnd, Some(&rect), true);
-            }
+        if let Some(tt) = self.hint_tooltip.as_mut() {
+            tt.hide();
+        }
+        self.last_hint_text.clear();
+    }
+}
+
+#[cfg(windows)]
+#[derive(Debug, Default)]
+pub struct DefaultOverlayBackend {
+    trail_surface: Option<TrailOverlaySurface>,
+    hint_tooltip: Option<HintTooltip>,
+    last_hint_text: String,
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct HintTooltip {
+    hwnd: windows::Win32::Foundation::HWND,
+    toolinfo: windows::Win32::UI::Controls::TTTOOLINFOW,
+    text_buf: Vec<u16>,
+    visible: bool,
+}
+
+#[cfg(windows)]
+unsafe impl Send for HintTooltip {}
+
+#[cfg(windows)]
+impl HintTooltip {
+    fn new() -> Option<Self> {
+        use std::{mem, ptr};
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::Controls::{
+            InitCommonControlsEx, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, TOOLTIPS_CLASSW,
+            TTF_ABSOLUTE, TTF_TRACK, TTM_ADDTOOLW, TTM_SETMAXTIPWIDTH, TTTOOLINFOW,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, GetDesktopWindow, SendMessageW, WINDOW_EX_STYLE, WINDOW_STYLE,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+        };
+
+        unsafe {
+            let icc = INITCOMMONCONTROLSEX {
+                dwSize: mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_WIN95_CLASSES,
+            };
+            let _ = InitCommonControlsEx(&icc);
+
+            let hinstance = GetModuleHandleW(PCWSTR::null()).ok()?;
+            let parent = GetDesktopWindow();
+
+            // Tooltip window (topmost, no-activate)
+            let hwnd = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                TOOLTIPS_CLASSW,
+                PCWSTR::null(),
+                // windows-rs wants WINDOW_STYLE, so wrap raw u32 bits
+                WS_POPUP | WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                parent,
+                None,
+                hinstance,
+                None,
+            )
+            .ok()?;
+
+            // initial empty text
+            let mut text_buf: Vec<u16> = vec![0];
+
+            let mut toolinfo = TTTOOLINFOW::default();
+            toolinfo.cbSize = mem::size_of::<TTTOOLINFOW>() as u32;
+            toolinfo.hwnd = parent;
+            toolinfo.uFlags = TTF_TRACK | TTF_ABSOLUTE;
+            toolinfo.lpszText = windows::core::PWSTR(text_buf.as_mut_ptr());
+
+            // Attach tool
+            let _ = SendMessageW(
+                hwnd,
+                TTM_ADDTOOLW,
+                windows::Win32::Foundation::WPARAM(0),
+                windows::Win32::Foundation::LPARAM(&toolinfo as *const _ as isize),
+            );
+            let _ = SendMessageW(
+                hwnd,
+                TTM_SETMAXTIPWIDTH,
+                windows::Win32::Foundation::WPARAM(0),
+                windows::Win32::Foundation::LPARAM(600),
+            );
+
+            Some(Self {
+                hwnd,
+                toolinfo,
+                text_buf,
+                visible: false,
+            })
+        }
+    }
+
+    fn set_text(&mut self, text: &str) {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::UI::Controls::TTM_UPDATETIPTEXTW;
+        use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+
+        // build wide string with trailing 0
+        self.text_buf.clear();
+        self.text_buf.extend(OsStr::new(text).encode_wide());
+        self.text_buf.push(0);
+
+        self.toolinfo.lpszText = windows::core::PWSTR(self.text_buf.as_mut_ptr());
+
+        unsafe {
+            let _ = SendMessageW(
+                self.hwnd,
+                TTM_UPDATETIPTEXTW,
+                windows::Win32::Foundation::WPARAM(0),
+                windows::Win32::Foundation::LPARAM(&self.toolinfo as *const _ as isize),
+            );
+        }
+    }
+
+    fn move_to(&mut self, position: (f32, f32)) {
+        use windows::Win32::UI::Controls::TTM_TRACKPOSITION;
+        use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+
+        let x = position.0.max(0.0).min(65535.0) as u32;
+        let y = position.1.max(0.0).min(65535.0) as u32;
+        let lparam = ((y << 16) | (x & 0xFFFF)) as isize;
+
+        unsafe {
+            let _ = SendMessageW(
+                self.hwnd,
+                TTM_TRACKPOSITION,
+                windows::Win32::Foundation::WPARAM(0),
+                windows::Win32::Foundation::LPARAM(lparam),
+            );
+        }
+    }
+
+    fn show(&mut self) {
+        use windows::Win32::UI::Controls::TTM_TRACKACTIVATE;
+        use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+
+        if self.visible {
+            return;
+        }
+        unsafe {
+            let _ = SendMessageW(
+                self.hwnd,
+                TTM_TRACKACTIVATE,
+                windows::Win32::Foundation::WPARAM(1),
+                windows::Win32::Foundation::LPARAM(&self.toolinfo as *const _ as isize),
+            );
+        }
+        self.visible = true;
+    }
+
+    fn hide(&mut self) {
+        use windows::Win32::UI::Controls::TTM_TRACKACTIVATE;
+        use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+
+        if !self.visible {
+            return;
+        }
+        unsafe {
+            let _ = SendMessageW(
+                self.hwnd,
+                TTM_TRACKACTIVATE,
+                windows::Win32::Foundation::WPARAM(0),
+                windows::Win32::Foundation::LPARAM(&self.toolinfo as *const _ as isize),
+            );
+        }
+        self.visible = false;
+    }
+}
+
+#[cfg(windows)]
+impl Drop for HintTooltip {
+    fn drop(&mut self) {
+        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+        unsafe {
+            let _ = DestroyWindow(self.hwnd);
         }
     }
 }

@@ -1,6 +1,6 @@
-use multi_launcher::history::{append_history, get_history, clear_history};
 use multi_launcher::actions::Action;
 use multi_launcher::history::HistoryEntry;
+use multi_launcher::history::{append_history, clear_history, get_history};
 use tempfile::tempdir;
 
 #[test]
@@ -31,8 +31,8 @@ fn clear_history_empties_file() {
 
 #[test]
 fn plugin_clear_action() {
-    use multi_launcher::plugins::history::HistoryPlugin;
     use multi_launcher::plugin::Plugin;
+    use multi_launcher::plugins::history::HistoryPlugin;
 
     let plugin = HistoryPlugin;
     let results = plugin.search("hi clear");

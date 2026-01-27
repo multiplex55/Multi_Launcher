@@ -31,7 +31,11 @@ impl Plugin for RecyclePlugin {
     }
 
     fn commands(&self) -> Vec<Action> {
-        vec![Action { label: "rec".into(), desc: "Recycle".into(), action: "query:rec".into(), args: None }]
+        vec![Action {
+            label: "rec".into(),
+            desc: "Recycle".into(),
+            action: "query:rec".into(),
+            args: None,
+        }]
     }
 }
-

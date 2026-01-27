@@ -23,7 +23,10 @@ fn indexer_indexes_files_recursively() {
     for path in expected.iter() {
         let label = path.file_name().unwrap().to_str().unwrap();
         let display = path.display().to_string();
-        assert!(actions.iter().any(|a| a.label == label && a.action == display && a.desc == display && a.args.is_none()));
+        assert!(actions.iter().any(|a| a.label == label
+            && a.action == display
+            && a.desc == display
+            && a.args.is_none()));
     }
 }
 
@@ -35,4 +38,3 @@ fn indexer_errors_on_missing_path() {
     let result = multi_launcher::indexer::index_paths(&[missing.to_string_lossy().into_owned()]);
     assert!(result.is_err());
 }
-

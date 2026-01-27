@@ -85,4 +85,3 @@ fn macros_file_change_reload() {
     }
     panic!("macros file did not reload");
 }
-

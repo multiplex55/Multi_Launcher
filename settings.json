@@ -62,8 +62,8 @@
     "calculator": {
       "save_on_enter": false
     },
-    "browser_tabs": {
-      "recalc_each_query": false
+    "history": {
+      "max_entries": 100
     },
     "screenshot": {
       "screenshot_auto_save": true,
@@ -74,20 +74,6 @@
     "clipboard": {
       "max_entries": 20
     },
-    "shell": {
-      "open_in_wezterm": false
-    },
-    "history": {
-      "max_entries": 100
-    },
-    "network": {
-      "refresh_rate": 1.0,
-      "unit": "auto"
-    },
-    "stopwatch": {
-      "precision": 2,
-      "refresh_rate": 1.0
-    },
     "color_picker": {
       "color": [
         255,
@@ -95,6 +81,20 @@
         0,
         255
       ]
+    },
+    "stopwatch": {
+      "precision": 2,
+      "refresh_rate": 1.0
+    },
+    "shell": {
+      "open_in_wezterm": false
+    },
+    "browser_tabs": {
+      "recalc_each_query": false
+    },
+    "network": {
+      "refresh_rate": 1.0,
+      "unit": "auto"
     }
   },
   "pinned_panels": [],

@@ -121,10 +121,7 @@ mod tests {
             muted: true,
         };
         let action = proc.slider_changed();
-        assert_eq!(
-            action,
-            Some("volume:pid_toggle_mute:1".to_string())
-        );
+        assert_eq!(action, Some("volume:pid_toggle_mute:1".to_string()));
         assert!(!proc.muted);
     }
 }

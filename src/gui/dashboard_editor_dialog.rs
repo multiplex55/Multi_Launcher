@@ -343,9 +343,7 @@ impl DashboardEditorDialog {
                                                 };
                                                 let swap_button = if is_swap_source {
                                                     egui::Button::new(swap_label)
-                                                        .fill(egui::Color32::from_rgb(
-                                                            60, 120, 200,
-                                                        ))
+                                                        .fill(egui::Color32::from_rgb(60, 120, 200))
                                                 } else {
                                                     egui::Button::new(swap_label)
                                                 };

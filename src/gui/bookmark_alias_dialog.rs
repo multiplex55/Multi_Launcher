@@ -1,5 +1,5 @@
 use crate::gui::LauncherApp;
-use crate::plugins::bookmarks::{set_alias, BOOKMARKS_FILE, load_bookmarks};
+use crate::plugins::bookmarks::{load_bookmarks, set_alias, BOOKMARKS_FILE};
 use eframe::egui;
 
 pub struct BookmarkAliasDialog {
@@ -10,7 +10,11 @@ pub struct BookmarkAliasDialog {
 
 impl Default for BookmarkAliasDialog {
     fn default() -> Self {
-        Self { open: false, url: String::new(), alias: String::new() }
+        Self {
+            open: false,
+            url: String::new(),
+            alias: String::new(),
+        }
     }
 }
 
