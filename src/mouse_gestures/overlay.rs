@@ -340,22 +340,22 @@ impl HintOverlaySurface {
     }
 
     fn move_to(&mut self, position: (f32, f32)) {
-        use windows::Win32::UI::WindowsAndMessaging::{
-            SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-        };
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::Controls::TTM_TRACKPOSITION;
+        use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 
-        let x = position.0 as i32;
-        let y = position.1 as i32;
+        // TTM_TRACKPOSITION packs x/y into 16-bit signed halves. Mask to avoid corrupting the
+        // high word when x/y are negative (common on multi-monitor layouts).
+        let x = position.0.round() as i32;
+        let y = position.1.round() as i32;
+        let packed = ((x as u32) & 0xFFFF) | (((y as u32) & 0xFFFF) << 16);
 
         unsafe {
-            let _ = SetWindowPos(
+            let _ = SendMessageW(
                 self.hwnd,
-                None,
-                x,
-                y,
-                0,
-                0,
-                SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE,
+                TTM_TRACKPOSITION,
+                WPARAM(0),
+                LPARAM(packed as isize),
             );
         }
     }
@@ -763,6 +763,7 @@ pub struct DefaultOverlayBackend {
 #[cfg(windows)]
 #[derive(Debug)]
 struct HintTooltip {
+    owner_hwnd: windows::Win32::Foundation::HWND,
     hwnd: windows::Win32::Foundation::HWND,
     toolinfo: windows::Win32::UI::Controls::TTTOOLINFOW,
     text_buf: Vec<u16>,
@@ -775,17 +776,19 @@ unsafe impl Send for HintTooltip {}
 #[cfg(windows)]
 impl HintTooltip {
     fn new() -> Option<Self> {
-        use std::{mem, ptr};
+        use std::mem;
         use windows::core::PCWSTR;
         use windows::Win32::Foundation::HWND;
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::Win32::UI::Controls::{
             InitCommonControlsEx, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, TOOLTIPS_CLASSW,
-            TTF_ABSOLUTE, TTF_TRACK, TTM_ADDTOOLW, TTM_SETMAXTIPWIDTH, TTTOOLINFOW,
+            TTDT_AUTOPOP, TTDT_INITIAL, TTDT_RESHOW, TTF_ABSOLUTE, TTF_TRACK, TTM_ADDTOOLW,
+            TTM_SETDELAYTIME, TTM_SETMAXTIPWIDTH, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
         };
         use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, GetDesktopWindow, SendMessageW, WINDOW_EX_STYLE, WINDOW_STYLE,
-            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+            CreateWindowExW, GetDesktopWindow, SendMessageW, ShowWindow, HWND_MESSAGE, SW_HIDE,
+            WINDOW_EX_STYLE, WINDOW_STYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+            WS_POPUP,
         };
 
         unsafe {
@@ -797,6 +800,25 @@ impl HintTooltip {
 
             let hinstance = GetModuleHandleW(PCWSTR::null()).ok()?;
             let parent = GetDesktopWindow();
+            // Use a tool/owner window we actually own.
+            // Using GetDesktopWindow() here is tempting, but it belongs to another process.
+            let owner_class = widestring("STATIC");
+            let owner_hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                PCWSTR(owner_class.as_ptr()),
+                PCWSTR::null(),
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                hinstance,
+                None,
+            )
+            .ok()?;
+            let _ = ShowWindow(owner_hwnd, SW_HIDE);
 
             // Tooltip window (topmost, no-activate)
             let hwnd = CreateWindowExW(
@@ -804,12 +826,12 @@ impl HintTooltip {
                 TOOLTIPS_CLASSW,
                 PCWSTR::null(),
                 // windows-rs wants WINDOW_STYLE, so wrap raw u32 bits
-                WS_POPUP | WINDOW_STYLE(0),
+                WS_POPUP | WINDOW_STYLE(TTS_ALWAYSTIP) | WINDOW_STYLE(TTS_NOPREFIX),
                 0,
                 0,
                 0,
                 0,
-                parent,
+                owner_hwnd,
                 None,
                 hinstance,
                 None,
@@ -820,18 +842,41 @@ impl HintTooltip {
             let mut text_buf: Vec<u16> = vec![0];
 
             let mut toolinfo = TTTOOLINFOW::default();
-            toolinfo.cbSize = mem::size_of::<TTTOOLINFOW>() as u32;
-            toolinfo.hwnd = parent;
+            toolinfo.cbSize =
+                (mem::size_of::<TTTOOLINFOW>() - mem::size_of::<*const core::ffi::c_void>()) as u32;
+            toolinfo.hwnd = owner_hwnd;
+            toolinfo.uId = 1;
             toolinfo.uFlags = TTF_TRACK | TTF_ABSOLUTE;
             toolinfo.lpszText = windows::core::PWSTR(text_buf.as_mut_ptr());
 
-            // Attach tool
-            let _ = SendMessageW(
+            // REQUIRED: register the tool, otherwise TTM_TRACKACTIVATE won't show anything.
+            let add_ok = SendMessageW(
                 hwnd,
                 TTM_ADDTOOLW,
                 windows::Win32::Foundation::WPARAM(0),
                 windows::Win32::Foundation::LPARAM(&toolinfo as *const _ as isize),
             );
+
+            // Make it feel "live" while drawing gestures.
+            let _ = SendMessageW(
+                hwnd,
+                TTM_SETDELAYTIME,
+                windows::Win32::Foundation::WPARAM(TTDT_INITIAL as usize),
+                windows::Win32::Foundation::LPARAM(0),
+            );
+            let _ = SendMessageW(
+                hwnd,
+                TTM_SETDELAYTIME,
+                windows::Win32::Foundation::WPARAM(TTDT_RESHOW as usize),
+                windows::Win32::Foundation::LPARAM(0),
+            );
+            let _ = SendMessageW(
+                hwnd,
+                TTM_SETDELAYTIME,
+                windows::Win32::Foundation::WPARAM(TTDT_AUTOPOP as usize),
+                windows::Win32::Foundation::LPARAM(10_000),
+            );
+
             let _ = SendMessageW(
                 hwnd,
                 TTM_SETMAXTIPWIDTH,
@@ -840,6 +885,7 @@ impl HintTooltip {
             );
 
             Some(Self {
+                owner_hwnd,
                 hwnd,
                 toolinfo,
                 text_buf,
@@ -875,16 +921,18 @@ impl HintTooltip {
         use windows::Win32::UI::Controls::TTM_TRACKPOSITION;
         use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 
-        let x = position.0.max(0.0).min(65535.0) as u32;
-        let y = position.1.max(0.0).min(65535.0) as u32;
-        let lparam = ((y << 16) | (x & 0xFFFF)) as isize;
+        // TTM_TRACKPOSITION packs x/y into 16-bit halves.
+        // Preserve negative coordinates (common on multi-monitor layouts).
+        let x = position.0.round() as i32;
+        let y = position.1.round() as i32;
+        let packed = ((x as u32) & 0xFFFF) | (((y as u32) & 0xFFFF) << 16);
 
         unsafe {
             let _ = SendMessageW(
                 self.hwnd,
                 TTM_TRACKPOSITION,
                 windows::Win32::Foundation::WPARAM(0),
-                windows::Win32::Foundation::LPARAM(lparam),
+                windows::Win32::Foundation::LPARAM(packed as isize),
             );
         }
     }
@@ -893,9 +941,9 @@ impl HintTooltip {
         use windows::Win32::UI::Controls::TTM_TRACKACTIVATE;
         use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 
-        if self.visible {
-            return;
-        }
+        // if self.visible {
+        //     return;
+        // }
         unsafe {
             let _ = SendMessageW(
                 self.hwnd,
@@ -904,6 +952,7 @@ impl HintTooltip {
                 windows::Win32::Foundation::LPARAM(&self.toolinfo as *const _ as isize),
             );
         }
+
         self.visible = true;
     }
 
@@ -931,7 +980,7 @@ impl Drop for HintTooltip {
     fn drop(&mut self) {
         use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
         unsafe {
-            let _ = DestroyWindow(self.hwnd);
+            let _ = DestroyWindow(self.owner_hwnd);
         }
     }
 }

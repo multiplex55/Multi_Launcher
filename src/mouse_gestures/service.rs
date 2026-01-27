@@ -210,6 +210,7 @@ fn worker_loop(
     let mut active = false;
     let mut exceeded_deadzone = false;
     let mut start_pos = (0.0_f32, 0.0_f32);
+    let mut cursor_pos = start_pos;
     let mut last_trail = Instant::now();
     let mut last_recognition = Instant::now();
     let mut start_time = Instant::now();
@@ -243,10 +244,13 @@ fn worker_loop(
                     start_time = Instant::now();
                     let pos = get_cursor_position().unwrap_or(start_pos);
                     start_pos = pos;
+                    cursor_pos = pos;
                     let ms = start_time.elapsed().as_millis() as u64;
                     tracker.feed_point(pos, ms);
                     trail_overlay.reset(pos);
                     hint_overlay.reset();
+
+                    hint_overlay.update("TEST", None, cursor_pos);
                     last_trail = Instant::now();
                     last_recognition = last_trail;
                 }
