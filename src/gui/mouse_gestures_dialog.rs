@@ -376,6 +376,14 @@ impl MgGesturesDialog {
                                         self.recorder.push_point(pos);
                                     }
                                 }
+                                if response.drag_released() {
+                                    let recorded_tokens = self.recorder.tokens_string();
+                                    if !recorded_tokens.is_empty() {
+                                        entry.tokens = recorded_tokens.clone();
+                                        self.token_buffer = entry.tokens.clone();
+                                        save_now = true;
+                                    }
+                                }
                                 if self.recorder.points().len() >= 2 {
                                     painter.add(egui::Shape::line(
                                         self.recorder.points().to_vec(),

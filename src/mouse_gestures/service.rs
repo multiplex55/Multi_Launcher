@@ -1,4 +1,4 @@
-use crate::mouse_gestures::db::SharedGestureDb;
+use crate::mouse_gestures::db::{load_gestures, SharedGestureDb, GESTURES_FILE};
 use crate::mouse_gestures::engine::{DirMode, GestureTracker};
 use crate::mouse_gestures::overlay::{DefaultOverlayBackend, HintOverlay, TrailOverlay};
 use anyhow::anyhow;
@@ -87,9 +87,12 @@ impl Default for MouseGestureService {
 
 impl MouseGestureService {
     pub fn new_with_backend(backend: Box<dyn HookBackend>) -> Self {
+        let db = load_gestures(GESTURES_FILE)
+            .map(|db| Arc::new(Mutex::new(db)))
+            .ok();
         Self {
             config: MouseGestureConfig::default(),
-            db: None,
+            db,
             backend,
             worker: None,
         }
@@ -126,6 +129,14 @@ impl MouseGestureService {
 
     pub fn update_db(&mut self, db: Option<SharedGestureDb>) {
         self.db = db;
+        // If the worker is already running, it captured the old Option<db> by value.
+        // Restart so the worker sees the new DB.
+        if self.worker.is_some() {
+            self.stop_running();
+            if self.config.enabled {
+                self.start_running();
+            }
+        }
     }
 
     pub fn is_running(&self) -> bool {
@@ -249,8 +260,6 @@ fn worker_loop(
                     tracker.feed_point(pos, ms);
                     trail_overlay.reset(pos);
                     hint_overlay.reset();
-
-                    hint_overlay.update("TEST", None, cursor_pos);
                     last_trail = Instant::now();
                     last_recognition = last_trail;
                 }
@@ -260,19 +269,43 @@ fn worker_loop(
                         // Sample cursor pos once on release so we tokenize the final motion.
                         let cursor_pos = get_cursor_position().unwrap_or(start_pos);
 
-                        // If we exceeded deadzone, swallow right click and evaluate gesture.
-                        if exceeded_deadzone {
-                            let ms = start_time.elapsed().as_millis() as u64;
-                            let _ = tracker.feed_point(cursor_pos, ms);
+                        // Always feed the final point so quick gestures still tokenize.
+                        let ms = start_time.elapsed().as_millis() as u64;
+                        let _ = tracker.feed_point(cursor_pos, ms);
 
-                            let tokens = tracker.tokens_string();
+                        let tokens = tracker.tokens_string();
+
+                        println!(
+                            "MG release tokens='{tokens}' mode={:?} db_present={}",
+                            config.dir_mode,
+                            db.is_some()
+                        );
+                        if let Some(db) = &db {
+                            if let Ok(guard) = db.lock() {
+                                for g in &guard.gestures {
+                                    println!(
+                                        "DB: label='{}' tokens='{}' mode={:?} enabled={} bindings={}",
+                                        g.label, g.tokens, g.dir_mode, g.enabled, g.bindings.len()
+                                        );
+                                    for b in &g.bindings {
+                                        println!("  - binding: label='{}' action='{}' args={:?} enabled={}",b.label, b.action, b.args, b.enabled);
+                                    }
+                                }
+                            }
+                        }
+
+                        // If we produced any tokens, treat it as a gesture (swallow right click).
+                        if !tokens.is_empty() {
                             if let Some(action) =
                                 match_binding_action(&db, &tokens, config.dir_mode)
                             {
                                 send_event(WatchEvent::ExecuteAction(action));
+                            } else {
+                                // Optional: leave as swallow-noop to avoid context menu on unknown gestures.
+                                // If you want fallback to right click on unknown gestures, call send_right_click() here.
                             }
                         } else {
-                            // Not a gesture -> pass through normal click
+                            // No tokens => normal right click
                             send_right_click();
                         }
 
