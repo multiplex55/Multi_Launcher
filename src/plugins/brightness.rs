@@ -24,12 +24,15 @@ impl Plugin for BrightnessPlugin {
         }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "bright") {
             if rest.trim().is_empty() {
-                return vec![Action {
-                    label: "bright: edit brightness".into(),
-                    desc: "Brightness".into(),
-                    action: "brightness:dialog".into(),
-                    args: None,
-                }, usage_action(BRIGHT_USAGE)];
+                return vec![
+                    Action {
+                        label: "bright: edit brightness".into(),
+                        desc: "Brightness".into(),
+                        action: "brightness:dialog".into(),
+                        args: None,
+                    },
+                    usage_action(BRIGHT_USAGE),
+                ];
             }
             let rest = rest.trim();
             let args: Vec<&str> = rest.split_whitespace().collect();
@@ -56,7 +59,9 @@ impl Plugin for BrightnessPlugin {
         Vec::new()
     }
 
-    fn name(&self) -> &str { "brightness" }
+    fn name(&self) -> &str {
+        "brightness"
+    }
 
     fn description(&self) -> &str {
         "Adjust display brightness (prefix: `bright`)"

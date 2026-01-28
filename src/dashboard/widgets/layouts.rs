@@ -5,7 +5,9 @@ use super::{
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
-use crate::plugins::layouts_storage::{self, layouts_config_path, Layout, LayoutMatch, LayoutStore};
+use crate::plugins::layouts_storage::{
+    self, layouts_config_path, Layout, LayoutMatch, LayoutStore,
+};
 use crate::windows_layout::{collect_layout_windows, LayoutWindowOptions};
 use chrono::Utc;
 use eframe::egui;
@@ -618,7 +620,9 @@ impl Widget for LayoutsWidget {
                             Self::unique_layout_name(&imported.name, &store, " (imported)");
                         imported.name = new_name.clone();
                         layouts_storage::upsert_layout(&mut store, imported.clone());
-                        if let Err(err) = layouts_storage::save_layouts(layouts_config_path(), &store) {
+                        if let Err(err) =
+                            layouts_storage::save_layouts(layouts_config_path(), &store)
+                        {
                             self.set_status(
                                 format!("Failed to save layouts: {err}"),
                                 egui::Color32::YELLOW,

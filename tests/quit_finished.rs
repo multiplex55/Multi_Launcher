@@ -1,8 +1,6 @@
 use eframe::egui;
 use multi_launcher::hotkey::{Hotkey, HotkeyTrigger};
-use std::sync::{
-    Arc, Mutex,
-};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 

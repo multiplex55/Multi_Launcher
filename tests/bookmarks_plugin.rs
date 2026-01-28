@@ -1,8 +1,10 @@
 use multi_launcher::plugin::Plugin;
-use multi_launcher::plugins::bookmarks::{save_bookmarks, load_bookmarks, BookmarkEntry, BookmarksPlugin, BOOKMARKS_FILE};
-use tempfile::tempdir;
+use multi_launcher::plugins::bookmarks::{
+    load_bookmarks, save_bookmarks, BookmarkEntry, BookmarksPlugin, BOOKMARKS_FILE,
+};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
+use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -12,7 +14,10 @@ fn alias_roundtrip() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    let entries = vec![BookmarkEntry { url: "https://example.com".into(), alias: Some("ex".into()) }];
+    let entries = vec![BookmarkEntry {
+        url: "https://example.com".into(),
+        alias: Some("ex".into()),
+    }];
     save_bookmarks(BOOKMARKS_FILE, &entries).unwrap();
     let loaded = load_bookmarks(BOOKMARKS_FILE).unwrap();
     assert_eq!(loaded.len(), 1);
@@ -25,7 +30,10 @@ fn search_uses_alias_label() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    let entries = vec![BookmarkEntry { url: "https://example.com".into(), alias: Some("ex".into()) }];
+    let entries = vec![BookmarkEntry {
+        url: "https://example.com".into(),
+        alias: Some("ex".into()),
+    }];
     save_bookmarks(BOOKMARKS_FILE, &entries).unwrap();
 
     let plugin = BookmarksPlugin::default();
@@ -66,8 +74,14 @@ fn bm_list_returns_bookmarks() {
     std::env::set_current_dir(dir.path()).unwrap();
 
     let entries = vec![
-        BookmarkEntry { url: "https://example.com".into(), alias: Some("ex".into()) },
-        BookmarkEntry { url: "https://rust-lang.org".into(), alias: None },
+        BookmarkEntry {
+            url: "https://example.com".into(),
+            alias: Some("ex".into()),
+        },
+        BookmarkEntry {
+            url: "https://rust-lang.org".into(),
+            alias: None,
+        },
     ];
     save_bookmarks(BOOKMARKS_FILE, &entries).unwrap();
 
@@ -85,8 +99,14 @@ fn bm_rm_lists_bookmarks_without_filter() {
     std::env::set_current_dir(dir.path()).unwrap();
 
     let entries = vec![
-        BookmarkEntry { url: "https://example.com".into(), alias: Some("ex".into()) },
-        BookmarkEntry { url: "https://rust-lang.org".into(), alias: None },
+        BookmarkEntry {
+            url: "https://example.com".into(),
+            alias: Some("ex".into()),
+        },
+        BookmarkEntry {
+            url: "https://rust-lang.org".into(),
+            alias: None,
+        },
     ];
     save_bookmarks(BOOKMARKS_FILE, &entries).unwrap();
 
@@ -100,4 +120,3 @@ fn bm_rm_lists_bookmarks_without_filter() {
         .iter()
         .any(|a| a.action == "bookmark:remove:https://rust-lang.org"));
 }
-

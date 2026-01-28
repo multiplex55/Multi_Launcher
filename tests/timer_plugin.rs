@@ -52,18 +52,21 @@ fn search_cancel_lists_timers() {
     // manually insert an active timer
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
-        list.insert(1, TimerEntry {
-            id: 1,
-            label: "test".into(),
-            deadline: Instant::now() + Duration::from_secs(10),
-            persist: false,
-            end_ts: 0,
-            start_ts: 0,
-            paused: false,
-            remaining: Duration::from_secs(10),
-            generation: 0,
-            sound: "None".into(),
-        });
+        list.insert(
+            1,
+            TimerEntry {
+                id: 1,
+                label: "test".into(),
+                deadline: Instant::now() + Duration::from_secs(10),
+                persist: false,
+                end_ts: 0,
+                start_ts: 0,
+                paused: false,
+                remaining: Duration::from_secs(10),
+                generation: 0,
+                sound: "None".into(),
+            },
+        );
     }
     let plugin = TimerPlugin;
     let results = plugin.search("timer cancel");
@@ -79,18 +82,21 @@ fn search_list_lists_timers() {
     let _lock = TEST_MUTEX.lock().unwrap();
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
-        list.insert(2, TimerEntry {
-            id: 2,
-            label: "demo".into(),
-            deadline: Instant::now() + Duration::from_secs(20),
-            persist: false,
-            end_ts: 0,
-            start_ts: 0,
-            paused: false,
-            remaining: Duration::from_secs(20),
-            generation: 0,
-            sound: "None".into(),
-        });
+        list.insert(
+            2,
+            TimerEntry {
+                id: 2,
+                label: "demo".into(),
+                deadline: Instant::now() + Duration::from_secs(20),
+                persist: false,
+                end_ts: 0,
+                start_ts: 0,
+                paused: false,
+                remaining: Duration::from_secs(20),
+                generation: 0,
+                sound: "None".into(),
+            },
+        );
     }
     let plugin = TimerPlugin;
     let results = plugin.search("timer list");
@@ -103,18 +109,21 @@ fn search_rm_lists_timers() {
     let _lock = TEST_MUTEX.lock().unwrap();
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
-        list.insert(3, TimerEntry {
-            id: 3,
-            label: "remove".into(),
-            deadline: Instant::now() + Duration::from_secs(30),
-            persist: false,
-            end_ts: 0,
-            start_ts: 0,
-            paused: false,
-            remaining: Duration::from_secs(30),
-            generation: 0,
-            sound: "None".into(),
-        });
+        list.insert(
+            3,
+            TimerEntry {
+                id: 3,
+                label: "remove".into(),
+                deadline: Instant::now() + Duration::from_secs(30),
+                persist: false,
+                end_ts: 0,
+                start_ts: 0,
+                paused: false,
+                remaining: Duration::from_secs(30),
+                generation: 0,
+                sound: "None".into(),
+            },
+        );
     }
     let plugin = TimerPlugin;
     let results = plugin.search("timer rm");
@@ -138,18 +147,21 @@ fn search_pause_lists_running_timers() {
     let _lock = TEST_MUTEX.lock().unwrap();
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
-        list.insert(11, TimerEntry {
-            id: 11,
-            label: "run".into(),
-            deadline: Instant::now() + Duration::from_secs(5),
-            persist: false,
-            end_ts: 0,
-            start_ts: 0,
-            paused: false,
-            remaining: Duration::from_secs(5),
-            generation: 0,
-            sound: "None".into(),
-        });
+        list.insert(
+            11,
+            TimerEntry {
+                id: 11,
+                label: "run".into(),
+                deadline: Instant::now() + Duration::from_secs(5),
+                persist: false,
+                end_ts: 0,
+                start_ts: 0,
+                paused: false,
+                remaining: Duration::from_secs(5),
+                generation: 0,
+                sound: "None".into(),
+            },
+        );
     }
     let plugin = TimerPlugin;
     let results = plugin.search("timer pause");
@@ -171,18 +183,21 @@ fn search_resume_lists_paused_timers() {
     let _lock = TEST_MUTEX.lock().unwrap();
     {
         let mut list = ACTIVE_TIMERS.lock().unwrap();
-        list.insert(12, TimerEntry {
-            id: 12,
-            label: "pause".into(),
-            deadline: Instant::now() + Duration::from_secs(5),
-            persist: false,
-            end_ts: 0,
-            start_ts: 0,
-            paused: true,
-            remaining: Duration::from_secs(5),
-            generation: 0,
-            sound: "None".into(),
-        });
+        list.insert(
+            12,
+            TimerEntry {
+                id: 12,
+                label: "pause".into(),
+                deadline: Instant::now() + Duration::from_secs(5),
+                persist: false,
+                end_ts: 0,
+                start_ts: 0,
+                paused: true,
+                remaining: Duration::from_secs(5),
+                generation: 0,
+                sound: "None".into(),
+            },
+        );
     }
     let plugin = TimerPlugin;
     let results = plugin.search("timer resume");
@@ -255,8 +270,8 @@ fn search_timer_hms_format() {
 
 #[test]
 fn format_ts_invalid_timestamp() {
-    use multi_launcher::plugins::timer::format_ts;
     use chrono::{Local, TimeZone};
+    use multi_launcher::plugins::timer::format_ts;
     let invalid_ts = 10_000_000_000_000u64;
     let expected = Local
         .timestamp_opt(0, 0)
@@ -276,7 +291,13 @@ fn pause_resume_does_not_grow_heap() {
     ACTIVE_TIMERS.lock().unwrap().clear();
 
     start_timer(Duration::from_secs(3600), "None".into());
-    let id = ACTIVE_TIMERS.lock().unwrap().keys().cloned().next().unwrap();
+    let id = ACTIVE_TIMERS
+        .lock()
+        .unwrap()
+        .keys()
+        .cloned()
+        .next()
+        .unwrap();
     assert_eq!(heap_len(), 1);
 
     for _ in 0..5 {
@@ -292,8 +313,8 @@ fn pause_resume_does_not_grow_heap() {
 
 #[test]
 fn parse_hhmm_with_day_offset() {
+    use chrono::{Duration as ChronoDuration, Local};
     use multi_launcher::plugins::timer::parse_hhmm;
-    use chrono::{Local, Duration as ChronoDuration};
     let (h, m, date) = parse_hhmm("2d 07:30").unwrap();
     assert_eq!((h, m), (7, 30));
     let expected = Local::now().date_naive() + ChronoDuration::days(2);
@@ -302,8 +323,8 @@ fn parse_hhmm_with_day_offset() {
 
 #[test]
 fn parse_hhmm_with_absolute_date() {
-    use multi_launcher::plugins::timer::parse_hhmm;
     use chrono::NaiveDate;
+    use multi_launcher::plugins::timer::parse_hhmm;
     let (h, m, date) = parse_hhmm("2024-01-31 05:15").unwrap();
     assert_eq!((h, m), (5, 15));
     assert_eq!(date.unwrap(), NaiveDate::from_ymd_opt(2024, 1, 31).unwrap());
@@ -318,10 +339,8 @@ fn parse_hhmm_large_day_offset() {
 
 #[test]
 fn start_alarm_multi_day() {
-    use multi_launcher::plugins::timer::{
-        cancel_timer, start_alarm_named, ACTIVE_TIMERS,
-    };
-    use chrono::{Local, Duration as ChronoDuration, Timelike};
+    use chrono::{Duration as ChronoDuration, Local, Timelike};
+    use multi_launcher::plugins::timer::{cancel_timer, start_alarm_named, ACTIVE_TIMERS};
     let _lock = TEST_MUTEX.lock().unwrap();
     ACTIVE_TIMERS.lock().unwrap().clear();
 
@@ -335,10 +354,16 @@ fn start_alarm_multi_day() {
         let list = ACTIVE_TIMERS.lock().unwrap();
         assert_eq!(list.len(), 1);
         let t = list.values().next().unwrap();
-        (t.id, t.deadline.saturating_duration_since(std::time::Instant::now()).as_secs())
+        (
+            t.id,
+            t.deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs(),
+        )
     };
 
-    let expected = (date.and_hms_opt(hour, minute, 0).unwrap() - now.naive_local()).num_seconds() as u64;
+    let expected =
+        (date.and_hms_opt(hour, minute, 0).unwrap() - now.naive_local()).num_seconds() as u64;
     assert!((remaining as i64 - expected as i64).abs() <= 2);
     cancel_timer(id);
 }

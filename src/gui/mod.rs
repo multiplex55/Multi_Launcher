@@ -14,6 +14,8 @@ mod dashboard_editor_dialog;
 mod fav_dialog;
 mod image_panel;
 mod macro_dialog;
+mod mouse_gesture_binding_dialog;
+mod mouse_gestures_dialog;
 mod note_panel;
 mod notes_dialog;
 mod screenshot_editor;
@@ -44,6 +46,8 @@ pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
 pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
+pub use mouse_gesture_binding_dialog::MgBindingDialog;
+pub use mouse_gestures_dialog::{GestureRecorder, MgGesturesDialog, RecorderConfig};
 pub use note_panel::{
     build_nvim_command, build_wezterm_command, extract_links, show_wiki_link, spawn_external,
     NotePanel,
@@ -95,12 +99,10 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Mutex;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 use std::time::{Duration, Instant};
@@ -142,6 +144,7 @@ pub enum WatchEvent {
     Favorites,
     Dashboard(DashboardEvent),
     Recycle(Result<(), String>),
+    ExecuteAction(Action),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,6 +181,7 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::Favorites => TestWatchEvent::Actions,
             WatchEvent::Dashboard(_) => TestWatchEvent::Actions,
             WatchEvent::Recycle(_) => unreachable!(),
+            WatchEvent::ExecuteAction(_) => TestWatchEvent::Actions,
         }
     }
 }
@@ -243,6 +247,30 @@ fn open_link(_url: &str) -> std::io::Result<()> {
 #[cfg(test)]
 pub static OPEN_LINK_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+#[allow(dead_code)]
+pub static EXECUTE_ACTION_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+static EXECUTE_ACTION_HOOK: Lazy<
+    Mutex<Option<Box<dyn Fn(&Action) -> anyhow::Result<()> + Send + Sync>>>,
+> = Lazy::new(|| Mutex::new(None));
+
+pub fn set_execute_action_hook(
+    hook: Option<Box<dyn Fn(&Action) -> anyhow::Result<()> + Send + Sync>>,
+) {
+    if let Ok(mut guard) = EXECUTE_ACTION_HOOK.lock() {
+        *guard = hook;
+    }
+}
+
+fn execute_action(action: &Action) -> anyhow::Result<()> {
+    if let Ok(guard) = EXECUTE_ACTION_HOOK.lock() {
+        if let Some(ref hook) = *guard {
+            return hook(action);
+        }
+    }
+    launch_action(action)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Panel {
     AliasDialog,
@@ -257,6 +285,8 @@ pub enum Panel {
     ShellCmdDialog,
     SnippetDialog,
     MacroDialog,
+    MouseGesturesDialog,
+    MouseGestureBindingDialog,
     FavDialog,
     NotesDialog,
     UnusedAssetsDialog,
@@ -293,6 +323,8 @@ struct PanelStates {
     shell_cmd_dialog: bool,
     snippet_dialog: bool,
     macro_dialog: bool,
+    mouse_gestures_dialog: bool,
+    mouse_gesture_binding_dialog: bool,
     fav_dialog: bool,
     notes_dialog: bool,
     unused_assets_dialog: bool,
@@ -395,6 +427,8 @@ pub struct LauncherApp {
     shell_cmd_dialog: ShellCmdDialog,
     snippet_dialog: SnippetDialog,
     macro_dialog: MacroDialog,
+    mouse_gestures_dialog: MgGesturesDialog,
+    mouse_gesture_binding_dialog: MgBindingDialog,
     fav_dialog: FavDialog,
     notes_dialog: NotesDialog,
     unused_assets_dialog: UnusedAssetsDialog,
@@ -500,6 +534,156 @@ impl LauncherApp {
         cmds.sort_by_cached_key(|a| a.label.to_lowercase());
         self.command_cache = cmds;
         self.update_completion_index();
+    }
+
+    pub fn process_watch_events(&mut self) {
+        while let Ok(ev) = self.rx.try_recv() {
+            match ev {
+                WatchEvent::Actions => {
+                    if let Ok(mut acts) = load_actions(&self.actions_path) {
+                        let custom_len = acts.len();
+                        if let Some(paths) = &self.index_paths {
+                            match indexer::index_paths(paths) {
+                                Ok(idx) => acts.extend(idx),
+                                Err(e) => {
+                                    tracing::error!(error = %e, "failed to index paths");
+                                    self.set_error(format!("Failed to index paths: {e}"));
+                                }
+                            }
+                        }
+                        self.actions = Arc::new(acts);
+                        self.custom_len = custom_len;
+                        self.update_action_cache();
+                        self.search();
+                        crate::actions::bump_actions_version();
+                        tracing::info!("actions reloaded");
+                    }
+                }
+                WatchEvent::Folders => {
+                    self.folder_aliases = crate::plugins::folders::load_folders(
+                        crate::plugins::folders::FOLDERS_FILE,
+                    )
+                    .unwrap_or_else(|_| crate::plugins::folders::default_folders())
+                    .into_iter()
+                    .map(|f| (f.path, f.alias))
+                    .collect();
+                }
+                WatchEvent::Bookmarks => {
+                    self.bookmark_aliases = crate::plugins::bookmarks::load_bookmarks(
+                        crate::plugins::bookmarks::BOOKMARKS_FILE,
+                    )
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|b| (b.url, b.alias))
+                    .collect();
+                }
+                WatchEvent::Clipboard => {
+                    self.dashboard_data_cache.refresh_clipboard();
+                }
+                WatchEvent::Snippets => {
+                    self.dashboard_data_cache.refresh_snippets();
+                }
+                WatchEvent::Notes => {
+                    self.dashboard_data_cache.refresh_notes();
+                }
+                WatchEvent::Todos => {
+                    self.dashboard_data_cache.refresh_todos();
+                }
+                WatchEvent::Favorites => {
+                    self.dashboard_data_cache.refresh_favorites();
+                }
+                WatchEvent::Dashboard(_) => {
+                    self.dashboard.reload();
+                    for warn in &self.dashboard.warnings {
+                        tracing::warn!("dashboard: {}", warn);
+                        if self.enable_toasts {
+                            push_toast(
+                                &mut self.toasts,
+                                Toast {
+                                    text: warn.clone().into(),
+                                    kind: ToastKind::Warning,
+                                    options: ToastOptions::default()
+                                        .duration_in_seconds(self.toast_duration as f64),
+                                },
+                            );
+                        }
+                    }
+                }
+                WatchEvent::Recycle(res) => match res {
+                    Ok(()) => {
+                        if self.enable_toasts {
+                            push_toast(
+                                &mut self.toasts,
+                                Toast {
+                                    text: "Emptied Recycle Bin".into(),
+                                    kind: ToastKind::Success,
+                                    options: ToastOptions::default()
+                                        .duration_in_seconds(self.toast_duration as f64),
+                                },
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        let msg = format!("Failed to empty recycle bin: {e}");
+                        self.set_error(msg.clone());
+                        if self.enable_toasts {
+                            push_toast(
+                                &mut self.toasts,
+                                Toast {
+                                    text: msg.into(),
+                                    kind: ToastKind::Error,
+                                    options: ToastOptions::default()
+                                        .duration_in_seconds(self.toast_duration as f64),
+                                },
+                            );
+                        }
+                    }
+                },
+                WatchEvent::ExecuteAction(action) => {
+                    let resolved = self.resolve_query_action(&action);
+                    if let Err(e) = execute_action(&resolved) {
+                        tracing::error!(error = %e, "failed to execute action from watcher");
+                        self.set_error(format!("Failed to execute action: {e}"));
+                    }
+                }
+            }
+        }
+    }
+
+    fn resolve_query_action(&self, action: &Action) -> Action {
+        if let Some(query) = action.action.strip_prefix("query:") {
+            let mut query = query.to_string();
+            if let Some(ref args) = action.args {
+                if !query.ends_with(' ') {
+                    query.push(' ');
+                }
+                query.push_str(args);
+            }
+            if let Some(res) = self
+                .plugins
+                .search_filtered(
+                    &query,
+                    self.enabled_plugins.as_ref(),
+                    self.enabled_capabilities.as_ref(),
+                )
+                .into_iter()
+                .next()
+            {
+                return Action {
+                    label: action.label.clone(),
+                    desc: action.desc.clone(),
+                    action: res.action,
+                    args: res.args,
+                };
+            }
+            return Action {
+                label: action.label.clone(),
+                desc: action.desc.clone(),
+                action: query,
+                args: None,
+            };
+        }
+        action.clone()
     }
 
     fn update_completion_index(&mut self) {
@@ -631,6 +815,9 @@ impl LauncherApp {
         self.plugin_dirs = plugin_dirs;
         self.index_paths = index_paths;
         self.enabled_plugins = enabled_plugins;
+
+        // Keep MG hook in lockstep with whether the plugin is enabled in the UI/settings.
+        crate::plugins::mouse_gestures::sync_enabled_plugins(self.enabled_plugins.as_ref());
         if self.enabled_plugins.is_some() {
             self.update_command_cache();
         }
@@ -730,6 +917,7 @@ impl LauncherApp {
         if let Some(v) = show_dashboard_diagnostics {
             self.show_dashboard_diagnostics = v;
         }
+        crate::plugins::mouse_gestures::sync_enabled_plugins(self.enabled_plugins.as_ref());
     }
 
     pub fn new(
@@ -1050,6 +1238,8 @@ impl LauncherApp {
             shell_cmd_dialog: ShellCmdDialog::default(),
             snippet_dialog: SnippetDialog::default(),
             macro_dialog: MacroDialog::default(),
+            mouse_gestures_dialog: MgGesturesDialog::default(),
+            mouse_gesture_binding_dialog: MgBindingDialog::default(),
             fav_dialog: FavDialog::default(),
             notes_dialog: NotesDialog::default(),
             unused_assets_dialog: UnusedAssetsDialog::default(),
@@ -1163,6 +1353,7 @@ impl LauncherApp {
         app.update_action_cache();
         app.update_command_cache();
         app.search();
+        crate::plugins::mouse_gestures::sync_enabled_plugins(app.enabled_plugins.as_ref());
         app
     }
 
@@ -1523,7 +1714,9 @@ impl LauncherApp {
             return Some(action.clone());
         }
 
-        let commands = self.plugins.commands_filtered(self.enabled_plugins.as_ref());
+        let commands = self
+            .plugins
+            .commands_filtered(self.enabled_plugins.as_ref());
         if let Some(action) = commands.into_iter().find(|action| {
             action.action == pin.action_id && action.args.as_deref() == pin.args.as_deref()
         }) {
@@ -1537,9 +1730,11 @@ impl LauncherApp {
             return Some(action.clone());
         }
 
-        if let Some(fav) = snapshot.favorites.iter().find(|fav| {
-            fav.action == pin.action_id && fav.args.as_deref() == pin.args.as_deref()
-        }) {
+        if let Some(fav) = snapshot
+            .favorites
+            .iter()
+            .find(|fav| fav.action == pin.action_id && fav.args.as_deref() == pin.args.as_deref())
+        {
             return Some(Action {
                 label: fav.label.clone(),
                 desc: "Fav".into(),
@@ -1692,11 +1887,9 @@ impl LauncherApp {
             }
         } else {
             if ui.button("Unpin result").clicked() {
-                if let Err(e) = history::remove_pin(
-                    HISTORY_PINS_FILE,
-                    &action.action,
-                    action.args.as_deref(),
-                ) {
+                if let Err(e) =
+                    history::remove_pin(HISTORY_PINS_FILE, &action.action, action.args.as_deref())
+                {
                     self.error = Some(format!("Failed to unpin result: {e}"));
                 } else if self.enable_toasts {
                     push_toast(
@@ -2209,6 +2402,12 @@ impl LauncherApp {
             self.snippet_dialog.open_edit(alias);
         } else if a.action == "macro:dialog" {
             self.macro_dialog.open();
+        } else if a.action == "mg:dialog" {
+            self.mouse_gestures_dialog.open();
+        } else if a.action == "mg:dialog:add" {
+            self.mouse_gestures_dialog.open_add();
+        } else if a.action == "mg:dialog:binding" {
+            self.mouse_gesture_binding_dialog.open();
         } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
             if label.is_empty() {
                 self.fav_dialog.open();
@@ -2603,6 +2802,8 @@ impl LauncherApp {
             || self.shell_cmd_dialog.open
             || self.snippet_dialog.open
             || self.macro_dialog.open
+            || self.mouse_gestures_dialog.open
+            || self.mouse_gesture_binding_dialog.open
             || self.fav_dialog.open
             || self.notes_dialog.open
             || self.unused_assets_dialog.open
@@ -2718,6 +2919,14 @@ impl LauncherApp {
             Panel::MacroDialog => {
                 self.macro_dialog.open = false;
                 self.panel_states.macro_dialog = false;
+            }
+            Panel::MouseGesturesDialog => {
+                self.mouse_gestures_dialog.open = false;
+                self.panel_states.mouse_gestures_dialog = false;
+            }
+            Panel::MouseGestureBindingDialog => {
+                self.mouse_gesture_binding_dialog.open = false;
+                self.panel_states.mouse_gesture_binding_dialog = false;
             }
             Panel::FavDialog => {
                 self.fav_dialog.open = false;
@@ -2857,6 +3066,14 @@ impl LauncherApp {
                 self.macro_dialog.open = false;
                 self.panel_states.macro_dialog = false;
             }
+            Panel::MouseGesturesDialog => {
+                self.mouse_gestures_dialog.open = false;
+                self.panel_states.mouse_gestures_dialog = false;
+            }
+            Panel::MouseGestureBindingDialog => {
+                self.mouse_gesture_binding_dialog.open = false;
+                self.panel_states.mouse_gesture_binding_dialog = false;
+            }
             Panel::FavDialog => {
                 self.fav_dialog.open = false;
                 self.panel_states.fav_dialog = false;
@@ -2959,6 +3176,8 @@ impl LauncherApp {
             Panel::ShellCmdDialog => self.shell_cmd_dialog.open = true,
             Panel::SnippetDialog => self.snippet_dialog.open = true,
             Panel::MacroDialog => self.macro_dialog.open = true,
+            Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open = true,
+            Panel::MouseGestureBindingDialog => self.mouse_gesture_binding_dialog.open = true,
             Panel::FavDialog => self.fav_dialog.open = true,
             Panel::NotesDialog => self.notes_dialog.open = true,
             Panel::UnusedAssetsDialog => self.unused_assets_dialog.open = true,
@@ -3076,6 +3295,16 @@ impl LauncherApp {
             Panel::SnippetDialog
         );
         check!(self.macro_dialog.open, macro_dialog, Panel::MacroDialog);
+        check!(
+            self.mouse_gestures_dialog.open,
+            mouse_gestures_dialog,
+            Panel::MouseGesturesDialog
+        );
+        check!(
+            self.mouse_gesture_binding_dialog.open,
+            mouse_gesture_binding_dialog,
+            Panel::MouseGestureBindingDialog
+        );
         check!(self.fav_dialog.open, fav_dialog, Panel::FavDialog);
         check!(self.notes_dialog.open, notes_dialog, Panel::NotesDialog);
         check!(
@@ -3270,7 +3499,10 @@ impl eframe::App for LauncherApp {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         self.unregister_all_hotkeys();
                         self.visible_flag.store(false, Ordering::SeqCst);
-                        self.last_visible = false;
+                        #[allow(unused_assignments)]
+                        {
+                            self.last_visible = false;
+                        }
                         #[cfg(not(test))]
                         std::process::exit(0);
                     }
@@ -3313,110 +3545,7 @@ impl eframe::App for LauncherApp {
             });
         });
 
-        while let Ok(ev) = self.rx.try_recv() {
-            match ev {
-                WatchEvent::Actions => {
-                    if let Ok(mut acts) = load_actions(&self.actions_path) {
-                        let custom_len = acts.len();
-                        if let Some(paths) = &self.index_paths {
-                            match indexer::index_paths(paths) {
-                                Ok(idx) => acts.extend(idx),
-                                Err(e) => {
-                                    tracing::error!(error = %e, "failed to index paths");
-                                    self.set_error(format!("Failed to index paths: {e}"));
-                                }
-                            }
-                        }
-                        self.actions = Arc::new(acts);
-                        self.custom_len = custom_len;
-                        self.update_action_cache();
-                        self.search();
-                        crate::actions::bump_actions_version();
-                        tracing::info!("actions reloaded");
-                    }
-                }
-                WatchEvent::Folders => {
-                    self.folder_aliases = crate::plugins::folders::load_folders(
-                        crate::plugins::folders::FOLDERS_FILE,
-                    )
-                    .unwrap_or_else(|_| crate::plugins::folders::default_folders())
-                    .into_iter()
-                    .map(|f| (f.path, f.alias))
-                    .collect();
-                }
-                WatchEvent::Bookmarks => {
-                    self.bookmark_aliases = crate::plugins::bookmarks::load_bookmarks(
-                        crate::plugins::bookmarks::BOOKMARKS_FILE,
-                    )
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|b| (b.url, b.alias))
-                    .collect();
-                }
-                WatchEvent::Clipboard => {
-                    self.dashboard_data_cache.refresh_clipboard();
-                }
-                WatchEvent::Snippets => {
-                    self.dashboard_data_cache.refresh_snippets();
-                }
-                WatchEvent::Notes => {
-                    self.dashboard_data_cache.refresh_notes();
-                }
-                WatchEvent::Todos => {
-                    self.dashboard_data_cache.refresh_todos();
-                }
-                WatchEvent::Favorites => {
-                    self.dashboard_data_cache.refresh_favorites();
-                }
-                WatchEvent::Dashboard(_) => {
-                    self.dashboard.reload();
-                    for warn in &self.dashboard.warnings {
-                        tracing::warn!("dashboard: {}", warn);
-                        if self.enable_toasts {
-                            push_toast(
-                                &mut self.toasts,
-                                Toast {
-                                    text: warn.clone().into(),
-                                    kind: ToastKind::Warning,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(self.toast_duration as f64),
-                                },
-                            );
-                        }
-                    }
-                }
-                WatchEvent::Recycle(res) => match res {
-                    Ok(()) => {
-                        if self.enable_toasts {
-                            push_toast(
-                                &mut self.toasts,
-                                Toast {
-                                    text: "Emptied Recycle Bin".into(),
-                                    kind: ToastKind::Success,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(self.toast_duration as f64),
-                                },
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        let msg = format!("Failed to empty recycle bin: {e}");
-                        self.set_error(msg.clone());
-                        if self.enable_toasts {
-                            push_toast(
-                                &mut self.toasts,
-                                Toast {
-                                    text: msg.into(),
-                                    kind: ToastKind::Error,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(self.toast_duration as f64),
-                                },
-                            );
-                        }
-                    }
-                },
-            }
-        }
+        self.process_watch_events();
 
         let trimmed = self.query.trim().to_string();
         let use_dashboard = self.should_show_dashboard(trimmed.as_str());
@@ -4184,6 +4313,12 @@ impl eframe::App for LauncherApp {
         let mut macro_dlg = std::mem::take(&mut self.macro_dialog);
         macro_dlg.ui(ctx, self);
         self.macro_dialog = macro_dlg;
+        let mut mg_dlg = std::mem::take(&mut self.mouse_gestures_dialog);
+        mg_dlg.ui(ctx, self);
+        self.mouse_gestures_dialog = mg_dlg;
+        let mut mg_bind_dlg = std::mem::take(&mut self.mouse_gesture_binding_dialog);
+        mg_bind_dlg.ui(ctx, self);
+        self.mouse_gesture_binding_dialog = mg_bind_dlg;
         let mut fav_dlg = std::mem::take(&mut self.fav_dialog);
         fav_dlg.ui(ctx, self);
         self.fav_dialog = fav_dlg;
@@ -4596,7 +4731,8 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
             | WatchEvent::Snippets
             | WatchEvent::Notes
             | WatchEvent::Todos
-            | WatchEvent::Favorites => {
+            | WatchEvent::Favorites
+            | WatchEvent::ExecuteAction(_) => {
                 continue;
             }
             WatchEvent::Recycle(_) => return Some(ev.into()),

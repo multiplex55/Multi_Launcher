@@ -21,11 +21,32 @@ impl Plugin for TextCasePlugin {
                 if words.len() > 1 {
                     let first = words[0].to_lowercase();
                     let known = [
-                        "upper", "lower", "capitalized", "camel", "pascal", "snake",
-                        "screaming", "kebab", "train", "dot", "alternating", "mocking",
-                        "inverse", "backwards", "acronym", "initials", "title",
-                        "sentence", "base64", "hex", "binary", "rot13", "clap",
-                        "emoji", "custom", "morse",
+                        "upper",
+                        "lower",
+                        "capitalized",
+                        "camel",
+                        "pascal",
+                        "snake",
+                        "screaming",
+                        "kebab",
+                        "train",
+                        "dot",
+                        "alternating",
+                        "mocking",
+                        "inverse",
+                        "backwards",
+                        "acronym",
+                        "initials",
+                        "title",
+                        "sentence",
+                        "base64",
+                        "hex",
+                        "binary",
+                        "rot13",
+                        "clap",
+                        "emoji",
+                        "custom",
+                        "morse",
                     ];
                     if known.contains(&first.as_str()) {
                         specific_case = Some(first.clone());
@@ -61,11 +82,27 @@ impl Plugin for TextCasePlugin {
                 };
 
                 let pascal = words.iter().map(|w| cap(w)).collect::<String>();
-                let snake = words.iter().map(|w| w.to_lowercase()).collect::<Vec<_>>().join("_");
-                let screaming = words.iter().map(|w| w.to_uppercase()).collect::<Vec<_>>().join("_");
-                let kebab = words.iter().map(|w| w.to_lowercase()).collect::<Vec<_>>().join("-");
+                let snake = words
+                    .iter()
+                    .map(|w| w.to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join("_");
+                let screaming = words
+                    .iter()
+                    .map(|w| w.to_uppercase())
+                    .collect::<Vec<_>>()
+                    .join("_");
+                let kebab = words
+                    .iter()
+                    .map(|w| w.to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join("-");
                 let train = words.iter().map(|w| cap(w)).collect::<Vec<_>>().join("-");
-                let dot = words.iter().map(|w| w.to_lowercase()).collect::<Vec<_>>().join(".");
+                let dot = words
+                    .iter()
+                    .map(|w| w.to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(".");
 
                 let alt_case = {
                     let mut upper_flag = true;
@@ -134,8 +171,8 @@ impl Plugin for TextCasePlugin {
                     .join(" ");
 
                 let small_words = [
-                    "a", "an", "and", "or", "the", "in", "on", "of", "for", "to",
-                    "at", "by", "with", "without",
+                    "a", "an", "and", "or", "the", "in", "on", "of", "for", "to", "at", "by",
+                    "with", "without",
                 ];
                 let small_set: std::collections::HashSet<&str> =
                     small_words.iter().cloned().collect();
@@ -199,13 +236,23 @@ impl Plugin for TextCasePlugin {
                 .collect();
                 let emoji_case = words
                     .iter()
-                    .map(|w| emoji_map.get(&w.to_lowercase().as_str()).copied().unwrap_or(*w))
+                    .map(|w| {
+                        emoji_map
+                            .get(&w.to_lowercase().as_str())
+                            .copied()
+                            .unwrap_or(*w)
+                    })
                     .collect::<Vec<_>>()
                     .join(" ");
 
                 let custom = words
                     .iter()
-                    .map(|w| w.chars().map(|c| c.to_string()).collect::<Vec<_>>().join("-"))
+                    .map(|w| {
+                        w.chars()
+                            .map(|c| c.to_string())
+                            .collect::<Vec<_>>()
+                            .join("-")
+                    })
                     .collect::<Vec<_>>()
                     .join(" ");
 
@@ -265,32 +312,240 @@ impl Plugin for TextCasePlugin {
                     .join(" ");
 
                 let actions = vec![
-                    ("upper", Action { label: upper.clone(), desc: "Text Case-Uppercase".into(), action: format!("clipboard:{}", upper), args: None }),
-                    ("lower", Action { label: lower.clone(), desc: "Text Case-Lowercase".into(), action: format!("clipboard:{}", lower), args: None }),
-                    ("capitalized", Action { label: capitalized.clone(), desc: "Text Case-Capitalized".into(), action: format!("clipboard:{}", capitalized), args: None }),
-                    ("camel", Action { label: camel.clone(), desc: "Text Case-Camel".into(), action: format!("clipboard:{}", camel), args: None }),
-                    ("pascal", Action { label: pascal.clone(), desc: "Text Case-Pascal".into(), action: format!("clipboard:{}", pascal), args: None }),
-                    ("snake", Action { label: snake.clone(), desc: "Text Case-Snake".into(), action: format!("clipboard:{}", snake), args: None }),
-                    ("screaming", Action { label: screaming.clone(), desc: "Text Case-Screaming".into(), action: format!("clipboard:{}", screaming), args: None }),
-                    ("kebab", Action { label: kebab.clone(), desc: "Text Case-Kebab".into(), action: format!("clipboard:{}", kebab), args: None }),
-                    ("train", Action { label: train.clone(), desc: "Text Case-Train".into(), action: format!("clipboard:{}", train), args: None }),
-                    ("dot", Action { label: dot.clone(), desc: "Text Case-Dot".into(), action: format!("clipboard:{}", dot), args: None }),
-                    ("alternating", Action { label: alt_case.clone(), desc: "Text Case-Alternating".into(), action: format!("clipboard:{}", alt_case), args: None }),
-                    ("mocking", Action { label: mocking.clone(), desc: "Text Case-Mocking".into(), action: format!("clipboard:{}", mocking), args: None }),
-                    ("inverse", Action { label: inverse.clone(), desc: "Text Case-Inverse".into(), action: format!("clipboard:{}", inverse), args: None }),
-                    ("backwards", Action { label: backwards.clone(), desc: "Text Case-Backwards".into(), action: format!("clipboard:{}", backwards), args: None }),
-                    ("acronym", Action { label: acronym.clone(), desc: "Text Case-Acronym".into(), action: format!("clipboard:{}", acronym), args: None }),
-                    ("initials", Action { label: initial_caps.clone(), desc: "Text Case-Initials".into(), action: format!("clipboard:{}", initial_caps), args: None }),
-                    ("title", Action { label: title_case.clone(), desc: "Text Case-Title".into(), action: format!("clipboard:{}", title_case), args: None }),
-                    ("sentence", Action { label: sentence.clone(), desc: "Text Case-Sentence".into(), action: format!("clipboard:{}", sentence), args: None }),
-                    ("base64", Action { label: b64.clone(), desc: "Text Case-Base64".into(), action: format!("clipboard:{}", b64), args: None }),
-                    ("hex", Action { label: hex_enc.clone(), desc: "Text Case-Hex".into(), action: format!("clipboard:{}", hex_enc), args: None }),
-                    ("binary", Action { label: binary.clone(), desc: "Text Case-Binary".into(), action: format!("clipboard:{}", binary), args: None }),
-                    ("rot13", Action { label: rot13.clone(), desc: "Text Case-ROT13".into(), action: format!("clipboard:{}", rot13), args: None }),
-                    ("clap", Action { label: clap.clone(), desc: "Text Case-Clap".into(), action: format!("clipboard:{}", clap), args: None }),
-                    ("emoji", Action { label: emoji_case.clone(), desc: "Text Case-Emoji".into(), action: format!("clipboard:{}", emoji_case), args: None }),
-                    ("custom", Action { label: custom.clone(), desc: "Text Case-Custom".into(), action: format!("clipboard:{}", custom), args: None }),
-                    ("morse", Action { label: morse.clone(), desc: "Text Case-Morse".into(), action: format!("clipboard:{}", morse), args: None }),
+                    (
+                        "upper",
+                        Action {
+                            label: upper.clone(),
+                            desc: "Text Case-Uppercase".into(),
+                            action: format!("clipboard:{}", upper),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "lower",
+                        Action {
+                            label: lower.clone(),
+                            desc: "Text Case-Lowercase".into(),
+                            action: format!("clipboard:{}", lower),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "capitalized",
+                        Action {
+                            label: capitalized.clone(),
+                            desc: "Text Case-Capitalized".into(),
+                            action: format!("clipboard:{}", capitalized),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "camel",
+                        Action {
+                            label: camel.clone(),
+                            desc: "Text Case-Camel".into(),
+                            action: format!("clipboard:{}", camel),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "pascal",
+                        Action {
+                            label: pascal.clone(),
+                            desc: "Text Case-Pascal".into(),
+                            action: format!("clipboard:{}", pascal),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "snake",
+                        Action {
+                            label: snake.clone(),
+                            desc: "Text Case-Snake".into(),
+                            action: format!("clipboard:{}", snake),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "screaming",
+                        Action {
+                            label: screaming.clone(),
+                            desc: "Text Case-Screaming".into(),
+                            action: format!("clipboard:{}", screaming),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "kebab",
+                        Action {
+                            label: kebab.clone(),
+                            desc: "Text Case-Kebab".into(),
+                            action: format!("clipboard:{}", kebab),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "train",
+                        Action {
+                            label: train.clone(),
+                            desc: "Text Case-Train".into(),
+                            action: format!("clipboard:{}", train),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "dot",
+                        Action {
+                            label: dot.clone(),
+                            desc: "Text Case-Dot".into(),
+                            action: format!("clipboard:{}", dot),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "alternating",
+                        Action {
+                            label: alt_case.clone(),
+                            desc: "Text Case-Alternating".into(),
+                            action: format!("clipboard:{}", alt_case),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "mocking",
+                        Action {
+                            label: mocking.clone(),
+                            desc: "Text Case-Mocking".into(),
+                            action: format!("clipboard:{}", mocking),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "inverse",
+                        Action {
+                            label: inverse.clone(),
+                            desc: "Text Case-Inverse".into(),
+                            action: format!("clipboard:{}", inverse),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "backwards",
+                        Action {
+                            label: backwards.clone(),
+                            desc: "Text Case-Backwards".into(),
+                            action: format!("clipboard:{}", backwards),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "acronym",
+                        Action {
+                            label: acronym.clone(),
+                            desc: "Text Case-Acronym".into(),
+                            action: format!("clipboard:{}", acronym),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "initials",
+                        Action {
+                            label: initial_caps.clone(),
+                            desc: "Text Case-Initials".into(),
+                            action: format!("clipboard:{}", initial_caps),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "title",
+                        Action {
+                            label: title_case.clone(),
+                            desc: "Text Case-Title".into(),
+                            action: format!("clipboard:{}", title_case),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "sentence",
+                        Action {
+                            label: sentence.clone(),
+                            desc: "Text Case-Sentence".into(),
+                            action: format!("clipboard:{}", sentence),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "base64",
+                        Action {
+                            label: b64.clone(),
+                            desc: "Text Case-Base64".into(),
+                            action: format!("clipboard:{}", b64),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "hex",
+                        Action {
+                            label: hex_enc.clone(),
+                            desc: "Text Case-Hex".into(),
+                            action: format!("clipboard:{}", hex_enc),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "binary",
+                        Action {
+                            label: binary.clone(),
+                            desc: "Text Case-Binary".into(),
+                            action: format!("clipboard:{}", binary),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "rot13",
+                        Action {
+                            label: rot13.clone(),
+                            desc: "Text Case-ROT13".into(),
+                            action: format!("clipboard:{}", rot13),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "clap",
+                        Action {
+                            label: clap.clone(),
+                            desc: "Text Case-Clap".into(),
+                            action: format!("clipboard:{}", clap),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "emoji",
+                        Action {
+                            label: emoji_case.clone(),
+                            desc: "Text Case-Emoji".into(),
+                            action: format!("clipboard:{}", emoji_case),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "custom",
+                        Action {
+                            label: custom.clone(),
+                            desc: "Text Case-Custom".into(),
+                            action: format!("clipboard:{}", custom),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "morse",
+                        Action {
+                            label: morse.clone(),
+                            desc: "Text Case-Morse".into(),
+                            action: format!("clipboard:{}", morse),
+                            args: None,
+                        },
+                    ),
                 ];
 
                 if let Some(case) = specific_case {

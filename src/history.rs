@@ -208,10 +208,7 @@ pub fn upsert_pin(path: &str, pin: &HistoryPin) -> anyhow::Result<bool> {
 
 pub fn remove_pin(path: &str, action_id: &str, args: Option<&str>) -> anyhow::Result<bool> {
     let mut pins = load_pins(path).unwrap_or_default();
-    if let Some(idx) = pins
-        .iter()
-        .position(|p| p.matches_id(action_id, args))
-    {
+    if let Some(idx) = pins.iter().position(|p| p.matches_id(action_id, args)) {
         pins.remove(idx);
         save_pins(path, &pins)?;
         Ok(true)

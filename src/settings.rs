@@ -2,8 +2,8 @@ use crate::hotkey::Key;
 
 use crate::gui::Panel;
 use crate::hotkey::{parse_hotkey, Hotkey};
-use serde::{Deserialize, Serialize};
 use once_cell::sync::OnceCell;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 

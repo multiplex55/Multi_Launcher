@@ -1,9 +1,9 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
-use urlencoding::encode;
 use crate::plugins::calc_history::{self, CalcHistoryEntry, CALC_HISTORY_FILE, MAX_ENTRIES};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
+use urlencoding::encode;
 
 pub struct WebSearchPlugin;
 
@@ -35,7 +35,12 @@ impl Plugin for WebSearchPlugin {
     }
 
     fn commands(&self) -> Vec<Action> {
-        vec![Action { label: "g".into(), desc: "Web search".into(), action: "query:g ".into(), args: None }]
+        vec![Action {
+            label: "g".into(),
+            desc: "Web search".into(),
+            action: "query:g ".into(),
+            args: None,
+        }]
     }
 }
 
@@ -90,11 +95,7 @@ impl Plugin for CalculatorPlugin {
                             expr: expr.to_string(),
                             result: result.clone(),
                         };
-                        let _ = calc_history::append_entry(
-                            CALC_HISTORY_FILE,
-                            entry,
-                            MAX_ENTRIES,
-                        );
+                        let _ = calc_history::append_entry(CALC_HISTORY_FILE, entry, MAX_ENTRIES);
                         vec![Action {
                             label: format!("{} = {}", expr, result),
                             desc: "Calculator".into(),

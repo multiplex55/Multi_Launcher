@@ -163,9 +163,7 @@ impl Widget for NotesRecentWidget {
                 for note in &self.cached[range] {
                     let mut clicked_row = false;
                     ui.vertical(|ui| {
-                        clicked_row |= ui
-                            .add(egui::Button::new(&note.title).wrap(false))
-                            .clicked();
+                        clicked_row |= ui.add(egui::Button::new(&note.title).wrap(false)).clicked();
                         if self.cfg.show_snippet {
                             ui.add(
                                 egui::Label::new(egui::RichText::new(&note.snippet).small())

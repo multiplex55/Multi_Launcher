@@ -73,8 +73,12 @@ impl SystemControlsWidget {
         value: &mut serde_json::Value,
         ctx: &WidgetSettingsContext<'_>,
     ) -> WidgetSettingsUiResult {
-        edit_typed_settings(ui, value, ctx, |ui, cfg: &mut SystemControlsConfig, _ctx| {
-            refresh_settings_ui(
+        edit_typed_settings(
+            ui,
+            value,
+            ctx,
+            |ui, cfg: &mut SystemControlsConfig, _ctx| {
+                refresh_settings_ui(
                 ui,
                 &mut cfg.refresh_interval_secs,
                 &mut cfg.refresh_mode,
@@ -82,7 +86,8 @@ impl SystemControlsWidget {
                 Some(&mut cfg.manual_refresh_only),
                 "System control data is cached. The widget will skip refreshing until this many seconds have passed. Use Refresh to update immediately.",
             )
-        })
+            },
+        )
     }
 
     fn refresh_interval(&self) -> Duration {
@@ -134,8 +139,7 @@ impl SystemControlsWidget {
                 Err(err) => snapshot.power_plan_error = Some(err),
             }
         } else {
-            snapshot.power_plan_error =
-                Some("Power plans are not supported on this OS.".into());
+            snapshot.power_plan_error = Some("Power plans are not supported on this OS.".into());
         }
 
         self.cache.refresh(|data| *data = snapshot);
@@ -267,7 +271,8 @@ impl Widget for SystemControlsWidget {
                                     )
                                     .changed()
                                 {
-                                    selection_changed = Some((plan.name.clone(), plan.guid.clone()));
+                                    selection_changed =
+                                        Some((plan.name.clone(), plan.guid.clone()));
                                 }
                             }
                         });

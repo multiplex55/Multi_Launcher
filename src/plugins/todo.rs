@@ -24,8 +24,7 @@ pub const TODO_FILE: &str = "todo.json";
 
 static TODO_VERSION: AtomicU64 = AtomicU64::new(0);
 
-const TODO_USAGE: &str =
-    "Usage: todo <add|list|rm|clear|pset|tag|edit|view|export> ...";
+const TODO_USAGE: &str = "Usage: todo <add|list|rm|clear|pset|tag|edit|view|export> ...";
 const TODO_ADD_USAGE: &str = "Usage: todo add <text> [p=<priority>] [#tag ...]";
 const TODO_RM_USAGE: &str = "Usage: todo rm <text>";
 const TODO_PSET_USAGE: &str = "Usage: todo pset <index> <priority>";
@@ -218,12 +217,15 @@ impl TodoPlugin {
     fn search_internal(&self, trimmed: &str) -> Vec<Action> {
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "todo") {
             if rest.trim().is_empty() {
-                return vec![Action {
-                    label: "todo: edit todos".into(),
-                    desc: "Todo".into(),
-                    action: "todo:dialog".into(),
-                    args: None,
-                }, usage_action(TODO_USAGE, "todo ")];
+                return vec![
+                    Action {
+                        label: "todo: edit todos".into(),
+                        desc: "Todo".into(),
+                        action: "todo:dialog".into(),
+                        args: None,
+                    },
+                    usage_action(TODO_USAGE, "todo "),
+                ];
             }
         }
 
@@ -320,7 +322,8 @@ impl TodoPlugin {
                         if let Ok(n) = p.parse::<u8>() {
                             priority = n;
                         }
-                    } else if let Some(tag) = part.strip_prefix('#').or_else(|| part.strip_prefix('@'))
+                    } else if let Some(tag) =
+                        part.strip_prefix('#').or_else(|| part.strip_prefix('@'))
                     {
                         if !tag.is_empty() {
                             tags.push(tag.to_string());
@@ -417,11 +420,7 @@ impl TodoPlugin {
             return entries
                 .into_iter()
                 .map(|(idx, t)| Action {
-                    label: format!(
-                        "{} {}",
-                        if t.done { "[x]" } else { "[ ]" },
-                        t.text.clone()
-                    ),
+                    label: format!("{} {}", if t.done { "[x]" } else { "[ ]" }, t.text.clone()),
                     desc: "Todo".into(),
                     action: format!("query:todo tag {idx} "),
                     args: None,
@@ -463,26 +462,24 @@ impl TodoPlugin {
 
             let filters = parse_query_filters(filter, &["@", "#", "tag:"]);
             let text_filter = filters.remaining_tokens.join(" ");
-            let has_tag_filter = !filters.include_tags.is_empty() || !filters.exclude_tags.is_empty();
+            let has_tag_filter =
+                !filters.include_tags.is_empty() || !filters.exclude_tags.is_empty();
 
             // Tag filters run first, then text filters apply fuzzy matching against remaining text.
             if !filters.include_tags.is_empty() {
                 entries.retain(|(_, t)| {
                     filters.include_tags.iter().all(|requested| {
-                        t.tags
-                            .iter()
-                            .any(|tag| tag.eq_ignore_ascii_case(requested))
+                        t.tags.iter().any(|tag| tag.eq_ignore_ascii_case(requested))
                     })
                 });
             }
 
             if !filters.exclude_tags.is_empty() {
                 entries.retain(|(_, t)| {
-                    !filters.exclude_tags.iter().any(|excluded| {
-                        t.tags
-                            .iter()
-                            .any(|tag| tag.eq_ignore_ascii_case(excluded))
-                    })
+                    !filters
+                        .exclude_tags
+                        .iter()
+                        .any(|excluded| t.tags.iter().any(|tag| tag.eq_ignore_ascii_case(excluded)))
                 });
             }
 

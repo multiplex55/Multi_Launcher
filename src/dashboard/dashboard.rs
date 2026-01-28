@@ -13,9 +13,9 @@ use siphasher::sip::SipHasher24;
 use std::collections::HashMap;
 use std::hash::Hasher;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 #[cfg(test)]
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DashboardEvent {
@@ -295,18 +295,16 @@ impl Dashboard {
                     };
 
                     let action = match overflow {
-                        OverflowPolicy::Clip => {
-                            Self::render_clipped_widget(
-                                slot,
-                                ui,
-                                ctx,
-                                activation,
-                                body_height,
-                                diagnostics,
-                                &heading,
-                                &diag_key,
-                            )
-                        }
+                        OverflowPolicy::Clip => Self::render_clipped_widget(
+                            slot,
+                            ui,
+                            ctx,
+                            activation,
+                            body_height,
+                            diagnostics,
+                            &heading,
+                            &diag_key,
+                        ),
                         OverflowPolicy::Scroll { visibility } => Self::render_scrollable_widget(
                             slot,
                             ui,
@@ -377,7 +375,15 @@ impl Dashboard {
                 let _ = viewport;
                 ui.set_clip_rect(ui.clip_rect().intersect(slot_clip));
                 ui.set_min_height(body_height);
-                Self::render_widget_content(slot, ui, ctx, activation, diagnostics, heading, diag_key)
+                Self::render_widget_content(
+                    slot,
+                    ui,
+                    ctx,
+                    activation,
+                    diagnostics,
+                    heading,
+                    diag_key,
+                )
             })
             .inner
     }
@@ -394,12 +400,7 @@ impl Dashboard {
         let start = Instant::now();
         let response = slot.widget.render(ui, ctx, activation);
         let end = Instant::now();
-        diagnostics.record_widget_refresh(
-            diag_key.to_string(),
-            heading.to_string(),
-            start,
-            end,
-        );
+        diagnostics.record_widget_refresh(diag_key.to_string(), heading.to_string(), start, end);
         response
     }
 

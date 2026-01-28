@@ -13,10 +13,7 @@ impl Plugin for RedditPlugin {
                 return vec![Action {
                     label: format!("Search Reddit for {q}"),
                     desc: "Web search".into(),
-                    action: format!(
-                        "https://www.reddit.com/search/?q={}",
-                        encode(q)
-                    ),
+                    action: format!("https://www.reddit.com/search/?q={}", encode(q)),
                     args: None,
                 }];
             }
@@ -37,6 +34,11 @@ impl Plugin for RedditPlugin {
     }
 
     fn commands(&self) -> Vec<Action> {
-        vec![Action { label: "red".into(), desc: "Reddit".into(), action: "query:red ".into(), args: None }]
+        vec![Action {
+            label: "red".into(),
+            desc: "Reddit".into(),
+            action: "query:red ".into(),
+            args: None,
+        }]
     }
 }

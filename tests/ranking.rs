@@ -1,11 +1,15 @@
+use eframe::egui;
+use multi_launcher::actions::Action;
 use multi_launcher::gui::{LauncherApp, APP_PREFIX};
 use multi_launcher::plugin::PluginManager;
-use multi_launcher::actions::Action;
 use multi_launcher::settings::Settings;
-use std::sync::{Arc, atomic::AtomicBool};
-use eframe::egui;
+use std::sync::{atomic::AtomicBool, Arc};
 
-fn new_app_with_settings(ctx: &egui::Context, actions: Vec<Action>, settings: Settings) -> LauncherApp {
+fn new_app_with_settings(
+    ctx: &egui::Context,
+    actions: Vec<Action>,
+    settings: Settings,
+) -> LauncherApp {
     let custom_len = actions.len();
     LauncherApp::new(
         ctx,
@@ -29,8 +33,18 @@ fn new_app_with_settings(ctx: &egui::Context, actions: Vec<Action>, settings: Se
 fn usage_ranking() {
     let ctx = egui::Context::default();
     let actions = vec![
-        Action { label: "foo".into(), desc: "".into(), action: "a".into(), args: None },
-        Action { label: "foo".into(), desc: "".into(), action: "b".into(), args: None },
+        Action {
+            label: "foo".into(),
+            desc: "".into(),
+            action: "a".into(),
+            args: None,
+        },
+        Action {
+            label: "foo".into(),
+            desc: "".into(),
+            action: "b".into(),
+            args: None,
+        },
     ];
     let settings = Settings::default();
     let mut app = new_app_with_settings(&ctx, actions, settings);
@@ -44,8 +58,18 @@ fn usage_ranking() {
 fn fuzzy_vs_usage_weight() {
     let ctx = egui::Context::default();
     let actions = vec![
-        Action { label: "abc".into(), desc: "".into(), action: "a".into(), args: None },
-        Action { label: "defabc".into(), desc: "".into(), action: "b".into(), args: None },
+        Action {
+            label: "abc".into(),
+            desc: "".into(),
+            action: "a".into(),
+            args: None,
+        },
+        Action {
+            label: "defabc".into(),
+            desc: "".into(),
+            action: "b".into(),
+            args: None,
+        },
     ];
     let mut settings = Settings::default();
     settings.fuzzy_weight = 5.0;

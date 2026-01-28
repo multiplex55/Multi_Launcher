@@ -690,17 +690,19 @@ impl Plugin for NotePlugin {
                                     .iter()
                                     .all(|tag| n.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
                             };
-                            let exclude_ok = !filters.exclude_tags.iter().any(|tag| {
-                                n.tags.iter().any(|t| t.eq_ignore_ascii_case(tag))
-                            });
+                            let exclude_ok = !filters
+                                .exclude_tags
+                                .iter()
+                                .any(|tag| n.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)));
                             let text_ok = if text_filter.is_empty() {
                                 true
                             } else {
-                                let matches = self.matcher.fuzzy_match(&n.title, &text_filter).is_some()
-                                    || n.alias
-                                        .as_ref()
-                                        .and_then(|a| self.matcher.fuzzy_match(a, &text_filter))
-                                        .is_some();
+                                let matches =
+                                    self.matcher.fuzzy_match(&n.title, &text_filter).is_some()
+                                        || n.alias
+                                            .as_ref()
+                                            .and_then(|a| self.matcher.fuzzy_match(a, &text_filter))
+                                            .is_some();
                                 if filters.negate_text {
                                     !matches
                                 } else {

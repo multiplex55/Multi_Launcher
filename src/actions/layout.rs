@@ -127,12 +127,7 @@ fn format_restore_summary(
             let matched_label = format_match(matched);
             let rect = entry
                 .target_rect
-                .map(|rect| {
-                    format!(
-                        "[{}, {}, {}, {}]",
-                        rect[0], rect[1], rect[2], rect[3]
-                    )
-                })
+                .map(|rect| format!("[{}, {}, {}, {}]", rect[0], rect[1], rect[2], rect[3]))
                 .unwrap_or_else(|| "unknown".to_string());
             let monitor = entry
                 .target_monitor
@@ -170,9 +165,7 @@ fn format_restore_summary(
     writeln!(
         &mut contents,
         "Results: found {}, launched {}, missing {}",
-        summary.found_windows,
-        summary.launched_windows,
-        summary.missing_windows
+        summary.found_windows, summary.launched_windows, summary.missing_windows
     )
     .ok();
     if launches.is_empty() && window_launches.is_empty() {
@@ -594,11 +587,11 @@ pub fn load_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
             exclude_minimized: flags.exclude_minimized,
         },
     )?;
-    let should_launch_missing = plan.missing_windows > 0
-        && !flags.no_launch
-        && layout.options.launch_missing;
+    let should_launch_missing =
+        plan.missing_windows > 0 && !flags.no_launch && layout.options.launch_missing;
     let should_launch_global = plan.missing_windows > 0 && !flags.no_launch;
-    let will_launch = should_launch_missing || (should_launch_global && !layout.launches.is_empty());
+    let will_launch =
+        should_launch_missing || (should_launch_global && !layout.launches.is_empty());
     if flags.dry_run {
         let window_launches = if layout.options.launch_missing {
             collect_window_launches(&layout, &plan.summary, true)
@@ -681,9 +674,8 @@ pub fn show_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
                 exclude_minimized: flags.exclude_minimized,
             },
         )?;
-        let should_launch_missing = plan.missing_windows > 0
-            && !flags.no_launch
-            && layout.options.launch_missing;
+        let should_launch_missing =
+            plan.missing_windows > 0 && !flags.no_launch && layout.options.launch_missing;
         let should_launch_global = plan.missing_windows > 0 && !flags.no_launch;
         let will_launch =
             should_launch_missing || (should_launch_global && !layout.launches.is_empty());

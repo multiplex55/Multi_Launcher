@@ -215,5 +215,9 @@ pub fn remove_layout(store: &mut LayoutStore, name: &str) -> bool {
 }
 
 pub fn list_layouts(store: &LayoutStore) -> Vec<String> {
-    store.layouts.iter().map(|layout| layout.name.clone()).collect()
+    store
+        .layouts
+        .iter()
+        .map(|layout| layout.name.clone())
+        .collect()
 }

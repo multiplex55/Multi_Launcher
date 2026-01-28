@@ -1,8 +1,10 @@
 use eframe::egui;
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 use crate::hotkey::HotkeyTrigger;
-
 
 /// Trait abstracting over an `egui::Context` for viewport commands.
 pub trait ViewportCtx {
@@ -123,15 +125,19 @@ pub fn apply_visibility<C: ViewportCtx>(
             if let Some((x, y)) = crate::window_manager::current_mouse_position() {
                 let pos_x = x - window_size.0 / 2.0;
                 let pos_y = y - window_size.1 / 2.0;
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(pos_x, pos_y)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                    pos_x, pos_y,
+                )));
             }
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     } else {
-        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(offscreen.0, offscreen.1)));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+            offscreen.0,
+            offscreen.1,
+        )));
     }
     ctx.request_repaint();
 }
-

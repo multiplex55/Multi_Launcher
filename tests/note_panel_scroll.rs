@@ -74,4 +74,3 @@ fn long_note_panel_respects_max_height() {
         .expect("window rect");
     assert!(rect.height() <= 600.0);
 }
-

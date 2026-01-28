@@ -469,6 +469,7 @@ enum ActionKind<'a> {
     },
     LayoutEdit,
     NoteReload,
+    Keys(&'a str),
     ExecPath {
         path: &'a str,
         args: Option<&'a str>,
@@ -509,7 +510,10 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
         }
         return ActionKind::ClipboardText(rest);
     }
-    if let Some(idx) = s.strip_prefix("calc:history:") {
+        if let Some(spec) = s.strip_prefix("keys:") {
+        return ActionKind::Keys(spec);
+    }
+if let Some(idx) = s.strip_prefix("calc:history:") {
         if let Ok(i) = idx.parse::<usize>() {
             return ActionKind::CalcHistory(i);
         }
@@ -1055,6 +1059,7 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
             Ok(())
         }
         ActionKind::PowerPlanSet { guid } => system::set_power_plan(guid),
+        ActionKind::Keys(spec) => keys::send(spec),
         ActionKind::ExecPath { path, args } => exec::launch(path, args),
     }
 }

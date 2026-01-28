@@ -31,10 +31,7 @@ impl Plugin for ProcessesPlugin {
                 if filter.is_empty() {
                     true
                 } else {
-                    p.name()
-                        .to_string_lossy()
-                        .to_lowercase()
-                        .contains(&filter)
+                    p.name().to_string_lossy().to_lowercase().contains(&filter)
                 }
             })
             .flat_map(|p| {
@@ -75,10 +72,24 @@ impl Plugin for ProcessesPlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![
-            Action { label: "ps".into(), desc: "Processes".into(), action: "query:ps ".into(), args: None },
-            Action { label: "psk".into(), desc: "Kill process".into(), action: "query:psk ".into(), args: None },
-            Action { label: "pss".into(), desc: "Switch process".into(), action: "query:pss ".into(), args: None },
+            Action {
+                label: "ps".into(),
+                desc: "Processes".into(),
+                action: "query:ps ".into(),
+                args: None,
+            },
+            Action {
+                label: "psk".into(),
+                desc: "Kill process".into(),
+                action: "query:psk ".into(),
+                args: None,
+            },
+            Action {
+                label: "pss".into(),
+                desc: "Switch process".into(),
+                action: "query:pss ".into(),
+                args: None,
+            },
         ]
     }
 }
-

@@ -12,7 +12,11 @@ pub struct VolumeDialog {
 
 impl Default for VolumeDialog {
     fn default() -> Self {
-        Self { open: false, value: 50, processes: Vec::new() }
+        Self {
+            open: false,
+            value: 50,
+            processes: Vec::new(),
+        }
     }
 }
 
@@ -24,7 +28,9 @@ impl VolumeDialog {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
-        if !self.open { return; }
+        if !self.open {
+            return;
+        }
         let mut close = false;
         egui::Window::new("Volume")
             .resizable(false)
@@ -50,7 +56,8 @@ impl VolumeDialog {
                 for proc in &mut self.processes {
                     ui.horizontal(|ui| {
                         ui.label(format!("{} (PID {})", proc.name, proc.pid));
-                        let resp = ui.add(egui::Slider::new(&mut proc.value, 0..=100).text("Level"));
+                        let resp =
+                            ui.add(egui::Slider::new(&mut proc.value, 0..=100).text("Level"));
                         if resp.changed() {
                             if let Some(action) = proc.slider_changed() {
                                 let _ = launch_action(&Action {
@@ -84,6 +91,8 @@ impl VolumeDialog {
                     });
                 }
             });
-        if close { self.open = false; }
+        if close {
+            self.open = false;
+        }
     }
 }

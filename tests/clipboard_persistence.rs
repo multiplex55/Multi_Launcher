@@ -1,6 +1,6 @@
+use arboard::Clipboard;
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::clipboard::{save_history, ClipboardPlugin, CLIPBOARD_FILE};
-use arboard::Clipboard;
 use once_cell::sync::Lazy;
 use std::collections::VecDeque;
 use std::sync::Mutex;

@@ -137,7 +137,11 @@ fn enumerate_windows(options: LayoutWindowOptions) -> anyhow::Result<Vec<Enumera
             if !success || size == 0 {
                 return None;
             }
-            Some(OsString::from_wide(&buffer[..size as usize]).to_string_lossy().to_string())
+            Some(
+                OsString::from_wide(&buffer[..size as usize])
+                    .to_string_lossy()
+                    .to_string(),
+            )
         }
     }
 
@@ -262,7 +266,11 @@ fn enumerate_windows(options: LayoutWindowOptions) -> anyhow::Result<Vec<Enumera
         None
     };
 
-    let mut ctx = Ctx { options, active_monitor, windows: Vec::new() };
+    let mut ctx = Ctx {
+        options,
+        active_monitor,
+        windows: Vec::new(),
+    };
     unsafe {
         let ctx_ptr = &mut ctx as *mut Ctx;
         let _ = EnumWindows(Some(enum_cb), LPARAM(ctx_ptr as isize));
@@ -291,9 +299,7 @@ fn placement_state(show_cmd: u32) -> LayoutWindowState {
 }
 
 #[cfg(windows)]
-fn collect_layout_windows_from_enumerated(
-    enumerated: Vec<EnumeratedWindow>,
-) -> Vec<LayoutWindow> {
+fn collect_layout_windows_from_enumerated(enumerated: Vec<EnumeratedWindow>) -> Vec<LayoutWindow> {
     enumerated
         .into_iter()
         .filter_map(|window| {
@@ -472,7 +478,9 @@ fn target_rect_from_monitor(
 }
 
 #[cfg(windows)]
-fn show_cmd_for_state(state: &LayoutWindowState) -> windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD {
+fn show_cmd_for_state(
+    state: &LayoutWindowState,
+) -> windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD {
     use windows::Win32::UI::WindowsAndMessaging::{SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE};
 
     match state {
@@ -489,16 +497,23 @@ pub fn plan_layout_restore(
 ) -> anyhow::Result<LayoutRestorePlan> {
     let enumerated = enumerate_windows(options)?;
     let monitors = list_monitors();
-    let monitor_map: std::collections::HashMap<String, windows::Win32::Graphics::Gdi::MONITORINFOEXW> =
-        monitors
-            .into_iter()
-            .filter(|(name, _)| !name.is_empty())
-            .map(|(name, info)| (name.to_lowercase(), info))
-            .collect();
+    let monitor_map: std::collections::HashMap<
+        String,
+        windows::Win32::Graphics::Gdi::MONITORINFOEXW,
+    > = monitors
+        .into_iter()
+        .filter(|(name, _)| !name.is_empty())
+        .map(|(name, info)| (name.to_lowercase(), info))
+        .collect();
 
     let candidates: Vec<EnumeratedWindow> = enumerated
         .into_iter()
-        .filter(|window| !layout.ignore.iter().any(|rule| is_rule_match(rule, &window.matcher)))
+        .filter(|window| {
+            !layout
+                .ignore
+                .iter()
+                .any(|rule| is_rule_match(rule, &window.matcher))
+        })
         .collect();
     let mut used = vec![false; candidates.len()];
 
@@ -598,7 +613,9 @@ pub fn plan_layout_restore(
 
 #[cfg(windows)]
 pub fn apply_layout_restore_plan(plan: &LayoutRestorePlan) -> anyhow::Result<()> {
-    use windows::Win32::UI::WindowsAndMessaging::{GetWindowPlacement, SetWindowPlacement, ShowWindow, WINDOWPLACEMENT, SW_SHOWNORMAL};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowPlacement, SetWindowPlacement, ShowWindow, SW_SHOWNORMAL, WINDOWPLACEMENT,
+    };
 
     for action in &plan.actions {
         let mut placement = WINDOWPLACEMENT::default();

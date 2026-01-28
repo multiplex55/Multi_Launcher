@@ -181,7 +181,10 @@ mod tests {
         );
         let first = diagnostics.snapshot();
         assert_eq!(first.widget_refreshes.len(), 1);
-        assert_eq!(first.widget_refreshes[0].last_duration, Duration::from_millis(10));
+        assert_eq!(
+            first.widget_refreshes[0].last_duration,
+            Duration::from_millis(10)
+        );
 
         let second_start = first_end + Duration::from_millis(5);
         let second_end = second_start + Duration::from_millis(5);
@@ -192,7 +195,10 @@ mod tests {
             second_end,
         );
         let second = diagnostics.snapshot();
-        assert_eq!(second.widget_refreshes[0].last_duration, Duration::from_millis(10));
+        assert_eq!(
+            second.widget_refreshes[0].last_duration,
+            Duration::from_millis(10)
+        );
 
         let third_start = second_end + Duration::from_millis(5);
         let third_end = third_start + Duration::from_millis(75);
@@ -203,7 +209,10 @@ mod tests {
             third_end,
         );
         let third = diagnostics.snapshot();
-        assert_eq!(third.widget_refreshes[0].last_duration, Duration::from_millis(75));
+        assert_eq!(
+            third.widget_refreshes[0].last_duration,
+            Duration::from_millis(75)
+        );
     }
 
     #[test]
@@ -252,7 +261,10 @@ mod tests {
             second_end,
         );
         let throttled = diagnostics.snapshot();
-        assert_eq!(throttled.widget_refreshes[0].last_duration, Duration::from_millis(30));
+        assert_eq!(
+            throttled.widget_refreshes[0].last_duration,
+            Duration::from_millis(30)
+        );
 
         let refresh_interval = diagnostics.refresh_interval();
         diagnostics.record_widget_refresh(
@@ -263,7 +275,10 @@ mod tests {
         );
         let after = diagnostics.snapshot();
         assert_ne!(after.widget_refreshes[0].last_refresh_at, last_sample);
-        assert_eq!(after.widget_refreshes[0].last_duration, Duration::from_millis(5));
+        assert_eq!(
+            after.widget_refreshes[0].last_duration,
+            Duration::from_millis(5)
+        );
         assert!(!after.widget_refreshes[0].throttled);
     }
 }

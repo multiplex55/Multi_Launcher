@@ -3,8 +3,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// Global lookup of slug base -> next suffix index.
-static SLUGS: Lazy<Mutex<HashMap<String, usize>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static SLUGS: Lazy<Mutex<HashMap<String, usize>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Reset the slug lookup. Should be called before scanning existing notes.
 pub fn reset_slug_lookup() {

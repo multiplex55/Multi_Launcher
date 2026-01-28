@@ -1,6 +1,6 @@
+use multi_launcher::gui::BRIGHTNESS_QUERIES;
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::brightness::BrightnessPlugin;
-use multi_launcher::gui::BRIGHTNESS_QUERIES;
 use std::sync::atomic::Ordering;
 
 #[test]
@@ -16,8 +16,12 @@ fn search_plain_bright() {
     let plugin = BrightnessPlugin;
     let results = plugin.search("bright");
     assert_eq!(results.len(), 2);
-    assert!(results.iter().any(|action| action.action == "brightness:dialog"));
-    assert!(results.iter().any(|action| action.label.starts_with("Usage: bright")));
+    assert!(results
+        .iter()
+        .any(|action| action.action == "brightness:dialog"));
+    assert!(results
+        .iter()
+        .any(|action| action.label.starts_with("Usage: bright")));
 }
 
 #[test]

@@ -170,8 +170,7 @@ impl ScratchpadWidget {
         let timestamp = format_timestamp(chrono::Local::now().naive_local());
         let id = self.text_edit_id(ui);
         let ctx = ui.ctx();
-        let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id)
-            .unwrap_or_default();
+        let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
         let cursor_index = state
             .cursor
             .char_range()
@@ -274,7 +273,10 @@ impl Widget for ScratchpadWidget {
         let tooltip = match schedule.mode {
             RefreshMode::Manual => "Manual refresh only.".to_string(),
             RefreshMode::Throttled => {
-                format!("Minimum refresh interval {:.0}s.", schedule.throttle.as_secs_f32())
+                format!(
+                    "Minimum refresh interval {:.0}s.",
+                    schedule.throttle.as_secs_f32()
+                )
             }
             RefreshMode::Auto => format!(
                 "Reloads from disk every {:.0}s.",

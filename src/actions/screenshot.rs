@@ -44,9 +44,10 @@ pub fn capture_raw(mode: Mode) -> anyhow::Result<image::RgbaImage> {
 
             // Wait for the snipping tool to provide a new clipboard image
             let mut cb = arboard::Clipboard::new()?;
-            let old = cb.get_image().ok().map(|img| {
-                (img.width, img.height, img.bytes.into_owned())
-            });
+            let old = cb
+                .get_image()
+                .ok()
+                .map(|img| (img.width, img.height, img.bytes.into_owned()));
 
             let _ = Command::new("explorer").arg("ms-screenclip:").status();
 
@@ -101,4 +102,3 @@ pub fn capture(mode: Mode, clipboard: bool) -> anyhow::Result<PathBuf> {
     }
     Ok(path)
 }
-

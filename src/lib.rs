@@ -9,6 +9,7 @@ pub mod hotkey;
 pub mod indexer;
 pub mod launcher;
 pub mod logging;
+pub mod mouse_gestures;
 pub mod plugin;
 pub mod plugin_editor;
 pub mod plugins;
@@ -22,8 +23,8 @@ pub mod visibility;
 
 pub mod global_hotkey;
 pub mod gui;
-pub mod windows_layout;
 pub mod window_manager;
+pub mod windows_layout;
 pub mod workspace;
 
 pub fn request_hotkey_restart(_settings: settings::Settings) {
