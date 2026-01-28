@@ -16,6 +16,7 @@ use crate::plugins::folders::FoldersPlugin;
 use crate::plugins::help::HelpPlugin;
 use crate::plugins::history::HistoryPlugin;
 use crate::plugins::ip::IpPlugin;
+use crate::plugins::keys::KeysPlugin;
 use crate::plugins::layout::LayoutPlugin;
 use crate::plugins::lorem::LoremPlugin;
 use crate::plugins::macros::MacrosPlugin;
@@ -147,6 +148,7 @@ impl PluginManager {
         self.register_with_settings(CalendarPlugin, plugin_settings);
         self.register_with_settings(SnippetsPlugin::default(), plugin_settings);
         self.register_with_settings(MacrosPlugin::default(), plugin_settings);
+        self.register_with_settings(KeysPlugin::default(), plugin_settings);
         self.register_with_settings(MouseGesturesPlugin::default(), plugin_settings);
         self.register_with_settings(FavPlugin::default(), plugin_settings);
         self.register_with_settings(MissingPlugin, plugin_settings);

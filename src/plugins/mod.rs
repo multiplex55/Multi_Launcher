@@ -15,6 +15,7 @@ pub mod folders;
 pub mod help;
 pub mod history;
 pub mod ip;
+pub mod keys;
 pub mod layout;
 pub mod layouts_storage;
 pub mod lorem;
