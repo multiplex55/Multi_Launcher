@@ -12,7 +12,6 @@ pub struct TrailOverlay<B: OverlayBackend> {
     color: [u8; 4],
     width: f32,
     start_move_px: f32,
-    segment_step_px: f32,
     start_point: Option<(f32, f32)>,
     last_point: Option<(f32, f32)>,
     started: bool,
@@ -26,7 +25,6 @@ impl<B: OverlayBackend> TrailOverlay<B> {
             color,
             width,
             start_move_px,
-            segment_step_px: 4.0,
             start_point: None,
             last_point: None,
             started: false,
@@ -91,21 +89,8 @@ impl<B: OverlayBackend> TrailOverlay<B> {
         let last = self.last_point.unwrap_or(point);
         let dx = point.0 - last.0;
         let dy = point.1 - last.1;
-        let distance = (dx * dx + dy * dy).sqrt();
-        if distance > self.segment_step_px {
-            let steps = (distance / self.segment_step_px).ceil() as usize;
-            for i in 1..=steps {
-                let t0 = (i - 1) as f32 / steps as f32;
-                let t1 = i as f32 / steps as f32;
-                let from = (last.0 + dx * t0, last.1 + dy * t0);
-                let to = (last.0 + dx * t1, last.1 + dy * t1);
-                self.backend
-                    .draw_trail_segment(from, to, self.color, self.width);
-            }
-        } else {
-            self.backend
-                .draw_trail_segment(last, point, self.color, self.width);
-        }
+        self.backend
+            .draw_trail_segment(last, point, self.color, self.width);
         self.last_point = Some(point);
     }
 }
