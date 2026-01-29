@@ -198,7 +198,7 @@ impl MouseGesturesPlugin {
             Action {
                 label: "mg settings".into(),
                 desc: "Mouse gestures".into(),
-                action: "settings:dialog".into(),
+                action: "mg:dialog:settings".into(),
                 args: None,
             },
             Action {
@@ -251,11 +251,13 @@ impl Plugin for MouseGesturesPlugin {
         if trimmed.eq_ignore_ascii_case("mg") {
             return Self::command_actions();
         }
-        if strip_prefix_ci(trimmed, "mg settings").is_some() {
+        if strip_prefix_ci(trimmed, "mg settings").is_some()
+            || strip_prefix_ci(trimmed, "mg setting").is_some()
+        {
             return vec![Action {
                 label: "Open mouse gesture settings".into(),
                 desc: "Mouse gestures".into(),
-                action: "settings:dialog".into(),
+                action: "mg:dialog:settings".into(),
                 args: None,
             }];
         }
