@@ -87,8 +87,6 @@ impl<B: OverlayBackend> TrailOverlay<B> {
         }
 
         let last = self.last_point.unwrap_or(point);
-        let dx = point.0 - last.0;
-        let dy = point.1 - last.1;
         self.backend
             .draw_trail_segment(last, point, self.color, self.width);
         self.last_point = Some(point);
@@ -183,6 +181,7 @@ impl<B: OverlayBackend> HintOverlay<B> {
 }
 
 #[cfg(windows)]
+#[allow(dead_code)]
 #[derive(Debug)]
 struct HintOverlaySurface {
     hwnd: windows::Win32::Foundation::HWND,
@@ -201,6 +200,7 @@ struct HintOverlaySurface {
 unsafe impl Send for HintOverlaySurface {}
 
 #[cfg(windows)]
+#[allow(dead_code)]
 impl HintOverlaySurface {
     fn new() -> Option<Self> {
         use std::sync::Once;
@@ -260,7 +260,7 @@ impl HintOverlaySurface {
         let mem_dc = unsafe { CreateCompatibleDC(None) };
         if mem_dc.0.is_null() {
             unsafe {
-                windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+                let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
             }
             return None;
         }
@@ -284,8 +284,8 @@ impl HintOverlaySurface {
                 .ok()?;
         if bits.is_null() {
             unsafe {
-                DeleteDC(mem_dc);
-                windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+                let _ = DeleteDC(mem_dc);
+                let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
             }
             return None;
         }
@@ -418,7 +418,7 @@ impl Drop for HintOverlaySurface {
                 let _ = DeleteObject(self.dib);
             }
             if !self.mem_dc.0.is_null() {
-                DeleteDC(self.mem_dc);
+                let _ = DeleteDC(self.mem_dc);
             }
             if !self.hwnd.0.is_null() {
                 let _ = DestroyWindow(self.hwnd);
@@ -510,7 +510,7 @@ impl TrailOverlaySurface {
         let mem_dc = unsafe { CreateCompatibleDC(None) };
         if mem_dc.0.is_null() {
             unsafe {
-                windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+                let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
             }
             return None;
         }
@@ -533,8 +533,8 @@ impl TrailOverlaySurface {
                 .ok()?;
         if bits.is_null() {
             unsafe {
-                DeleteDC(mem_dc);
-                windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+                let _ = DeleteDC(mem_dc);
+                let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
             }
             return None;
         }
@@ -588,7 +588,7 @@ impl Drop for TrailOverlaySurface {
                 let _ = DeleteObject(self.dib);
             }
             if !self.mem_dc.0.is_null() {
-                DeleteDC(self.mem_dc);
+                let _ = DeleteDC(self.mem_dc);
             }
             if !self.hwnd.0.is_null() {
                 let _ = DestroyWindow(self.hwnd);
@@ -633,7 +633,7 @@ unsafe extern "system" fn trail_overlay_wndproc(
                         let _ = BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
                     }
                 }
-                EndPaint(hwnd, &paint);
+                let _ = EndPaint(hwnd, &paint);
                 return LRESULT(0);
             }
             _ => {}
@@ -796,7 +796,6 @@ impl HintTooltip {
     fn new() -> Option<Self> {
         use std::mem;
         use windows::core::PCWSTR;
-        use windows::Win32::Foundation::HWND;
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::Win32::UI::Controls::{
             InitCommonControlsEx, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, TOOLTIPS_CLASSW,
@@ -804,8 +803,8 @@ impl HintTooltip {
             TTM_SETDELAYTIME, TTM_SETMAXTIPWIDTH, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
         };
         use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, GetDesktopWindow, SendMessageW, ShowWindow, HWND_MESSAGE, SW_HIDE,
-            WINDOW_EX_STYLE, WINDOW_STYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+            CreateWindowExW, GetDesktopWindow, SendMessageW, ShowWindow, SW_HIDE,
+            WINDOW_STYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
             WS_POPUP,
         };
 
@@ -817,7 +816,7 @@ impl HintTooltip {
             let _ = InitCommonControlsEx(&icc);
 
             let hinstance = GetModuleHandleW(PCWSTR::null()).ok()?;
-            let parent = GetDesktopWindow();
+            let _parent = GetDesktopWindow();
             // Use a tool/owner window we actually own.
             // Using GetDesktopWindow() here is tempting, but it belongs to another process.
             let owner_class = widestring("STATIC");
@@ -868,7 +867,7 @@ impl HintTooltip {
             toolinfo.lpszText = windows::core::PWSTR(text_buf.as_mut_ptr());
 
             // REQUIRED: register the tool, otherwise TTM_TRACKACTIVATE won't show anything.
-            let add_ok = SendMessageW(
+            let _add_ok = SendMessageW(
                 hwnd,
                 TTM_ADDTOOLW,
                 windows::Win32::Foundation::WPARAM(0),

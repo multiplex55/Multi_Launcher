@@ -223,7 +223,6 @@ fn worker_loop(
     let mut active = false;
     let mut exceeded_deadzone = false;
     let mut start_pos = (0.0_f32, 0.0_f32);
-    let mut cursor_pos = start_pos;
     let mut last_trail = Instant::now();
     let mut last_recognition = Instant::now();
     let mut start_time = Instant::now();
@@ -242,7 +241,7 @@ fn worker_loop(
             let mut msg = MSG::default();
             while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() } {
                 unsafe {
-                    TranslateMessage(&msg);
+                    let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
             }
@@ -250,8 +249,6 @@ fn worker_loop(
         if stop_rx.try_recv().is_ok() {
             break;
         }
-
-        let deadzone_sq = config.deadzone_px * config.deadzone_px;
         match event_rx.recv_timeout(poll_interval) {
             Ok(event) => match event {
                 HookEvent::RButtonDown => {
@@ -267,7 +264,6 @@ fn worker_loop(
                     start_time = Instant::now();
                     let pos = get_cursor_position().unwrap_or(start_pos);
                     start_pos = pos;
-                    cursor_pos = pos;
                     let ms = start_time.elapsed().as_millis() as u64;
                     tracker.feed_point(pos, ms);
                     trail_overlay.reset(pos);
@@ -356,8 +352,7 @@ fn worker_loop(
                         }
 
                         if let Some(pos) = get_cursor_position() {
-                            cursor_pos = pos;
-                            let best_match = cached_gesture_label.as_deref().map(|label| {
+                                    let best_match = cached_gesture_label.as_deref().map(|label| {
                                 format_selected_hint(label, &cached_actions, selected_binding_idx)
                             });
                             hint_overlay.update(&cached_tokens, best_match.as_deref(), pos);
@@ -413,6 +408,7 @@ fn worker_loop(
     }
 }
 
+#[allow(dead_code)]
 fn match_binding_action(
     db: &Option<SharedGestureDb>,
     tokens: &str,
@@ -461,6 +457,7 @@ fn format_selected_hint(
     }
 }
 
+#[allow(dead_code)]
 fn best_match_name(
     db: &Option<SharedGestureDb>,
     tokens: &str,
@@ -568,12 +565,11 @@ impl HookBackend for DefaultHookBackend {
         hook_dispatch().set_enabled(true);
 
         use std::time::Duration;
-        use windows::Win32::Foundation::{LPARAM, WPARAM};
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::Win32::System::Threading::GetCurrentThreadId;
         use windows::Win32::UI::WindowsAndMessaging::{
-            DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW, TranslateMessage, MSG,
-            PM_NOREMOVE, WM_QUIT,
+            DispatchMessageW, GetMessageW, PeekMessageW, TranslateMessage, MSG,
+            PM_NOREMOVE,
         };
         use windows::Win32::UI::WindowsAndMessaging::{
             SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL,
@@ -586,7 +582,7 @@ impl HookBackend for DefaultHookBackend {
             // Ensure the thread has a message queue.
             let mut msg = MSG::default();
             unsafe {
-                PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+                let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
             }
 
             let thread_id = unsafe { GetCurrentThreadId() };
@@ -626,7 +622,7 @@ impl HookBackend for DefaultHookBackend {
                     break;
                 }
                 unsafe {
-                    TranslateMessage(&msg);
+                    let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
             }
@@ -653,6 +649,7 @@ impl HookBackend for DefaultHookBackend {
         if let Some(th) = self.hook_thread.take() {
             use windows::Win32::Foundation::{LPARAM, WPARAM};
             use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
+                use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
             unsafe {
                 let _ = PostThreadMessageW(th.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
             }
