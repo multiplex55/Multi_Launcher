@@ -229,6 +229,17 @@ impl SettingsEditor {
         }
     }
 
+    /// Returns the raw JSON value for a plugin's settings, if present.
+    pub fn get_plugin_setting_value(&self, name: &str) -> Option<&serde_json::Value> {
+        self.plugin_settings.get(name)
+    }
+
+    /// Sets the raw JSON value for a plugin's settings and re-syncs any derived editor state.
+    pub fn set_plugin_setting_value(&mut self, name: &str, value: serde_json::Value) {
+        self.plugin_settings.insert(name.to_string(), value);
+        self.sync_from_plugin_settings();
+    }
+
     pub fn to_settings(&self, current: &Settings) -> Settings {
         Settings {
             hotkey: if self.hotkey.trim().is_empty() {
@@ -537,6 +548,8 @@ impl SettingsEditor {
                             self.expand_request = Some(self.plugins_expanded);
                         }
                         let enabled_list = app.enabled_plugins_list();
+                        let mut open_mg_settings_dialog = false;
+
                         for plugin in app.plugins.iter_mut() {
                             let name = plugin.name().to_string();
                             if name == "notes" {
@@ -575,8 +588,22 @@ impl SettingsEditor {
                                     ui.label(format!("{name} settings"));
                                 })
                                 .body(|ui| {
-                                    plugin.settings_ui(ui, entry);
+                                    if name == "mouse_gestures" {
+                                        ui.label("Mouse gesture settings are managed in a dedicated dialog.");
+                                        ui.add_space(6.0);
+                                        if ui.button("Open Mouse Gesture Settings...").clicked() {
+                                            open_mg_settings_dialog = true;
+                                        }
+                                        ui.add_space(4.0);
+                                        ui.small("Tip: you can also open this window via `mg settings`.");
+                                    } else {
+                                        plugin.settings_ui(ui, entry);
+                                    }
                                 });
+                        }
+
+                        if open_mg_settings_dialog {
+                            app.open_mouse_gesture_settings_dialog();
                         }
                         let id = ui.make_persistent_id("plugin_notes");
                         let mut state =
