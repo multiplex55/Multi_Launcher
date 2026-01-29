@@ -154,14 +154,17 @@ impl Default for MgGesturesDialog {
 }
 
 impl MgGesturesDialog {
+    /// Returns gesture indices sorted by label (case-insensitive) for display purposes.
+    fn sorted_gesture_indices(&self) -> Vec<usize> {
+        let mut indices: Vec<usize> = (0..self.db.gestures.len()).collect();
+        indices.sort_by_key(|&i| self.db.gestures[i].label.to_lowercase());
+        indices
+    }
+
     pub fn open(&mut self) {
         self.db = load_gestures(GESTURES_FILE).unwrap_or_default();
         self.open = true;
-        self.selected_idx = if self.db.gestures.is_empty() {
-            None
-        } else {
-            Some(0)
-        };
+        self.selected_idx = self.sorted_gesture_indices().into_iter().next();
         self.rename_idx = None;
         self.rename_label.clear();
         self.token_buffer.clear();
@@ -175,7 +178,7 @@ impl MgGesturesDialog {
 
     fn ensure_selection(&mut self) {
         if self.selected_idx.is_none() && !self.db.gestures.is_empty() {
-            self.selected_idx = Some(0);
+            self.selected_idx = self.sorted_gesture_indices().into_iter().next();
         }
         if let Some(idx) = self.selected_idx {
             if let Some(gesture) = self.db.gestures.get(idx) {
@@ -265,7 +268,8 @@ impl MgGesturesDialog {
                                     // so horizontally-wide rows can't paint into the right panel.
                                     ui.set_clip_rect(left_clip);
                                     let mut remove_idx: Option<usize> = None;
-                                    for idx in 0..self.db.gestures.len() {
+                                    let gesture_order = self.sorted_gesture_indices();
+                                    for idx in gesture_order {
                                         let selected = self.selected_idx == Some(idx);
                                         let entry = &mut self.db.gestures[idx];
                                         ui.horizontal(|ui| {
@@ -318,6 +322,7 @@ impl MgGesturesDialog {
                                     }
                                     if let Some(idx) = remove_idx {
                                         self.db.gestures.remove(idx);
+
                                         if let Some(selected) = self.selected_idx {
                                             if selected == idx {
                                                 self.selected_idx = None;
@@ -325,6 +330,15 @@ impl MgGesturesDialog {
                                                 self.selected_idx = Some(selected - 1);
                                             }
                                         }
+
+                                        if let Some(rename) = self.rename_idx {
+                                            if rename == idx {
+                                                self.rename_idx = None;
+                                            } else if rename > idx {
+                                                self.rename_idx = Some(rename - 1);
+                                            }
+                                        }
+
                                         self.ensure_selection();
                                         save_now = true;
                                     }
