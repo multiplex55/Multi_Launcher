@@ -648,7 +648,6 @@ impl HookBackend for DefaultHookBackend {
 
         if let Some(th) = self.hook_thread.take() {
             use windows::Win32::Foundation::{LPARAM, WPARAM};
-            use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
                 use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
             unsafe {
                 let _ = PostThreadMessageW(th.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
