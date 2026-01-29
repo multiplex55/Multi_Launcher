@@ -41,7 +41,8 @@ fn send_windows(spec: &str) -> anyhow::Result<()> {
             continue;
         }
 
-        if let Some(text) = strip_prefix_ci(step, "text:").or_else(|| strip_prefix_ci(step, "type:"))
+        if let Some(text) =
+            strip_prefix_ci(step, "text:").or_else(|| strip_prefix_ci(step, "type:"))
         {
             send_text(text.trim())?;
             continue;

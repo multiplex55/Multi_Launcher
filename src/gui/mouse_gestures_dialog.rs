@@ -233,71 +233,91 @@ impl MgGesturesDialog {
                     }
                 });
                 ui.separator();
+
+                // Use the remaining window height *before* entering `ui.horizontal`,
+                // otherwise `ui.available_height()` inside the horizontal row will be only a single-row height.
+                let content_height = ui.available_height();
+
                 ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.set_min_width(220.0);
-                        ui.label("Gestures");
-                        egui::ScrollArea::vertical()
-                            .max_height(320.0)
-                            .show(ui, |ui| {
-                                let mut remove_idx: Option<usize> = None;
-                                for idx in 0..self.db.gestures.len() {
-                                    let selected = self.selected_idx == Some(idx);
-                                    let entry = &mut self.db.gestures[idx];
-                                    ui.horizontal(|ui| {
-                                        if ui.checkbox(&mut entry.enabled, "").changed() {
-                                            save_now = true;
-                                        }
-                                        if ui
-                                            .selectable_label(selected, format_gesture_label(entry))
-                                            .clicked()
-                                        {
-                                            self.selected_idx = Some(idx);
-                                            self.recorder.set_dir_mode(entry.dir_mode);
-                                            self.token_buffer = entry.tokens.clone();
-                                        }
-                                        if ui.button("Rename").clicked() {
-                                            self.rename_idx = Some(idx);
-                                            self.rename_label = entry.label.clone();
-                                        }
-                                        if ui.button("Delete").clicked() {
-                                            remove_idx = Some(idx);
-                                        }
-                                    });
-                                    if self.rename_idx == Some(idx) {
+                    // Left panel: allocate an exact rect (full height) and render into a child Ui so it clips.
+                    // This prevents long gesture labels/buttons from painting over the right panel.
+                    let left_width = (ui.available_width() * 0.42).clamp(260.0, 380.0);
+                    let (left_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(left_width, content_height),
+                        egui::Sense::hover(),
+                    );
+                    let mut left_ui =
+                        ui.child_ui(left_rect, egui::Layout::top_down(egui::Align::Min));
+                    left_ui.set_min_width(left_width);
+                    left_ui.set_min_height(content_height);
+
+                    left_ui.label("Gestures");
+                    egui::ScrollArea::vertical()
+                        .id_source("mg_gestures_list")
+                        .auto_shrink([false, false])
+                        .max_height(left_ui.available_height())
+                        .show(&mut left_ui, |ui| {
+                                    let mut remove_idx: Option<usize> = None;
+                                    for idx in 0..self.db.gestures.len() {
+                                        let selected = self.selected_idx == Some(idx);
+                                        let entry = &mut self.db.gestures[idx];
                                         ui.horizontal(|ui| {
-                                            ui.label("Label");
-                                            ui.text_edit_singleline(&mut self.rename_label);
-                                            if ui.button("Save").clicked() {
-                                                if !self.rename_label.trim().is_empty() {
-                                                    entry.label =
-                                                        self.rename_label.trim().to_string();
-                                                    self.rename_idx = None;
-                                                    save_now = true;
-                                                }
+                                            if ui.checkbox(&mut entry.enabled, "").changed() {
+                                                save_now = true;
                                             }
-                                            if ui.button("Cancel").clicked() {
-                                                self.rename_idx = None;
+                                            if ui
+                                                .selectable_label(
+                                                    selected,
+                                                    format_gesture_label(entry),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.selected_idx = Some(idx);
+                                                self.recorder.set_dir_mode(entry.dir_mode);
+                                                self.token_buffer = entry.tokens.clone();
+                                            }
+                                            if ui.button("Rename").clicked() {
+                                                self.rename_idx = Some(idx);
+                                                self.rename_label = entry.label.clone();
+                                            }
+                                            if ui.button("Delete").clicked() {
+                                                remove_idx = Some(idx);
                                             }
                                         });
-                                    }
-                                }
-                                if let Some(idx) = remove_idx {
-                                    self.db.gestures.remove(idx);
-                                    if let Some(selected) = self.selected_idx {
-                                        if selected == idx {
-                                            self.selected_idx = None;
-                                        } else if selected > idx {
-                                            self.selected_idx = Some(selected - 1);
+                                        if self.rename_idx == Some(idx) {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Label");
+                                                ui.text_edit_singleline(&mut self.rename_label);
+                                                if ui.button("Save").clicked() {
+                                                    if !self.rename_label.trim().is_empty() {
+                                                        entry.label =
+                                                            self.rename_label.trim().to_string();
+                                                        self.rename_idx = None;
+                                                        save_now = true;
+                                                    }
+                                                }
+                                                if ui.button("Cancel").clicked() {
+                                                    self.rename_idx = None;
+                                                }
+                                            });
                                         }
                                     }
-                                    self.ensure_selection();
-                                    save_now = true;
-                                }
-                            });
-                    });
+                                    if let Some(idx) = remove_idx {
+                                        self.db.gestures.remove(idx);
+                                        if let Some(selected) = self.selected_idx {
+                                            if selected == idx {
+                                                self.selected_idx = None;
+                                            } else if selected > idx {
+                                                self.selected_idx = Some(selected - 1);
+                                            }
+                                        }
+                                        self.ensure_selection();
+                                        save_now = true;
+                                    }
+                                                        });
                     ui.separator();
                     ui.vertical(|ui| {
+                        ui.set_min_height(content_height);
                         ui.set_min_width(320.0);
                         if let Some(idx) = self.selected_idx {
                             if let Some(entry) = self.db.gestures.get_mut(idx) {
@@ -376,7 +396,7 @@ impl MgGesturesDialog {
                                         self.recorder.push_point(pos);
                                     }
                                 }
-                                if response.drag_released() {
+                                if response.drag_stopped() {
                                     let recorded_tokens = self.recorder.tokens_string();
                                     if !recorded_tokens.is_empty() {
                                         entry.tokens = recorded_tokens.clone();

@@ -510,10 +510,10 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
         }
         return ActionKind::ClipboardText(rest);
     }
-        if let Some(spec) = s.strip_prefix("keys:") {
+    if let Some(spec) = s.strip_prefix("keys:") {
         return ActionKind::Keys(spec);
     }
-if let Some(idx) = s.strip_prefix("calc:history:") {
+    if let Some(idx) = s.strip_prefix("calc:history:") {
         if let Ok(i) = idx.parse::<usize>() {
             return ActionKind::CalcHistory(i);
         }

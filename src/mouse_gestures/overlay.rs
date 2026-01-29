@@ -470,12 +470,12 @@ impl TrailOverlaySurface {
             BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
         };
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics;
         use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, RegisterClassW, SetLayeredWindowAttributes, SetWindowLongPtrW,
             ShowWindow, GWLP_USERDATA, LWA_COLORKEY, SW_SHOW, WNDCLASSW, WS_EX_LAYERED,
             WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
         };
-        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
         static REGISTER: Once = Once::new();
         let class_name = widestring("MultiLauncherTrailOverlay");
@@ -671,6 +671,7 @@ impl DefaultOverlayBackend {
     fn ensure_trail_surface(&mut self) -> Option<&mut TrailOverlaySurface> {
         if self.trail_surface.is_none() {
             self.trail_surface = TrailOverlaySurface::new();
+            self.trail_needs_raise = true;
         }
         self.trail_surface.as_mut()
     }
@@ -692,9 +693,37 @@ impl OverlayBackend for DefaultOverlayBackend {
             CreatePen, DeleteObject, LineTo, MoveToEx, SelectObject, PS_SOLID,
         };
 
+        let needs_raise = self.trail_needs_raise;
+
+        let hwnd = {
+            let Some(surface) = self.ensure_trail_surface() else {
+                return;
+            };
+            surface.hwnd
+        };
+
+        if needs_raise {
+            self.trail_needs_raise = false;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+            };
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            }
+        }
+
         let Some(surface) = self.ensure_trail_surface() else {
             return;
         };
+
         let colorref =
             COLORREF((color[0] as u32) | ((color[1] as u32) << 8) | ((color[2] as u32) << 16));
         let pen = unsafe { CreatePen(PS_SOLID, width.max(1.0) as i32, colorref) };
@@ -716,6 +745,8 @@ impl OverlayBackend for DefaultOverlayBackend {
     }
 
     fn clear_trail(&mut self) {
+        // Next draw should re-raise the overlay (some apps create TOPMOST windows that can cover us).
+        self.trail_needs_raise = true;
         if let Some(surface) = self.ensure_trail_surface() {
             surface.clear();
         }
@@ -756,6 +787,8 @@ impl OverlayBackend for DefaultOverlayBackend {
 #[derive(Debug, Default)]
 pub struct DefaultOverlayBackend {
     trail_surface: Option<TrailOverlaySurface>,
+    /// Set to true when starting a new gesture so the overlay is re-raised to the top of the TOPMOST band.
+    trail_needs_raise: bool,
     hint_tooltip: Option<HintTooltip>,
     last_hint_text: String,
 }

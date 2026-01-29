@@ -232,7 +232,6 @@ fn worker_loop(
     let mut cached_actions: Vec<crate::actions::Action> = Vec::new();
     let mut cached_gesture_label: Option<String> = None;
 
-
     loop {
         #[cfg(windows)]
         {
@@ -365,7 +364,6 @@ fn worker_loop(
                         }
                     }
                 }
-
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -462,7 +460,6 @@ fn format_selected_hint(
         )
     }
 }
-
 
 fn best_match_name(
     db: &Option<SharedGestureDb>,

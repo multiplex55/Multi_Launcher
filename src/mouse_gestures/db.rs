@@ -121,7 +121,6 @@ impl GestureDb {
         }
         None
     }
-
 }
 
 impl BindingEntry {
