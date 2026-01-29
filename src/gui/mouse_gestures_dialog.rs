@@ -248,6 +248,10 @@ impl MgGesturesDialog {
                     );
                     let mut left_ui =
                         ui.child_ui(left_rect, egui::Layout::top_down(egui::Align::Min));
+                    // Hard clip the left panel to its allocated rect so wide widgets
+                    // (e.g. rename row text edit + buttons) don't paint over the right panel.
+                    let left_clip = left_rect.shrink(1.0);
+                    left_ui.set_clip_rect(left_clip);
                     left_ui.set_min_width(left_width);
                     left_ui.set_min_height(content_height);
 
@@ -257,6 +261,9 @@ impl MgGesturesDialog {
                         .auto_shrink([false, false])
                         .max_height(left_ui.available_height())
                         .show(&mut left_ui, |ui| {
+                                    // ScrollArea creates its own child Ui; re-apply the left clip
+                                    // so horizontally-wide rows can't paint into the right panel.
+                                    ui.set_clip_rect(left_clip);
                                     let mut remove_idx: Option<usize> = None;
                                     for idx in 0..self.db.gestures.len() {
                                         let selected = self.selected_idx == Some(idx);
@@ -285,20 +292,27 @@ impl MgGesturesDialog {
                                             }
                                         });
                                         if self.rename_idx == Some(idx) {
-                                            ui.horizontal(|ui| {
+                                            // Use a vertical group for renaming so the text edit never
+                                            // pushes the Save/Cancel buttons past the left panel width.
+                                            ui.group(|ui| {
                                                 ui.label("Label");
-                                                ui.text_edit_singleline(&mut self.rename_label);
-                                                if ui.button("Save").clicked() {
-                                                    if !self.rename_label.trim().is_empty() {
-                                                        entry.label =
-                                                            self.rename_label.trim().to_string();
-                                                        self.rename_idx = None;
-                                                        save_now = true;
+                                                ui.add_sized(
+                                                    [ui.available_width(), 0.0],
+                                                    egui::TextEdit::singleline(&mut self.rename_label),
+                                                );
+                                                ui.horizontal(|ui| {
+                                                    if ui.button("Save").clicked() {
+                                                        if !self.rename_label.trim().is_empty() {
+                                                            entry.label =
+                                                                self.rename_label.trim().to_string();
+                                                            self.rename_idx = None;
+                                                            save_now = true;
+                                                        }
                                                     }
-                                                }
-                                                if ui.button("Cancel").clicked() {
-                                                    self.rename_idx = None;
-                                                }
+                                                    if ui.button("Cancel").clicked() {
+                                                        self.rename_idx = None;
+                                                    }
+                                                });
                                             });
                                         }
                                     }
@@ -316,9 +330,20 @@ impl MgGesturesDialog {
                                     }
                                                         });
                     ui.separator();
-                    ui.vertical(|ui| {
-                        ui.set_min_height(content_height);
-                        ui.set_min_width(320.0);
+
+                    // Right panel: allocate an exact rect (full height) and render into a child Ui
+                    // so it clips too. This prevents any over-wide widgets from bleeding left/right.
+                    let (right_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), content_height),
+                        egui::Sense::hover(),
+                    );
+                    let mut right_ui =
+                        ui.child_ui(right_rect, egui::Layout::top_down(egui::Align::Min));
+                    right_ui.set_min_height(content_height);
+                    right_ui.set_min_width(320.0);
+                    right_ui.set_clip_rect(right_rect.shrink(1.0));
+
+                    let ui = &mut right_ui;
                         if let Some(idx) = self.selected_idx {
                             if let Some(entry) = self.db.gestures.get_mut(idx) {
                                 ui.label("Recorder");
@@ -433,7 +458,6 @@ impl MgGesturesDialog {
                         } else {
                             ui.label("Select a gesture to edit.");
                         }
-                    });
                 });
             });
         if save_now {
