@@ -21,6 +21,13 @@ pub struct GestureEntry {
     pub label: String,
     pub tokens: String,
     pub dir_mode: DirMode,
+    /// Normalized stroke points for previewing the gesture in the UI.
+    ///
+    /// Stored as signed 16-bit fixed-point coordinates in the range [-32767, 32767]
+    /// where +/-32767 corresponds to +/-1.0 in normalized space. The UI scales these
+    /// points into the current preview rectangle.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stroke: Vec<[i16; 2]>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default)]

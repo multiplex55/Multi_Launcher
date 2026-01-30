@@ -53,6 +53,73 @@ pub fn default_recorder_config() -> RecorderConfig {
     RecorderConfig::from_gesture_config(&MouseGestureConfig::default())
 }
 
+const STROKE_MAX_POINTS: usize = 256;
+const STROKE_I16_SCALE: f32 = 32767.0;
+
+fn normalize_stroke_points(points: &[egui::Pos2], max_points: usize) -> Vec<[i16; 2]> {
+    if points.len() < 2 {
+        return Vec::new();
+    }
+
+    // Downsample (cheap) so we don't bloat the JSON file when drawing long gestures.
+    let step = (points.len() / max_points).max(1);
+    let mut sampled: Vec<egui::Pos2> = points.iter().copied().step_by(step).collect();
+    if sampled.last().copied() != points.last().copied() {
+        if let Some(last) = points.last().copied() {
+            sampled.push(last);
+        }
+    }
+
+    let mut min = sampled[0];
+    let mut max = sampled[0];
+    for p in &sampled[1..] {
+        min.x = min.x.min(p.x);
+        min.y = min.y.min(p.y);
+        max.x = max.x.max(p.x);
+        max.y = max.y.max(p.y);
+    }
+    let center = egui::pos2((min.x + max.x) * 0.5, (min.y + max.y) * 0.5);
+    let half_span = ((max.x - min.x).max(max.y - min.y)) * 0.5;
+    if half_span <= f32::EPSILON {
+        return Vec::new();
+    }
+
+    let mut out: Vec<[i16; 2]> = Vec::with_capacity(sampled.len());
+    for p in sampled {
+        let nx = ((p.x - center.x) / half_span).clamp(-1.0, 1.0);
+        let ny = ((p.y - center.y) / half_span).clamp(-1.0, 1.0);
+        let ix = (nx * STROKE_I16_SCALE).round() as i16;
+        let iy = (ny * STROKE_I16_SCALE).round() as i16;
+        if out.last().copied() != Some([ix, iy]) {
+            out.push([ix, iy]);
+        }
+    }
+
+    out
+}
+
+fn stroke_points_in_rect(stroke: &[[i16; 2]], rect: egui::Rect) -> Vec<egui::Pos2> {
+    if stroke.len() < 2 {
+        return Vec::new();
+    }
+
+    let rect = rect.shrink(12.0);
+    let center = rect.center();
+    let scale = rect.width().min(rect.height()) * 0.45;
+    if scale <= f32::EPSILON {
+        return Vec::new();
+    }
+
+    stroke
+        .iter()
+        .map(|p| {
+            let nx = p[0] as f32 / STROKE_I16_SCALE;
+            let ny = p[1] as f32 / STROKE_I16_SCALE;
+            egui::pos2(center.x + nx * scale, center.y + ny * scale)
+        })
+        .collect()
+}
+
 pub struct GestureRecorder {
     config: RecorderConfig,
     tracker: GestureTracker,
@@ -89,6 +156,10 @@ impl GestureRecorder {
 
     pub fn points(&self) -> &[egui::Pos2] {
         &self.draw_points
+    }
+
+    pub fn normalized_stroke(&self) -> Vec<[i16; 2]> {
+        normalize_stroke_points(&self.draw_points, STROKE_MAX_POINTS)
     }
 
     pub fn reset(&mut self) {
@@ -194,6 +265,7 @@ impl MgGesturesDialog {
             label: format!("Gesture {}", idx + 1),
             tokens: String::new(),
             dir_mode: DirMode::Four,
+            stroke: Vec::new(),
             enabled: true,
             bindings: Vec::new(),
         });
@@ -408,10 +480,17 @@ impl MgGesturesDialog {
                                     if ui.button("Use Recording").clicked() {
                                         entry.tokens = recorded_tokens.clone();
                                         self.token_buffer = entry.tokens.clone();
+                                        entry.stroke = self.recorder.normalized_stroke();
                                         save_now = true;
                                     }
                                     if ui.button("Clear Recording").clicked() {
                                         self.recorder.reset();
+                                    }
+                                    if !entry.stroke.is_empty()
+                                        && ui.button("Clear Saved").clicked()
+                                    {
+                                        entry.stroke.clear();
+                                        save_now = true;
                                     }
                                 });
                                 let available = ui.available_width();
@@ -440,7 +519,19 @@ impl MgGesturesDialog {
                                     if !recorded_tokens.is_empty() {
                                         entry.tokens = recorded_tokens.clone();
                                         self.token_buffer = entry.tokens.clone();
+                                        entry.stroke = self.recorder.normalized_stroke();
                                         save_now = true;
+                                    }
+                                }
+
+                                // Render the saved preview stroke (if any) behind the active recording.
+                                if entry.stroke.len() >= 2 {
+                                    let pts = stroke_points_in_rect(&entry.stroke, rect);
+                                    if pts.len() >= 2 {
+                                        painter.add(egui::Shape::line(
+                                            pts,
+                                            egui::Stroke::new(2.0, egui::Color32::from_gray(140)),
+                                        ));
                                     }
                                 }
                                 if self.recorder.points().len() >= 2 {
