@@ -504,6 +504,11 @@ impl MgGesturesDialog {
                                     egui::Stroke::new(1.0, egui::Color32::GRAY),
                                 );
                                 if response.drag_started() {
+                                    // Starting a new recording replaces any existing saved preview stroke.
+                                    if !entry.stroke.is_empty() {
+                                        entry.stroke.clear();
+                                        save_now = true;
+                                    }
                                     self.recorder.reset();
                                     if let Some(pos) = response.interact_pointer_pos() {
                                         self.recorder.push_point(pos);
