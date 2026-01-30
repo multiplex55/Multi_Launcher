@@ -481,6 +481,7 @@ impl MgGesturesDialog {
                                         entry.tokens = recorded_tokens.clone();
                                         self.token_buffer = entry.tokens.clone();
                                         entry.stroke = self.recorder.normalized_stroke();
+                                        self.recorder.reset();
                                         save_now = true;
                                     }
                                     if ui.button("Clear Recording").clicked() {
@@ -527,6 +528,9 @@ impl MgGesturesDialog {
                                         entry.stroke = self.recorder.normalized_stroke();
                                         save_now = true;
                                     }
+                                    //Clear the live drawing so the saved preview is shown
+                                    //immediately
+                                    self.recorder.reset();
                                 }
 
                                 // Render the saved preview stroke (if any) behind the active recording.
