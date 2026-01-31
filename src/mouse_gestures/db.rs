@@ -248,7 +248,7 @@ impl GestureDb {
                     gestures
                         .iter()
                         .find(|g| g.label == label && g.tokens == tokens_match)
-                        .cloned()
+                        .map(|g| (*g).clone())
                 })
                 .collect();
             gesture_list.sort_by(|a, b| a.label.cmp(&b.label));

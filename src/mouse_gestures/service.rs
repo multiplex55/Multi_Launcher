@@ -525,7 +525,7 @@ fn worker_loop(
                     if tokens != cached_tokens {
                         cached_tokens = tokens.to_string();
                         selected_binding_idx = 0;
-                        if let Some((gesture_label, actions)) =
+                        if let Some((_gesture_label, actions)) =
                             match_binding_actions(&db, &tokens, config.dir_mode)
                         {
                             cached_actions = actions;
