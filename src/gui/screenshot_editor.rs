@@ -488,11 +488,10 @@ impl ScreenshotEditor {
                 );
                 let display = img_size * self.zoom;
                 let (response, painter) = ui.allocate_painter(display, Sense::drag());
-                let to_img = |pos: Pos2| {
-                    let offset = response.rect.min;
-                    ((pos - offset) / self.zoom).to_pos2()
-                };
-                let to_screen = |p: Pos2| response.rect.min + (p * self.zoom).to_vec2();
+                let zoom = self.zoom;
+                let rect_min = response.rect.min;
+                let to_img = |pos: Pos2| ((pos - rect_min) / zoom).to_pos2();
+                let to_screen = |p: Pos2| rect_min + (p * zoom).to_vec2();
                 painter.image(
                     tex.id(),
                     response.rect,
