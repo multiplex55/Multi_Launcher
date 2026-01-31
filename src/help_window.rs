@@ -92,6 +92,11 @@ impl HelpWindow {
                 ui.monospace("  kind:<kind>   id:<action_id>");
                 ui.monospace("  Quotes for spaces: tag:\"high priority\"");
                 ui.separator();
+                ui.label(egui::RichText::new("Launcher actions").strong());
+                ui.label("Use these action IDs in custom actions, macros, or gestures:");
+                ui.monospace("  launcher:toggle  launcher:show  launcher:hide");
+                ui.monospace("  launcher:focus   launcher:restore");
+                ui.separator();
                 let mut command_map = std::collections::HashMap::new();
                 for plugin in app.plugins.iter() {
                     command_map.insert(plugin.name().to_string(), plugin.commands());
