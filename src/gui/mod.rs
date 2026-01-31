@@ -2041,7 +2041,21 @@ impl LauncherApp {
                 self.query.starts_with("timer list") || self.query.starts_with("alarm list");
             self.search();
         }
+        let mut focus_after_launcher = false;
+        if a.action == "launcher:show" {
+            if let Some(query) = a.args.as_ref() {
+                self.query = query.to_string();
+                self.last_timer_query =
+                    query.starts_with("timer list") || query.starts_with("alarm list");
+                self.search();
+                self.move_cursor_end = true;
+                focus_after_launcher = true;
+            }
+        }
         if self.handle_launcher_action(&a.action) {
+            if focus_after_launcher {
+                self.focus_input();
+            }
             return;
         }
         let current = self.query.clone();
@@ -2488,7 +2502,7 @@ impl LauncherApp {
             } else if a.action != "help:show" {
                 self.record_history_usage(&a, &current, source);
             }
-        } else if let Err(e) = launch_action(&a) {
+        } else if let Err(e) = execute_action(&a) {
             if a.desc == "Fav" && !a.action.starts_with("fav:") {
                 tracing::error!(?e, fav=%a.label, "failed to run favorite");
             }

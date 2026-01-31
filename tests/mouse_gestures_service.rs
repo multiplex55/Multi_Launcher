@@ -1,4 +1,6 @@
-use multi_launcher::mouse_gestures::db::{BindingEntry, GestureDb, GestureEntry, SCHEMA_VERSION};
+use multi_launcher::mouse_gestures::db::{
+    BindingEntry, BindingKind, GestureDb, GestureEntry, SCHEMA_VERSION,
+};
 use multi_launcher::mouse_gestures::engine::DirMode;
 use multi_launcher::mouse_gestures::overlay::OverlayBackend;
 use multi_launcher::mouse_gestures::service::{
@@ -324,6 +326,7 @@ fn hint_text_includes_best_guess_and_match_type() {
             enabled: true,
             bindings: vec![BindingEntry {
                 label: "Open Browser".into(),
+                kind: BindingKind::Execute,
                 action: "stopwatch:show:1".into(),
                 args: None,
                 enabled: true,

@@ -5,11 +5,29 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 pub const GESTURES_FILE: &str = "mouse_gestures.json";
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
+const LEGACY_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BindingKind {
+    Execute,
+    SetQuery,
+    SetQueryAndShow,
+    ToggleLauncher,
+}
+
+impl Default for BindingKind {
+    fn default() -> Self {
+        BindingKind::Execute
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BindingEntry {
     pub label: String,
+    #[serde(default)]
+    pub kind: BindingKind,
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<String>,
@@ -134,7 +152,11 @@ impl GestureDb {
                 if binding.label.to_lowercase().contains(&query_lower) {
                     fields.push(BindingMatchField::BindingLabel);
                 }
-                if binding.action.to_lowercase().contains(&query_lower) {
+                if binding
+                    .display_target()
+                    .to_lowercase()
+                    .contains(&query_lower)
+                {
                     fields.push(BindingMatchField::Action);
                 }
                 if binding
@@ -178,7 +200,7 @@ impl GestureDb {
         for gesture in self.gestures.iter().filter(|gesture| gesture.enabled) {
             for binding in gesture.bindings.iter().filter(|binding| binding.enabled) {
                 if binding
-                    .action
+                    .action_string()
                     .to_lowercase()
                     .starts_with(&action_prefix)
                 {
@@ -419,12 +441,41 @@ impl GestureDb {
 }
 
 impl BindingEntry {
+    pub fn action_string(&self) -> String {
+        match self.kind {
+            BindingKind::Execute => self.action.clone(),
+            BindingKind::SetQuery => format!("query:{}", self.action),
+            BindingKind::SetQueryAndShow => "launcher:show".to_string(),
+            BindingKind::ToggleLauncher => "launcher:toggle".to_string(),
+        }
+    }
+
+    pub fn display_target(&self) -> String {
+        match self.kind {
+            BindingKind::Execute => match &self.args {
+                Some(args) => format!("{} {}", self.action, args),
+                None => self.action.clone(),
+            },
+            BindingKind::SetQuery => format!("query:{}", self.action),
+            BindingKind::SetQueryAndShow => format!("launcher:show (query: {})", self.action),
+            BindingKind::ToggleLauncher => "launcher:toggle".to_string(),
+        }
+    }
+
     pub fn to_action(&self, gesture_label: &str) -> Action {
+        let (action, args) = match self.kind {
+            BindingKind::Execute => (self.action.clone(), self.args.clone()),
+            BindingKind::SetQuery => (format!("query:{}", self.action), None),
+            BindingKind::SetQueryAndShow => {
+                ("launcher:show".to_string(), Some(self.action.clone()))
+            }
+            BindingKind::ToggleLauncher => ("launcher:toggle".to_string(), None),
+        };
         Action {
             label: self.label.clone(),
             desc: format!("Mouse gesture: {gesture_label}"),
-            action: self.action.clone(),
-            args: self.args.clone(),
+            action,
+            args,
         }
     }
 }
@@ -434,14 +485,43 @@ pub fn load_gestures(path: &str) -> anyhow::Result<GestureDb> {
     if content.trim().is_empty() {
         return Ok(GestureDb::default());
     }
-    let db: GestureDb = serde_json::from_str(&content)?;
-    if db.schema_version != SCHEMA_VERSION {
+    let raw: serde_json::Value = serde_json::from_str(&content)?;
+    let version = raw
+        .get("schema_version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(LEGACY_SCHEMA_VERSION as u64) as u32;
+    if version == SCHEMA_VERSION {
+        let db: GestureDb = serde_json::from_value(raw)?;
+        return Ok(db);
+    }
+    if version != LEGACY_SCHEMA_VERSION {
         return Err(anyhow::anyhow!(
             "Unsupported gesture schema version {}",
-            db.schema_version
+            version
         ));
     }
-    Ok(db)
+
+    let legacy: LegacyGestureDb = serde_json::from_value(raw)?;
+    let gestures = legacy
+        .gestures
+        .into_iter()
+        .map(|gesture| GestureEntry {
+            label: gesture.label,
+            tokens: gesture.tokens,
+            dir_mode: gesture.dir_mode,
+            stroke: gesture.stroke,
+            enabled: gesture.enabled,
+            bindings: gesture
+                .bindings
+                .into_iter()
+                .map(|binding| binding.into_binding())
+                .collect(),
+        })
+        .collect();
+    Ok(GestureDb {
+        schema_version: SCHEMA_VERSION,
+        gestures,
+    })
 }
 
 pub fn save_gestures(path: &str, db: &GestureDb) -> anyhow::Result<()> {
@@ -514,6 +594,75 @@ fn dir_mode_rank(dir_mode: DirMode) -> u8 {
 
 fn default_schema_version() -> u32 {
     SCHEMA_VERSION
+}
+
+fn default_legacy_schema_version() -> u32 {
+    LEGACY_SCHEMA_VERSION
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyGestureDb {
+    #[serde(default = "default_legacy_schema_version")]
+    schema_version: u32,
+    #[serde(default)]
+    gestures: Vec<LegacyGestureEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyGestureEntry {
+    label: String,
+    tokens: String,
+    dir_mode: DirMode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    stroke: Vec<[i16; 2]>,
+    #[serde(default = "default_enabled")]
+    enabled: bool,
+    #[serde(default)]
+    bindings: Vec<LegacyBindingEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyBindingEntry {
+    label: String,
+    action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    args: Option<String>,
+    #[serde(default = "default_enabled")]
+    enabled: bool,
+    #[serde(default)]
+    use_query: bool,
+}
+
+impl LegacyBindingEntry {
+    fn into_binding(self) -> BindingEntry {
+        let action = self.action.trim().to_string();
+        if action == "launcher:toggle" {
+            return BindingEntry {
+                label: self.label,
+                kind: BindingKind::ToggleLauncher,
+                action: String::new(),
+                args: None,
+                enabled: self.enabled,
+            };
+        }
+        let (kind, action) = if self.use_query || action.starts_with("query:") {
+            let action = action
+                .strip_prefix("query:")
+                .unwrap_or(&action)
+                .trim()
+                .to_string();
+            (BindingKind::SetQuery, action)
+        } else {
+            (BindingKind::Execute, action)
+        };
+        BindingEntry {
+            label: self.label,
+            kind,
+            action,
+            args: self.args,
+            enabled: self.enabled,
+        }
+    }
 }
 
 fn fuzzy_score(needle: &str, haystack: &str) -> Option<f32> {

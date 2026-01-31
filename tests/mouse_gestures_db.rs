@@ -1,11 +1,12 @@
 use eframe::egui;
 use multi_launcher::actions::{save_actions, Action};
 use multi_launcher::gui::{
-    send_event, LauncherApp, WatchEvent,
+    send_event, set_execute_action_hook, ActivationSource, LauncherApp, WatchEvent,
 };
 use multi_launcher::mouse_gestures::db::{
-    load_gestures, save_gestures, BindingEntry, BindingMatchField, GestureCandidate, GestureConflict,
-    GestureConflictKind, GestureDb, GestureEntry, GestureMatchType, SCHEMA_VERSION,
+    load_gestures, save_gestures, BindingEntry, BindingKind, BindingMatchField, GestureCandidate,
+    GestureConflict, GestureConflictKind, GestureDb, GestureEntry, GestureMatchType,
+    SCHEMA_VERSION,
 };
 use multi_launcher::mouse_gestures::engine::DirMode;
 use multi_launcher::plugin::PluginManager;
@@ -52,6 +53,7 @@ fn gesture_db_round_trip_serialization() {
             enabled: true,
             bindings: vec![BindingEntry {
                 label: "Launch".into(),
+                kind: BindingKind::Execute,
                 action: "stopwatch:show:1".into(),
                 args: None,
                 enabled: true,
@@ -63,6 +65,58 @@ fn gesture_db_round_trip_serialization() {
     let loaded = load_gestures(path.to_str().unwrap()).unwrap();
 
     assert_eq!(db, loaded);
+}
+
+#[test]
+fn gesture_db_migrates_legacy_schema() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("mouse_gestures.json");
+    std::fs::write(
+        &path,
+        r#"{
+  "schema_version": 1,
+  "gestures": [
+    {
+      "label": "Legacy",
+      "tokens": "LR",
+      "dir_mode": "Four",
+      "stroke": [],
+      "enabled": true,
+      "bindings": [
+        {
+          "label": "Query",
+          "action": "query:calc",
+          "args": null,
+          "enabled": true
+        },
+        {
+          "label": "UseQuery",
+          "action": "note list",
+          "args": null,
+          "enabled": true,
+          "use_query": true
+        },
+        {
+          "label": "Toggle",
+          "action": "launcher:toggle",
+          "args": null,
+          "enabled": true
+        }
+      ]
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+
+    let loaded = load_gestures(path.to_str().unwrap()).unwrap();
+    assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+    let bindings = &loaded.gestures[0].bindings;
+    assert_eq!(bindings[0].kind, BindingKind::SetQuery);
+    assert_eq!(bindings[0].action, "calc");
+    assert_eq!(bindings[1].kind, BindingKind::SetQuery);
+    assert_eq!(bindings[1].action, "note list");
+    assert_eq!(bindings[2].kind, BindingKind::ToggleLauncher);
 }
 
 #[test]
@@ -95,6 +149,7 @@ fn matching_skips_disabled_gestures_and_bindings() {
                 enabled: false,
                 bindings: vec![BindingEntry {
                     label: "Launch".into(),
+                    kind: BindingKind::Execute,
                     action: "stopwatch:show:1".into(),
                     args: None,
                     enabled: true,
@@ -108,6 +163,7 @@ fn matching_skips_disabled_gestures_and_bindings() {
                 enabled: true,
                 bindings: vec![BindingEntry {
                     label: "Launch".into(),
+                    kind: BindingKind::Execute,
                     action: "stopwatch:show:2".into(),
                     args: None,
                     enabled: false,
@@ -134,12 +190,14 @@ fn binding_resolution_is_deterministic() {
                 bindings: vec![
                     BindingEntry {
                         label: "Primary".into(),
+                        kind: BindingKind::Execute,
                         action: "stopwatch:show:1".into(),
                         args: None,
                         enabled: true,
                     },
                     BindingEntry {
                         label: "Secondary".into(),
+                        kind: BindingKind::Execute,
                         action: "stopwatch:show:2".into(),
                         args: None,
                         enabled: true,
@@ -154,6 +212,7 @@ fn binding_resolution_is_deterministic() {
                 enabled: true,
                 bindings: vec![BindingEntry {
                     label: "Tertiary".into(),
+                    kind: BindingKind::Execute,
                     action: "stopwatch:show:3".into(),
                     args: None,
                     enabled: true,
@@ -181,6 +240,7 @@ fn binding_enabled_state_persists_and_controls_matching() {
             enabled: true,
             bindings: vec![BindingEntry {
                 label: "Launch".into(),
+                kind: BindingKind::Execute,
                 action: "stopwatch:show:1".into(),
                 args: None,
                 enabled: false,
@@ -212,6 +272,7 @@ fn candidate_matching_ranks_exact_over_prefix_over_fuzzy() {
                 enabled: true,
                 bindings: vec![BindingEntry {
                     label: "Exact bind".into(),
+                    kind: BindingKind::Execute,
                     action: "stopwatch:show:1".into(),
                     args: None,
                     enabled: true,
@@ -225,6 +286,7 @@ fn candidate_matching_ranks_exact_over_prefix_over_fuzzy() {
                 enabled: true,
                 bindings: vec![BindingEntry {
                     label: "Prefix bind".into(),
+                    kind: BindingKind::Execute,
                     action: "stopwatch:show:2".into(),
                     args: None,
                     enabled: true,
@@ -238,6 +300,7 @@ fn candidate_matching_ranks_exact_over_prefix_over_fuzzy() {
                 enabled: true,
                 bindings: vec![BindingEntry {
                     label: "Fuzzy bind".into(),
+                    kind: BindingKind::Execute,
                     action: "stopwatch:show:3".into(),
                     args: None,
                     enabled: true,
@@ -265,6 +328,7 @@ fn search_bindings_matches_across_fields() {
             enabled: true,
             bindings: vec![BindingEntry {
                 label: "Primary".into(),
+                kind: BindingKind::Execute,
                 action: "browser:open".into(),
                 args: Some("profile=work".into()),
                 enabled: true,
@@ -304,6 +368,7 @@ fn find_by_action_matches_prefixes() {
             enabled: true,
             bindings: vec![BindingEntry {
                 label: "Primary".into(),
+                kind: BindingKind::Execute,
                 action: "browser:open".into(),
                 args: None,
                 enabled: true,
@@ -330,6 +395,7 @@ fn find_conflicts_groups_duplicates_and_prefixes() {
                 enabled: true,
                 bindings: vec![BindingEntry {
                     label: "Primary".into(),
+                    kind: BindingKind::Execute,
                     action: "browser:open".into(),
                     args: None,
                     enabled: true,
@@ -343,6 +409,7 @@ fn find_conflicts_groups_duplicates_and_prefixes() {
                 enabled: true,
                 bindings: vec![BindingEntry {
                     label: "Secondary".into(),
+                    kind: BindingKind::Execute,
                     action: "mail:open".into(),
                     args: None,
                     enabled: true,
@@ -356,6 +423,7 @@ fn find_conflicts_groups_duplicates_and_prefixes() {
                 enabled: true,
                 bindings: vec![BindingEntry {
                     label: "Tertiary".into(),
+                    kind: BindingKind::Execute,
                     action: "settings:open".into(),
                     args: None,
                     enabled: true,
@@ -369,6 +437,7 @@ fn find_conflicts_groups_duplicates_and_prefixes() {
                 enabled: true,
                 bindings: vec![BindingEntry {
                     label: "Alt".into(),
+                    kind: BindingKind::Execute,
                     action: "other:open".into(),
                     args: None,
                     enabled: true,
@@ -436,4 +505,31 @@ fn watch_event_executes_action() {
     app.process_watch_events();
     assert_eq!(app.query, "after");
     assert!(app.move_cursor_end_flag());
+}
+
+#[test]
+fn set_query_binding_avoids_execute_action() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let executed_hook = Arc::clone(&executed);
+    set_execute_action_hook(Some(Box::new(move |_| {
+        executed_hook.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    })));
+
+    let ctx = egui::Context::default();
+    let mut app = new_app(&ctx, Vec::new());
+    let binding = BindingEntry {
+        label: "Query".into(),
+        kind: BindingKind::SetQuery,
+        action: "timer list".into(),
+        args: None,
+        enabled: true,
+    };
+    let action = binding.to_action("Gesture");
+    assert_eq!(action.action, "query:timer list");
+    app.activate_action(action, None, ActivationSource::Gesture);
+
+    assert_eq!(executed.load(Ordering::SeqCst), 0);
+    set_execute_action_hook(None);
 }

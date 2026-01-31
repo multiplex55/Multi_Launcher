@@ -257,9 +257,7 @@ impl MouseGestureSettingsDialog {
     }
 }
 
-fn cancel_behavior_label(
-    value: crate::mouse_gestures::service::CancelBehavior,
-) -> &'static str {
+fn cancel_behavior_label(value: crate::mouse_gestures::service::CancelBehavior) -> &'static str {
     match value {
         crate::mouse_gestures::service::CancelBehavior::DoNothing => "Do nothing",
         crate::mouse_gestures::service::CancelBehavior::PassThroughClick => {
@@ -268,9 +266,7 @@ fn cancel_behavior_label(
     }
 }
 
-fn no_match_behavior_label(
-    value: crate::mouse_gestures::service::NoMatchBehavior,
-) -> &'static str {
+fn no_match_behavior_label(value: crate::mouse_gestures::service::NoMatchBehavior) -> &'static str {
     match value {
         crate::mouse_gestures::service::NoMatchBehavior::DoNothing => "Do nothing",
         crate::mouse_gestures::service::NoMatchBehavior::PassThroughClick => {
