@@ -118,10 +118,7 @@ impl MouseGestureSettingsDialog {
                 let mut changed = false;
                 changed |= ui.checkbox(&mut self.settings.enabled, "Enable mouse gestures").changed();
                 changed |= ui
-                    .checkbox(
-                        &mut self.settings.require_button,
-                        "Require trigger button to be held",
-                    )
+                    .checkbox(&mut self.settings.debug_logging, "Enable debug logging")
                     .changed();
 
                 ui.separator();
@@ -247,6 +244,7 @@ impl MouseGestureSettingsDialog {
                                 .changed();
                         });
                 });
+                ui.small("Fallback runs when a gesture does not match; default is pass-through right-click.");
 
                 if changed {
                     self.dirty = true;

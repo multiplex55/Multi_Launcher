@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, PartialEq)]
 pub struct MouseGestureConfig {
     pub enabled: bool,
+    pub debug_logging: bool,
     pub trail_interval_ms: u64,
     pub recognition_interval_ms: u64,
     pub deadzone_px: f32,
@@ -44,6 +45,7 @@ impl Default for MouseGestureConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            debug_logging: false,
             trail_interval_ms: 16,
             recognition_interval_ms: 40,
             deadzone_px: 12.0,
@@ -59,7 +61,7 @@ impl Default for MouseGestureConfig {
             long_threshold_y: 30.0,
             max_tokens: 10,
             cancel_behavior: CancelBehavior::DoNothing,
-            no_match_behavior: NoMatchBehavior::DoNothing,
+            no_match_behavior: NoMatchBehavior::PassThroughClick,
             wheel_cycle_gate: WheelCycleGate::Deadzone,
             practice_mode: false,
         }
@@ -432,6 +434,9 @@ fn worker_loop(
                         let _ = tracker.feed_point(cursor_pos, ms);
 
                         let tokens = tracker.tokens_string();
+                        if config.debug_logging {
+                            tracing::debug!(tokens = %tokens, "mouse gesture tokens");
+                        }
 
                         // If we produced any tokens, treat it as a gesture (swallow right click).
                         if !tokens.is_empty() {
