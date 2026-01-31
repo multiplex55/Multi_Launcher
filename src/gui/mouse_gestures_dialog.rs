@@ -255,6 +255,27 @@ impl BindingEditor {
     }
 }
 
+#[derive(Default)]
+struct BindingDialog {
+    open: bool,
+    gesture_idx: Option<usize>,
+    editor: BindingEditor,
+}
+
+impl BindingDialog {
+    fn open_new(&mut self, gesture_idx: usize, next_idx: usize) {
+        self.open = true;
+        self.gesture_idx = Some(gesture_idx);
+        self.editor.start_edit(None, next_idx);
+    }
+
+    fn open_edit(&mut self, gesture_idx: usize, binding: &BindingEntry, edit_idx: usize) {
+        self.open = true;
+        self.gesture_idx = Some(gesture_idx);
+        self.editor.start_edit(Some(binding), edit_idx);
+    }
+}
+
 pub struct MgGesturesDialog {
     pub open: bool,
     db: GestureDb,
@@ -263,7 +284,7 @@ pub struct MgGesturesDialog {
     rename_label: String,
     recorder: GestureRecorder,
     token_buffer: String,
-    binding_editor: BindingEditor,
+    binding_dialog: BindingDialog,
 }
 
 impl Default for MgGesturesDialog {
@@ -277,7 +298,7 @@ impl Default for MgGesturesDialog {
             rename_label: String::new(),
             recorder: GestureRecorder::new(DirMode::Four, config),
             token_buffer: String::new(),
-            binding_editor: BindingEditor::default(),
+            binding_dialog: BindingDialog::default(),
         }
     }
 }
@@ -297,7 +318,7 @@ impl MgGesturesDialog {
         self.rename_idx = None;
         self.rename_label.clear();
         self.token_buffer.clear();
-        self.binding_editor.reset();
+        self.binding_dialog.open = false;
         self.ensure_selection();
     }
 
@@ -315,7 +336,7 @@ impl MgGesturesDialog {
         }
         if let Some(idx) = self.selected_idx {
             let next_idx = self.db.gestures[idx].bindings.len();
-            self.binding_editor.start_edit(None, next_idx);
+            self.binding_dialog.open_new(idx, next_idx);
         }
     }
 
@@ -345,7 +366,7 @@ impl MgGesturesDialog {
         self.rename_idx = Some(idx);
         self.rename_label = self.db.gestures[idx].label.clone();
         self.recorder.set_dir_mode(DirMode::Four);
-        self.binding_editor.reset();
+        self.binding_dialog.open = false;
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
@@ -366,17 +387,17 @@ impl MgGesturesDialog {
     }
 
     fn bindings_ui(
-        binding_editor: &mut BindingEditor,
+        binding_dialog: &mut BindingDialog,
         ui: &mut egui::Ui,
-        app: &mut LauncherApp,
         entry: &mut GestureEntry,
+        gesture_idx: usize,
         save_now: &mut bool,
     ) {
         ui.label("Bindings");
         ui.horizontal(|ui| {
             if ui.button("Add Binding").clicked() {
                 let next_idx = entry.bindings.len();
-                binding_editor.start_edit(None, next_idx);
+                binding_dialog.open_new(gesture_idx, next_idx);
             }
         });
         ui.separator();
@@ -434,222 +455,234 @@ impl MgGesturesDialog {
         if let Some((from, to)) = reorder_request {
             if from < entry.bindings.len() && to < entry.bindings.len() {
                 entry.bindings.swap(from, to);
-                if let Some(edit_idx) = binding_editor.edit_idx {
-                    if edit_idx == from {
-                        binding_editor.edit_idx = Some(to);
-                    } else if edit_idx == to {
-                        binding_editor.edit_idx = Some(from);
-                    }
-                }
                 *save_now = true;
             }
         }
 
         if let Some((idx, binding)) = edit_request {
-            binding_editor.start_edit(Some(&binding), idx);
+            binding_dialog.open_edit(gesture_idx, &binding, idx);
         }
         if let Some(idx) = remove_idx {
             entry.bindings.remove(idx);
-            if let Some(edit_idx) = binding_editor.edit_idx {
-                if edit_idx == idx {
-                    binding_editor.reset();
-                } else if edit_idx > idx {
-                    binding_editor.edit_idx = Some(edit_idx - 1);
-                }
-            }
             *save_now = true;
         }
+    }
 
-        if let Some(edit_idx) = binding_editor.edit_idx {
-            let mut save_entry: Option<BindingEntry> = None;
-            ui.separator();
-            ui.label("Binding Editor");
-            ui.horizontal(|ui| {
-                ui.label("Label");
-                let response = ui.text_edit_singleline(&mut binding_editor.label);
-                if binding_editor.focus_label {
-                    response.request_focus();
-                    binding_editor.focus_label = false;
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Action");
-                ui.text_edit_singleline(&mut binding_editor.action);
-            });
-            ui.horizontal(|ui| {
-                ui.label("Args");
-                ui.text_edit_singleline(&mut binding_editor.args);
-            });
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut binding_editor.use_query, "Use query action");
-                ui.checkbox(&mut binding_editor.enabled, "Enabled");
-            });
-            ui.separator();
-            ui.label("Pick an action");
-            ui.horizontal(|ui| {
-                ui.label("Category");
-                let mut plugin_names: Vec<_> =
-                    app.plugins.iter().map(|p| p.name().to_string()).collect();
-                plugin_names.push("app".to_string());
-                plugin_names.sort_unstable();
-                egui::ComboBox::from_id_source("mg_binding_category")
-                    .selected_text(if binding_editor.add_plugin.is_empty() {
-                        "Select".to_string()
-                    } else {
-                        binding_editor.add_plugin.clone()
-                    })
-                    .show_ui(ui, |ui| {
-                        for name in plugin_names.iter() {
-                            ui.selectable_value(
-                                &mut binding_editor.add_plugin,
-                                name.to_string(),
-                                name,
-                            );
-                        }
-                    });
-            });
-            ui.horizontal(|ui| {
-                ui.label("Filter");
-                ui.text_edit_singleline(&mut binding_editor.add_filter);
-            });
-            ui.horizontal(|ui| {
-                ui.label("Args");
-                ui.text_edit_singleline(&mut binding_editor.add_args);
-            });
-            if binding_editor.add_plugin == "app" {
-                let filter = binding_editor.add_filter.trim().to_lowercase();
-                egui::ScrollArea::vertical()
-                    .id_source("mg_binding_app_list")
-                    .max_height(120.0)
-                    .show(ui, |ui| {
-                        for act in app.actions.iter() {
-                            if !filter.is_empty()
-                                && !act.label.to_lowercase().contains(&filter)
-                                && !act.desc.to_lowercase().contains(&filter)
-                                && !act.action.to_lowercase().contains(&filter)
-                            {
-                                continue;
-                            }
-                            if ui
-                                .button(format!("{} - {}", act.label, act.desc))
-                                .clicked()
-                            {
-                                binding_editor.label = act.label.clone();
-                                binding_editor.use_query = false;
-                                binding_editor.action = act.action.clone();
-                                binding_editor.args =
-                                    act.args.clone().unwrap_or_default();
-                                binding_editor.add_args.clear();
-                            }
-                        }
-                    });
-            } else if let Some(plugin) = app
-                .plugins
-                .iter()
-                .find(|p| p.name() == binding_editor.add_plugin)
-            {
-                let filter = binding_editor.add_filter.trim().to_lowercase();
-                let mut actions = if plugin.name() == "folders" {
-                    plugin.search(&format!("f list {}", binding_editor.add_filter))
-                } else if plugin.name() == "bookmarks" {
-                    plugin.search(&format!("bm list {}", binding_editor.add_filter))
-                } else {
-                    plugin.commands()
-                };
-                egui::ScrollArea::vertical()
-                    .id_source("mg_binding_action_list")
-                    .max_height(120.0)
-                    .show(ui, |ui| {
-                        for act in actions.drain(..) {
-                            if !filter.is_empty()
-                                && !act.label.to_lowercase().contains(&filter)
-                                && !act.desc.to_lowercase().contains(&filter)
-                                && !act.action.to_lowercase().contains(&filter)
-                            {
-                                continue;
-                            }
-                            if ui
-                                .button(format!("{} - {}", act.label, act.desc))
-                                .clicked()
-                            {
-                                let mut command = act.action.clone();
-                                let mut args = if binding_editor.add_args.trim().is_empty() {
-                                    None
-                                } else {
-                                    Some(binding_editor.add_args.clone())
-                                };
+    fn binding_dialog_ui(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        save_now: &mut bool,
+    ) {
+        if !self.binding_dialog.open {
+            return;
+        }
 
-                                if let Some(q) = command.strip_prefix("query:") {
-                                    let mut q = q.to_string();
-                                    if let Some(ref a) = args {
-                                        q.push_str(a);
-                                    }
-                                    if let Some(res) =
-                                        plugin.search(&q).into_iter().next()
-                                    {
-                                        command = res.action;
-                                        args = res.args;
-                                    } else {
-                                        command = q;
-                                        args = None;
-                                    }
-                                }
+        let Some(gesture_idx) = self.binding_dialog.gesture_idx else {
+            self.binding_dialog.open = false;
+            return;
+        };
 
-                                let (action, use_query) = if let Some(rest) =
-                                    command.strip_prefix("query:")
-                                {
-                                    (rest.to_string(), true)
-                                } else {
-                                    (command, false)
-                                };
-                                binding_editor.label = act.label.clone();
-                                binding_editor.use_query = use_query;
-                                binding_editor.action = action;
-                                binding_editor.args = args.unwrap_or_default();
-                                binding_editor.add_args.clear();
-                            }
-                        }
-                    });
-            }
-            ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
-                    if binding_editor.label.trim().is_empty()
-                        || binding_editor.action.trim().is_empty()
-                    {
-                        app.set_error("Label and action required".into());
-                    } else {
-                        let action = if binding_editor.use_query {
-                            format!("query:{}", binding_editor.action.trim())
-                        } else {
-                            binding_editor.action.trim().to_string()
-                        };
-                        let args = if binding_editor.args.trim().is_empty() {
-                            None
-                        } else {
-                            Some(binding_editor.args.trim().to_string())
-                        };
-                        let entry = BindingEntry {
-                            label: binding_editor.label.trim().to_string(),
-                            action,
-                            args,
-                            enabled: binding_editor.enabled,
-                        };
-                        save_entry = Some(entry);
+        if gesture_idx >= self.db.gestures.len() {
+            self.binding_dialog.open = false;
+            return;
+        }
+
+        let gesture_label = self.db.gestures[gesture_idx].label.clone();
+        let mut open = self.binding_dialog.open;
+        egui::Window::new(format!("Bind Action: {gesture_label}"))
+            .collapsible(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let editor = &mut self.binding_dialog.editor;
+                let mut save_entry: Option<BindingEntry> = None;
+                ui.horizontal(|ui| {
+                    ui.label("Label");
+                    let response = ui.text_edit_singleline(&mut editor.label);
+                    if editor.focus_label {
+                        response.request_focus();
+                        editor.focus_label = false;
                     }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Action");
+                    ui.text_edit_singleline(&mut editor.action);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Args");
+                    ui.text_edit_singleline(&mut editor.args);
+                });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut editor.use_query, "Use query action");
+                    ui.checkbox(&mut editor.enabled, "Enabled");
+                });
+                ui.separator();
+                ui.label("Pick an action");
+                ui.horizontal(|ui| {
+                    ui.label("Category");
+                    let mut plugin_names: Vec<_> =
+                        app.plugins.iter().map(|p| p.name().to_string()).collect();
+                    plugin_names.push("app".to_string());
+                    plugin_names.sort_unstable();
+                    egui::ComboBox::from_id_source("mg_binding_category")
+                        .selected_text(if editor.add_plugin.is_empty() {
+                            "Select".to_string()
+                        } else {
+                            editor.add_plugin.clone()
+                        })
+                        .show_ui(ui, |ui| {
+                            for name in plugin_names.iter() {
+                                ui.selectable_value(&mut editor.add_plugin, name.to_string(), name);
+                            }
+                        });
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Filter");
+                    ui.text_edit_singleline(&mut editor.add_filter);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Args");
+                    ui.text_edit_singleline(&mut editor.add_args);
+                });
+                if editor.add_plugin == "app" {
+                    let filter = editor.add_filter.trim().to_lowercase();
+                    egui::ScrollArea::vertical()
+                        .id_source("mg_binding_app_list")
+                        .max_height(160.0)
+                        .show(ui, |ui| {
+                            for act in app.actions.iter() {
+                                if !filter.is_empty()
+                                    && !act.label.to_lowercase().contains(&filter)
+                                    && !act.desc.to_lowercase().contains(&filter)
+                                    && !act.action.to_lowercase().contains(&filter)
+                                {
+                                    continue;
+                                }
+                                if ui
+                                    .button(format!("{} - {}", act.label, act.desc))
+                                    .clicked()
+                                {
+                                    editor.label = act.label.clone();
+                                    editor.use_query = false;
+                                    editor.action = act.action.clone();
+                                    editor.args = act.args.clone().unwrap_or_default();
+                                    editor.add_args.clear();
+                                }
+                            }
+                        });
+                } else if let Some(plugin) =
+                    app.plugins.iter().find(|p| p.name() == editor.add_plugin)
+                {
+                    let filter = editor.add_filter.trim().to_lowercase();
+                    let mut actions = if plugin.name() == "folders" {
+                        plugin.search(&format!("f list {}", editor.add_filter))
+                    } else if plugin.name() == "bookmarks" {
+                        plugin.search(&format!("bm list {}", editor.add_filter))
+                    } else {
+                        plugin.commands()
+                    };
+                    egui::ScrollArea::vertical()
+                        .id_source("mg_binding_action_list")
+                        .max_height(160.0)
+                        .show(ui, |ui| {
+                            for act in actions.drain(..) {
+                                if !filter.is_empty()
+                                    && !act.label.to_lowercase().contains(&filter)
+                                    && !act.desc.to_lowercase().contains(&filter)
+                                    && !act.action.to_lowercase().contains(&filter)
+                                {
+                                    continue;
+                                }
+                                if ui
+                                    .button(format!("{} - {}", act.label, act.desc))
+                                    .clicked()
+                                {
+                                    let mut command = act.action.clone();
+                                    let mut args = if editor.add_args.trim().is_empty() {
+                                        None
+                                    } else {
+                                        Some(editor.add_args.clone())
+                                    };
+
+                                    if let Some(q) = command.strip_prefix("query:") {
+                                        let mut q = q.to_string();
+                                        if let Some(ref a) = args {
+                                            q.push_str(a);
+                                        }
+                                        if let Some(res) =
+                                            plugin.search(&q).into_iter().next()
+                                        {
+                                            command = res.action;
+                                            args = res.args;
+                                        } else {
+                                            command = q;
+                                            args = None;
+                                        }
+                                    }
+
+                                    let (action, use_query) =
+                                        if let Some(rest) = command.strip_prefix("query:") {
+                                            (rest.to_string(), true)
+                                        } else {
+                                            (command, false)
+                                        };
+                                    editor.label = act.label.clone();
+                                    editor.use_query = use_query;
+                                    editor.action = action;
+                                    editor.args = args.unwrap_or_default();
+                                    editor.add_args.clear();
+                                }
+                            }
+                        });
                 }
-                if ui.button("Cancel").clicked() {
-                    binding_editor.reset();
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        if editor.label.trim().is_empty() || editor.action.trim().is_empty() {
+                            app.set_error("Label and action required".into());
+                        } else {
+                            let action = if editor.use_query {
+                                format!("query:{}", editor.action.trim())
+                            } else {
+                                editor.action.trim().to_string()
+                            };
+                            let args = if editor.args.trim().is_empty() {
+                                None
+                            } else {
+                                Some(editor.args.trim().to_string())
+                            };
+                            let entry = BindingEntry {
+                                label: editor.label.trim().to_string(),
+                                action,
+                                args,
+                                enabled: editor.enabled,
+                            };
+                            save_entry = Some(entry);
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        open = false;
+                    }
+                });
+
+                if let Some(binding_entry) = save_entry {
+                    let bindings = &mut self.db.gestures[gesture_idx].bindings;
+                    if let Some(edit_idx) = editor.edit_idx {
+                        if edit_idx >= bindings.len() {
+                            bindings.push(binding_entry);
+                        } else if let Some(binding) = bindings.get_mut(edit_idx) {
+                            *binding = binding_entry;
+                        }
+                    }
+                    *save_now = true;
+                    open = false;
                 }
             });
-            if let Some(binding_entry) = save_entry {
-                if edit_idx >= entry.bindings.len() {
-                    entry.bindings.push(binding_entry);
-                } else if let Some(binding) = entry.bindings.get_mut(edit_idx) {
-                    *binding = binding_entry;
-                }
-                binding_editor.reset();
-                *save_now = true;
-            }
+
+        if !open {
+            self.binding_dialog.editor.reset();
+            self.binding_dialog.open = false;
+        } else {
+            self.binding_dialog.open = open;
         }
     }
 
@@ -727,7 +760,8 @@ impl MgGesturesDialog {
                                                 self.selected_idx = Some(idx);
                                                 self.recorder.set_dir_mode(entry.dir_mode);
                                                 self.token_buffer = entry.tokens.clone();
-                                                self.binding_editor.reset();
+                                                self.binding_dialog.editor.reset();
+                                                self.binding_dialog.open = false;
                                             }
                                             if ui.button("Rename").clicked() {
                                                 self.rename_idx = Some(idx);
@@ -782,7 +816,8 @@ impl MgGesturesDialog {
                                         }
 
                                         self.ensure_selection();
-                                        self.binding_editor.reset();
+                                        self.binding_dialog.editor.reset();
+                                        self.binding_dialog.open = false;
                                         save_now = true;
                                     }
                                                         });
@@ -800,11 +835,14 @@ impl MgGesturesDialog {
                     right_ui.set_min_width(320.0);
                     right_ui.set_clip_rect(right_rect.shrink(1.0));
 
-                    let ui = &mut right_ui;
-                        if let Some(idx) = self.selected_idx {
-                            if let Some(entry) = self.db.gestures.get_mut(idx) {
-                                ui.label("Recorder");
-                                ui.horizontal(|ui| {
+                    egui::ScrollArea::both()
+                        .id_source("mg_right_panel")
+                        .auto_shrink([false, false])
+                        .show(&mut right_ui, |ui| {
+                            if let Some(idx) = self.selected_idx {
+                                if let Some(entry) = self.db.gestures.get_mut(idx) {
+                                    ui.label("Recorder");
+                                    ui.horizontal(|ui| {
                                     ui.label("Direction mode");
                                     let mut dir_mode = entry.dir_mode;
                                     egui::ComboBox::from_id_source("mg_dir_mode")
@@ -937,17 +975,25 @@ impl MgGesturesDialog {
                                         });
                                     }
                                 });
-                                ui.separator();
-                                let binding_editor = &mut self.binding_editor;
-                                Self::bindings_ui(binding_editor, ui, app, entry, &mut save_now);
+                                    ui.separator();
+                                    let binding_dialog = &mut self.binding_dialog;
+                                    Self::bindings_ui(
+                                        binding_dialog,
+                                        ui,
+                                        entry,
+                                        idx,
+                                        &mut save_now,
+                                    );
+                                } else {
+                                    ui.label("Select a gesture to edit.");
+                                }
                             } else {
                                 ui.label("Select a gesture to edit.");
                             }
-                        } else {
-                            ui.label("Select a gesture to edit.");
-                        }
+                        });
                 });
             });
+        self.binding_dialog_ui(ctx, app, &mut save_now);
         if save_now {
             self.save(app);
         }
