@@ -6,13 +6,7 @@ pub trait OverlayBackend: Send {
 }
 
 impl OverlayBackend for Box<dyn OverlayBackend> {
-    fn draw_trail_segment(
-        &mut self,
-        from: (f32, f32),
-        to: (f32, f32),
-        color: [u8; 4],
-        width: f32,
-    ) {
+    fn draw_trail_segment(&mut self, from: (f32, f32), to: (f32, f32), color: [u8; 4], width: f32) {
         (**self).draw_trail_segment(from, to, color, width);
     }
 
@@ -122,8 +116,7 @@ pub struct HintOverlay<B: OverlayBackend> {
     backend: B,
     enabled: bool,
     offset: (f32, f32),
-    last_tokens: String,
-    last_match: Option<String>,
+    last_text: String,
     last_position: Option<(f32, f32)>,
     visible: bool,
 }
@@ -134,8 +127,7 @@ impl<B: OverlayBackend> HintOverlay<B> {
             backend,
             enabled,
             offset,
-            last_tokens: String::new(),
-            last_match: None,
+            last_text: String::new(),
             last_position: None,
             visible: false,
         }
@@ -150,12 +142,11 @@ impl<B: OverlayBackend> HintOverlay<B> {
 
     pub fn reset(&mut self) {
         self.hide();
-        self.last_tokens.clear();
-        self.last_match = None;
+        self.last_text.clear();
         self.last_position = None;
     }
 
-    pub fn update(&mut self, tokens: &str, best_match: Option<&str>, cursor: (f32, f32)) {
+    pub fn update(&mut self, text: &str, cursor: (f32, f32)) {
         if !self.enabled {
             if self.visible {
                 self.hide();
@@ -163,36 +154,25 @@ impl<B: OverlayBackend> HintOverlay<B> {
             return;
         }
 
-        let match_owned = best_match.map(|value| value.to_string());
         let position = (cursor.0 + self.offset.0, cursor.1 + self.offset.1);
-        let same_tokens = tokens == self.last_tokens;
-        let same_match = match_owned.as_deref() == self.last_match.as_deref();
+        let same_text = text == self.last_text;
         let same_position = self
             .last_position
             .map(|pos| pos == position)
             .unwrap_or(false);
-
-        let mut text = tokens.to_string();
-        if let Some(name) = best_match {
-            if !text.is_empty() {
-                text.push_str(" - ");
-            }
-            text.push_str(name);
-        }
 
         if text.is_empty() {
             self.hide();
             return;
         }
 
-        if same_tokens && same_match && same_position {
+        if same_text && same_position {
             return;
         }
 
-        self.last_tokens = tokens.to_string();
-        self.last_match = match_owned;
+        self.last_text = text.to_string();
         self.last_position = Some(position);
-        self.backend.show_hint(&text, position);
+        self.backend.show_hint(text, position);
         self.visible = true;
     }
 
@@ -827,9 +807,8 @@ impl HintTooltip {
             TTM_SETDELAYTIME, TTM_SETMAXTIPWIDTH, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
         };
         use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, GetDesktopWindow, SendMessageW, ShowWindow, SW_HIDE,
-            WINDOW_STYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-            WS_POPUP,
+            CreateWindowExW, GetDesktopWindow, SendMessageW, ShowWindow, SW_HIDE, WINDOW_STYLE,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
         };
 
         unsafe {

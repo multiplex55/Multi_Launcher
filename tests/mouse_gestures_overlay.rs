@@ -109,9 +109,9 @@ fn hint_updates_on_tokens_and_hides_when_disabled() {
     let calls = backend.calls();
     let mut overlay = HintOverlay::new(backend, true, (2.0, 3.0));
 
-    overlay.update("LR", Some("Open"), (10.0, 10.0));
-    overlay.update("LR", Some("Open"), (10.0, 10.0));
-    overlay.update("LRU", Some("Open"), (10.0, 10.0));
+    overlay.update("LR - Open", (10.0, 10.0));
+    overlay.update("LR - Open", (10.0, 10.0));
+    overlay.update("LRU - Open", (10.0, 10.0));
 
     {
         let guard = calls.lock().expect("lock calls");
@@ -135,6 +135,24 @@ fn hint_updates_on_tokens_and_hides_when_disabled() {
 
     let guard = calls.lock().expect("lock calls");
     assert_eq!(guard.hides, 1);
+}
+
+#[test]
+fn hint_preserves_multiline_text() {
+    let backend = RecordingBackend::default();
+    let calls = backend.calls();
+    let mut overlay = HintOverlay::new(backend, true, (0.0, 0.0));
+
+    overlay.update("Line 1\nLine 2\nLine 3", (5.0, 6.0));
+
+    let guard = calls.lock().expect("lock calls");
+    assert_eq!(
+        guard.hints,
+        vec![HintCall {
+            text: "Line 1\nLine 2\nLine 3".to_string(),
+            position: (5.0, 6.0),
+        }]
+    );
 }
 
 #[test]
