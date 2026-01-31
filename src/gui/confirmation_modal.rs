@@ -1,5 +1,7 @@
 use eframe::egui;
 
+use super::ActivationSource;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmationResult {
     None,
@@ -59,6 +61,7 @@ pub struct ConfirmationModal {
     warning: String,
     confirm_label: String,
     cancel_label: String,
+    source_label: Option<String>,
 }
 
 impl Default for ConfirmationModal {
@@ -70,17 +73,23 @@ impl Default for ConfirmationModal {
             warning: "This action cannot be undone.".into(),
             confirm_label: "Confirm".into(),
             cancel_label: "Cancel".into(),
+            source_label: None,
         }
     }
 }
 
 impl ConfirmationModal {
     pub fn open_for(&mut self, kind: DestructiveAction) {
+        self.open_for_source(kind, None);
+    }
+
+    pub fn open_for_source(&mut self, kind: DestructiveAction, source: Option<ActivationSource>) {
         self.title = "Confirm destructive action".into();
         self.description = kind.label().into();
         self.warning = kind.warning().into();
         self.confirm_label = "Confirm".into();
         self.cancel_label = "Cancel".into();
+        self.source_label = source.map(|source| format!("Triggered by {}", source.label()));
         self.open = true;
     }
 
@@ -98,6 +107,9 @@ impl ConfirmationModal {
             .show(ctx, |ui| {
                 if !self.description.is_empty() {
                     ui.label(&self.description);
+                }
+                if let Some(label) = &self.source_label {
+                    ui.label(label);
                 }
                 ui.colored_label(egui::Color32::YELLOW, &self.warning);
                 ui.horizontal(|ui| {

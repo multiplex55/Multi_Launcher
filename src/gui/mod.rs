@@ -157,6 +157,17 @@ pub enum ActivationSource {
     Gesture,
 }
 
+impl ActivationSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Enter => "enter",
+            Self::Click => "click",
+            Self::Dashboard => "dashboard",
+            Self::Gesture => "gesture",
+        }
+    }
+}
+
 #[derive(Clone)]
 struct PendingConfirmAction {
     action: Action,
@@ -2018,7 +2029,7 @@ impl LauncherApp {
                 query_override,
                 source,
             });
-            self.confirm_modal.open_for(kind);
+            self.confirm_modal.open_for_source(kind, Some(source));
             return true;
         }
         false
@@ -2028,7 +2039,7 @@ impl LauncherApp {
         &mut self,
         a: Action,
         query_override: Option<String>,
-        _source: ActivationSource,
+        source: ActivationSource,
     ) {
         if let Some(new_query) = query_override {
             self.query = new_query;
@@ -2049,8 +2060,9 @@ impl LauncherApp {
             self.last_timer_query =
                 new_q.starts_with("timer list") || new_q.starts_with("alarm list");
             self.search();
-            set_focus = true;
             self.move_cursor_end = true;
+            self.focus_input();
+            return;
         } else if a.action == "help:show" {
             self.help_window.open = true;
         } else if a.action == "timer:dialog:timer" {
@@ -2464,17 +2476,7 @@ impl LauncherApp {
                 }
             });
             if a.action != "help:show" {
-                let _ = history::append_history(
-                    HistoryEntry {
-                        query: current.clone(),
-                        query_lc: String::new(),
-                        action: a.clone(),
-                        timestamp: 0,
-                    },
-                    self.history_limit,
-                );
-                let count = self.usage.entry(a.action.clone()).or_insert(0);
-                *count += 1;
+                self.record_history_usage(&a, &current, source);
             }
         } else if let Some(mode) = a.action.strip_prefix("screenshot:") {
             use crate::actions::screenshot::Mode as ScreenshotMode;
@@ -2490,17 +2492,7 @@ impl LauncherApp {
             if let Err(e) = crate::plugins::screenshot::launch_editor(self, mode, clip) {
                 self.set_error(format!("Failed: {e}"));
             } else if a.action != "help:show" {
-                let _ = history::append_history(
-                    HistoryEntry {
-                        query: current.clone(),
-                        query_lc: String::new(),
-                        action: a.clone(),
-                        timestamp: 0,
-                    },
-                    self.history_limit,
-                );
-                let count = self.usage.entry(a.action.clone()).or_insert(0);
-                *count += 1;
+                self.record_history_usage(&a, &current, source);
             }
         } else if let Err(e) = launch_action(&a) {
             if a.desc == "Fav" && !a.action.starts_with("fav:") {
@@ -2539,17 +2531,7 @@ impl LauncherApp {
                 );
             }
             if a.action != "help:show" {
-                let _ = history::append_history(
-                    HistoryEntry {
-                        query: current.clone(),
-                        query_lc: String::new(),
-                        action: a.clone(),
-                        timestamp: 0,
-                    },
-                    self.history_limit,
-                );
-                let count = self.usage.entry(a.action.clone()).or_insert(0);
-                *count += 1;
+                self.record_history_usage(&a, &current, source);
             }
             if a.action == "note:reload" {
                 refresh = true;
@@ -2778,6 +2760,21 @@ impl LauncherApp {
         } else if self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open() {
             self.focus_input();
         }
+    }
+
+    fn record_history_usage(&mut self, action: &Action, query: &str, source: ActivationSource) {
+        let _ = history::append_history(
+            HistoryEntry {
+                query: query.to_string(),
+                query_lc: String::new(),
+                action: action.clone(),
+                source: Some(source.label().to_string()),
+                timestamp: 0,
+            },
+            self.history_limit,
+        );
+        let count = self.usage.entry(action.action.clone()).or_insert(0);
+        *count += 1;
     }
 
     fn handle_launcher_action(&mut self, action: &str) -> bool {
