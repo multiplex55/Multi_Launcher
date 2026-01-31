@@ -2,7 +2,8 @@ use crate::actions::Action;
 use crate::common::json_watch::watch_json;
 use crate::common::strip_prefix_ci;
 use crate::mouse_gestures::db::{
-    format_gesture_label, load_gestures, SharedGestureDb, GESTURES_FILE,
+    format_gesture_label, format_search_result_label, load_gestures, BindingMatchContext,
+    SharedGestureDb, GESTURES_FILE,
 };
 use crate::mouse_gestures::service::{
     with_service as with_gesture_service, CancelBehavior, MouseGestureConfig, NoMatchBehavior,
@@ -222,6 +223,24 @@ impl MouseGesturesPlugin {
                 action: "query:mg list".into(),
                 args: None,
             },
+            Action {
+                label: "mg find".into(),
+                desc: "Mouse gestures".into(),
+                action: "query:mg find ".into(),
+                args: None,
+            },
+            Action {
+                label: "mg where".into(),
+                desc: "Mouse gestures".into(),
+                action: "query:mg where ".into(),
+                args: None,
+            },
+            Action {
+                label: "mg conflicts".into(),
+                desc: "Mouse gestures".into(),
+                action: "query:mg conflicts".into(),
+                args: None,
+            },
         ]
     }
 
@@ -245,6 +264,24 @@ impl MouseGesturesPlugin {
                 args: None,
             })
             .collect()
+    }
+
+    fn format_match_desc(context: &BindingMatchContext) -> String {
+        if context.fields.is_empty() {
+            return "Mouse gestures".into();
+        }
+        let labels: Vec<&str> = context
+            .fields
+            .iter()
+            .map(|field| match field {
+                crate::mouse_gestures::db::BindingMatchField::GestureLabel => "gesture label",
+                crate::mouse_gestures::db::BindingMatchField::Tokens => "tokens",
+                crate::mouse_gestures::db::BindingMatchField::BindingLabel => "binding label",
+                crate::mouse_gestures::db::BindingMatchField::Action => "action",
+                crate::mouse_gestures::db::BindingMatchField::Args => "args",
+            })
+            .collect();
+        format!("Mouse gestures (matches: {})", labels.join(", "))
     }
 }
 
@@ -279,6 +316,67 @@ impl Plugin for MouseGesturesPlugin {
                 action: "mg:dialog:binding".into(),
                 args: None,
             }];
+        }
+        if let Some(rest) = strip_prefix_ci(trimmed, "mg find") {
+            let query = rest.trim();
+            let db = load_gestures(GESTURES_FILE).unwrap_or_default();
+            return db
+                .search_bindings(query)
+                .into_iter()
+                .map(|(gesture, binding, context)| Action {
+                    label: format_search_result_label(&gesture, &binding),
+                    desc: Self::format_match_desc(&context),
+                    action: "mg:dialog".into(),
+                    args: None,
+                })
+                .collect();
+        }
+        if let Some(rest) = strip_prefix_ci(trimmed, "mg where") {
+            let action_prefix = rest.trim();
+            let db = load_gestures(GESTURES_FILE).unwrap_or_default();
+            return db
+                .find_by_action(action_prefix)
+                .into_iter()
+                .map(|(gesture, binding)| Action {
+                    label: format_search_result_label(&gesture, &binding),
+                    desc: "Mouse gestures".into(),
+                    action: "mg:dialog".into(),
+                    args: None,
+                })
+                .collect();
+        }
+        if let Some(rest) = strip_prefix_ci(trimmed, "mg conflicts") {
+            if !rest.trim().is_empty() {
+                return Vec::new();
+            }
+            let db = load_gestures(GESTURES_FILE).unwrap_or_default();
+            let mut actions = Vec::new();
+            for conflict in db.find_conflicts() {
+                let conflict_desc = match conflict.kind {
+                    crate::mouse_gestures::db::GestureConflictKind::DuplicateTokens => {
+                        "Mouse gestures (conflict: duplicate tokens)"
+                    }
+                    crate::mouse_gestures::db::GestureConflictKind::PrefixOverlap => {
+                        "Mouse gestures (conflict: prefix overlap)"
+                    }
+                };
+                for gesture in conflict.gestures {
+                    for binding in gesture
+                        .bindings
+                        .iter()
+                        .filter(|binding| binding.enabled)
+                        .cloned()
+                    {
+                        actions.push(Action {
+                            label: format_search_result_label(&gesture, &binding),
+                            desc: conflict_desc.into(),
+                            action: "mg:dialog".into(),
+                            args: None,
+                        });
+                    }
+                }
+            }
+            return actions;
         }
         if let Some(rest) = strip_prefix_ci(trimmed, "mg list") {
             return Self::list_gestures(rest);

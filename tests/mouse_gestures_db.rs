@@ -4,8 +4,8 @@ use multi_launcher::gui::{
     send_event, set_execute_action_hook, LauncherApp, WatchEvent, EXECUTE_ACTION_COUNT,
 };
 use multi_launcher::mouse_gestures::db::{
-    load_gestures, save_gestures, BindingEntry, GestureCandidate, GestureDb, GestureEntry,
-    GestureMatchType, SCHEMA_VERSION,
+    load_gestures, save_gestures, BindingEntry, BindingMatchField, GestureCandidate, GestureConflict,
+    GestureConflictKind, GestureDb, GestureEntry, GestureMatchType, SCHEMA_VERSION,
 };
 use multi_launcher::mouse_gestures::engine::DirMode;
 use multi_launcher::plugin::PluginManager;
@@ -219,6 +219,156 @@ fn candidate_matching_ranks_exact_over_prefix_over_fuzzy() {
     assert_match_type(&candidates[0], GestureMatchType::Exact, "Exact bind");
     assert_match_type(&candidates[1], GestureMatchType::Prefix, "Prefix bind");
     assert_match_type(&candidates[2], GestureMatchType::Fuzzy, "Fuzzy bind");
+}
+
+#[test]
+fn search_bindings_matches_across_fields() {
+    let db = GestureDb {
+        schema_version: SCHEMA_VERSION,
+        gestures: vec![GestureEntry {
+            label: "Open Browser".into(),
+            tokens: "UR".into(),
+            dir_mode: DirMode::Four,
+            stroke: Vec::new(),
+            enabled: true,
+            bindings: vec![BindingEntry {
+                label: "Primary".into(),
+                action: "browser:open".into(),
+                args: Some("profile=work".into()),
+                enabled: true,
+            }],
+        }],
+    };
+
+    let results = db.search_bindings("browser");
+    assert_eq!(results.len(), 1);
+    let (gesture, binding, context) = &results[0];
+    assert_eq!(gesture.label, "Open Browser");
+    assert_eq!(binding.label, "Primary");
+    assert!(context.fields.contains(&BindingMatchField::GestureLabel));
+    assert!(context.fields.contains(&BindingMatchField::Action));
+
+    let token_results = db.search_bindings("UR");
+    assert_eq!(token_results.len(), 1);
+    assert!(token_results[0]
+        .2
+        .fields
+        .contains(&BindingMatchField::Tokens));
+
+    let args_results = db.search_bindings("work");
+    assert_eq!(args_results.len(), 1);
+    assert!(args_results[0].2.fields.contains(&BindingMatchField::Args));
+}
+
+#[test]
+fn find_by_action_matches_prefixes() {
+    let db = GestureDb {
+        schema_version: SCHEMA_VERSION,
+        gestures: vec![GestureEntry {
+            label: "Open Browser".into(),
+            tokens: "UR".into(),
+            dir_mode: DirMode::Four,
+            stroke: Vec::new(),
+            enabled: true,
+            bindings: vec![BindingEntry {
+                label: "Primary".into(),
+                action: "browser:open".into(),
+                args: None,
+                enabled: true,
+            }],
+        }],
+    };
+
+    let matches = db.find_by_action("browser");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].0.label, "Open Browser");
+    assert_eq!(matches[0].1.label, "Primary");
+}
+
+#[test]
+fn find_conflicts_groups_duplicates_and_prefixes() {
+    let db = GestureDb {
+        schema_version: SCHEMA_VERSION,
+        gestures: vec![
+            GestureEntry {
+                label: "Open Browser".into(),
+                tokens: "UR".into(),
+                dir_mode: DirMode::Four,
+                stroke: Vec::new(),
+                enabled: true,
+                bindings: vec![BindingEntry {
+                    label: "Primary".into(),
+                    action: "browser:open".into(),
+                    args: None,
+                    enabled: true,
+                }],
+            },
+            GestureEntry {
+                label: "Open Mail".into(),
+                tokens: "UR".into(),
+                dir_mode: DirMode::Four,
+                stroke: Vec::new(),
+                enabled: true,
+                bindings: vec![BindingEntry {
+                    label: "Secondary".into(),
+                    action: "mail:open".into(),
+                    args: None,
+                    enabled: true,
+                }],
+            },
+            GestureEntry {
+                label: "Open Settings".into(),
+                tokens: "URD".into(),
+                dir_mode: DirMode::Four,
+                stroke: Vec::new(),
+                enabled: true,
+                bindings: vec![BindingEntry {
+                    label: "Tertiary".into(),
+                    action: "settings:open".into(),
+                    args: None,
+                    enabled: true,
+                }],
+            },
+            GestureEntry {
+                label: "Eight Way".into(),
+                tokens: "UR".into(),
+                dir_mode: DirMode::Eight,
+                stroke: Vec::new(),
+                enabled: true,
+                bindings: vec![BindingEntry {
+                    label: "Alt".into(),
+                    action: "other:open".into(),
+                    args: None,
+                    enabled: true,
+                }],
+            },
+        ],
+    };
+
+    let conflicts = db.find_conflicts();
+    let duplicate = conflicts.iter().find(|conflict| {
+        conflict.kind == GestureConflictKind::DuplicateTokens
+            && conflict.tokens == "UR"
+            && conflict.dir_mode == DirMode::Four
+    });
+    let duplicate = duplicate.expect("duplicate token conflict");
+    assert_eq!(duplicate.gestures.len(), 2);
+
+    let prefix = conflicts.iter().find(|conflict| {
+        conflict.kind == GestureConflictKind::PrefixOverlap
+            && conflict.tokens == "UR"
+            && conflict.dir_mode == DirMode::Four
+    });
+    let prefix = prefix.expect("prefix conflict");
+    assert_eq!(prefix.gestures.len(), 3);
+
+    assert!(conflicts.iter().all(|conflict| match conflict {
+        GestureConflict {
+            dir_mode: DirMode::Eight,
+            ..
+        } => false,
+        _ => true,
+    }));
 }
 
 fn assert_match_type(

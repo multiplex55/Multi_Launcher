@@ -8,7 +8,16 @@ fn mouse_gestures_commands_match_expected_labels() {
     let labels: Vec<_> = actions.iter().map(|a| a.label.as_str()).collect();
     assert_eq!(
         labels,
-        vec!["mg", "mg settings", "mg edit", "mg add", "mg list"]
+        vec![
+            "mg",
+            "mg settings",
+            "mg edit",
+            "mg add",
+            "mg list",
+            "mg find",
+            "mg where",
+            "mg conflicts"
+        ]
     );
     let action_strings: Vec<_> = actions.iter().map(|a| a.action.as_str()).collect();
     assert_eq!(
@@ -19,6 +28,9 @@ fn mouse_gestures_commands_match_expected_labels() {
             "mg:dialog",
             "mg:dialog:binding",
             "query:mg list",
+            "query:mg find ",
+            "query:mg where ",
+            "query:mg conflicts",
         ]
     );
 }

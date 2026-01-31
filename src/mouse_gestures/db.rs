@@ -1,6 +1,7 @@
 use crate::actions::Action;
 use crate::mouse_gestures::engine::DirMode;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 pub const GESTURES_FILE: &str = "mouse_gestures.json";
@@ -60,6 +61,34 @@ pub struct GestureCandidate {
     pub score: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BindingMatchField {
+    GestureLabel,
+    Tokens,
+    BindingLabel,
+    Action,
+    Args,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingMatchContext {
+    pub fields: Vec<BindingMatchField>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GestureConflictKind {
+    DuplicateTokens,
+    PrefixOverlap,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GestureConflict {
+    pub tokens: String,
+    pub dir_mode: DirMode,
+    pub kind: GestureConflictKind,
+    pub gestures: Vec<GestureEntry>,
+}
+
 impl GestureMatchType {
     fn rank(self) -> u8 {
         match self {
@@ -80,6 +109,166 @@ impl Default for GestureDb {
 }
 
 impl GestureDb {
+    pub fn search_bindings(
+        &self,
+        query: &str,
+    ) -> Vec<(GestureEntry, BindingEntry, BindingMatchContext)> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let query_lower = query.to_lowercase();
+        let mut results = Vec::new();
+
+        for gesture in self.gestures.iter().filter(|gesture| gesture.enabled) {
+            let mut gesture_fields = Vec::new();
+            if gesture.label.to_lowercase().contains(&query_lower) {
+                gesture_fields.push(BindingMatchField::GestureLabel);
+            }
+            if gesture.tokens.to_lowercase().contains(&query_lower) {
+                gesture_fields.push(BindingMatchField::Tokens);
+            }
+
+            for binding in gesture.bindings.iter().filter(|binding| binding.enabled) {
+                let mut fields = gesture_fields.clone();
+                if binding.label.to_lowercase().contains(&query_lower) {
+                    fields.push(BindingMatchField::BindingLabel);
+                }
+                if binding.action.to_lowercase().contains(&query_lower) {
+                    fields.push(BindingMatchField::Action);
+                }
+                if binding
+                    .args
+                    .as_ref()
+                    .map(|args| args.to_lowercase().contains(&query_lower))
+                    .unwrap_or(false)
+                {
+                    fields.push(BindingMatchField::Args);
+                }
+
+                if !fields.is_empty() {
+                    fields.sort();
+                    fields.dedup();
+                    results.push((
+                        gesture.clone(),
+                        binding.clone(),
+                        BindingMatchContext { fields },
+                    ));
+                }
+            }
+        }
+
+        results.sort_by(|a, b| {
+            a.0.label
+                .cmp(&b.0.label)
+                .then_with(|| a.0.tokens.cmp(&b.0.tokens))
+                .then_with(|| a.1.label.cmp(&b.1.label))
+        });
+        results
+    }
+
+    pub fn find_by_action(&self, action_prefix: &str) -> Vec<(GestureEntry, BindingEntry)> {
+        let action_prefix = action_prefix.trim();
+        if action_prefix.is_empty() {
+            return Vec::new();
+        }
+        let action_prefix = action_prefix.to_lowercase();
+        let mut results = Vec::new();
+
+        for gesture in self.gestures.iter().filter(|gesture| gesture.enabled) {
+            for binding in gesture.bindings.iter().filter(|binding| binding.enabled) {
+                if binding
+                    .action
+                    .to_lowercase()
+                    .starts_with(&action_prefix)
+                {
+                    results.push((gesture.clone(), binding.clone()));
+                }
+            }
+        }
+
+        results.sort_by(|a, b| {
+            a.0.label
+                .cmp(&b.0.label)
+                .then_with(|| a.0.tokens.cmp(&b.0.tokens))
+                .then_with(|| a.1.label.cmp(&b.1.label))
+        });
+        results
+    }
+
+    pub fn find_conflicts(&self) -> Vec<GestureConflict> {
+        let gestures: Vec<&GestureEntry> = self.gestures.iter().filter(|g| g.enabled).collect();
+        let mut duplicates: HashMap<(DirMode, String), Vec<GestureEntry>> = HashMap::new();
+        for gesture in &gestures {
+            duplicates
+                .entry((gesture.dir_mode, gesture.tokens.clone()))
+                .or_default()
+                .push((*gesture).clone());
+        }
+
+        let mut conflicts = Vec::new();
+        for ((dir_mode, tokens), mut grouped) in duplicates {
+            if grouped.len() > 1 {
+                grouped.sort_by(|a, b| a.label.cmp(&b.label));
+                conflicts.push(GestureConflict {
+                    tokens,
+                    dir_mode,
+                    kind: GestureConflictKind::DuplicateTokens,
+                    gestures: grouped,
+                });
+            }
+        }
+
+        let mut prefix_groups: HashMap<(DirMode, String), HashSet<(String, String)>> =
+            HashMap::new();
+        for gesture in &gestures {
+            if gesture.tokens.trim().is_empty() {
+                continue;
+            }
+            for other in &gestures {
+                if gesture.dir_mode != other.dir_mode || gesture.tokens == other.tokens {
+                    continue;
+                }
+                if other.tokens.starts_with(&gesture.tokens) {
+                    let key = (gesture.dir_mode, gesture.tokens.clone());
+                    let entry = prefix_groups.entry(key).or_default();
+                    entry.insert((gesture.label.clone(), gesture.tokens.clone()));
+                    entry.insert((other.label.clone(), other.tokens.clone()));
+                }
+            }
+        }
+
+        for ((dir_mode, tokens), grouped) in prefix_groups {
+            if grouped.len() <= 1 {
+                continue;
+            }
+            let mut gesture_list: Vec<GestureEntry> = grouped
+                .into_iter()
+                .filter_map(|(label, tokens_match)| {
+                    gestures
+                        .iter()
+                        .find(|g| g.label == label && g.tokens == tokens_match)
+                        .map(|g| (*g).clone())
+                })
+                .collect();
+            gesture_list.sort_by(|a, b| a.label.cmp(&b.label));
+            conflicts.push(GestureConflict {
+                tokens,
+                dir_mode,
+                kind: GestureConflictKind::PrefixOverlap,
+                gestures: gesture_list,
+            });
+        }
+
+        conflicts.sort_by(|a, b| {
+            a.tokens
+                .cmp(&b.tokens)
+                .then_with(|| dir_mode_rank(a.dir_mode).cmp(&dir_mode_rank(b.dir_mode)))
+                .then_with(|| a.kind.cmp(&b.kind))
+        });
+        conflicts
+    }
+
     pub fn match_binding(
         &self,
         tokens: &str,
@@ -264,11 +453,7 @@ pub fn save_gestures(path: &str, db: &GestureDb) -> anyhow::Result<()> {
 }
 
 pub fn format_gesture_label(gesture: &GestureEntry) -> String {
-    let tokens = if gesture.tokens.trim().is_empty() {
-        "∅"
-    } else {
-        gesture.tokens.as_str()
-    };
+    let tokens = format_tokens(&gesture.tokens);
     let status = if gesture.enabled { "" } else { " (disabled)" };
     let binding_labels = format_binding_labels(&gesture.bindings);
     let base = format!("{}{} [{tokens}]", gesture.label, status);
@@ -291,8 +476,40 @@ fn format_binding_label(binding: &BindingEntry) -> String {
     }
 }
 
+pub fn format_tokens(tokens: &str) -> String {
+    if tokens.trim().is_empty() {
+        "∅".into()
+    } else {
+        tokens.to_string()
+    }
+}
+
+pub fn format_dir_mode_label(dir_mode: DirMode) -> &'static str {
+    match dir_mode {
+        DirMode::Four => "Four",
+        DirMode::Eight => "Eight",
+    }
+}
+
+pub fn format_search_result_label(gesture: &GestureEntry, binding: &BindingEntry) -> String {
+    format!(
+        "{} [{}] → {} (binding: {})",
+        format_tokens(&gesture.tokens),
+        format_dir_mode_label(gesture.dir_mode),
+        gesture.label,
+        binding.label
+    )
+}
+
 fn default_enabled() -> bool {
     true
+}
+
+fn dir_mode_rank(dir_mode: DirMode) -> u8 {
+    match dir_mode {
+        DirMode::Four => 0,
+        DirMode::Eight => 1,
+    }
 }
 
 fn default_schema_version() -> u32 {
