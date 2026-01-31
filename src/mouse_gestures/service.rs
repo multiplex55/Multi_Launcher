@@ -1067,14 +1067,15 @@ unsafe extern "system" fn keyboard_hook_proc(
 ) -> windows::Win32::Foundation::LRESULT {
     use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, HC_ACTION, KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_SYSKEYDOWN,
+        CallNextHookEx, HC_ACTION, KBDLLHOOKSTRUCT, KBDLLHOOKSTRUCT_FLAGS, WM_KEYDOWN,
+        WM_SYSKEYDOWN,
     };
 
     if n_code == HC_ACTION as i32 {
         let msg = w_param.0 as u32;
         if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
             let info = &*(l_param.0 as *const KBDLLHOOKSTRUCT);
-            let injected = (info.flags & 0x10) != 0;
+            let injected = (info.flags & KBDLLHOOKSTRUCT_FLAGS(0x10)) != KBDLLHOOKSTRUCT_FLAGS(0);
             if !injected && info.vkCode == VK_ESCAPE.0 as u32 {
                 let dispatch = hook_dispatch();
                 if dispatch.enabled.load(Ordering::Acquire) && dispatch.is_active() {
