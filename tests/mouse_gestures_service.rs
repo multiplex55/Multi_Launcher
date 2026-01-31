@@ -128,10 +128,10 @@ fn cancel_event_clears_overlays_and_does_not_click() {
         state: Arc::clone(&overlay_state),
     });
     let click_backend = Arc::new(TestRightClickBackend::default());
-    let click_backend_trait: Arc<dyn RightClickBackend> = Arc::clone(&click_backend);
+    let click_backend_trait: Arc<dyn RightClickBackend> = click_backend.clone();
     let cursor_provider = Arc::new(TestCursorProvider::new((0.0, 0.0)));
     let cursor_provider_trait: Arc<dyn CursorPositionProvider> =
-        Arc::clone(&cursor_provider);
+        cursor_provider.clone();
 
     let mut service = MouseGestureService::new_with_backend_and_overlays(
         Box::new(backend),
@@ -169,10 +169,10 @@ fn no_match_pass_through_click_sends_right_click() {
         state: Arc::new(TestOverlayState::default()),
     });
     let click_backend = Arc::new(TestRightClickBackend::default());
-    let click_backend_trait: Arc<dyn RightClickBackend> = Arc::clone(&click_backend);
+    let click_backend_trait: Arc<dyn RightClickBackend> = click_backend.clone();
     let cursor_provider = Arc::new(TestCursorProvider::new((0.0, 0.0)));
     let cursor_provider_trait: Arc<dyn CursorPositionProvider> =
-        Arc::clone(&cursor_provider);
+        cursor_provider.clone();
 
     let mut service = MouseGestureService::new_with_backend_and_overlays(
         Box::new(backend),
@@ -208,10 +208,10 @@ fn no_match_noop_does_not_send_right_click() {
         state: Arc::new(TestOverlayState::default()),
     });
     let click_backend = Arc::new(TestRightClickBackend::default());
-    let click_backend_trait: Arc<dyn RightClickBackend> = Arc::clone(&click_backend);
+    let click_backend_trait: Arc<dyn RightClickBackend> = click_backend.clone();
     let cursor_provider = Arc::new(TestCursorProvider::new((0.0, 0.0)));
     let cursor_provider_trait: Arc<dyn CursorPositionProvider> =
-        Arc::clone(&cursor_provider);
+        cursor_provider.clone();
 
     let mut service = MouseGestureService::new_with_backend_and_overlays(
         Box::new(backend),

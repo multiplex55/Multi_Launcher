@@ -47,6 +47,7 @@ fn gesture_db_round_trip_serialization() {
             label: "Test".into(),
             tokens: "LR".into(),
             dir_mode: DirMode::Four,
+            stroke: Vec::new(),
             enabled: true,
             bindings: vec![BindingEntry {
                 label: "Launch".into(),
@@ -89,6 +90,7 @@ fn matching_skips_disabled_gestures_and_bindings() {
                 label: "Disabled gesture".into(),
                 tokens: "LR".into(),
                 dir_mode: DirMode::Four,
+                stroke: Vec::new(),
                 enabled: false,
                 bindings: vec![BindingEntry {
                     label: "Launch".into(),
@@ -101,6 +103,7 @@ fn matching_skips_disabled_gestures_and_bindings() {
                 label: "Disabled binding".into(),
                 tokens: "UD".into(),
                 dir_mode: DirMode::Four,
+                stroke: Vec::new(),
                 enabled: true,
                 bindings: vec![BindingEntry {
                     label: "Launch".into(),
@@ -125,6 +128,7 @@ fn binding_resolution_is_deterministic() {
                 label: "First".into(),
                 tokens: "LR".into(),
                 dir_mode: DirMode::Four,
+                stroke: Vec::new(),
                 enabled: true,
                 bindings: vec![
                     BindingEntry {
@@ -145,6 +149,7 @@ fn binding_resolution_is_deterministic() {
                 label: "Second".into(),
                 tokens: "LR".into(),
                 dir_mode: DirMode::Four,
+                stroke: Vec::new(),
                 enabled: true,
                 bindings: vec![BindingEntry {
                     label: "Tertiary".into(),
