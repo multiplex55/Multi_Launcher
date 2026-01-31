@@ -173,6 +173,28 @@ impl MouseGestureSettingsDialog {
                         .changed();
                 });
 
+                ui.horizontal(|ui| {
+                    ui.label("Wheel cycling");
+                    egui::ComboBox::from_id_source("mg_settings_wheel_cycle_gate")
+                        .selected_text(wheel_cycle_gate_label(self.settings.wheel_cycle_gate))
+                        .show_ui(ui, |ui| {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.settings.wheel_cycle_gate,
+                                    crate::mouse_gestures::service::WheelCycleGate::Deadzone,
+                                    "After deadzone",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.settings.wheel_cycle_gate,
+                                    crate::mouse_gestures::service::WheelCycleGate::Shift,
+                                    "Shift + wheel",
+                                )
+                                .changed();
+                        });
+                });
+
                 ui.separator();
 
                 ui.horizontal(|ui| {
@@ -273,5 +295,12 @@ fn no_match_behavior_label(value: crate::mouse_gestures::service::NoMatchBehavio
             "Pass through right-click"
         }
         crate::mouse_gestures::service::NoMatchBehavior::ShowNoMatchHint => "Show no-match hint",
+    }
+}
+
+fn wheel_cycle_gate_label(value: crate::mouse_gestures::service::WheelCycleGate) -> &'static str {
+    match value {
+        crate::mouse_gestures::service::WheelCycleGate::Deadzone => "After deadzone",
+        crate::mouse_gestures::service::WheelCycleGate::Shift => "Shift + wheel",
     }
 }
