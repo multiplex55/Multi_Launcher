@@ -66,9 +66,6 @@ impl Widget for GestureHealthWidget {
             if ui.button("Settings").clicked() {
                 clicked = Some(Self::action("Settings", "mg:dialog:settings"));
             }
-            if ui.button("Practice mode").clicked() {
-                clicked = Some(Self::action("Practice mode", "mg:practice"));
-            }
         });
 
         clicked

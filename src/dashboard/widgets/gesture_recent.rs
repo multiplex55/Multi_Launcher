@@ -50,6 +50,25 @@ impl GestureRecentWidget {
             changed
         })
     }
+
+    fn binding_label(
+        snapshot: &crate::dashboard::data_cache::DashboardDataSnapshot,
+        entry: &crate::mouse_gestures::usage::GestureUsageEntry,
+    ) -> String {
+        let gesture = snapshot.gestures.db.gestures.iter().find(|gesture| {
+            gesture.label == entry.gesture_label
+                && gesture.tokens == entry.tokens
+                && gesture.dir_mode == entry.dir_mode
+        });
+        let Some(gesture) = gesture else {
+            return "Unknown".into();
+        };
+        let mut enabled_bindings = gesture.bindings.iter().filter(|binding| binding.enabled);
+        enabled_bindings
+            .nth(entry.binding_idx)
+            .map(|binding| binding.label.clone())
+            .unwrap_or_else(|| "Unknown".into())
+    }
 }
 
 impl Default for GestureRecentWidget {
@@ -80,9 +99,11 @@ impl Widget for GestureRecentWidget {
                 ui.label("Gesture");
                 ui.label("Tokens");
                 ui.label("Binding");
+                ui.label("Action");
                 ui.end_row();
 
                 for entry in usage.iter().rev().take(count) {
+                    let binding_label = Self::binding_label(&snapshot, entry);
                     if ui
                         .selectable_label(false, entry.gesture_label.clone())
                         .clicked()
@@ -96,6 +117,7 @@ impl Widget for GestureRecentWidget {
                     }
                     ui.label(format_tokens(&entry.tokens));
                     ui.label(format!("#{}", entry.binding_idx + 1));
+                    ui.label(binding_label);
                     ui.end_row();
                 }
             });

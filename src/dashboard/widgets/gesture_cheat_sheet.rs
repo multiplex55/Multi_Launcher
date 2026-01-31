@@ -72,9 +72,8 @@ impl GestureCheatSheetWidget {
     }
 
     fn usage_counts(
-        gestures: &[GestureEntry],
         usage: &[crate::mouse_gestures::usage::GestureUsageEntry],
-    ) -> Vec<(GestureEntry, usize)> {
+    ) -> HashMap<(String, String, DirMode), usize> {
         let mut counts: HashMap<(String, String, DirMode), usize> = HashMap::new();
         for entry in usage {
             *counts
@@ -85,27 +84,7 @@ impl GestureCheatSheetWidget {
                 ))
                 .or_insert(0) += 1;
         }
-
-        let mut out: Vec<(GestureEntry, usize)> = counts
-            .into_iter()
-            .filter_map(|((label, tokens, dir_mode), count)| {
-                gestures
-                    .iter()
-                    .find(|gesture| {
-                        gesture.label == label
-                            && gesture.tokens == tokens
-                            && gesture.dir_mode == dir_mode
-                    })
-                    .cloned()
-                    .map(|gesture| (gesture, count))
-            })
-            .collect();
-
-        out.sort_by(|a, b| {
-            b.1.cmp(&a.1)
-                .then_with(|| a.0.label.cmp(&b.0.label))
-        });
-        out
+        counts
     }
 }
 
@@ -125,22 +104,33 @@ impl Widget for GestureCheatSheetWidget {
         let snapshot = ctx.data_cache.snapshot();
         let gestures = &snapshot.gestures.db.gestures;
         let usage = &snapshot.gestures.usage;
-        let mut rows = if usage.is_empty() {
-            let mut list = gestures.to_vec();
-            list.sort_by(|a, b| a.label.cmp(&b.label));
-            list.into_iter().map(|g| (g, 0)).collect()
-        } else {
-            Self::usage_counts(gestures, usage)
-        };
+        let counts = Self::usage_counts(usage);
+        let mut rows: Vec<(GestureEntry, usize)> = gestures
+            .iter()
+            .filter(|gesture| !gesture.bindings.is_empty())
+            .cloned()
+            .map(|gesture| {
+                let count = counts
+                    .get(&(gesture.label.clone(), gesture.tokens.clone(), gesture.dir_mode))
+                    .copied()
+                    .unwrap_or(0);
+                (gesture, count)
+            })
+            .collect();
 
         if !self.cfg.show_disabled {
             rows.retain(|(gesture, _)| gesture.enabled);
         }
 
+        rows.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| a.0.label.cmp(&b.0.label))
+        });
+
         let mut clicked = None;
         let count = self.cfg.count.max(1);
         if rows.is_empty() {
-            ui.label("No gestures configured.");
+            ui.label("No bound gestures configured.");
             return None;
         }
 

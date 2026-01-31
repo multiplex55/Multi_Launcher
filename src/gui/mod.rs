@@ -2470,24 +2470,6 @@ impl LauncherApp {
                     }
                 }
             }
-        } else if a.action == "mg:practice" {
-            let enabled = crate::plugins::mouse_gestures::toggle_practice_mode();
-            if self.enable_toasts {
-                let label = if enabled {
-                    "Mouse gesture practice mode enabled"
-                } else {
-                    "Mouse gesture practice mode disabled"
-                };
-                push_toast(
-                    &mut self.toasts,
-                    Toast {
-                        text: label.into(),
-                        kind: ToastKind::Info,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(self.toast_duration as f64),
-                    },
-                );
-            }
         } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
             if label.is_empty() {
                 self.fav_dialog.open();
