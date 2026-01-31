@@ -490,6 +490,7 @@ impl MgGesturesDialog {
 
         let gesture_label = self.db.gestures[gesture_idx].label.clone();
         let mut open = self.binding_dialog.open;
+        let mut close_requested = false;
         egui::Window::new(format!("Bind Action: {gesture_label}"))
             .collapsible(false)
             .open(&mut open)
@@ -660,7 +661,7 @@ impl MgGesturesDialog {
                         }
                     }
                     if ui.button("Cancel").clicked() {
-                        open = false;
+                        close_requested = true;
                     }
                 });
 
@@ -674,11 +675,11 @@ impl MgGesturesDialog {
                         }
                     }
                     *save_now = true;
-                    open = false;
+                    close_requested = true;
                 }
             });
 
-        if !open {
+        if !open || close_requested {
             self.binding_dialog.editor.reset();
             self.binding_dialog.open = false;
         } else {
