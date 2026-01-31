@@ -465,6 +465,11 @@ App*. Apps can also be removed from the list. All changes are written to
 Type `app <filter>` in the launcher to search these saved entries. Typing `app`
 alone lists all saved apps.
 
+Custom entries can also target built-in launcher actions. Use action IDs such as
+`launcher:toggle`, `launcher:show`, `launcher:hide`, `launcher:focus`, or
+`launcher:restore` to control the launcher window from custom actions, macros,
+or mouse gestures.
+
 ## Packaging
 
 The project can be compiled for Windows using `cargo build --release`.

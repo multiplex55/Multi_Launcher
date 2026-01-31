@@ -1,5 +1,9 @@
 use eframe::egui;
+use multi_launcher::actions::Action;
 use multi_launcher::hotkey::{Hotkey, HotkeyTrigger};
+use multi_launcher::plugin::PluginManager;
+use multi_launcher::settings::Settings;
+use multi_launcher::{gui::ActivationSource, gui::LauncherApp};
 use multi_launcher::visibility::handle_visibility_trigger;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -9,6 +13,25 @@ use std::sync::{
 #[path = "mock_ctx.rs"]
 mod mock_ctx;
 use mock_ctx::MockCtx;
+
+fn new_app(ctx: &egui::Context) -> LauncherApp {
+    LauncherApp::new(
+        ctx,
+        Arc::new(Vec::new()),
+        0,
+        PluginManager::new(),
+        "actions.json".into(),
+        "settings.json".into(),
+        Settings::default(),
+        None,
+        None,
+        None,
+        None,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    )
+}
 
 #[test]
 fn visibility_toggle_immediate_when_context_present() {
@@ -58,4 +81,23 @@ fn visibility_toggle_immediate_when_context_present() {
         egui::ViewportCommand::Focus => {}
         _ => panic!("unexpected command"),
     }
+}
+
+#[test]
+fn launcher_toggle_action_sets_visibility_and_restore() {
+    let ctx = egui::Context::default();
+    let mut app = new_app(&ctx);
+    assert!(!app.visible_flag_state());
+    assert!(!app.restore_flag_state());
+
+    let action = Action {
+        label: "Toggle launcher".into(),
+        desc: "".into(),
+        action: "launcher:toggle".into(),
+        args: None,
+    };
+    app.activate_action(action, None, ActivationSource::Enter);
+
+    assert!(app.visible_flag_state());
+    assert!(app.restore_flag_state());
 }

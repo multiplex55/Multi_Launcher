@@ -154,6 +154,7 @@ pub enum ActivationSource {
     Enter,
     Click,
     Dashboard,
+    Gesture,
 }
 
 #[derive(Clone)]
@@ -645,50 +646,10 @@ impl LauncherApp {
                     }
                 },
                 WatchEvent::ExecuteAction(action) => {
-                    let resolved = self.resolve_query_action(&action);
-                    if let Err(e) = execute_action(&resolved) {
-                        tracing::error!(error = %e, "failed to execute action from watcher");
-                        self.set_error(format!("Failed to execute action: {e}"));
-                    }
+                    self.activate_action(action, None, ActivationSource::Gesture);
                 }
             }
         }
-    }
-
-    fn resolve_query_action(&self, action: &Action) -> Action {
-        if let Some(query) = action.action.strip_prefix("query:") {
-            let mut query = query.to_string();
-            if let Some(ref args) = action.args {
-                if !query.ends_with(' ') {
-                    query.push(' ');
-                }
-                query.push_str(args);
-            }
-            if let Some(res) = self
-                .plugins
-                .search_filtered(
-                    &query,
-                    self.enabled_plugins.as_ref(),
-                    self.enabled_capabilities.as_ref(),
-                )
-                .into_iter()
-                .next()
-            {
-                return Action {
-                    label: action.label.clone(),
-                    desc: action.desc.clone(),
-                    action: res.action,
-                    args: res.args,
-                };
-            }
-            return Action {
-                label: action.label.clone(),
-                desc: action.desc.clone(),
-                action: query,
-                args: None,
-            };
-        }
-        action.clone()
     }
 
     fn update_completion_index(&mut self) {
@@ -2014,6 +1975,14 @@ impl LauncherApp {
         self.last_stopwatch_query
     }
 
+    pub fn visible_flag_state(&self) -> bool {
+        self.visible_flag.load(Ordering::SeqCst)
+    }
+
+    pub fn restore_flag_state(&self) -> bool {
+        self.restore_flag.load(Ordering::SeqCst)
+    }
+
     pub fn should_show_dashboard(&self, trimmed: &str) -> bool {
         self.dashboard_enabled && self.dashboard_show_when_empty && trimmed.trim().is_empty()
     }
@@ -2066,6 +2035,9 @@ impl LauncherApp {
             self.last_timer_query =
                 self.query.starts_with("timer list") || self.query.starts_with("alarm list");
             self.search();
+        }
+        if self.handle_launcher_action(&a.action) {
+            return;
         }
         let current = self.query.clone();
         let mut refresh = false;
@@ -2805,6 +2777,34 @@ impl LauncherApp {
             self.focus_input();
         } else if self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open() {
             self.focus_input();
+        }
+    }
+
+    fn handle_launcher_action(&mut self, action: &str) -> bool {
+        match action {
+            "launcher:toggle" => {
+                let next = !self.visible_flag.load(Ordering::SeqCst);
+                self.visible_flag.store(next, Ordering::SeqCst);
+                if next {
+                    self.restore_flag.store(true, Ordering::SeqCst);
+                }
+                true
+            }
+            "launcher:show" => {
+                self.visible_flag.store(true, Ordering::SeqCst);
+                self.restore_flag.store(true, Ordering::SeqCst);
+                true
+            }
+            "launcher:hide" => {
+                self.visible_flag.store(false, Ordering::SeqCst);
+                true
+            }
+            "launcher:focus" | "launcher:restore" => {
+                self.visible_flag.store(true, Ordering::SeqCst);
+                self.restore_flag.store(true, Ordering::SeqCst);
+                true
+            }
+            _ => false,
         }
     }
 
