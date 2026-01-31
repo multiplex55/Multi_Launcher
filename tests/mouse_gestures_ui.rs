@@ -9,6 +9,7 @@ fn gesture_label_formatting_includes_tokens_and_bindings() {
         label: "Back".into(),
         tokens: "LR".into(),
         dir_mode: DirMode::Four,
+        stroke: Vec::new(),
         enabled: true,
         bindings: vec![
             BindingEntry {
