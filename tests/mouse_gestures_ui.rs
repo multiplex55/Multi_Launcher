@@ -1,8 +1,8 @@
 use eframe::egui::Pos2;
 use multi_launcher::gui::{GestureRecorder, RecorderConfig};
 use multi_launcher::mouse_gestures::db::{
-    format_gesture_label, load_gestures, save_gestures, BindingEntry, GestureEntry, GestureDb,
-    SCHEMA_VERSION,
+    format_gesture_label, load_gestures, save_gestures, BindingEntry, BindingKind, GestureDb,
+    GestureEntry, SCHEMA_VERSION,
 };
 use multi_launcher::mouse_gestures::engine::DirMode;
 use tempfile::tempdir;
@@ -18,12 +18,14 @@ fn gesture_label_formatting_includes_tokens_and_bindings() {
         bindings: vec![
             BindingEntry {
                 label: "Browser back".into(),
+                kind: BindingKind::Execute,
                 action: "app:back".into(),
                 args: None,
                 enabled: true,
             },
             BindingEntry {
                 label: "Disabled action".into(),
+                kind: BindingKind::Execute,
                 action: "app:noop".into(),
                 args: None,
                 enabled: false,
@@ -63,12 +65,14 @@ fn binding_order_changes_persist_after_save_load() {
             bindings: vec![
                 BindingEntry {
                     label: "First".into(),
+                    kind: BindingKind::Execute,
                     action: "app:first".into(),
                     args: None,
                     enabled: true,
                 },
                 BindingEntry {
                     label: "Second".into(),
+                    kind: BindingKind::Execute,
                     action: "app:second".into(),
                     args: None,
                     enabled: true,

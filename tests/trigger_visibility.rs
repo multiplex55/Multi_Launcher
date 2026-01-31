@@ -3,8 +3,8 @@ use multi_launcher::actions::Action;
 use multi_launcher::hotkey::{Hotkey, HotkeyTrigger};
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
-use multi_launcher::{gui::ActivationSource, gui::LauncherApp};
 use multi_launcher::visibility::handle_visibility_trigger;
+use multi_launcher::{gui::ActivationSource, gui::LauncherApp};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,

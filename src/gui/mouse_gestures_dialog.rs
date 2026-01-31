@@ -1,7 +1,7 @@
 use crate::gui::LauncherApp;
 use crate::mouse_gestures::db::{
-    format_gesture_label, load_gestures, save_gestures, BindingEntry, GestureDb, GestureEntry,
-    GESTURES_FILE,
+    format_gesture_label, load_gestures, save_gestures, BindingEntry, BindingKind, GestureDb,
+    GestureEntry, GESTURES_FILE,
 };
 use crate::mouse_gestures::engine::{DirMode, GestureTracker};
 use crate::mouse_gestures::service::MouseGestureConfig;
@@ -207,7 +207,7 @@ struct BindingEditor {
     action: String,
     args: String,
     enabled: bool,
-    use_query: bool,
+    kind: BindingKind,
     add_plugin: String,
     add_filter: String,
     add_args: String,
@@ -221,7 +221,7 @@ impl BindingEditor {
         self.action.clear();
         self.args.clear();
         self.enabled = true;
-        self.use_query = false;
+        self.kind = BindingKind::Execute;
         self.add_plugin.clear();
         self.add_filter.clear();
         self.add_args.clear();
@@ -230,22 +230,21 @@ impl BindingEditor {
 
     fn start_edit(&mut self, binding: Option<&BindingEntry>, idx: usize) {
         if let Some(binding) = binding {
-            let (action, use_query) = if let Some(rest) = binding.action.strip_prefix("query:") {
-                (rest.to_string(), true)
-            } else {
-                (binding.action.clone(), false)
-            };
             self.label = binding.label.clone();
-            self.action = action;
-            self.args = binding.args.clone().unwrap_or_default();
+            self.kind = binding.kind;
+            self.action = binding.action.clone();
+            self.args = if binding.kind == BindingKind::Execute {
+                binding.args.clone().unwrap_or_default()
+            } else {
+                String::new()
+            };
             self.enabled = binding.enabled;
-            self.use_query = use_query;
         } else {
             self.label.clear();
             self.action.clear();
             self.args.clear();
             self.enabled = true;
-            self.use_query = false;
+            self.kind = BindingKind::Execute;
         }
         self.edit_idx = Some(idx);
         self.add_plugin.clear();
@@ -379,11 +378,7 @@ impl MgGesturesDialog {
     }
 
     fn binding_target_label(binding: &BindingEntry) -> String {
-        if let Some(args) = &binding.args {
-            format!("{} {}", binding.action, args)
-        } else {
-            binding.action.clone()
-        }
+        binding.display_target()
     }
 
     fn bindings_ui(
@@ -425,10 +420,7 @@ impl MgGesturesDialog {
                             ui.label(Self::binding_target_label(binding));
                         });
                         ui.add_space(4.0);
-                        if ui
-                            .add_enabled(idx > 0, egui::Button::new("↑"))
-                            .clicked()
-                        {
+                        if ui.add_enabled(idx > 0, egui::Button::new("↑")).clicked() {
                             reorder_request = Some((idx, idx - 1));
                         }
                         if ui
@@ -506,153 +498,211 @@ impl MgGesturesDialog {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Action");
-                    ui.text_edit_singleline(&mut editor.action);
+                    ui.label("Type");
+                    ui.radio_value(&mut editor.kind, BindingKind::Execute, "Execute");
+                    ui.radio_value(&mut editor.kind, BindingKind::SetQuery, "Set query");
+                    ui.radio_value(
+                        &mut editor.kind,
+                        BindingKind::SetQueryAndShow,
+                        "Set query + show",
+                    );
+                    ui.radio_value(
+                        &mut editor.kind,
+                        BindingKind::ToggleLauncher,
+                        "Toggle launcher",
+                    );
                 });
+                match editor.kind {
+                    BindingKind::Execute => {
+                        ui.horizontal(|ui| {
+                            ui.label("Action");
+                            ui.text_edit_singleline(&mut editor.action);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Args");
+                            ui.text_edit_singleline(&mut editor.args);
+                        });
+                    }
+                    BindingKind::SetQuery | BindingKind::SetQueryAndShow => {
+                        ui.horizontal(|ui| {
+                            ui.label("Query");
+                            ui.text_edit_singleline(&mut editor.action);
+                        });
+                    }
+                    BindingKind::ToggleLauncher => {
+                        ui.label("No action details required for toggling the launcher.");
+                    }
+                }
                 ui.horizontal(|ui| {
-                    ui.label("Args");
-                    ui.text_edit_singleline(&mut editor.args);
-                });
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut editor.use_query, "Use query action");
                     ui.checkbox(&mut editor.enabled, "Enabled");
                 });
                 ui.separator();
-                ui.label("Pick an action");
-                ui.horizontal(|ui| {
-                    ui.label("Category");
-                    let mut plugin_names: Vec<_> =
-                        app.plugins.iter().map(|p| p.name().to_string()).collect();
-                    plugin_names.push("app".to_string());
-                    plugin_names.sort_unstable();
-                    egui::ComboBox::from_id_source("mg_binding_category")
-                        .selected_text(if editor.add_plugin.is_empty() {
-                            "Select".to_string()
-                        } else {
-                            editor.add_plugin.clone()
-                        })
-                        .show_ui(ui, |ui| {
-                            for name in plugin_names.iter() {
-                                ui.selectable_value(&mut editor.add_plugin, name.to_string(), name);
-                            }
-                        });
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Filter");
-                    ui.text_edit_singleline(&mut editor.add_filter);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Args");
-                    ui.text_edit_singleline(&mut editor.add_args);
-                });
-                if editor.add_plugin == "app" {
-                    let filter = editor.add_filter.trim().to_lowercase();
-                    egui::ScrollArea::vertical()
-                        .id_source("mg_binding_app_list")
-                        .max_height(160.0)
-                        .show(ui, |ui| {
-                            for act in app.actions.iter() {
-                                if !filter.is_empty()
-                                    && !act.label.to_lowercase().contains(&filter)
-                                    && !act.desc.to_lowercase().contains(&filter)
-                                    && !act.action.to_lowercase().contains(&filter)
-                                {
-                                    continue;
-                                }
-                                if ui
-                                    .button(format!("{} - {}", act.label, act.desc))
-                                    .clicked()
-                                {
-                                    editor.label = act.label.clone();
-                                    editor.use_query = false;
-                                    editor.action = act.action.clone();
-                                    editor.args = act.args.clone().unwrap_or_default();
-                                    editor.add_args.clear();
-                                }
-                            }
-                        });
-                } else if let Some(plugin) =
-                    app.plugins.iter().find(|p| p.name() == editor.add_plugin)
-                {
-                    let filter = editor.add_filter.trim().to_lowercase();
-                    let mut actions = if plugin.name() == "folders" {
-                        plugin.search(&format!("f list {}", editor.add_filter))
-                    } else if plugin.name() == "bookmarks" {
-                        plugin.search(&format!("bm list {}", editor.add_filter))
-                    } else {
-                        plugin.commands()
+                if editor.kind != BindingKind::ToggleLauncher {
+                    let picker_label = match editor.kind {
+                        BindingKind::Execute => "Pick an action",
+                        BindingKind::SetQuery | BindingKind::SetQueryAndShow => "Pick a query",
+                        BindingKind::ToggleLauncher => "Pick an action",
                     };
-                    egui::ScrollArea::vertical()
-                        .id_source("mg_binding_action_list")
-                        .max_height(160.0)
-                        .show(ui, |ui| {
-                            for act in actions.drain(..) {
-                                if !filter.is_empty()
-                                    && !act.label.to_lowercase().contains(&filter)
-                                    && !act.desc.to_lowercase().contains(&filter)
-                                    && !act.action.to_lowercase().contains(&filter)
-                                {
-                                    continue;
+                    ui.label(picker_label);
+                    ui.horizontal(|ui| {
+                        ui.label("Category");
+                        let mut plugin_names: Vec<_> =
+                            app.plugins.iter().map(|p| p.name().to_string()).collect();
+                        plugin_names.push("app".to_string());
+                        plugin_names.sort_unstable();
+                        egui::ComboBox::from_id_source("mg_binding_category")
+                            .selected_text(if editor.add_plugin.is_empty() {
+                                "Select".to_string()
+                            } else {
+                                editor.add_plugin.clone()
+                            })
+                            .show_ui(ui, |ui| {
+                                for name in plugin_names.iter() {
+                                    ui.selectable_value(
+                                        &mut editor.add_plugin,
+                                        name.to_string(),
+                                        name,
+                                    );
                                 }
-                                if ui
-                                    .button(format!("{} - {}", act.label, act.desc))
-                                    .clicked()
-                                {
-                                    let mut command = act.action.clone();
-                                    let mut args = if editor.add_args.trim().is_empty() {
-                                        None
-                                    } else {
-                                        Some(editor.add_args.clone())
-                                    };
-
-                                    if let Some(q) = command.strip_prefix("query:") {
-                                        let mut q = q.to_string();
-                                        if let Some(ref a) = args {
-                                            q.push_str(a);
-                                        }
-                                        if let Some(res) =
-                                            plugin.search(&q).into_iter().next()
-                                        {
-                                            command = res.action;
-                                            args = res.args;
-                                        } else {
-                                            command = q;
-                                            args = None;
-                                        }
+                            });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Filter");
+                        ui.text_edit_singleline(&mut editor.add_filter);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Args");
+                        ui.text_edit_singleline(&mut editor.add_args);
+                    });
+                    if editor.add_plugin == "app" {
+                        let filter = editor.add_filter.trim().to_lowercase();
+                        egui::ScrollArea::vertical()
+                            .id_source("mg_binding_app_list")
+                            .max_height(160.0)
+                            .show(ui, |ui| {
+                                for act in app.actions.iter() {
+                                    if !filter.is_empty()
+                                        && !act.label.to_lowercase().contains(&filter)
+                                        && !act.desc.to_lowercase().contains(&filter)
+                                        && !act.action.to_lowercase().contains(&filter)
+                                    {
+                                        continue;
                                     }
-
-                                    let (action, use_query) =
-                                        if let Some(rest) = command.strip_prefix("query:") {
-                                            (rest.to_string(), true)
+                                    if ui.button(format!("{} - {}", act.label, act.desc)).clicked()
+                                    {
+                                        editor.label = act.label.clone();
+                                        if let Some(query) = act.action.strip_prefix("query:") {
+                                            editor.kind = match editor.kind {
+                                                BindingKind::SetQueryAndShow => {
+                                                    BindingKind::SetQueryAndShow
+                                                }
+                                                _ => BindingKind::SetQuery,
+                                            };
+                                            editor.action = query.to_string();
+                                            editor.args.clear();
+                                        } else if act.action == "launcher:toggle" {
+                                            editor.kind = BindingKind::ToggleLauncher;
+                                            editor.action.clear();
+                                            editor.args.clear();
                                         } else {
-                                            (command, false)
-                                        };
-                                    editor.label = act.label.clone();
-                                    editor.use_query = use_query;
-                                    editor.action = action;
-                                    editor.args = args.unwrap_or_default();
-                                    editor.add_args.clear();
+                                            editor.kind = BindingKind::Execute;
+                                            editor.action = act.action.clone();
+                                            editor.args = act.args.clone().unwrap_or_default();
+                                        }
+                                        editor.add_args.clear();
+                                    }
                                 }
-                            }
-                        });
+                            });
+                    } else if let Some(plugin) =
+                        app.plugins.iter().find(|p| p.name() == editor.add_plugin)
+                    {
+                        let filter = editor.add_filter.trim().to_lowercase();
+                        let mut actions = if plugin.name() == "folders" {
+                            plugin.search(&format!("f list {}", editor.add_filter))
+                        } else if plugin.name() == "bookmarks" {
+                            plugin.search(&format!("bm list {}", editor.add_filter))
+                        } else {
+                            plugin.commands()
+                        };
+                        egui::ScrollArea::vertical()
+                            .id_source("mg_binding_action_list")
+                            .max_height(160.0)
+                            .show(ui, |ui| {
+                                for act in actions.drain(..) {
+                                    if !filter.is_empty()
+                                        && !act.label.to_lowercase().contains(&filter)
+                                        && !act.desc.to_lowercase().contains(&filter)
+                                        && !act.action.to_lowercase().contains(&filter)
+                                    {
+                                        continue;
+                                    }
+                                    if ui.button(format!("{} - {}", act.label, act.desc)).clicked()
+                                    {
+                                        let args = if editor.add_args.trim().is_empty() {
+                                            None
+                                        } else {
+                                            Some(editor.add_args.clone())
+                                        };
+
+                                        if let Some(query) = act.action.strip_prefix("query:") {
+                                            let mut query = query.to_string();
+                                            if let Some(ref a) = args {
+                                                query.push_str(a);
+                                            }
+                                            editor.kind = match editor.kind {
+                                                BindingKind::SetQueryAndShow => {
+                                                    BindingKind::SetQueryAndShow
+                                                }
+                                                _ => BindingKind::SetQuery,
+                                            };
+                                            editor.action = query;
+                                            editor.args.clear();
+                                        } else if act.action == "launcher:toggle" {
+                                            editor.kind = BindingKind::ToggleLauncher;
+                                            editor.action.clear();
+                                            editor.args.clear();
+                                        } else {
+                                            editor.kind = BindingKind::Execute;
+                                            editor.action = act.action.clone();
+                                            editor.args = args.unwrap_or_else(|| {
+                                                act.args.clone().unwrap_or_default()
+                                            });
+                                        }
+                                        editor.label = act.label.clone();
+                                        editor.add_args.clear();
+                                    }
+                                }
+                            });
+                    }
                 }
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
-                        if editor.label.trim().is_empty() || editor.action.trim().is_empty() {
+                        let action_required = matches!(
+                            editor.kind,
+                            BindingKind::Execute
+                                | BindingKind::SetQuery
+                                | BindingKind::SetQueryAndShow
+                        );
+                        if editor.label.trim().is_empty()
+                            || (action_required && editor.action.trim().is_empty())
+                        {
                             app.set_error("Label and action required".into());
                         } else {
-                            let action = if editor.use_query {
-                                format!("query:{}", editor.action.trim())
+                            let action = if editor.kind == BindingKind::ToggleLauncher {
+                                String::new()
                             } else {
                                 editor.action.trim().to_string()
                             };
-                            let args = if editor.args.trim().is_empty() {
-                                None
-                            } else {
+                            let args = if editor.kind == BindingKind::Execute
+                                && !editor.args.trim().is_empty()
+                            {
                                 Some(editor.args.trim().to_string())
+                            } else {
+                                None
                             };
                             let entry = BindingEntry {
                                 label: editor.label.trim().to_string(),
+                                kind: editor.kind,
                                 action,
                                 args,
                                 enabled: editor.enabled,
@@ -739,89 +789,86 @@ impl MgGesturesDialog {
                         .auto_shrink([false, false])
                         .max_height(left_ui.available_height())
                         .show(&mut left_ui, |ui| {
-                                    // ScrollArea creates its own child Ui; re-apply the left clip
-                                    // so horizontally-wide rows can't paint into the right panel.
-                                    ui.set_clip_rect(left_clip);
-                                    let mut remove_idx: Option<usize> = None;
-                                    let gesture_order = self.sorted_gesture_indices();
-                                    for idx in gesture_order {
-                                        let selected = self.selected_idx == Some(idx);
-                                        let entry = &mut self.db.gestures[idx];
-                                        ui.horizontal(|ui| {
-                                            if ui.checkbox(&mut entry.enabled, "").changed() {
-                                                save_now = true;
-                                            }
-                                            if ui
-                                                .selectable_label(
-                                                    selected,
-                                                    format_gesture_label(entry),
-                                                )
-                                                .clicked()
-                                            {
-                                                self.selected_idx = Some(idx);
-                                                self.recorder.set_dir_mode(entry.dir_mode);
-                                                self.token_buffer = entry.tokens.clone();
-                                                self.binding_dialog.editor.reset();
-                                                self.binding_dialog.open = false;
-                                            }
-                                            if ui.button("Rename").clicked() {
-                                                self.rename_idx = Some(idx);
-                                                self.rename_label = entry.label.clone();
-                                            }
-                                            if ui.button("Delete").clicked() {
-                                                remove_idx = Some(idx);
-                                            }
-                                        });
-                                        if self.rename_idx == Some(idx) {
-                                            // Use a vertical group for renaming so the text edit never
-                                            // pushes the Save/Cancel buttons past the left panel width.
-                                            ui.group(|ui| {
-                                                ui.label("Label");
-                                                ui.add_sized(
-                                                    [ui.available_width(), 0.0],
-                                                    egui::TextEdit::singleline(&mut self.rename_label),
-                                                );
-                                                ui.horizontal(|ui| {
-                                                    if ui.button("Save").clicked() {
-                                                        if !self.rename_label.trim().is_empty() {
-                                                            entry.label =
-                                                                self.rename_label.trim().to_string();
-                                                            self.rename_idx = None;
-                                                            save_now = true;
-                                                        }
-                                                    }
-                                                    if ui.button("Cancel").clicked() {
-                                                        self.rename_idx = None;
-                                                    }
-                                                });
-                                            });
-                                        }
-                                    }
-                                    if let Some(idx) = remove_idx {
-                                        self.db.gestures.remove(idx);
-
-                                        if let Some(selected) = self.selected_idx {
-                                            if selected == idx {
-                                                self.selected_idx = None;
-                                            } else if selected > idx {
-                                                self.selected_idx = Some(selected - 1);
-                                            }
-                                        }
-
-                                        if let Some(rename) = self.rename_idx {
-                                            if rename == idx {
-                                                self.rename_idx = None;
-                                            } else if rename > idx {
-                                                self.rename_idx = Some(rename - 1);
-                                            }
-                                        }
-
-                                        self.ensure_selection();
-                                        self.binding_dialog.editor.reset();
-                                        self.binding_dialog.open = false;
+                            // ScrollArea creates its own child Ui; re-apply the left clip
+                            // so horizontally-wide rows can't paint into the right panel.
+                            ui.set_clip_rect(left_clip);
+                            let mut remove_idx: Option<usize> = None;
+                            let gesture_order = self.sorted_gesture_indices();
+                            for idx in gesture_order {
+                                let selected = self.selected_idx == Some(idx);
+                                let entry = &mut self.db.gestures[idx];
+                                ui.horizontal(|ui| {
+                                    if ui.checkbox(&mut entry.enabled, "").changed() {
                                         save_now = true;
                                     }
-                                                        });
+                                    if ui
+                                        .selectable_label(selected, format_gesture_label(entry))
+                                        .clicked()
+                                    {
+                                        self.selected_idx = Some(idx);
+                                        self.recorder.set_dir_mode(entry.dir_mode);
+                                        self.token_buffer = entry.tokens.clone();
+                                        self.binding_dialog.editor.reset();
+                                        self.binding_dialog.open = false;
+                                    }
+                                    if ui.button("Rename").clicked() {
+                                        self.rename_idx = Some(idx);
+                                        self.rename_label = entry.label.clone();
+                                    }
+                                    if ui.button("Delete").clicked() {
+                                        remove_idx = Some(idx);
+                                    }
+                                });
+                                if self.rename_idx == Some(idx) {
+                                    // Use a vertical group for renaming so the text edit never
+                                    // pushes the Save/Cancel buttons past the left panel width.
+                                    ui.group(|ui| {
+                                        ui.label("Label");
+                                        ui.add_sized(
+                                            [ui.available_width(), 0.0],
+                                            egui::TextEdit::singleline(&mut self.rename_label),
+                                        );
+                                        ui.horizontal(|ui| {
+                                            if ui.button("Save").clicked() {
+                                                if !self.rename_label.trim().is_empty() {
+                                                    entry.label =
+                                                        self.rename_label.trim().to_string();
+                                                    self.rename_idx = None;
+                                                    save_now = true;
+                                                }
+                                            }
+                                            if ui.button("Cancel").clicked() {
+                                                self.rename_idx = None;
+                                            }
+                                        });
+                                    });
+                                }
+                            }
+                            if let Some(idx) = remove_idx {
+                                self.db.gestures.remove(idx);
+
+                                if let Some(selected) = self.selected_idx {
+                                    if selected == idx {
+                                        self.selected_idx = None;
+                                    } else if selected > idx {
+                                        self.selected_idx = Some(selected - 1);
+                                    }
+                                }
+
+                                if let Some(rename) = self.rename_idx {
+                                    if rename == idx {
+                                        self.rename_idx = None;
+                                    } else if rename > idx {
+                                        self.rename_idx = Some(rename - 1);
+                                    }
+                                }
+
+                                self.ensure_selection();
+                                self.binding_dialog.editor.reset();
+                                self.binding_dialog.open = false;
+                                save_now = true;
+                            }
+                        });
                     ui.separator();
 
                     // Right panel: allocate an exact rect (full height) and render into a child Ui
@@ -844,138 +891,141 @@ impl MgGesturesDialog {
                                 if let Some(entry) = self.db.gestures.get_mut(idx) {
                                     ui.label("Recorder");
                                     ui.horizontal(|ui| {
-                                    ui.label("Direction mode");
-                                    let mut dir_mode = entry.dir_mode;
-                                    egui::ComboBox::from_id_source("mg_dir_mode")
-                                        .selected_text(match dir_mode {
-                                            DirMode::Four => "4-way",
-                                            DirMode::Eight => "8-way",
-                                        })
-                                        .show_ui(ui, |ui| {
-                                            ui.selectable_value(
-                                                &mut dir_mode,
-                                                DirMode::Four,
-                                                "4-way",
-                                            );
-                                            ui.selectable_value(
-                                                &mut dir_mode,
-                                                DirMode::Eight,
-                                                "8-way",
-                                            );
-                                        });
-                                    if dir_mode != entry.dir_mode {
-                                        entry.dir_mode = dir_mode;
-                                        self.recorder.set_dir_mode(dir_mode);
-                                        save_now = true;
-                                    }
-                                });
-                                ui.label(format!(
-                                    "Gesture tokens: {}",
-                                    if entry.tokens.trim().is_empty() {
-                                        "∅"
-                                    } else {
-                                        entry.tokens.as_str()
-                                    }
-                                ));
-                                let recorded_tokens = self.recorder.tokens_string();
-                                ui.label(format!(
-                                    "Recorded tokens: {}",
-                                    if recorded_tokens.is_empty() {
-                                        "∅"
-                                    } else {
-                                        recorded_tokens.as_str()
-                                    }
-                                ));
-                                ui.horizontal(|ui| {
-                                    if ui.button("Use Recording").clicked() {
-                                        entry.tokens = recorded_tokens.clone();
-                                        self.token_buffer = entry.tokens.clone();
-                                        entry.stroke = self.recorder.normalized_stroke();
-                                        self.recorder.reset();
-                                        save_now = true;
-                                    }
-                                    if ui.button("Clear Recording").clicked() {
-                                        self.recorder.reset();
-                                    }
-                                    if !entry.stroke.is_empty()
-                                        && ui.button("Clear Saved").clicked()
-                                    {
-                                        entry.stroke.clear();
-                                        save_now = true;
-                                    }
-                                });
-                                let available = ui.available_width();
-                                let size = egui::vec2(available.max(320.0), 260.0);
-                                let (rect, response) =
-                                    ui.allocate_exact_size(size, egui::Sense::drag());
-                                let painter = ui.painter_at(rect);
-                                painter.rect_stroke(
-                                    rect,
-                                    0.0,
-                                    egui::Stroke::new(1.0, egui::Color32::GRAY),
-                                );
-                                if response.drag_started() {
-                                    // Starting a new recording replaces any existing saved preview stroke.
-                                    if !entry.stroke.is_empty() {
-                                        entry.stroke.clear();
-                                        save_now = true;
-                                    }
-                                    self.recorder.reset();
-                                    if let Some(pos) = response.interact_pointer_pos() {
-                                        self.recorder.push_point(pos);
-                                    }
-                                }
-                                if response.dragged() {
-                                    if let Some(pos) = response.interact_pointer_pos() {
-                                        self.recorder.push_point(pos);
-                                    }
-                                }
-                                if response.drag_stopped() {
+                                        ui.label("Direction mode");
+                                        let mut dir_mode = entry.dir_mode;
+                                        egui::ComboBox::from_id_source("mg_dir_mode")
+                                            .selected_text(match dir_mode {
+                                                DirMode::Four => "4-way",
+                                                DirMode::Eight => "8-way",
+                                            })
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(
+                                                    &mut dir_mode,
+                                                    DirMode::Four,
+                                                    "4-way",
+                                                );
+                                                ui.selectable_value(
+                                                    &mut dir_mode,
+                                                    DirMode::Eight,
+                                                    "8-way",
+                                                );
+                                            });
+                                        if dir_mode != entry.dir_mode {
+                                            entry.dir_mode = dir_mode;
+                                            self.recorder.set_dir_mode(dir_mode);
+                                            save_now = true;
+                                        }
+                                    });
+                                    ui.label(format!(
+                                        "Gesture tokens: {}",
+                                        if entry.tokens.trim().is_empty() {
+                                            "∅"
+                                        } else {
+                                            entry.tokens.as_str()
+                                        }
+                                    ));
                                     let recorded_tokens = self.recorder.tokens_string();
-                                    if !recorded_tokens.is_empty() {
-                                        entry.tokens = recorded_tokens.clone();
-                                        self.token_buffer = entry.tokens.clone();
-                                        entry.stroke = self.recorder.normalized_stroke();
-                                        save_now = true;
+                                    ui.label(format!(
+                                        "Recorded tokens: {}",
+                                        if recorded_tokens.is_empty() {
+                                            "∅"
+                                        } else {
+                                            recorded_tokens.as_str()
+                                        }
+                                    ));
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Use Recording").clicked() {
+                                            entry.tokens = recorded_tokens.clone();
+                                            self.token_buffer = entry.tokens.clone();
+                                            entry.stroke = self.recorder.normalized_stroke();
+                                            self.recorder.reset();
+                                            save_now = true;
+                                        }
+                                        if ui.button("Clear Recording").clicked() {
+                                            self.recorder.reset();
+                                        }
+                                        if !entry.stroke.is_empty()
+                                            && ui.button("Clear Saved").clicked()
+                                        {
+                                            entry.stroke.clear();
+                                            save_now = true;
+                                        }
+                                    });
+                                    let available = ui.available_width();
+                                    let size = egui::vec2(available.max(320.0), 260.0);
+                                    let (rect, response) =
+                                        ui.allocate_exact_size(size, egui::Sense::drag());
+                                    let painter = ui.painter_at(rect);
+                                    painter.rect_stroke(
+                                        rect,
+                                        0.0,
+                                        egui::Stroke::new(1.0, egui::Color32::GRAY),
+                                    );
+                                    if response.drag_started() {
+                                        // Starting a new recording replaces any existing saved preview stroke.
+                                        if !entry.stroke.is_empty() {
+                                            entry.stroke.clear();
+                                            save_now = true;
+                                        }
+                                        self.recorder.reset();
+                                        if let Some(pos) = response.interact_pointer_pos() {
+                                            self.recorder.push_point(pos);
+                                        }
                                     }
-                                    //Clear the live drawing so the saved preview is shown
-                                    //immediately
-                                    self.recorder.reset();
-                                }
+                                    if response.dragged() {
+                                        if let Some(pos) = response.interact_pointer_pos() {
+                                            self.recorder.push_point(pos);
+                                        }
+                                    }
+                                    if response.drag_stopped() {
+                                        let recorded_tokens = self.recorder.tokens_string();
+                                        if !recorded_tokens.is_empty() {
+                                            entry.tokens = recorded_tokens.clone();
+                                            self.token_buffer = entry.tokens.clone();
+                                            entry.stroke = self.recorder.normalized_stroke();
+                                            save_now = true;
+                                        }
+                                        //Clear the live drawing so the saved preview is shown
+                                        //immediately
+                                        self.recorder.reset();
+                                    }
 
-                                // Render the saved preview stroke (if any) behind the active recording.
-                                if entry.stroke.len() >= 2 {
-                                    let pts = stroke_points_in_rect(&entry.stroke, rect);
-                                    if pts.len() >= 2 {
+                                    // Render the saved preview stroke (if any) behind the active recording.
+                                    if entry.stroke.len() >= 2 {
+                                        let pts = stroke_points_in_rect(&entry.stroke, rect);
+                                        if pts.len() >= 2 {
+                                            painter.add(egui::Shape::line(
+                                                pts,
+                                                egui::Stroke::new(
+                                                    2.0,
+                                                    egui::Color32::from_gray(140),
+                                                ),
+                                            ));
+                                        }
+                                    }
+                                    if self.recorder.points().len() >= 2 {
                                         painter.add(egui::Shape::line(
-                                            pts,
-                                            egui::Stroke::new(2.0, egui::Color32::from_gray(140)),
+                                            self.recorder.points().to_vec(),
+                                            egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
                                         ));
                                     }
-                                }
-                                if self.recorder.points().len() >= 2 {
-                                    painter.add(egui::Shape::line(
-                                        self.recorder.points().to_vec(),
-                                        egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
-                                    ));
-                                }
-                                ui.separator();
-                                ui.horizontal(|ui| {
-                                    ui.label("Tokens");
-                                    ui.text_edit_singleline(&mut self.token_buffer);
-                                });
-                                ui.horizontal(|ui| {
-                                    if ui.button("Import").clicked() {
-                                        entry.tokens = self.token_buffer.trim().to_string();
-                                        save_now = true;
-                                    }
-                                    if ui.button("Export").clicked() {
-                                        self.token_buffer = entry.tokens.clone();
-                                        ctx.output_mut(|o| {
-                                            o.copied_text = self.token_buffer.clone();
-                                        });
-                                    }
-                                });
+                                    ui.separator();
+                                    ui.horizontal(|ui| {
+                                        ui.label("Tokens");
+                                        ui.text_edit_singleline(&mut self.token_buffer);
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Import").clicked() {
+                                            entry.tokens = self.token_buffer.trim().to_string();
+                                            save_now = true;
+                                        }
+                                        if ui.button("Export").clicked() {
+                                            self.token_buffer = entry.tokens.clone();
+                                            ctx.output_mut(|o| {
+                                                o.copied_text = self.token_buffer.clone();
+                                            });
+                                        }
+                                    });
                                     ui.separator();
                                     let binding_dialog = &mut self.binding_dialog;
                                     Self::bindings_ui(
