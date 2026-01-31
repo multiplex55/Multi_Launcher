@@ -628,7 +628,10 @@ fn format_hint_text(
     }
 
     let mut lines = Vec::new();
-    if let Some(candidate) = candidates.first() {
+    if let Some(candidate) = candidates
+        .iter()
+        .find(|candidate| candidate.match_type == GestureMatchType::Exact)
+    {
         let bindings = &candidate.bindings;
         let binding_count = bindings.len();
         let selected_idx = if binding_count == 0 {
@@ -644,12 +647,7 @@ fn format_hint_text(
         if binding_count > 1 {
             line.push_str(&format!(" ({}/{})", selected_idx + 1, binding_count));
         }
-        let indicator = match candidate.match_type {
-            GestureMatchType::Exact => "[exact]".to_string(),
-            GestureMatchType::Prefix => format!("[prefix {:.2}]", candidate.score),
-            GestureMatchType::Fuzzy => format!("[fuzzy {:.2}]", candidate.score),
-        };
-        line.push_str(&format!(" {indicator}"));
+        line.push_str(" [exact]");
         lines.push(line);
 
         if binding_count > 1 {

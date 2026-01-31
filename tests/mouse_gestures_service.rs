@@ -347,10 +347,7 @@ fn hint_text_includes_best_guess_and_match_type() {
 
     let hints = hint_state.hints.lock().expect("lock hints");
     let last = hints.last().expect("hint text");
-    assert_eq!(
-        last,
-        "R — Open Browser [prefix 0.50]\nWheel: cycle • Release: run • Esc: cancel"
-    );
+    assert_eq!(last, "R\nWheel: cycle • Release: run • Esc: cancel");
 
     service.stop();
 }
