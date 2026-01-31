@@ -11,7 +11,7 @@ use multi_launcher::gui::register_event_sender;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 #[derive(Default)]
@@ -147,6 +147,21 @@ impl TestCursorProvider {
 impl CursorPositionProvider for TestCursorProvider {
     fn cursor_position(&self) -> Option<(f32, f32)> {
         self.position.lock().ok().and_then(|guard| *guard)
+    }
+}
+
+fn wait_for_hint(state: &HintRecordingState, timeout: Duration) -> Option<String> {
+    let start = Instant::now();
+    loop {
+        if let Ok(guard) = state.hints.lock() {
+            if let Some(last) = guard.last() {
+                return Some(last.clone());
+            }
+        }
+        if start.elapsed() >= timeout {
+            return None;
+        }
+        sleep(Duration::from_millis(5));
     }
 }
 
@@ -581,9 +596,9 @@ fn selection_persists_across_gesture_sessions() {
     cursor_provider.set_position((50.0, 0.0));
     sleep(Duration::from_millis(20));
 
-    let hints = hint_state.hints.lock().expect("lock hints");
-    let last = hints.last().expect("hint text");
-    let first_line = last.lines().next().expect("first line");
+    let hint_text =
+        wait_for_hint(&hint_state, Duration::from_millis(200)).expect("hint text");
+    let first_line = hint_text.lines().next().expect("first line");
     assert!(first_line.contains("Secondary"));
 
     service.stop();
