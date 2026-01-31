@@ -125,31 +125,6 @@ impl MouseGestureSettingsDialog {
                     .changed();
 
                 ui.separator();
-
-                ui.horizontal(|ui| {
-                    ui.label("Min distance between points (px)");
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut self.settings.min_distance_px)
-                                .clamp_range(1.0..=50.0)
-                                .speed(0.5),
-                        )
-                        .changed();
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("Max gesture duration (ms)");
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut self.settings.max_duration_ms)
-                                .clamp_range(100..=60_000)
-                                .speed(50.0),
-                        )
-                        .changed();
-                });
-
-                ui.separator();
-
                 changed |= ui.checkbox(&mut self.settings.show_trail, "Show trail overlay").changed();
                 ui.horizontal(|ui| {
                     ui.label("Trail color");
