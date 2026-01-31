@@ -432,11 +432,22 @@ fn worker_loop(
                         // If we produced any tokens, treat it as a gesture (swallow right click).
                         if !tokens.is_empty() {
                             // Execute the currently selected binding (wheel-cycled) if there are multiple.
-                            if let Some((_gesture_label, actions)) =
+                            if let Some((gesture_label, actions)) =
                                 match_binding_actions(&db, &tokens, config.dir_mode)
                             {
                                 if !actions.is_empty() {
                                     let idx = selected_binding_idx % actions.len();
+                                    let key = selection_key(&gesture_label, &tokens);
+                                    if selection_state
+                                        .selections
+                                        .get(&key)
+                                        .copied()
+                                        .unwrap_or(usize::MAX)
+                                        != idx
+                                    {
+                                        selection_state.selections.insert(key, idx);
+                                        save_selection_state(GESTURES_STATE_FILE, &selection_state);
+                                    }
                                     if let Some(action) = actions.get(idx).cloned() {
                                         if config.practice_mode {
                                             tracing::info!(
