@@ -55,7 +55,7 @@ pub use note_panel::{
 pub use notes_dialog::NotesDialog;
 pub use screenshot_editor::{
     render_markup_layers, MarkupArrow, MarkupHistory, MarkupLayer, MarkupRect, MarkupStroke,
-    MarkupTool, ScreenshotEditor,
+    MarkupText, MarkupTool, ScreenshotEditor,
 };
 pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;

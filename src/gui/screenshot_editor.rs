@@ -11,6 +11,7 @@ pub enum MarkupTool {
     Arrow,
     Rectangle,
     Highlight,
+    Text,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -36,11 +37,20 @@ pub struct MarkupArrow {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct MarkupText {
+    pub position: Pos2,
+    pub text: String,
+    pub color: Color32,
+    pub size: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum MarkupLayer {
     Stroke(MarkupStroke),
     Rectangle(MarkupRect),
     Arrow(MarkupArrow),
     Highlight(MarkupRect),
+    Text(MarkupText),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -196,8 +206,68 @@ fn rotate_vec(vec: Vec2, angle: f32) -> Vec2 {
     Vec2::new(vec.x * cos - vec.y * sin, vec.x * sin + vec.y * cos)
 }
 
+fn default_font_data() -> Option<(egui::FontData, egui::FontTweak)> {
+    let definitions = egui::FontDefinitions::default();
+    let family = definitions.families.get(&egui::FontFamily::Proportional)?;
+    let font_name = family.first()?;
+    let data = definitions.font_data.get(font_name)?.clone();
+    Some((data.clone(), data.tweak))
+}
+
+fn default_font_arc() -> Option<(ab_glyph::FontArc, egui::FontTweak)> {
+    let (data, tweak) = default_font_data()?;
+    let font = match data.font {
+        std::borrow::Cow::Borrowed(bytes) => {
+            ab_glyph::FontRef::try_from_slice_and_index(bytes, data.index)
+                .map(ab_glyph::FontArc::from)
+                .ok()
+        }
+        std::borrow::Cow::Owned(bytes) => {
+            ab_glyph::FontVec::try_from_vec_and_index(bytes, data.index)
+                .map(ab_glyph::FontArc::from)
+                .ok()
+        }
+    }?;
+    Some((font, tweak))
+}
+
+fn draw_text(
+    img: &mut RgbaImage,
+    font: &ab_glyph::FontArc,
+    tweak: egui::FontTweak,
+    pos: Pos2,
+    text: &str,
+    color: Color32,
+    size: f32,
+) {
+    use ab_glyph::{point, Font, ScaleFont};
+    if text.is_empty() {
+        return;
+    }
+    let scaled = font.as_scaled(size * tweak.scale);
+    let mut caret = point(pos.x, pos.y + scaled.ascent() + tweak.y_offset * size);
+    for ch in text.chars() {
+        let glyph = scaled.scaled_glyph(ch).positioned(caret);
+        caret.x += scaled.h_advance(glyph.id);
+        if let Some(outlined) = scaled.outline_glyph(glyph) {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|x, y, coverage| {
+                let px = x as i32 + bounds.min.x as i32;
+                let py = y as i32 + bounds.min.y as i32;
+                if px >= 0 && py >= 0 && px < img.width() as i32 && py < img.height() as i32 {
+                    let alpha = (color.a() as f32 * coverage).round().clamp(0.0, 255.0) as u8;
+                    let blended =
+                        Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
+                    blend_pixel(img, px as u32, py as u32, blended);
+                }
+            });
+        }
+    }
+}
+
 pub fn render_markup_layers(base: &RgbaImage, layers: &[MarkupLayer]) -> RgbaImage {
     let mut img = base.clone();
+    let font = default_font_arc();
     for layer in layers {
         match layer {
             MarkupLayer::Stroke(stroke) => {
@@ -237,6 +307,19 @@ pub fn render_markup_layers(base: &RgbaImage, layers: &[MarkupLayer]) -> RgbaIma
             MarkupLayer::Highlight(rect) => {
                 draw_rect_fill(&mut img, rect.rect, rect.color);
             }
+            MarkupLayer::Text(text) => {
+                if let Some((font, tweak)) = &font {
+                    draw_text(
+                        &mut img,
+                        font,
+                        *tweak,
+                        text.position,
+                        &text.text,
+                        text.color,
+                        text.size,
+                    );
+                }
+            }
         }
     }
     img
@@ -258,6 +341,9 @@ pub struct ScreenshotEditor {
     active_start: Option<Pos2>,
     active_end: Option<Pos2>,
     active_stroke: Option<MarkupStroke>,
+    text_anchor: Option<Pos2>,
+    text_input: String,
+    text_focus: bool,
     history: MarkupHistory,
     path: PathBuf,
     _clip: bool,
@@ -266,6 +352,7 @@ pub struct ScreenshotEditor {
     tool: MarkupTool,
     color_index: usize,
     thickness: f32,
+    text_size: f32,
 }
 
 impl ScreenshotEditor {
@@ -289,6 +376,9 @@ impl ScreenshotEditor {
             active_start: None,
             active_end: None,
             active_stroke: None,
+            text_anchor: None,
+            text_input: String::new(),
+            text_focus: false,
             history: MarkupHistory::default(),
             path,
             _clip: clip,
@@ -297,6 +387,7 @@ impl ScreenshotEditor {
             tool,
             color_index: 0,
             thickness: 4.0,
+            text_size: 18.0,
         }
     }
 
@@ -411,6 +502,7 @@ impl ScreenshotEditor {
                         }
                     }
                     ui.add(egui::Slider::new(&mut self.zoom, 0.1..=4.0).text("Zoom"));
+                    ui.add(egui::Slider::new(&mut self.text_size, 6.0..=48.0).text("Text Size"));
                 });
                 ui.horizontal(|ui| {
                     ui.label("Tool");
@@ -418,6 +510,7 @@ impl ScreenshotEditor {
                     ui.selectable_value(&mut self.tool, MarkupTool::Arrow, "Arrow");
                     ui.selectable_value(&mut self.tool, MarkupTool::Rectangle, "Rect");
                     ui.selectable_value(&mut self.tool, MarkupTool::Highlight, "Highlight");
+                    ui.selectable_value(&mut self.tool, MarkupTool::Text, "Text");
                     ui.separator();
                     ui.label("Color");
                     for (idx, color) in Self::palette().iter().enumerate() {
@@ -446,6 +539,13 @@ impl ScreenshotEditor {
                     if ui.button("Redo").clicked() {
                         self.redo();
                     }
+                    ui.separator();
+                    ui.label("Text");
+                    let text_edit = ui.text_edit_singleline(&mut self.text_input);
+                    if self.text_focus {
+                        ui.memory_mut(|mem| mem.request_focus(text_edit.id));
+                        self.text_focus = false;
+                    }
                 });
                 let pressed_undo = ctx.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl);
                 let pressed_redo = ctx.input(|i| {
@@ -463,6 +563,25 @@ impl ScreenshotEditor {
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::CloseBracket)) {
                     self.thickness = (self.thickness + 1.0).min(20.0);
+                }
+                if self.tool == MarkupTool::Text && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if let Some(anchor) = self.text_anchor.take() {
+                        if !self.text_input.is_empty() {
+                            let text = MarkupText {
+                                position: anchor,
+                                text: self.text_input.clone(),
+                                color: self.current_color(),
+                                size: self.text_size,
+                            };
+                            self.push_layer(MarkupLayer::Text(text));
+                            self.text_input.clear();
+                        }
+                    }
+                }
+                if self.tool == MarkupTool::Text && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+                {
+                    self.text_anchor = None;
+                    self.text_input.clear();
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::Num1)) {
                     self.color_index = 0;
@@ -530,6 +649,10 @@ impl ScreenshotEditor {
                                 self.active_start = Some(start);
                                 self.active_end = Some(start);
                             }
+                            MarkupTool::Text => {
+                                self.text_anchor = Some(start);
+                                self.text_focus = true;
+                            }
                         }
                     }
                 }
@@ -545,6 +668,7 @@ impl ScreenshotEditor {
                             MarkupTool::Arrow | MarkupTool::Rectangle | MarkupTool::Highlight => {
                                 self.active_end = Some(current);
                             }
+                            MarkupTool::Text => {}
                         }
                     }
                 }
@@ -591,6 +715,7 @@ impl ScreenshotEditor {
                                 }));
                             }
                         }
+                        MarkupTool::Text => {}
                     }
                     self.active_start = None;
                     self.active_end = None;
@@ -647,6 +772,15 @@ impl ScreenshotEditor {
                             );
                             painter.rect_filled(draw, 0.0, rect.color);
                         }
+                        MarkupLayer::Text(text) => {
+                            painter.text(
+                                to_screen(text.position),
+                                egui::Align2::LEFT_TOP,
+                                &text.text,
+                                egui::FontId::proportional(text.size),
+                                text.color,
+                            );
+                        }
                     }
                 }
                 if let (Some(start), Some(end)) = (self.active_start, self.active_end) {
@@ -670,7 +804,7 @@ impl ScreenshotEditor {
                             let draw = Rect::from_min_max(to_screen(rect.min), to_screen(rect.max));
                             painter.rect_filled(draw, 0.0, self.current_color());
                         }
-                        MarkupTool::Pen => {}
+                        MarkupTool::Pen | MarkupTool::Text => {}
                     }
                 }
                 if let Some(stroke) = &self.active_stroke {
@@ -678,6 +812,17 @@ impl ScreenshotEditor {
                         painter.line_segment(
                             [to_screen(points[0]), to_screen(points[1])],
                             Stroke::new(stroke.thickness, stroke.color),
+                        );
+                    }
+                }
+                if let Some(anchor) = self.text_anchor {
+                    if !self.text_input.is_empty() {
+                        painter.text(
+                            to_screen(anchor),
+                            egui::Align2::LEFT_TOP,
+                            &self.text_input,
+                            egui::FontId::proportional(self.text_size),
+                            self.current_color(),
                         );
                     }
                 }
