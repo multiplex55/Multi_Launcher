@@ -4,7 +4,9 @@ use crate::common::strip_prefix_ci;
 use crate::mouse_gestures::db::{
     format_gesture_label, load_gestures, SharedGestureDb, GESTURES_FILE,
 };
-use crate::mouse_gestures::service::{with_service as with_gesture_service, MouseGestureConfig};
+use crate::mouse_gestures::service::{
+    with_service as with_gesture_service, CancelBehavior, MouseGestureConfig, NoMatchBehavior,
+};
 use crate::plugin::Plugin;
 use eframe::egui;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -38,6 +40,10 @@ pub struct MouseGestureSettings {
     pub show_hint: bool,
     #[serde(default = "default_hint_offset")]
     pub hint_offset: (f32, f32),
+    #[serde(default = "default_cancel_behavior")]
+    pub cancel_behavior: CancelBehavior,
+    #[serde(default = "default_no_match_behavior")]
+    pub no_match_behavior: NoMatchBehavior,
 }
 
 impl Default for MouseGestureSettings {
@@ -53,6 +59,8 @@ impl Default for MouseGestureSettings {
             trail_start_move_px: default_trail_start_move_px(),
             show_hint: default_show_hint(),
             hint_offset: default_hint_offset(),
+            cancel_behavior: default_cancel_behavior(),
+            no_match_behavior: default_no_match_behavior(),
         }
     }
 }
@@ -95,6 +103,14 @@ fn default_show_hint() -> bool {
 
 fn default_hint_offset() -> (f32, f32) {
     (16.0, 16.0)
+}
+
+fn default_cancel_behavior() -> CancelBehavior {
+    CancelBehavior::DoNothing
+}
+
+fn default_no_match_behavior() -> NoMatchBehavior {
+    NoMatchBehavior::DoNothing
 }
 
 #[derive(Debug)]
@@ -150,6 +166,8 @@ impl MouseGestureRuntime {
         config.trail_width = self.settings.trail_width;
         config.show_hint = self.settings.show_hint;
         config.hint_offset = self.settings.hint_offset;
+        config.cancel_behavior = self.settings.cancel_behavior;
+        config.no_match_behavior = self.settings.no_match_behavior;
         with_gesture_service(|svc| {
             svc.update_config(config);
             svc.update_db(Some(self.db.clone()));
@@ -401,6 +419,57 @@ impl Plugin for MouseGesturesPlugin {
                 .changed();
         });
 
+        ui.horizontal(|ui| {
+            ui.label("Cancel behavior");
+            egui::ComboBox::from_id_source("mg_cancel_behavior")
+                .selected_text(cancel_behavior_label(cfg.cancel_behavior))
+                .show_ui(ui, |ui| {
+                    changed |= ui
+                        .selectable_value(
+                            &mut cfg.cancel_behavior,
+                            CancelBehavior::DoNothing,
+                            "Do nothing",
+                        )
+                        .changed();
+                    changed |= ui
+                        .selectable_value(
+                            &mut cfg.cancel_behavior,
+                            CancelBehavior::PassThroughClick,
+                            "Pass through right-click",
+                        )
+                        .changed();
+                });
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("No-match behavior");
+            egui::ComboBox::from_id_source("mg_no_match_behavior")
+                .selected_text(no_match_behavior_label(cfg.no_match_behavior))
+                .show_ui(ui, |ui| {
+                    changed |= ui
+                        .selectable_value(
+                            &mut cfg.no_match_behavior,
+                            NoMatchBehavior::DoNothing,
+                            "Do nothing",
+                        )
+                        .changed();
+                    changed |= ui
+                        .selectable_value(
+                            &mut cfg.no_match_behavior,
+                            NoMatchBehavior::PassThroughClick,
+                            "Pass through right-click",
+                        )
+                        .changed();
+                    changed |= ui
+                        .selectable_value(
+                            &mut cfg.no_match_behavior,
+                            NoMatchBehavior::ShowNoMatchHint,
+                            "Show no-match hint",
+                        )
+                        .changed();
+                });
+        });
+
         // Only write+apply when something changed.
         if changed {
             match serde_json::to_value(&cfg) {
@@ -410,5 +479,20 @@ impl Plugin for MouseGesturesPlugin {
             self.settings = cfg.clone();
             apply_runtime_settings(cfg);
         }
+    }
+}
+
+fn cancel_behavior_label(value: CancelBehavior) -> &'static str {
+    match value {
+        CancelBehavior::DoNothing => "Do nothing",
+        CancelBehavior::PassThroughClick => "Pass through right-click",
+    }
+}
+
+fn no_match_behavior_label(value: NoMatchBehavior) -> &'static str {
+    match value {
+        NoMatchBehavior::DoNothing => "Do nothing",
+        NoMatchBehavior::PassThroughClick => "Pass through right-click",
+        NoMatchBehavior::ShowNoMatchHint => "Show no-match hint",
     }
 }

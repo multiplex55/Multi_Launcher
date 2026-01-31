@@ -1,6 +1,6 @@
 use crate::mouse_gestures::db::{load_gestures, SharedGestureDb, GESTURES_FILE};
 use crate::mouse_gestures::engine::{DirMode, GestureTracker};
-use crate::mouse_gestures::overlay::{DefaultOverlayBackend, HintOverlay, TrailOverlay};
+use crate::mouse_gestures::overlay::{DefaultOverlayBackend, HintOverlay, OverlayBackend, TrailOverlay};
 use anyhow::anyhow;
 use once_cell::sync::OnceCell;
 #[cfg(windows)]
@@ -28,6 +28,8 @@ pub struct MouseGestureConfig {
     pub long_threshold_x: f32,
     pub long_threshold_y: f32,
     pub max_tokens: usize,
+    pub cancel_behavior: CancelBehavior,
+    pub no_match_behavior: NoMatchBehavior,
 }
 
 impl Default for MouseGestureConfig {
@@ -48,11 +50,28 @@ impl Default for MouseGestureConfig {
             long_threshold_x: 30.0,
             long_threshold_y: 30.0,
             max_tokens: 10,
+            cancel_behavior: CancelBehavior::DoNothing,
+            no_match_behavior: NoMatchBehavior::DoNothing,
         }
     }
 }
 
 use crate::gui::{send_event, WatchEvent};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelBehavior {
+    DoNothing,
+    PassThroughClick,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoMatchBehavior {
+    DoNothing,
+    PassThroughClick,
+    ShowNoMatchHint,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum HookEvent {
@@ -60,12 +79,57 @@ pub enum HookEvent {
     RButtonUp,
     WheelUp,
     WheelDown,
+    Cancel,
 }
 
 pub trait HookBackend: Send {
     fn install(&mut self, sender: Sender<HookEvent>) -> anyhow::Result<()>;
     fn uninstall(&mut self) -> anyhow::Result<()>;
     fn is_installed(&self) -> bool;
+}
+
+pub trait OverlayFactory: Send + Sync {
+    fn trail_backend(&self) -> Box<dyn OverlayBackend>;
+    fn hint_backend(&self) -> Box<dyn OverlayBackend>;
+}
+
+#[derive(Debug)]
+struct DefaultOverlayFactory;
+
+impl OverlayFactory for DefaultOverlayFactory {
+    fn trail_backend(&self) -> Box<dyn OverlayBackend> {
+        Box::new(DefaultOverlayBackend::default())
+    }
+
+    fn hint_backend(&self) -> Box<dyn OverlayBackend> {
+        Box::new(DefaultOverlayBackend::default())
+    }
+}
+
+pub trait RightClickBackend: Send + Sync {
+    fn send_right_click(&self);
+}
+
+#[derive(Debug)]
+struct DefaultRightClickBackend;
+
+impl RightClickBackend for DefaultRightClickBackend {
+    fn send_right_click(&self) {
+        send_right_click();
+    }
+}
+
+pub trait CursorPositionProvider: Send + Sync {
+    fn cursor_position(&self) -> Option<(f32, f32)>;
+}
+
+#[derive(Debug)]
+struct DefaultCursorPositionProvider;
+
+impl CursorPositionProvider for DefaultCursorPositionProvider {
+    fn cursor_position(&self) -> Option<(f32, f32)> {
+        get_cursor_position()
+    }
 }
 
 #[derive(Debug)]
@@ -78,6 +142,9 @@ pub struct MouseGestureService {
     config: MouseGestureConfig,
     db: Option<SharedGestureDb>,
     backend: Box<dyn HookBackend>,
+    overlay_factory: Arc<dyn OverlayFactory>,
+    right_click_backend: Arc<dyn RightClickBackend>,
+    cursor_provider: Arc<dyn CursorPositionProvider>,
     worker: Option<WorkerHandle>,
 }
 
@@ -89,6 +156,20 @@ impl Default for MouseGestureService {
 
 impl MouseGestureService {
     pub fn new_with_backend(backend: Box<dyn HookBackend>) -> Self {
+        Self::new_with_backend_and_overlays(
+            backend,
+            Arc::new(DefaultOverlayFactory),
+            Arc::new(DefaultRightClickBackend),
+            Arc::new(DefaultCursorPositionProvider),
+        )
+    }
+
+    pub fn new_with_backend_and_overlays(
+        backend: Box<dyn HookBackend>,
+        overlay_factory: Arc<dyn OverlayFactory>,
+        right_click_backend: Arc<dyn RightClickBackend>,
+        cursor_provider: Arc<dyn CursorPositionProvider>,
+    ) -> Self {
         let db = load_gestures(GESTURES_FILE)
             .map(|db| Arc::new(Mutex::new(db)))
             .ok();
@@ -96,6 +177,9 @@ impl MouseGestureService {
             config: MouseGestureConfig::default(),
             db,
             backend,
+            overlay_factory,
+            right_click_backend,
+            cursor_provider,
             worker: None,
         }
     }
@@ -160,7 +244,20 @@ impl MouseGestureService {
 
         let config = self.config.clone();
         let db = self.db.clone();
-        let join = thread::spawn(move || worker_loop(config, db, event_rx, stop_rx));
+        let overlay_factory = Arc::clone(&self.overlay_factory);
+        let right_click_backend = Arc::clone(&self.right_click_backend);
+        let cursor_provider = Arc::clone(&self.cursor_provider);
+        let join = thread::spawn(move || {
+            worker_loop(
+                config,
+                db,
+                event_rx,
+                stop_rx,
+                overlay_factory,
+                right_click_backend,
+                cursor_provider,
+            )
+        });
         self.worker = Some(WorkerHandle { stop_tx, join });
     }
 
@@ -198,6 +295,9 @@ fn worker_loop(
     db: Option<SharedGestureDb>,
     event_rx: Receiver<HookEvent>,
     stop_rx: Receiver<()>,
+    overlay_factory: Arc<dyn OverlayFactory>,
+    right_click_backend: Arc<dyn RightClickBackend>,
+    cursor_provider: Arc<dyn CursorPositionProvider>,
 ) {
     let mut tracker = GestureTracker::new(
         config.dir_mode,
@@ -207,14 +307,14 @@ fn worker_loop(
         config.max_tokens,
     );
     let mut trail_overlay = TrailOverlay::new(
-        DefaultOverlayBackend::default(),
+        overlay_factory.trail_backend(),
         config.show_trail,
         config.trail_color,
         config.trail_width,
         config.trail_start_move_px,
     );
     let mut hint_overlay = HintOverlay::new(
-        DefaultOverlayBackend::default(),
+        overlay_factory.hint_backend(),
         config.show_hint,
         config.hint_offset,
     );
@@ -262,7 +362,7 @@ fn worker_loop(
                     cached_actions.clear();
                     cached_gesture_label = None;
                     start_time = Instant::now();
-                    let pos = get_cursor_position().unwrap_or(start_pos);
+                    let pos = cursor_provider.cursor_position().unwrap_or(start_pos);
                     start_pos = pos;
                     let ms = start_time.elapsed().as_millis() as u64;
                     tracker.feed_point(pos, ms);
@@ -270,12 +370,14 @@ fn worker_loop(
                     hint_overlay.reset();
                     last_trail = Instant::now();
                     last_recognition = last_trail;
+                    #[cfg(windows)]
+                    hook_dispatch().set_active(true);
                 }
 
                 HookEvent::RButtonUp => {
                     if active {
                         // Sample cursor pos once on release so we tokenize the final motion.
-                        let cursor_pos = get_cursor_position().unwrap_or(start_pos);
+                        let cursor_pos = cursor_provider.cursor_position().unwrap_or(start_pos);
 
                         // Always feed the final point so quick gestures still tokenize.
                         let ms = start_time.elapsed().as_millis() as u64;
@@ -315,12 +417,19 @@ fn worker_loop(
                                     }
                                 }
                             } else {
-                                // No match -> swallow-noop (keeps context menu from popping).
-                                // If you prefer fallback to right click on unknown gestures, call send_right_click() here.
+                                match config.no_match_behavior {
+                                    NoMatchBehavior::DoNothing => {}
+                                    NoMatchBehavior::PassThroughClick => {
+                                        right_click_backend.send_right_click();
+                                    }
+                                    NoMatchBehavior::ShowNoMatchHint => {
+                                        hint_overlay.update("No match", None, cursor_pos);
+                                    }
+                                }
                             }
                         } else {
                             // No tokens => normal right click
-                            send_right_click();
+                            right_click_backend.send_right_click();
                         }
 
                         // Always clear visuals on release
@@ -335,6 +444,8 @@ fn worker_loop(
                         cached_tokens.clear();
                         cached_actions.clear();
                         cached_gesture_label = None;
+                        #[cfg(windows)]
+                        hook_dispatch().set_active(false);
                     }
                 }
 
@@ -351,11 +462,33 @@ fn worker_loop(
                             _ => {}
                         }
 
-                        if let Some(pos) = get_cursor_position() {
-                                    let best_match = cached_gesture_label.as_deref().map(|label| {
+                        if let Some(pos) = cursor_provider.cursor_position() {
+                            let best_match = cached_gesture_label.as_deref().map(|label| {
                                 format_selected_hint(label, &cached_actions, selected_binding_idx)
                             });
                             hint_overlay.update(&cached_tokens, best_match.as_deref(), pos);
+                        }
+                    }
+                }
+
+                HookEvent::Cancel => {
+                    if active {
+                        if config.cancel_behavior == CancelBehavior::PassThroughClick {
+                            right_click_backend.send_right_click();
+                        }
+                        trail_overlay.clear();
+                        hint_overlay.reset();
+                        active = false;
+                        exceeded_deadzone = false;
+                        tracker.reset();
+                        selected_binding_idx = 0;
+                        cached_tokens.clear();
+                        cached_actions.clear();
+                        cached_gesture_label = None;
+                        #[cfg(windows)]
+                        {
+                            hook_dispatch().set_tracking(false);
+                            hook_dispatch().set_active(false);
                         }
                     }
                 }
@@ -365,7 +498,7 @@ fn worker_loop(
         }
 
         if active && last_trail.elapsed() >= poll_interval {
-            if let Some(pos) = get_cursor_position() {
+            if let Some(pos) = cursor_provider.cursor_position() {
                 let dx = pos.0 - start_pos.0;
                 let dy = pos.1 - start_pos.1;
                 let dist_sq = dx * dx + dy * dy;
@@ -390,7 +523,13 @@ fn worker_loop(
                             cached_gesture_label = Some(gesture_label);
                             cached_actions = actions;
                         } else {
-                            cached_gesture_label = None;
+                            if config.no_match_behavior == NoMatchBehavior::ShowNoMatchHint
+                                && !tokens.is_empty()
+                            {
+                                cached_gesture_label = Some("No match".to_string());
+                            } else {
+                                cached_gesture_label = None;
+                            }
                             cached_actions.clear();
                         }
                     }
@@ -562,6 +701,7 @@ impl HookBackend for DefaultHookBackend {
         // Put the sender where the hook proc can see it.
         hook_dispatch().set_sender(Some(sender));
         hook_dispatch().set_tracking(false);
+        hook_dispatch().set_active(false);
         hook_dispatch().set_enabled(true);
 
         use std::time::Duration;
@@ -572,7 +712,7 @@ impl HookBackend for DefaultHookBackend {
             PM_NOREMOVE,
         };
         use windows::Win32::UI::WindowsAndMessaging::{
-            SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL,
+            SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL,
         };
 
         // Handshake so install() only returns once the hook thread is actually ready.
@@ -595,7 +735,7 @@ impl HookBackend for DefaultHookBackend {
                 }
             };
 
-            let hook = match unsafe {
+            let mouse_hook = match unsafe {
                 SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), hmodule, 0)
             } {
                 Ok(h) if !h.0.is_null() => h,
@@ -605,6 +745,26 @@ impl HookBackend for DefaultHookBackend {
                 }
                 Err(e) => {
                     let _ = ready_tx.send(Err(anyhow!(e)));
+                    return;
+                }
+            };
+
+            let keyboard_hook = match unsafe {
+                SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), hmodule, 0)
+            } {
+                Ok(h) if !h.0.is_null() => h,
+                Ok(_) => {
+                    let _ = ready_tx.send(Err(anyhow!(windows::core::Error::from_win32())));
+                    unsafe {
+                        let _ = UnhookWindowsHookEx(mouse_hook);
+                    }
+                    return;
+                }
+                Err(e) => {
+                    let _ = ready_tx.send(Err(anyhow!(e)));
+                    unsafe {
+                        let _ = UnhookWindowsHookEx(mouse_hook);
+                    }
                     return;
                 }
             };
@@ -628,7 +788,8 @@ impl HookBackend for DefaultHookBackend {
             }
 
             unsafe {
-                let _ = UnhookWindowsHookEx(hook);
+                let _ = UnhookWindowsHookEx(mouse_hook);
+                let _ = UnhookWindowsHookEx(keyboard_hook);
             }
         });
 
@@ -644,11 +805,12 @@ impl HookBackend for DefaultHookBackend {
         // Stop dispatch first to avoid any new work while shutting down.
         hook_dispatch().set_enabled(false);
         hook_dispatch().set_tracking(false);
+        hook_dispatch().set_active(false);
         hook_dispatch().set_sender(None);
 
         if let Some(th) = self.hook_thread.take() {
             use windows::Win32::Foundation::{LPARAM, WPARAM};
-                use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
+            use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
             unsafe {
                 let _ = PostThreadMessageW(th.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
             }
@@ -762,6 +924,7 @@ struct HookDispatch {
     enabled: AtomicBool,
     tracking: AtomicBool,
     injecting: AtomicBool,
+    active: AtomicBool,
     sender: Mutex<Option<Sender<HookEvent>>>,
 }
 
@@ -787,6 +950,14 @@ impl HookDispatch {
         self.injecting.load(Ordering::Acquire)
     }
 
+    fn set_active(&self, active: bool) {
+        self.active.store(active, Ordering::Release);
+    }
+
+    fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
     fn set_sender(&self, sender: Option<Sender<HookEvent>>) {
         if let Ok(mut guard) = self.sender.lock() {
             *guard = sender;
@@ -803,6 +974,7 @@ fn hook_dispatch() -> &'static HookDispatch {
         enabled: AtomicBool::new(false),
         tracking: AtomicBool::new(false),
         injecting: AtomicBool::new(false),
+        active: AtomicBool::new(false),
         sender: Mutex::new(None),
     })
 }
@@ -875,6 +1047,44 @@ unsafe extern "system" fn mouse_hook_proc(
 
                 // Consume while MG is enabled (RMB always, wheel only when tracking).
                 return windows::Win32::Foundation::LRESULT(1);
+            }
+        }
+    }
+
+    CallNextHookEx(
+        windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
+        n_code,
+        w_param,
+        l_param,
+    )
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn keyboard_hook_proc(
+    n_code: i32,
+    w_param: windows::Win32::Foundation::WPARAM,
+    l_param: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, HC_ACTION, KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_SYSKEYDOWN,
+    };
+
+    if n_code == HC_ACTION as i32 {
+        let msg = w_param.0 as u32;
+        if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
+            let info = &*(l_param.0 as *const KBDLLHOOKSTRUCT);
+            let injected = (info.flags & 0x10) != 0;
+            if !injected && info.vkCode == VK_ESCAPE.0 as u32 {
+                let dispatch = hook_dispatch();
+                if dispatch.enabled.load(Ordering::Acquire) && dispatch.is_active() {
+                    if let Ok(guard) = dispatch.sender.try_lock() {
+                        if let Some(sender) = guard.as_ref() {
+                            let _ = sender.send(HookEvent::Cancel);
+                        }
+                    }
+                    return windows::Win32::Foundation::LRESULT(1);
+                }
             }
         }
     }

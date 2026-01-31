@@ -198,6 +198,59 @@ impl MouseGestureSettingsDialog {
                         .changed();
                 });
 
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    ui.label("Cancel behavior");
+                    egui::ComboBox::from_id_source("mg_settings_cancel_behavior")
+                        .selected_text(cancel_behavior_label(self.settings.cancel_behavior))
+                        .show_ui(ui, |ui| {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.settings.cancel_behavior,
+                                    crate::mouse_gestures::service::CancelBehavior::DoNothing,
+                                    "Do nothing",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.settings.cancel_behavior,
+                                    crate::mouse_gestures::service::CancelBehavior::PassThroughClick,
+                                    "Pass through right-click",
+                                )
+                                .changed();
+                        });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("No-match behavior");
+                    egui::ComboBox::from_id_source("mg_settings_no_match_behavior")
+                        .selected_text(no_match_behavior_label(self.settings.no_match_behavior))
+                        .show_ui(ui, |ui| {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.settings.no_match_behavior,
+                                    crate::mouse_gestures::service::NoMatchBehavior::DoNothing,
+                                    "Do nothing",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.settings.no_match_behavior,
+                                    crate::mouse_gestures::service::NoMatchBehavior::PassThroughClick,
+                                    "Pass through right-click",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.settings.no_match_behavior,
+                                    crate::mouse_gestures::service::NoMatchBehavior::ShowNoMatchHint,
+                                    "Show no-match hint",
+                                )
+                                .changed();
+                        });
+                });
+
                 if changed {
                     self.dirty = true;
                     // Live-apply while editing.
@@ -226,5 +279,28 @@ impl MouseGestureSettingsDialog {
             });
 
         self.open = open;
+    }
+}
+
+fn cancel_behavior_label(
+    value: crate::mouse_gestures::service::CancelBehavior,
+) -> &'static str {
+    match value {
+        crate::mouse_gestures::service::CancelBehavior::DoNothing => "Do nothing",
+        crate::mouse_gestures::service::CancelBehavior::PassThroughClick => {
+            "Pass through right-click"
+        }
+    }
+}
+
+fn no_match_behavior_label(
+    value: crate::mouse_gestures::service::NoMatchBehavior,
+) -> &'static str {
+    match value {
+        crate::mouse_gestures::service::NoMatchBehavior::DoNothing => "Do nothing",
+        crate::mouse_gestures::service::NoMatchBehavior::PassThroughClick => {
+            "Pass through right-click"
+        }
+        crate::mouse_gestures::service::NoMatchBehavior::ShowNoMatchHint => "Show no-match hint",
     }
 }
