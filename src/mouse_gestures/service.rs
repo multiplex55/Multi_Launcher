@@ -367,6 +367,7 @@ fn worker_loop(
     let mut pending_selection_idx: Option<usize> = None;
     let mut selected_binding_idx: usize = 0;
     let mut cached_tokens = String::new();
+    let mut cached_actions_tokens = String::new();
     let mut cached_actions: Vec<crate::actions::Action> = Vec::new();
     let mut cached_candidates: Vec<GestureCandidate> = Vec::new();
     let mut selection_state = load_selection_state(GESTURES_STATE_FILE);
@@ -402,6 +403,7 @@ fn worker_loop(
                     selected_binding_idx = 0;
                     pending_selection_idx = None;
                     cached_tokens.clear();
+                    cached_actions_tokens.clear();
                     cached_actions.clear();
                     cached_candidates.clear();
                     exact_selection_key = None;
@@ -500,6 +502,7 @@ fn worker_loop(
                         selected_binding_idx = 0;
                         pending_selection_idx = None;
                         cached_tokens.clear();
+                        cached_actions_tokens.clear();
                         cached_actions.clear();
                         cached_candidates.clear();
                         exact_selection_key = None;
@@ -608,6 +611,7 @@ fn worker_loop(
                         selected_binding_idx = 0;
                         pending_selection_idx = None;
                         cached_tokens.clear();
+                        cached_actions_tokens.clear();
                         cached_actions.clear();
                         cached_candidates.clear();
                         exact_selection_key = None;
@@ -661,15 +665,28 @@ fn worker_loop(
                         cached_tokens = tokens.to_string();
                         selected_binding_idx = 0;
                         pending_selection_idx = None;
-                        if let Some((_gesture_label, actions)) =
-                            match_binding_actions(&db, &tokens, config.dir_mode)
+                        cached_candidates =
+                            candidate_matches(&db, &tokens, config.dir_mode, MAX_HINT_CANDIDATES);
+                        if let Some(candidate) = cached_candidates
+                            .iter()
+                            .find(|candidate| candidate.match_type == GestureMatchType::Exact)
                         {
-                            cached_actions = actions;
+                            cached_actions_tokens = candidate.tokens.clone();
+                        } else {
+                            cached_actions_tokens.clear();
+                        }
+                        if !cached_actions_tokens.is_empty() {
+                            if let Some((_gesture_label, actions)) =
+                                match_binding_actions(&db, &cached_actions_tokens, config.dir_mode)
+                            {
+                                cached_actions = actions;
+                            } else {
+                                cached_actions.clear();
+                                cached_actions_tokens.clear();
+                            }
                         } else {
                             cached_actions.clear();
                         }
-                        cached_candidates =
-                            candidate_matches(&db, &tokens, config.dir_mode, MAX_HINT_CANDIDATES);
                     }
 
                     if let Some(candidate) = cached_candidates
