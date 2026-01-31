@@ -16,8 +16,7 @@ fn mouse_gestures_commands_match_expected_labels() {
             "mg list",
             "mg find",
             "mg where",
-            "mg conflicts",
-            "mg practice"
+            "mg conflicts"
         ]
     );
     let action_strings: Vec<_> = actions.iter().map(|a| a.action.as_str()).collect();
@@ -32,7 +31,6 @@ fn mouse_gestures_commands_match_expected_labels() {
             "query:mg find ",
             "query:mg where ",
             "query:mg conflicts",
-            "mg:practice",
         ]
     );
 }
