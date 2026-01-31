@@ -14,7 +14,6 @@ mod dashboard_editor_dialog;
 mod fav_dialog;
 mod image_panel;
 mod macro_dialog;
-mod mouse_gesture_binding_dialog;
 mod mouse_gesture_settings_dialog;
 mod mouse_gestures_dialog;
 mod note_panel;
@@ -47,7 +46,6 @@ pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
 pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
-pub use mouse_gesture_binding_dialog::MgBindingDialog;
 pub use mouse_gesture_settings_dialog::MouseGestureSettingsDialog;
 pub use mouse_gestures_dialog::{GestureRecorder, MgGesturesDialog, RecorderConfig};
 pub use note_panel::{
@@ -300,7 +298,6 @@ pub enum Panel {
     SnippetDialog,
     MacroDialog,
     MouseGesturesDialog,
-    MouseGestureBindingDialog,
     MouseGestureSettingsDialog,
     FavDialog,
     NotesDialog,
@@ -339,7 +336,6 @@ struct PanelStates {
     snippet_dialog: bool,
     macro_dialog: bool,
     mouse_gestures_dialog: bool,
-    mouse_gesture_binding_dialog: bool,
     mouse_gesture_settings_dialog: bool,
     fav_dialog: bool,
     notes_dialog: bool,
@@ -444,7 +440,6 @@ pub struct LauncherApp {
     snippet_dialog: SnippetDialog,
     macro_dialog: MacroDialog,
     mouse_gestures_dialog: MgGesturesDialog,
-    mouse_gesture_binding_dialog: MgBindingDialog,
     mouse_gesture_settings_dialog: MouseGestureSettingsDialog,
     fav_dialog: FavDialog,
     notes_dialog: NotesDialog,
@@ -1224,7 +1219,6 @@ impl LauncherApp {
             snippet_dialog: SnippetDialog::default(),
             macro_dialog: MacroDialog::default(),
             mouse_gestures_dialog: MgGesturesDialog::default(),
-            mouse_gesture_binding_dialog: MgBindingDialog::default(),
             mouse_gesture_settings_dialog: MouseGestureSettingsDialog::default(),
             fav_dialog: FavDialog::default(),
             notes_dialog: NotesDialog::default(),
@@ -2405,7 +2399,7 @@ impl LauncherApp {
         } else if a.action == "mg:dialog:add" {
             self.mouse_gestures_dialog.open_add();
         } else if a.action == "mg:dialog:binding" {
-            self.mouse_gesture_binding_dialog.open();
+            self.mouse_gestures_dialog.open_binding_editor();
         } else if a.action == "mg:dialog:settings" {
             self.open_mouse_gesture_settings_dialog();
         } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
@@ -2816,7 +2810,6 @@ impl LauncherApp {
             || self.snippet_dialog.open
             || self.macro_dialog.open
             || self.mouse_gestures_dialog.open
-            || self.mouse_gesture_binding_dialog.open
             || self.mouse_gesture_settings_dialog.open
             || self.fav_dialog.open
             || self.notes_dialog.open
@@ -2937,10 +2930,6 @@ impl LauncherApp {
             Panel::MouseGesturesDialog => {
                 self.mouse_gestures_dialog.open = false;
                 self.panel_states.mouse_gestures_dialog = false;
-            }
-            Panel::MouseGestureBindingDialog => {
-                self.mouse_gesture_binding_dialog.open = false;
-                self.panel_states.mouse_gesture_binding_dialog = false;
             }
             Panel::MouseGestureSettingsDialog => {
                 self.mouse_gesture_settings_dialog.open = false;
@@ -3088,10 +3077,6 @@ impl LauncherApp {
                 self.mouse_gestures_dialog.open = false;
                 self.panel_states.mouse_gestures_dialog = false;
             }
-            Panel::MouseGestureBindingDialog => {
-                self.mouse_gesture_binding_dialog.open = false;
-                self.panel_states.mouse_gesture_binding_dialog = false;
-            }
             Panel::MouseGestureSettingsDialog => {
                 self.mouse_gesture_settings_dialog.open = false;
                 self.panel_states.mouse_gesture_settings_dialog = false;
@@ -3199,7 +3184,6 @@ impl LauncherApp {
             Panel::SnippetDialog => self.snippet_dialog.open = true,
             Panel::MacroDialog => self.macro_dialog.open = true,
             Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open = true,
-            Panel::MouseGestureBindingDialog => self.mouse_gesture_binding_dialog.open = true,
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_dialog.open(),
             Panel::FavDialog => self.fav_dialog.open = true,
             Panel::NotesDialog => self.notes_dialog.open = true,
@@ -3322,11 +3306,6 @@ impl LauncherApp {
             self.mouse_gestures_dialog.open,
             mouse_gestures_dialog,
             Panel::MouseGesturesDialog
-        );
-        check!(
-            self.mouse_gesture_binding_dialog.open,
-            mouse_gesture_binding_dialog,
-            Panel::MouseGestureBindingDialog
         );
         check!(
             self.mouse_gesture_settings_dialog.open,
@@ -4344,9 +4323,6 @@ impl eframe::App for LauncherApp {
         let mut mg_dlg = std::mem::take(&mut self.mouse_gestures_dialog);
         mg_dlg.ui(ctx, self);
         self.mouse_gestures_dialog = mg_dlg;
-        let mut mg_bind_dlg = std::mem::take(&mut self.mouse_gesture_binding_dialog);
-        mg_bind_dlg.ui(ctx, self);
-        self.mouse_gesture_binding_dialog = mg_bind_dlg;
         let mut mg_settings_dlg = std::mem::take(&mut self.mouse_gesture_settings_dialog);
         mg_settings_dlg.ui(ctx, self);
         self.mouse_gesture_settings_dialog = mg_settings_dlg;
