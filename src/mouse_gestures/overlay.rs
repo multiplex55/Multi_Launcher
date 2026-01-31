@@ -5,6 +5,30 @@ pub trait OverlayBackend: Send {
     fn hide_hint(&mut self);
 }
 
+impl OverlayBackend for Box<dyn OverlayBackend> {
+    fn draw_trail_segment(
+        &mut self,
+        from: (f32, f32),
+        to: (f32, f32),
+        color: [u8; 4],
+        width: f32,
+    ) {
+        (**self).draw_trail_segment(from, to, color, width);
+    }
+
+    fn clear_trail(&mut self) {
+        (**self).clear_trail();
+    }
+
+    fn show_hint(&mut self, text: &str, position: (f32, f32)) {
+        (**self).show_hint(text, position);
+    }
+
+    fn hide_hint(&mut self) {
+        (**self).hide_hint();
+    }
+}
+
 #[derive(Debug)]
 pub struct TrailOverlay<B: OverlayBackend> {
     backend: B,
