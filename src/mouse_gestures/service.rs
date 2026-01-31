@@ -364,6 +364,7 @@ fn worker_loop(
     let mut last_recognition = Instant::now();
     let mut start_time = Instant::now();
     let mut cheat_sheet_visible = false;
+    let mut pending_selection_idx: Option<usize> = None;
     let mut selected_binding_idx: usize = 0;
     let mut cached_tokens = String::new();
     let mut cached_actions: Vec<crate::actions::Action> = Vec::new();
@@ -399,6 +400,7 @@ fn worker_loop(
                     #[cfg(windows)]
                     hook_dispatch().set_tracking(false);
                     selected_binding_idx = 0;
+                    pending_selection_idx = None;
                     cached_tokens.clear();
                     cached_actions.clear();
                     cached_candidates.clear();
@@ -496,6 +498,7 @@ fn worker_loop(
                         exceeded_deadzone = false;
                         tracker.reset();
                         selected_binding_idx = 0;
+                        pending_selection_idx = None;
                         cached_tokens.clear();
                         cached_actions.clear();
                         cached_candidates.clear();
@@ -509,12 +512,11 @@ fn worker_loop(
 
                 HookEvent::SelectBinding(idx) => {
                     if active {
-                        selected_binding_idx = idx;
+                        pending_selection_idx = Some(idx);
                         if !cached_actions.is_empty() {
                             let len = cached_actions.len();
-                            if idx < len {
-                                selected_binding_idx = idx;
-                            }
+                            selected_binding_idx = idx.min(len.saturating_sub(1));
+                            pending_selection_idx = None;
 
                             if let Some(key) = exact_selection_key.as_ref() {
                                 if exact_binding_count > 0 {
@@ -604,6 +606,7 @@ fn worker_loop(
                         exceeded_deadzone = false;
                         tracker.reset();
                         selected_binding_idx = 0;
+                        pending_selection_idx = None;
                         cached_tokens.clear();
                         cached_actions.clear();
                         cached_candidates.clear();
@@ -657,6 +660,7 @@ fn worker_loop(
                     if tokens != cached_tokens {
                         cached_tokens = tokens.to_string();
                         selected_binding_idx = 0;
+                        pending_selection_idx = None;
                         if let Some((_gesture_label, actions)) =
                             match_binding_actions(&db, &tokens, config.dir_mode)
                         {
@@ -685,6 +689,31 @@ fn worker_loop(
                     } else {
                         exact_selection_key = None;
                         exact_binding_count = 0;
+                    }
+
+                    if let Some(pending_idx) = pending_selection_idx.take() {
+                        if !cached_actions.is_empty() {
+                            let len = cached_actions.len();
+                            selected_binding_idx = pending_idx.min(len.saturating_sub(1));
+                            if let Some(key) = exact_selection_key.as_ref() {
+                                if exact_binding_count > 0 {
+                                    let stored_idx = selected_binding_idx % exact_binding_count;
+                                    if selection_state
+                                        .selections
+                                        .get(key)
+                                        .copied()
+                                        .unwrap_or(usize::MAX)
+                                        != stored_idx
+                                    {
+                                        selection_state.selections.insert(key.clone(), stored_idx);
+                                        save_selection_state(
+                                            GESTURES_STATE_FILE,
+                                            &selection_state,
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     if let Some(text) = format_hint_text(
