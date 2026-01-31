@@ -350,36 +350,33 @@ impl Plugin for MouseGesturesPlugin {
                 return Vec::new();
             }
             let db = load_gestures(GESTURES_FILE).unwrap_or_default();
-            return db
-                .find_conflicts()
-                .into_iter()
-                .flat_map(|conflict| {
-                    let conflict_desc = match conflict.kind {
-                        crate::mouse_gestures::db::GestureConflictKind::DuplicateTokens => {
-                            "Mouse gestures (conflict: duplicate tokens)".to_string()
-                        }
-                        crate::mouse_gestures::db::GestureConflictKind::PrefixOverlap => {
-                            "Mouse gestures (conflict: prefix overlap)".to_string()
-                        }
-                    };
-                    conflict
-                        .gestures
-                        .into_iter()
-                        .flat_map(move |gesture| {
-                            gesture
-                                .bindings
-                                .iter()
-                                .filter(|binding| binding.enabled)
-                                .cloned()
-                                .map(move |binding| Action {
-                                    label: format_search_result_label(&gesture, &binding),
-                                    desc: conflict_desc.clone(),
-                                    action: "mg:dialog".into(),
-                                    args: None,
-                                })
-                        })
-                })
-                .collect();
+            let mut actions = Vec::new();
+            for conflict in db.find_conflicts() {
+                let conflict_desc = match conflict.kind {
+                    crate::mouse_gestures::db::GestureConflictKind::DuplicateTokens => {
+                        "Mouse gestures (conflict: duplicate tokens)"
+                    }
+                    crate::mouse_gestures::db::GestureConflictKind::PrefixOverlap => {
+                        "Mouse gestures (conflict: prefix overlap)"
+                    }
+                };
+                for gesture in conflict.gestures {
+                    for binding in gesture
+                        .bindings
+                        .iter()
+                        .filter(|binding| binding.enabled)
+                        .cloned()
+                    {
+                        actions.push(Action {
+                            label: format_search_result_label(&gesture, &binding),
+                            desc: conflict_desc.into(),
+                            action: "mg:dialog".into(),
+                            args: None,
+                        });
+                    }
+                }
+            }
+            return actions;
         }
         if let Some(rest) = strip_prefix_ci(trimmed, "mg list") {
             return Self::list_gestures(rest);

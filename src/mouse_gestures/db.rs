@@ -1,7 +1,7 @@
 use crate::actions::Action;
 use crate::mouse_gestures::engine::DirMode;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 pub const GESTURES_FILE: &str = "mouse_gestures.json";
@@ -198,7 +198,7 @@ impl GestureDb {
 
     pub fn find_conflicts(&self) -> Vec<GestureConflict> {
         let gestures: Vec<&GestureEntry> = self.gestures.iter().filter(|g| g.enabled).collect();
-        let mut duplicates: BTreeMap<(DirMode, String), Vec<GestureEntry>> = BTreeMap::new();
+        let mut duplicates: HashMap<(DirMode, String), Vec<GestureEntry>> = HashMap::new();
         for gesture in &gestures {
             duplicates
                 .entry((gesture.dir_mode, gesture.tokens.clone()))
@@ -219,8 +219,8 @@ impl GestureDb {
             }
         }
 
-        let mut prefix_groups: BTreeMap<(DirMode, String), BTreeSet<(String, String)>> =
-            BTreeMap::new();
+        let mut prefix_groups: HashMap<(DirMode, String), HashSet<(String, String)>> =
+            HashMap::new();
         for gesture in &gestures {
             if gesture.tokens.trim().is_empty() {
                 continue;
@@ -263,7 +263,7 @@ impl GestureDb {
         conflicts.sort_by(|a, b| {
             a.tokens
                 .cmp(&b.tokens)
-                .then_with(|| a.dir_mode.cmp(&b.dir_mode))
+                .then_with(|| dir_mode_rank(a.dir_mode).cmp(&dir_mode_rank(b.dir_mode)))
                 .then_with(|| a.kind.cmp(&b.kind))
         });
         conflicts
@@ -503,6 +503,13 @@ pub fn format_search_result_label(gesture: &GestureEntry, binding: &BindingEntry
 
 fn default_enabled() -> bool {
     true
+}
+
+fn dir_mode_rank(dir_mode: DirMode) -> u8 {
+    match dir_mode {
+        DirMode::Four => 0,
+        DirMode::Eight => 1,
+    }
 }
 
 fn default_schema_version() -> u32 {
