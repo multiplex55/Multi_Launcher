@@ -1,5 +1,7 @@
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
+use crate::mouse_gestures::engine::DirMode;
+use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
 use crate::plugin::PluginManager;
 use eframe::egui;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -15,6 +17,9 @@ mod clipboard_snippets;
 mod command_history;
 mod diagnostics;
 mod frequent_commands;
+mod gesture_cheat_sheet;
+mod gesture_health;
+mod gesture_recent;
 mod layouts;
 mod notes_recent;
 mod notes_tags;
@@ -50,6 +55,9 @@ pub use clipboard_snippets::ClipboardSnippetsWidget;
 pub use command_history::CommandHistoryWidget;
 pub use diagnostics::DiagnosticsWidget;
 pub use frequent_commands::FrequentCommandsWidget;
+pub use gesture_cheat_sheet::GestureCheatSheetWidget;
+pub use gesture_health::GestureHealthWidget;
+pub use gesture_recent::GestureRecentWidget;
 pub use layouts::LayoutsWidget;
 pub use notes_recent::NotesRecentWidget;
 pub use notes_tags::NotesTagsWidget;
@@ -238,6 +246,20 @@ impl WidgetRegistry {
             "frequent_commands",
             WidgetFactory::new(FrequentCommandsWidget::new)
                 .with_settings_ui(FrequentCommandsWidget::settings_ui),
+        );
+        reg.register(
+            "gesture_cheat_sheet",
+            WidgetFactory::new(GestureCheatSheetWidget::new)
+                .with_settings_ui(GestureCheatSheetWidget::settings_ui),
+        );
+        reg.register(
+            "gesture_recent",
+            WidgetFactory::new(GestureRecentWidget::new)
+                .with_settings_ui(GestureRecentWidget::settings_ui),
+        );
+        reg.register(
+            "gesture_health",
+            WidgetFactory::new(GestureHealthWidget::new),
         );
         reg.register(
             "todo",
@@ -525,6 +547,52 @@ pub(crate) fn query_suggestions(
         }
     }
     out
+}
+
+pub(crate) fn gesture_focus_action(
+    label: &str,
+    tokens: &str,
+    dir_mode: DirMode,
+    binding_idx: Option<usize>,
+) -> WidgetAction {
+    let args = GestureFocusArgs {
+        label: label.to_string(),
+        tokens: tokens.to_string(),
+        dir_mode,
+        binding_idx,
+    };
+    WidgetAction {
+        action: Action {
+            label: label.to_string(),
+            desc: "Mouse gestures".into(),
+            action: "mg:dialog:focus".into(),
+            args: serde_json::to_string(&args).ok(),
+        },
+        query_override: None,
+    }
+}
+
+pub(crate) fn gesture_toggle_action(
+    label: &str,
+    tokens: &str,
+    dir_mode: DirMode,
+    enabled: bool,
+) -> WidgetAction {
+    let args = GestureToggleArgs {
+        label: label.to_string(),
+        tokens: tokens.to_string(),
+        dir_mode,
+        enabled,
+    };
+    WidgetAction {
+        action: Action {
+            label: format!("Toggle {label}"),
+            desc: "Mouse gestures".into(),
+            action: "mg:toggle".into(),
+            args: serde_json::to_string(&args).ok(),
+        },
+        query_override: None,
+    }
 }
 
 pub(crate) fn edit_typed_settings<C: DeserializeOwned + Serialize + Default>(

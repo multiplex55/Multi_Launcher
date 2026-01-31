@@ -6,7 +6,9 @@ use crate::mouse_gestures::engine::{DirMode, GestureTracker};
 use crate::mouse_gestures::overlay::{
     DefaultOverlayBackend, HintOverlay, OverlayBackend, TrailOverlay,
 };
+use crate::mouse_gestures::usage::{record_usage, GestureUsageEntry, GESTURES_USAGE_FILE};
 use anyhow::anyhow;
+use chrono::Local;
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 #[cfg(windows)]
@@ -458,6 +460,16 @@ fn worker_loop(
                                         save_selection_state(GESTURES_STATE_FILE, &selection_state);
                                     }
                                     if let Some(action) = actions.get(idx).cloned() {
+                                        record_usage(
+                                            GESTURES_USAGE_FILE,
+                                            GestureUsageEntry {
+                                                timestamp: Local::now().timestamp(),
+                                                gesture_label: gesture_label.clone(),
+                                                tokens: tokens.clone(),
+                                                dir_mode: config.dir_mode,
+                                                binding_idx: idx,
+                                            },
+                                        );
                                         if config.practice_mode {
                                             tracing::info!(
                                                 tokens = %tokens,

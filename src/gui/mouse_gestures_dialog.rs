@@ -321,6 +321,21 @@ impl MgGesturesDialog {
         self.ensure_selection();
     }
 
+    pub fn open_focus(&mut self, label: &str, tokens: &str, dir_mode: DirMode) {
+        self.open();
+        self.selected_idx = self
+            .db
+            .gestures
+            .iter()
+            .position(|gesture| {
+                gesture.label == label
+                    && gesture.tokens == tokens
+                    && gesture.dir_mode == dir_mode
+            })
+            .or(self.selected_idx);
+        self.ensure_selection();
+    }
+
     pub fn open_add(&mut self) {
         self.open();
         self.add_gesture();

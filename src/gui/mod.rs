@@ -77,6 +77,8 @@ use crate::help_window::HelpWindow;
 use crate::history::{self, HistoryEntry, HistoryPin, HISTORY_PINS_FILE};
 use crate::indexer;
 use crate::launcher::launch_action;
+use crate::mouse_gestures::db::{load_gestures, save_gestures, GESTURES_FILE};
+use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
 use crate::plugin::PluginManager;
 use crate::plugin_editor::PluginEditor;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
@@ -142,6 +144,7 @@ pub enum WatchEvent {
     Notes,
     Todos,
     Favorites,
+    Gestures,
     Dashboard(DashboardEvent),
     Recycle(Result<(), String>),
     ExecuteAction(Action),
@@ -191,6 +194,7 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::Notes => TestWatchEvent::Actions,
             WatchEvent::Todos => TestWatchEvent::Actions,
             WatchEvent::Favorites => TestWatchEvent::Actions,
+            WatchEvent::Gestures => TestWatchEvent::Actions,
             WatchEvent::Dashboard(_) => TestWatchEvent::Actions,
             WatchEvent::Recycle(_) => unreachable!(),
             WatchEvent::ExecuteAction(_) => TestWatchEvent::Actions,
@@ -603,6 +607,9 @@ impl LauncherApp {
                 }
                 WatchEvent::Favorites => {
                     self.dashboard_data_cache.refresh_favorites();
+                }
+                WatchEvent::Gestures => {
+                    self.dashboard_data_cache.refresh_gestures();
                 }
                 WatchEvent::Dashboard(_) => {
                     self.dashboard.reload();
@@ -1093,6 +1100,14 @@ impl LauncherApp {
                 WatchEvent::Favorites,
             ),
             (notes_dir.as_path(), WatchEvent::Notes),
+            (
+                Path::new(crate::mouse_gestures::db::GESTURES_FILE),
+                WatchEvent::Gestures,
+            ),
+            (
+                Path::new(crate::mouse_gestures::usage::GESTURES_USAGE_FILE),
+                WatchEvent::Gestures,
+            ),
         ] {
             match watch_file(path, tx.clone(), event) {
                 Ok(w) => watchers.push(w),
@@ -1119,6 +1134,14 @@ impl LauncherApp {
                 WatchEvent::Favorites,
             ),
             (notes_dir.as_path(), WatchEvent::Notes),
+            (
+                Path::new(crate::mouse_gestures::db::GESTURES_FILE),
+                WatchEvent::Gestures,
+            ),
+            (
+                Path::new(crate::mouse_gestures::usage::GESTURES_USAGE_FILE),
+                WatchEvent::Gestures,
+            ),
         ] {
             if path.exists() {
                 if let Ok(w) = watch_file(path, tx.clone(), event) {
@@ -2414,8 +2437,39 @@ impl LauncherApp {
             self.mouse_gestures_dialog.open_add();
         } else if a.action == "mg:dialog:binding" {
             self.mouse_gestures_dialog.open_binding_editor();
+        } else if a.action == "mg:dialog:focus" {
+            if let Some(args) = a
+                .args
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<GestureFocusArgs>(raw).ok())
+            {
+                self.mouse_gestures_dialog
+                    .open_focus(&args.label, &args.tokens, args.dir_mode);
+            } else {
+                self.mouse_gestures_dialog.open();
+            }
         } else if a.action == "mg:dialog:settings" {
             self.open_mouse_gesture_settings_dialog();
+        } else if a.action == "mg:toggle" {
+            if let Some(args) = a
+                .args
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<GestureToggleArgs>(raw).ok())
+            {
+                let mut db = load_gestures(GESTURES_FILE).unwrap_or_default();
+                if let Some(gesture) = db.gestures.iter_mut().find(|gesture| {
+                    gesture.label == args.label
+                        && gesture.tokens == args.tokens
+                        && gesture.dir_mode == args.dir_mode
+                }) {
+                    gesture.enabled = args.enabled;
+                    if let Err(err) = save_gestures(GESTURES_FILE, &db) {
+                        self.set_error(format!("Failed to save mouse gestures: {err}"));
+                    } else {
+                        self.dashboard_data_cache.refresh_gestures();
+                    }
+                }
+            }
         } else if a.action == "mg:practice" {
             let enabled = crate::plugins::mouse_gestures::toggle_practice_mode();
             if self.enable_toasts {
@@ -4771,6 +4825,7 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
             | WatchEvent::Notes
             | WatchEvent::Todos
             | WatchEvent::Favorites
+            | WatchEvent::Gestures
             | WatchEvent::ExecuteAction(_) => {
                 continue;
             }
