@@ -8,11 +8,14 @@ use multi_launcher::mouse_gestures::service::{
     MouseGestureService, NoMatchBehavior, OverlayFactory, RightClickBackend,
 };
 use multi_launcher::gui::register_event_sender;
+use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
+
+static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[derive(Default)]
 struct TestOverlayState {
@@ -510,6 +513,7 @@ fn cheat_sheet_overlay_shows_after_delay_without_tokens() {
 
 #[test]
 fn selection_persists_across_gesture_sessions() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().expect("tempdir");
     std::env::set_current_dir(dir.path()).expect("set current dir");
 
@@ -606,6 +610,7 @@ fn selection_persists_across_gesture_sessions() {
 
 #[test]
 fn numeric_selection_updates_hint_text() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().expect("tempdir");
     std::env::set_current_dir(dir.path()).expect("set current dir");
 
