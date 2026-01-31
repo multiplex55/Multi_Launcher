@@ -366,7 +366,7 @@ impl MgGesturesDialog {
     }
 
     fn bindings_ui(
-        &mut self,
+        binding_editor: &mut BindingEditor,
         ui: &mut egui::Ui,
         app: &mut LauncherApp,
         entry: &mut GestureEntry,
@@ -376,7 +376,7 @@ impl MgGesturesDialog {
         ui.horizontal(|ui| {
             if ui.button("Add Binding").clicked() {
                 let next_idx = entry.bindings.len();
-                self.binding_editor.start_edit(None, next_idx);
+                binding_editor.start_edit(None, next_idx);
             }
         });
         ui.separator();
@@ -434,11 +434,11 @@ impl MgGesturesDialog {
         if let Some((from, to)) = reorder_request {
             if from < entry.bindings.len() && to < entry.bindings.len() {
                 entry.bindings.swap(from, to);
-                if let Some(edit_idx) = self.binding_editor.edit_idx {
+                if let Some(edit_idx) = binding_editor.edit_idx {
                     if edit_idx == from {
-                        self.binding_editor.edit_idx = Some(to);
+                        binding_editor.edit_idx = Some(to);
                     } else if edit_idx == to {
-                        self.binding_editor.edit_idx = Some(from);
+                        binding_editor.edit_idx = Some(from);
                     }
                 }
                 *save_now = true;
@@ -446,43 +446,43 @@ impl MgGesturesDialog {
         }
 
         if let Some((idx, binding)) = edit_request {
-            self.binding_editor.start_edit(Some(&binding), idx);
+            binding_editor.start_edit(Some(&binding), idx);
         }
         if let Some(idx) = remove_idx {
             entry.bindings.remove(idx);
-            if let Some(edit_idx) = self.binding_editor.edit_idx {
+            if let Some(edit_idx) = binding_editor.edit_idx {
                 if edit_idx == idx {
-                    self.binding_editor.reset();
+                    binding_editor.reset();
                 } else if edit_idx > idx {
-                    self.binding_editor.edit_idx = Some(edit_idx - 1);
+                    binding_editor.edit_idx = Some(edit_idx - 1);
                 }
             }
             *save_now = true;
         }
 
-        if let Some(edit_idx) = self.binding_editor.edit_idx {
+        if let Some(edit_idx) = binding_editor.edit_idx {
             let mut save_entry: Option<BindingEntry> = None;
             ui.separator();
             ui.label("Binding Editor");
             ui.horizontal(|ui| {
                 ui.label("Label");
-                let response = ui.text_edit_singleline(&mut self.binding_editor.label);
-                if self.binding_editor.focus_label {
+                let response = ui.text_edit_singleline(&mut binding_editor.label);
+                if binding_editor.focus_label {
                     response.request_focus();
-                    self.binding_editor.focus_label = false;
+                    binding_editor.focus_label = false;
                 }
             });
             ui.horizontal(|ui| {
                 ui.label("Action");
-                ui.text_edit_singleline(&mut self.binding_editor.action);
+                ui.text_edit_singleline(&mut binding_editor.action);
             });
             ui.horizontal(|ui| {
                 ui.label("Args");
-                ui.text_edit_singleline(&mut self.binding_editor.args);
+                ui.text_edit_singleline(&mut binding_editor.args);
             });
             ui.horizontal(|ui| {
-                ui.checkbox(&mut self.binding_editor.use_query, "Use query action");
-                ui.checkbox(&mut self.binding_editor.enabled, "Enabled");
+                ui.checkbox(&mut binding_editor.use_query, "Use query action");
+                ui.checkbox(&mut binding_editor.enabled, "Enabled");
             });
             ui.separator();
             ui.label("Pick an action");
@@ -493,15 +493,15 @@ impl MgGesturesDialog {
                 plugin_names.push("app".to_string());
                 plugin_names.sort_unstable();
                 egui::ComboBox::from_id_source("mg_binding_category")
-                    .selected_text(if self.binding_editor.add_plugin.is_empty() {
+                    .selected_text(if binding_editor.add_plugin.is_empty() {
                         "Select".to_string()
                     } else {
-                        self.binding_editor.add_plugin.clone()
+                        binding_editor.add_plugin.clone()
                     })
                     .show_ui(ui, |ui| {
                         for name in plugin_names.iter() {
                             ui.selectable_value(
-                                &mut self.binding_editor.add_plugin,
+                                &mut binding_editor.add_plugin,
                                 name.to_string(),
                                 name,
                             );
@@ -510,14 +510,14 @@ impl MgGesturesDialog {
             });
             ui.horizontal(|ui| {
                 ui.label("Filter");
-                ui.text_edit_singleline(&mut self.binding_editor.add_filter);
+                ui.text_edit_singleline(&mut binding_editor.add_filter);
             });
             ui.horizontal(|ui| {
                 ui.label("Args");
-                ui.text_edit_singleline(&mut self.binding_editor.add_args);
+                ui.text_edit_singleline(&mut binding_editor.add_args);
             });
-            if self.binding_editor.add_plugin == "app" {
-                let filter = self.binding_editor.add_filter.trim().to_lowercase();
+            if binding_editor.add_plugin == "app" {
+                let filter = binding_editor.add_filter.trim().to_lowercase();
                 egui::ScrollArea::vertical()
                     .id_source("mg_binding_app_list")
                     .max_height(120.0)
@@ -534,25 +534,25 @@ impl MgGesturesDialog {
                                 .button(format!("{} - {}", act.label, act.desc))
                                 .clicked()
                             {
-                                self.binding_editor.label = act.label.clone();
-                                self.binding_editor.use_query = false;
-                                self.binding_editor.action = act.action.clone();
-                                self.binding_editor.args =
+                                binding_editor.label = act.label.clone();
+                                binding_editor.use_query = false;
+                                binding_editor.action = act.action.clone();
+                                binding_editor.args =
                                     act.args.clone().unwrap_or_default();
-                                self.binding_editor.add_args.clear();
+                                binding_editor.add_args.clear();
                             }
                         }
                     });
             } else if let Some(plugin) = app
                 .plugins
                 .iter()
-                .find(|p| p.name() == self.binding_editor.add_plugin)
+                .find(|p| p.name() == binding_editor.add_plugin)
             {
-                let filter = self.binding_editor.add_filter.trim().to_lowercase();
+                let filter = binding_editor.add_filter.trim().to_lowercase();
                 let mut actions = if plugin.name() == "folders" {
-                    plugin.search(&format!("f list {}", self.binding_editor.add_filter))
+                    plugin.search(&format!("f list {}", binding_editor.add_filter))
                 } else if plugin.name() == "bookmarks" {
-                    plugin.search(&format!("bm list {}", self.binding_editor.add_filter))
+                    plugin.search(&format!("bm list {}", binding_editor.add_filter))
                 } else {
                     plugin.commands()
                 };
@@ -573,10 +573,10 @@ impl MgGesturesDialog {
                                 .clicked()
                             {
                                 let mut command = act.action.clone();
-                                let mut args = if self.binding_editor.add_args.trim().is_empty() {
+                                let mut args = if binding_editor.add_args.trim().is_empty() {
                                     None
                                 } else {
-                                    Some(self.binding_editor.add_args.clone())
+                                    Some(binding_editor.add_args.clone())
                                 };
 
                                 if let Some(q) = command.strip_prefix("query:") {
@@ -602,43 +602,43 @@ impl MgGesturesDialog {
                                 } else {
                                     (command, false)
                                 };
-                                self.binding_editor.label = act.label.clone();
-                                self.binding_editor.use_query = use_query;
-                                self.binding_editor.action = action;
-                                self.binding_editor.args = args.unwrap_or_default();
-                                self.binding_editor.add_args.clear();
+                                binding_editor.label = act.label.clone();
+                                binding_editor.use_query = use_query;
+                                binding_editor.action = action;
+                                binding_editor.args = args.unwrap_or_default();
+                                binding_editor.add_args.clear();
                             }
                         }
                     });
             }
             ui.horizontal(|ui| {
                 if ui.button("Save").clicked() {
-                    if self.binding_editor.label.trim().is_empty()
-                        || self.binding_editor.action.trim().is_empty()
+                    if binding_editor.label.trim().is_empty()
+                        || binding_editor.action.trim().is_empty()
                     {
                         app.set_error("Label and action required".into());
                     } else {
-                        let action = if self.binding_editor.use_query {
-                            format!("query:{}", self.binding_editor.action.trim())
+                        let action = if binding_editor.use_query {
+                            format!("query:{}", binding_editor.action.trim())
                         } else {
-                            self.binding_editor.action.trim().to_string()
+                            binding_editor.action.trim().to_string()
                         };
-                        let args = if self.binding_editor.args.trim().is_empty() {
+                        let args = if binding_editor.args.trim().is_empty() {
                             None
                         } else {
-                            Some(self.binding_editor.args.trim().to_string())
+                            Some(binding_editor.args.trim().to_string())
                         };
                         let entry = BindingEntry {
-                            label: self.binding_editor.label.trim().to_string(),
+                            label: binding_editor.label.trim().to_string(),
                             action,
                             args,
-                            enabled: self.binding_editor.enabled,
+                            enabled: binding_editor.enabled,
                         };
                         save_entry = Some(entry);
                     }
                 }
                 if ui.button("Cancel").clicked() {
-                    self.binding_editor.reset();
+                    binding_editor.reset();
                 }
             });
             if let Some(binding_entry) = save_entry {
@@ -647,7 +647,7 @@ impl MgGesturesDialog {
                 } else if let Some(binding) = entry.bindings.get_mut(edit_idx) {
                     *binding = binding_entry;
                 }
-                self.binding_editor.reset();
+                binding_editor.reset();
                 *save_now = true;
             }
         }
@@ -938,7 +938,8 @@ impl MgGesturesDialog {
                                     }
                                 });
                                 ui.separator();
-                                self.bindings_ui(ui, app, entry, &mut save_now);
+                                let binding_editor = &mut self.binding_editor;
+                                Self::bindings_ui(binding_editor, ui, app, entry, &mut save_now);
                             } else {
                                 ui.label("Select a gesture to edit.");
                             }
