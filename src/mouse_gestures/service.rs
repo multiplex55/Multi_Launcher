@@ -508,9 +508,12 @@ fn worker_loop(
                 }
 
                 HookEvent::CycleNext | HookEvent::CyclePrev | HookEvent::SelectBinding(_) => {
-                    let allow_cycle = match config.wheel_cycle_gate {
-                        WheelCycleGate::Deadzone => exceeded_deadzone,
-                        WheelCycleGate::Shift => true,
+                    let allow_cycle = match event {
+                        HookEvent::SelectBinding(_) => true,
+                        _ => match config.wheel_cycle_gate {
+                            WheelCycleGate::Deadzone => exceeded_deadzone,
+                            WheelCycleGate::Shift => true,
+                        },
                     };
                     if active && allow_cycle && !cached_actions.is_empty() {
                         let len = cached_actions.len();
