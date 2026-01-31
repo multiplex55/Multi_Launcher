@@ -11,6 +11,8 @@ pub struct HistoryEntry {
     pub query_lc: String,
     pub action: Action,
     #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
     pub timestamp: i64,
 }
 
