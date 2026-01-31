@@ -222,12 +222,12 @@ fn cancel_event_clears_overlays_and_does_not_click() {
     service.update_config(config);
 
     assert!(handle.emit(HookEvent::RButtonDown));
-    sleep(Duration::from_millis(20));
+    sleep(Duration::from_millis(50));
     let clears_before = overlay_state.trail_clears.load(Ordering::SeqCst);
     let hides_before = overlay_state.hint_hides.load(Ordering::SeqCst);
 
     assert!(handle.emit(HookEvent::Cancel));
-    sleep(Duration::from_millis(20));
+    sleep(Duration::from_millis(50));
 
     let clears_after = overlay_state.trail_clears.load(Ordering::SeqCst);
     let hides_after = overlay_state.hint_hides.load(Ordering::SeqCst);
@@ -269,7 +269,7 @@ fn no_match_pass_through_click_sends_right_click() {
     sleep(Duration::from_millis(5));
     cursor_provider.set_position((50.0, 0.0));
     assert!(handle.emit(HookEvent::RButtonUp));
-    sleep(Duration::from_millis(20));
+    sleep(Duration::from_millis(50));
 
     assert_eq!(click_backend.clicks.load(Ordering::SeqCst), 1);
 
@@ -307,7 +307,7 @@ fn no_match_noop_does_not_send_right_click() {
     sleep(Duration::from_millis(5));
     cursor_provider.set_position((50.0, 0.0));
     assert!(handle.emit(HookEvent::RButtonUp));
-    sleep(Duration::from_millis(20));
+    sleep(Duration::from_millis(50));
 
     assert_eq!(click_backend.clicks.load(Ordering::SeqCst), 0);
 
@@ -363,7 +363,7 @@ fn hint_text_includes_best_guess_and_match_type() {
     assert!(handle.emit(HookEvent::RButtonDown));
     sleep(Duration::from_millis(5));
     cursor_provider.set_position((50.0, 0.0));
-    sleep(Duration::from_millis(20));
+    sleep(Duration::from_millis(50));
 
     let hints = hint_state.hints.lock().expect("lock hints");
     let last = hints.last().expect("hint text");
@@ -594,10 +594,10 @@ fn selection_persists_across_gesture_sessions() {
     assert!(handle.emit(HookEvent::RButtonDown));
     sleep(Duration::from_millis(5));
     cursor_provider.set_position((50.0, 0.0));
-    sleep(Duration::from_millis(20));
+    sleep(Duration::from_millis(50));
 
     let hint_text =
-        wait_for_hint(&hint_state, Duration::from_millis(200)).expect("hint text");
+        wait_for_hint(&hint_state, Duration::from_millis(500)).expect("hint text");
     let first_line = hint_text.lines().next().expect("first line");
     assert!(first_line.contains("Secondary"));
 

@@ -429,25 +429,6 @@ fn worker_loop(
 
                         let tokens = tracker.tokens_string();
 
-                        println!(
-                            "MG release tokens='{tokens}' mode={:?} db_present={}",
-                            config.dir_mode,
-                            db.is_some()
-                        );
-                        if let Some(db) = &db {
-                            if let Ok(guard) = db.lock() {
-                                for g in &guard.gestures {
-                                    println!(
-                                        "DB: label='{}' tokens='{}' mode={:?} enabled={} bindings={}",
-                                        g.label, g.tokens, g.dir_mode, g.enabled, g.bindings.len()
-                                        );
-                                    for b in &g.bindings {
-                                        println!("  - binding: label='{}' action='{}' args={:?} enabled={}",b.label, b.action, b.args, b.enabled);
-                                    }
-                                }
-                            }
-                        }
-
                         // If we produced any tokens, treat it as a gesture (swallow right click).
                         if !tokens.is_empty() {
                             // Execute the currently selected binding (wheel-cycled) if there are multiple.
