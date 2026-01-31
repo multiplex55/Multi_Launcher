@@ -1,14 +1,253 @@
 use crate::gui::LauncherApp;
-use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions};
+use eframe::egui::{
+    self, Color32, PointerButton, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
+};
 use image::RgbaImage;
 use std::path::PathBuf;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkupTool {
+    Pen,
+    Arrow,
+    Rectangle,
+    Highlight,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarkupStroke {
+    pub points: Vec<Pos2>,
+    pub color: Color32,
+    pub thickness: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarkupRect {
+    pub rect: Rect,
+    pub color: Color32,
+    pub thickness: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarkupArrow {
+    pub start: Pos2,
+    pub end: Pos2,
+    pub color: Color32,
+    pub thickness: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum MarkupLayer {
+    Stroke(MarkupStroke),
+    Rectangle(MarkupRect),
+    Arrow(MarkupArrow),
+    Highlight(MarkupRect),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MarkupHistory {
+    layers: Vec<MarkupLayer>,
+    undo_stack: Vec<MarkupLayer>,
+    redo_stack: Vec<MarkupLayer>,
+}
+
+impl MarkupHistory {
+    pub fn layers(&self) -> &[MarkupLayer] {
+        &self.layers
+    }
+
+    pub fn push(&mut self, layer: MarkupLayer) {
+        self.layers.push(layer);
+        self.redo_stack.clear();
+    }
+
+    pub fn undo(&mut self) -> bool {
+        if let Some(layer) = self.layers.pop() {
+            self.redo_stack.push(layer);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn redo(&mut self) -> bool {
+        if let Some(layer) = self.redo_stack.pop() {
+            self.layers.push(layer);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn blend_pixel(img: &mut RgbaImage, x: u32, y: u32, color: Color32) {
+    let [r, g, b, a] = color.to_array();
+    if a == 0 {
+        return;
+    }
+    let dst = img.get_pixel(x, y).0;
+    let src_a = a as f32 / 255.0;
+    let dst_a = dst[3] as f32 / 255.0;
+    let out_a = src_a + dst_a * (1.0 - src_a);
+    if out_a <= 0.0 {
+        return;
+    }
+    let blend = |src: u8, dst: u8| {
+        let src_f = src as f32 / 255.0;
+        let dst_f = dst as f32 / 255.0;
+        ((src_f * src_a + dst_f * dst_a * (1.0 - src_a)) / out_a * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    img.put_pixel(
+        x,
+        y,
+        image::Rgba([
+            blend(r, dst[0]),
+            blend(g, dst[1]),
+            blend(b, dst[2]),
+            (out_a * 255.0) as u8,
+        ]),
+    );
+}
+
+fn draw_circle(img: &mut RgbaImage, center: Pos2, radius: f32, color: Color32) {
+    if radius <= 0.0 {
+        return;
+    }
+    let radius_sq = radius * radius;
+    let width = img.width() as i32;
+    let height = img.height() as i32;
+    let min_x = (center.x - radius).floor().max(0.0) as i32;
+    let max_x = (center.x + radius).ceil().min((width - 1) as f32) as i32;
+    let min_y = (center.y - radius).floor().max(0.0) as i32;
+    let max_y = (center.y + radius).ceil().min((height - 1) as f32) as i32;
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let dx = x as f32 + 0.5 - center.x;
+            let dy = y as f32 + 0.5 - center.y;
+            if dx * dx + dy * dy <= radius_sq {
+                blend_pixel(img, x as u32, y as u32, color);
+            }
+        }
+    }
+}
+
+fn draw_line(img: &mut RgbaImage, start: Pos2, end: Pos2, color: Color32, thickness: f32) {
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let steps = dx.abs().max(dy.abs()).ceil().max(1.0) as i32;
+    let radius = (thickness / 2.0).max(0.5);
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let point = Pos2::new(start.x + dx * t, start.y + dy * t);
+        draw_circle(img, point, radius, color);
+    }
+}
+
+fn draw_rect_outline(img: &mut RgbaImage, rect: Rect, color: Color32, thickness: f32) {
+    let min = rect.min;
+    let max = rect.max;
+    draw_line(
+        img,
+        Pos2::new(min.x, min.y),
+        Pos2::new(max.x, min.y),
+        color,
+        thickness,
+    );
+    draw_line(
+        img,
+        Pos2::new(max.x, min.y),
+        Pos2::new(max.x, max.y),
+        color,
+        thickness,
+    );
+    draw_line(
+        img,
+        Pos2::new(max.x, max.y),
+        Pos2::new(min.x, max.y),
+        color,
+        thickness,
+    );
+    draw_line(
+        img,
+        Pos2::new(min.x, max.y),
+        Pos2::new(min.x, min.y),
+        color,
+        thickness,
+    );
+}
+
+fn draw_rect_fill(img: &mut RgbaImage, rect: Rect, color: Color32) {
+    let width = img.width() as i32;
+    let height = img.height() as i32;
+    let min_x = rect.min.x.floor().max(0.0) as i32;
+    let max_x = rect.max.x.ceil().min((width - 1) as f32) as i32;
+    let min_y = rect.min.y.floor().max(0.0) as i32;
+    let max_y = rect.max.y.ceil().min((height - 1) as f32) as i32;
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            blend_pixel(img, x as u32, y as u32, color);
+        }
+    }
+}
+
+fn rotate_vec(vec: Vec2, angle: f32) -> Vec2 {
+    let (sin, cos) = angle.sin_cos();
+    Vec2::new(vec.x * cos - vec.y * sin, vec.x * sin + vec.y * cos)
+}
+
+pub fn render_markup_layers(base: &RgbaImage, layers: &[MarkupLayer]) -> RgbaImage {
+    let mut img = base.clone();
+    for layer in layers {
+        match layer {
+            MarkupLayer::Stroke(stroke) => {
+                for points in stroke.points.windows(2) {
+                    draw_line(
+                        &mut img,
+                        points[0],
+                        points[1],
+                        stroke.color,
+                        stroke.thickness,
+                    );
+                }
+            }
+            MarkupLayer::Rectangle(rect) => {
+                draw_rect_outline(&mut img, rect.rect, rect.color, rect.thickness);
+            }
+            MarkupLayer::Arrow(arrow) => {
+                draw_line(
+                    &mut img,
+                    arrow.start,
+                    arrow.end,
+                    arrow.color,
+                    arrow.thickness,
+                );
+                let dir = arrow.end - arrow.start;
+                let len = dir.length();
+                if len > 0.5 {
+                    let unit = dir / len;
+                    let head_len = (10.0 + arrow.thickness * 2.0).min(len * 0.5);
+                    let angle = 30.0_f32.to_radians();
+                    let left = arrow.end - rotate_vec(unit, angle) * head_len;
+                    let right = arrow.end - rotate_vec(unit, -angle) * head_len;
+                    draw_line(&mut img, arrow.end, left, arrow.color, arrow.thickness);
+                    draw_line(&mut img, arrow.end, right, arrow.color, arrow.thickness);
+                }
+            }
+            MarkupLayer::Highlight(rect) => {
+                draw_rect_fill(&mut img, rect.rect, rect.color);
+            }
+        }
+    }
+    img
+}
+
 /// Editor window for captured screenshots allowing simple cropping and annotation.
 ///
-/// Cropping is initiated by dragging with the primary mouse button. Holding
-/// `Shift` while dragging creates a red annotation rectangle. When saving or
-/// copying the screenshot the selected region and annotations are applied to the
-/// output image.
+/// Cropping is initiated by dragging with the secondary mouse button. Markup
+/// tools are selected from the toolbar and applied with the primary mouse
+/// button. When saving or copying the screenshot the selected region and
+/// markup layers are applied to the output image.
 pub struct ScreenshotEditor {
     pub open: bool,
     image: RgbaImage,
@@ -16,17 +255,28 @@ pub struct ScreenshotEditor {
     tex: Option<TextureHandle>,
     crop_start: Option<Pos2>,
     crop_rect: Option<Rect>,
-    ann_start: Option<Pos2>,
-    annotations: Vec<Rect>,
+    active_start: Option<Pos2>,
+    active_end: Option<Pos2>,
+    active_stroke: Option<MarkupStroke>,
+    history: MarkupHistory,
     path: PathBuf,
     _clip: bool,
     auto_save: bool,
     zoom: f32,
+    tool: MarkupTool,
+    color_index: usize,
+    thickness: f32,
 }
 
 impl ScreenshotEditor {
     /// Create a new editor from the captured image.
-    pub fn new(img: RgbaImage, path: PathBuf, clip: bool, auto_save: bool) -> Self {
+    pub fn new(
+        img: RgbaImage,
+        path: PathBuf,
+        clip: bool,
+        auto_save: bool,
+        tool: MarkupTool,
+    ) -> Self {
         let size = [img.width() as usize, img.height() as usize];
         let color_image = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
         Self {
@@ -36,29 +286,22 @@ impl ScreenshotEditor {
             tex: None,
             crop_start: None,
             crop_rect: None,
-            ann_start: None,
-            annotations: Vec::new(),
+            active_start: None,
+            active_end: None,
+            active_stroke: None,
+            history: MarkupHistory::default(),
             path,
             _clip: clip,
             auto_save,
             zoom: 1.0,
+            tool,
+            color_index: 0,
+            thickness: 4.0,
         }
     }
 
     fn apply_edits(&self) -> RgbaImage {
-        let mut img = self.image.clone();
-        // draw annotations first
-        for rect in &self.annotations {
-            let x1 = rect.min.x.max(0.0) as u32;
-            let y1 = rect.min.y.max(0.0) as u32;
-            let x2 = rect.max.x.min(img.width() as f32) as u32;
-            let y2 = rect.max.y.min(img.height() as f32) as u32;
-            for y in y1..y2 {
-                for x in x1..x2 {
-                    img.put_pixel(x, y, image::Rgba([255, 0, 0, 128]));
-                }
-            }
-        }
+        let mut img = render_markup_layers(&self.image, self.history.layers());
         if let Some(rect) = self.crop_rect {
             let x1 = rect.min.x.max(0.0) as u32;
             let y1 = rect.min.y.max(0.0) as u32;
@@ -91,6 +334,37 @@ impl ScreenshotEditor {
             bytes: Cow::Owned(img.into_raw()),
         })?;
         Ok(())
+    }
+
+    fn palette() -> [Color32; 5] {
+        [
+            Color32::from_rgb(231, 76, 60),
+            Color32::from_rgb(241, 196, 15),
+            Color32::from_rgb(46, 204, 113),
+            Color32::from_rgb(52, 152, 219),
+            Color32::from_rgb(155, 89, 182),
+        ]
+    }
+
+    fn current_color(&self) -> Color32 {
+        let base = Self::palette()[self.color_index];
+        if self.tool == MarkupTool::Highlight {
+            Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 96)
+        } else {
+            base
+        }
+    }
+
+    fn push_layer(&mut self, layer: MarkupLayer) {
+        self.history.push(layer);
+    }
+
+    fn undo(&mut self) {
+        self.history.undo();
+    }
+
+    fn redo(&mut self) {
+        self.history.redo();
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
@@ -138,6 +412,69 @@ impl ScreenshotEditor {
                     }
                     ui.add(egui::Slider::new(&mut self.zoom, 0.1..=4.0).text("Zoom"));
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Tool");
+                    ui.selectable_value(&mut self.tool, MarkupTool::Pen, "Pen");
+                    ui.selectable_value(&mut self.tool, MarkupTool::Arrow, "Arrow");
+                    ui.selectable_value(&mut self.tool, MarkupTool::Rectangle, "Rect");
+                    ui.selectable_value(&mut self.tool, MarkupTool::Highlight, "Highlight");
+                    ui.separator();
+                    ui.label("Color");
+                    for (idx, color) in Self::palette().iter().enumerate() {
+                        let selected = self.color_index == idx;
+                        let mut button = egui::Button::new(format!("{}", idx + 1))
+                            .fill(*color)
+                            .stroke(Stroke::new(1.0, Color32::BLACK));
+                        if selected {
+                            button = button.stroke(Stroke::new(2.0, Color32::WHITE));
+                        }
+                        if ui.add(button).clicked() {
+                            self.color_index = idx;
+                        }
+                    }
+                    ui.separator();
+                    ui.label(format!("Thickness {}", self.thickness as i32));
+                    if ui.button("−").clicked() {
+                        self.thickness = (self.thickness - 1.0).max(1.0);
+                    }
+                    if ui.button("+").clicked() {
+                        self.thickness = (self.thickness + 1.0).min(20.0);
+                    }
+                    if ui.button("Undo").clicked() {
+                        self.undo();
+                    }
+                    if ui.button("Redo").clicked() {
+                        self.redo();
+                    }
+                });
+                let pressed_undo = ctx.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl);
+                let pressed_redo = ctx.input(|i| {
+                    (i.key_pressed(egui::Key::Y) && i.modifiers.ctrl)
+                        || (i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && i.modifiers.shift)
+                });
+                if pressed_undo {
+                    self.undo();
+                }
+                if pressed_redo {
+                    self.redo();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::OpenBracket)) {
+                    self.thickness = (self.thickness - 1.0).max(1.0);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::CloseBracket)) {
+                    self.thickness = (self.thickness + 1.0).min(20.0);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::Num1)) {
+                    self.color_index = 0;
+                } else if ctx.input(|i| i.key_pressed(egui::Key::Num2)) {
+                    self.color_index = 1;
+                } else if ctx.input(|i| i.key_pressed(egui::Key::Num3)) {
+                    self.color_index = 2;
+                } else if ctx.input(|i| i.key_pressed(egui::Key::Num4)) {
+                    self.color_index = 3;
+                } else if ctx.input(|i| i.key_pressed(egui::Key::Num5)) {
+                    self.color_index = 4;
+                }
                 let tex = self.tex.get_or_insert_with(|| {
                     ctx.load_texture(
                         "screenshot",
@@ -162,41 +499,188 @@ impl ScreenshotEditor {
                     Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
                     Color32::WHITE,
                 );
-                if response.drag_started() {
+                if response.drag_started_by(PointerButton::Secondary) {
                     if let Some(pos) = response.interact_pointer_pos() {
-                        if ctx.input(|i| i.modifiers.shift) {
-                            self.ann_start = Some(to_img(pos));
-                        } else {
-                            self.crop_start = Some(to_img(pos));
-                            self.crop_rect = None;
-                        }
+                        self.crop_start = Some(to_img(pos));
+                        self.crop_rect = None;
                     }
                 }
-                if response.dragged() {
+                if response.dragged_by(PointerButton::Secondary) {
                     if let Some(start) = self.crop_start {
                         if let Some(pos) = response.interact_pointer_pos() {
                             self.crop_rect = Some(Rect::from_two_pos(start, to_img(pos)));
                         }
                     }
-                    if let Some(start) = self.ann_start {
-                        if let Some(pos) = response.interact_pointer_pos() {
-                            self.annotations
-                                .push(Rect::from_two_pos(start, to_img(pos)));
-                            self.ann_start = None;
+                }
+                if response.drag_stopped_by(PointerButton::Secondary) {
+                    self.crop_start = None;
+                }
+
+                if response.drag_started_by(PointerButton::Primary) {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        let start = to_img(pos);
+                        match self.tool {
+                            MarkupTool::Pen => {
+                                self.active_stroke = Some(MarkupStroke {
+                                    points: vec![start],
+                                    color: self.current_color(),
+                                    thickness: self.thickness,
+                                });
+                            }
+                            MarkupTool::Arrow | MarkupTool::Rectangle | MarkupTool::Highlight => {
+                                self.active_start = Some(start);
+                                self.active_end = Some(start);
+                            }
                         }
                     }
                 }
-                if response.drag_stopped() {
-                    self.crop_start = None;
-                    self.ann_start = None;
+                if response.dragged_by(PointerButton::Primary) {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        let current = to_img(pos);
+                        match self.tool {
+                            MarkupTool::Pen => {
+                                if let Some(stroke) = &mut self.active_stroke {
+                                    stroke.points.push(current);
+                                }
+                            }
+                            MarkupTool::Arrow | MarkupTool::Rectangle | MarkupTool::Highlight => {
+                                self.active_end = Some(current);
+                            }
+                        }
+                    }
+                }
+                if response.drag_stopped_by(PointerButton::Primary) {
+                    match self.tool {
+                        MarkupTool::Pen => {
+                            if let Some(stroke) = self.active_stroke.take() {
+                                if stroke.points.len() > 1 {
+                                    self.push_layer(MarkupLayer::Stroke(stroke));
+                                }
+                            }
+                        }
+                        MarkupTool::Arrow => {
+                            if let (Some(start), Some(end)) =
+                                (self.active_start.take(), self.active_end.take())
+                            {
+                                self.push_layer(MarkupLayer::Arrow(MarkupArrow {
+                                    start,
+                                    end,
+                                    color: self.current_color(),
+                                    thickness: self.thickness,
+                                }));
+                            }
+                        }
+                        MarkupTool::Rectangle => {
+                            if let (Some(start), Some(end)) =
+                                (self.active_start.take(), self.active_end.take())
+                            {
+                                self.push_layer(MarkupLayer::Rectangle(MarkupRect {
+                                    rect: Rect::from_two_pos(start, end),
+                                    color: self.current_color(),
+                                    thickness: self.thickness,
+                                }));
+                            }
+                        }
+                        MarkupTool::Highlight => {
+                            if let (Some(start), Some(end)) =
+                                (self.active_start.take(), self.active_end.take())
+                            {
+                                self.push_layer(MarkupLayer::Highlight(MarkupRect {
+                                    rect: Rect::from_two_pos(start, end),
+                                    color: self.current_color(),
+                                    thickness: self.thickness,
+                                }));
+                            }
+                        }
+                    }
+                    self.active_start = None;
+                    self.active_end = None;
+                    self.active_stroke = None;
                 }
                 if let Some(rect) = self.crop_rect {
                     let draw = Rect::from_min_max(to_screen(rect.min), to_screen(rect.max));
                     painter.rect_stroke(draw, 0.0, Stroke::new(1.0, Color32::GREEN));
                 }
-                for rect in &self.annotations {
-                    let draw = Rect::from_min_max(to_screen(rect.min), to_screen(rect.max));
-                    painter.rect_stroke(draw, 0.0, Stroke::new(1.0, Color32::RED));
+                for layer in self.history.layers() {
+                    match layer {
+                        MarkupLayer::Stroke(stroke) => {
+                            for points in stroke.points.windows(2) {
+                                painter.line_segment(
+                                    [to_screen(points[0]), to_screen(points[1])],
+                                    Stroke::new(stroke.thickness, stroke.color),
+                                );
+                            }
+                        }
+                        MarkupLayer::Rectangle(rect) => {
+                            let draw = Rect::from_min_max(
+                                to_screen(rect.rect.min),
+                                to_screen(rect.rect.max),
+                            );
+                            painter.rect_stroke(draw, 0.0, Stroke::new(rect.thickness, rect.color));
+                        }
+                        MarkupLayer::Arrow(arrow) => {
+                            painter.line_segment(
+                                [to_screen(arrow.start), to_screen(arrow.end)],
+                                Stroke::new(arrow.thickness, arrow.color),
+                            );
+                            let dir = arrow.end - arrow.start;
+                            let len = dir.length();
+                            if len > 0.5 {
+                                let unit = dir / len;
+                                let head_len = (10.0 + arrow.thickness * 2.0).min(len * 0.5);
+                                let angle = 30.0_f32.to_radians();
+                                let left = arrow.end - rotate_vec(unit, angle) * head_len;
+                                let right = arrow.end - rotate_vec(unit, -angle) * head_len;
+                                painter.line_segment(
+                                    [to_screen(arrow.end), to_screen(left)],
+                                    Stroke::new(arrow.thickness, arrow.color),
+                                );
+                                painter.line_segment(
+                                    [to_screen(arrow.end), to_screen(right)],
+                                    Stroke::new(arrow.thickness, arrow.color),
+                                );
+                            }
+                        }
+                        MarkupLayer::Highlight(rect) => {
+                            let draw = Rect::from_min_max(
+                                to_screen(rect.rect.min),
+                                to_screen(rect.rect.max),
+                            );
+                            painter.rect_filled(draw, 0.0, rect.color);
+                        }
+                    }
+                }
+                if let (Some(start), Some(end)) = (self.active_start, self.active_end) {
+                    let rect = Rect::from_two_pos(start, end);
+                    match self.tool {
+                        MarkupTool::Arrow => {
+                            painter.line_segment(
+                                [to_screen(start), to_screen(end)],
+                                Stroke::new(self.thickness, self.current_color()),
+                            );
+                        }
+                        MarkupTool::Rectangle => {
+                            let draw = Rect::from_min_max(to_screen(rect.min), to_screen(rect.max));
+                            painter.rect_stroke(
+                                draw,
+                                0.0,
+                                Stroke::new(self.thickness, self.current_color()),
+                            );
+                        }
+                        MarkupTool::Highlight => {
+                            let draw = Rect::from_min_max(to_screen(rect.min), to_screen(rect.max));
+                            painter.rect_filled(draw, 0.0, self.current_color());
+                        }
+                        MarkupTool::Pen => {}
+                    }
+                }
+                if let Some(stroke) = &self.active_stroke {
+                    for points in stroke.points.windows(2) {
+                        painter.line_segment(
+                            [to_screen(points[0]), to_screen(points[1])],
+                            Stroke::new(stroke.thickness, stroke.color),
+                        );
+                    }
                 }
             });
         self.open = open;
