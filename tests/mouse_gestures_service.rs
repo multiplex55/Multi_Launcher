@@ -124,17 +124,20 @@ fn disabling_config_stops_worker_and_blocks_hook_events() {
 fn cancel_event_clears_overlays_and_does_not_click() {
     let (backend, handle) = MockHookBackend::new();
     let overlay_state = Arc::new(TestOverlayState::default());
-    let overlay_factory = Arc::new(TestOverlayFactory {
+    let overlay_factory: Arc<dyn OverlayFactory> = Arc::new(TestOverlayFactory {
         state: Arc::clone(&overlay_state),
     });
     let click_backend = Arc::new(TestRightClickBackend::default());
+    let click_backend_trait: Arc<dyn RightClickBackend> = Arc::clone(&click_backend);
     let cursor_provider = Arc::new(TestCursorProvider::new((0.0, 0.0)));
+    let cursor_provider_trait: Arc<dyn CursorPositionProvider> =
+        Arc::clone(&cursor_provider);
 
     let mut service = MouseGestureService::new_with_backend_and_overlays(
         Box::new(backend),
         overlay_factory,
-        Arc::clone(&click_backend),
-        cursor_provider,
+        Arc::clone(&click_backend_trait),
+        cursor_provider_trait,
     );
 
     let mut config = MouseGestureConfig::default();
@@ -162,17 +165,20 @@ fn cancel_event_clears_overlays_and_does_not_click() {
 #[test]
 fn no_match_pass_through_click_sends_right_click() {
     let (backend, handle) = MockHookBackend::new();
-    let overlay_factory = Arc::new(TestOverlayFactory {
+    let overlay_factory: Arc<dyn OverlayFactory> = Arc::new(TestOverlayFactory {
         state: Arc::new(TestOverlayState::default()),
     });
     let click_backend = Arc::new(TestRightClickBackend::default());
+    let click_backend_trait: Arc<dyn RightClickBackend> = Arc::clone(&click_backend);
     let cursor_provider = Arc::new(TestCursorProvider::new((0.0, 0.0)));
+    let cursor_provider_trait: Arc<dyn CursorPositionProvider> =
+        Arc::clone(&cursor_provider);
 
     let mut service = MouseGestureService::new_with_backend_and_overlays(
         Box::new(backend),
         overlay_factory,
-        Arc::clone(&click_backend),
-        Arc::clone(&cursor_provider),
+        Arc::clone(&click_backend_trait),
+        Arc::clone(&cursor_provider_trait),
     );
 
     let mut config = MouseGestureConfig::default();
@@ -198,17 +204,20 @@ fn no_match_pass_through_click_sends_right_click() {
 #[test]
 fn no_match_noop_does_not_send_right_click() {
     let (backend, handle) = MockHookBackend::new();
-    let overlay_factory = Arc::new(TestOverlayFactory {
+    let overlay_factory: Arc<dyn OverlayFactory> = Arc::new(TestOverlayFactory {
         state: Arc::new(TestOverlayState::default()),
     });
     let click_backend = Arc::new(TestRightClickBackend::default());
+    let click_backend_trait: Arc<dyn RightClickBackend> = Arc::clone(&click_backend);
     let cursor_provider = Arc::new(TestCursorProvider::new((0.0, 0.0)));
+    let cursor_provider_trait: Arc<dyn CursorPositionProvider> =
+        Arc::clone(&cursor_provider);
 
     let mut service = MouseGestureService::new_with_backend_and_overlays(
         Box::new(backend),
         overlay_factory,
-        Arc::clone(&click_backend),
-        Arc::clone(&cursor_provider),
+        Arc::clone(&click_backend_trait),
+        Arc::clone(&cursor_provider_trait),
     );
 
     let mut config = MouseGestureConfig::default();
