@@ -44,6 +44,8 @@ pub struct MouseGestureSettings {
     pub no_match_behavior: NoMatchBehavior,
     #[serde(default = "default_wheel_cycle_gate")]
     pub wheel_cycle_gate: WheelCycleGate,
+    #[serde(default = "default_practice_mode")]
+    pub practice_mode: bool,
 }
 
 impl Default for MouseGestureSettings {
@@ -60,6 +62,7 @@ impl Default for MouseGestureSettings {
             cancel_behavior: default_cancel_behavior(),
             no_match_behavior: default_no_match_behavior(),
             wheel_cycle_gate: default_wheel_cycle_gate(),
+            practice_mode: default_practice_mode(),
         }
     }
 }
@@ -106,6 +109,10 @@ fn default_no_match_behavior() -> NoMatchBehavior {
 
 fn default_wheel_cycle_gate() -> WheelCycleGate {
     WheelCycleGate::Deadzone
+}
+
+fn default_practice_mode() -> bool {
+    false
 }
 
 #[derive(Debug)]
@@ -163,11 +170,22 @@ impl MouseGestureRuntime {
         config.cancel_behavior = self.settings.cancel_behavior;
         config.no_match_behavior = self.settings.no_match_behavior;
         config.wheel_cycle_gate = self.settings.wheel_cycle_gate;
+        config.practice_mode = self.settings.practice_mode;
         with_gesture_service(|svc| {
             svc.update_config(config);
             svc.update_db(Some(self.db.clone()));
         });
     }
+}
+
+pub fn toggle_practice_mode() -> bool {
+    let mut enabled = false;
+    with_service(|svc| {
+        svc.settings.practice_mode = !svc.settings.practice_mode;
+        enabled = svc.settings.practice_mode;
+        svc.apply();
+    });
+    enabled
 }
 
 static SERVICE: OnceCell<Mutex<MouseGestureRuntime>> = OnceCell::new();
@@ -250,6 +268,12 @@ impl MouseGesturesPlugin {
                 action: "query:mg conflicts".into(),
                 args: None,
             },
+            Action {
+                label: "mg practice".into(),
+                desc: "Toggle mouse gesture practice mode".into(),
+                action: "mg:practice".into(),
+                args: None,
+            },
         ]
     }
 
@@ -323,6 +347,14 @@ impl Plugin for MouseGesturesPlugin {
                 label: "Add mouse gesture binding".into(),
                 desc: "Mouse gestures".into(),
                 action: "mg:dialog:binding".into(),
+                args: None,
+            }];
+        }
+        if strip_prefix_ci(trimmed, "mg practice").is_some() {
+            return vec![Action {
+                label: "Toggle mouse gesture practice mode".into(),
+                desc: "Mouse gestures".into(),
+                action: "mg:practice".into(),
                 args: None,
             }];
         }

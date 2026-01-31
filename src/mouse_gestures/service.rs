@@ -1,5 +1,6 @@
 use crate::mouse_gestures::db::{
-    load_gestures, GestureCandidate, GestureMatchType, SharedGestureDb, GESTURES_FILE,
+    format_gesture_label, load_gestures, GestureCandidate, GestureMatchType, SharedGestureDb,
+    GESTURES_FILE,
 };
 use crate::mouse_gestures::engine::{DirMode, GestureTracker};
 use crate::mouse_gestures::overlay::{
@@ -36,6 +37,7 @@ pub struct MouseGestureConfig {
     pub cancel_behavior: CancelBehavior,
     pub no_match_behavior: NoMatchBehavior,
     pub wheel_cycle_gate: WheelCycleGate,
+    pub practice_mode: bool,
 }
 
 impl Default for MouseGestureConfig {
@@ -59,6 +61,7 @@ impl Default for MouseGestureConfig {
             cancel_behavior: CancelBehavior::DoNothing,
             no_match_behavior: NoMatchBehavior::DoNothing,
             wheel_cycle_gate: WheelCycleGate::Deadzone,
+            practice_mode: false,
         }
     }
 }
@@ -360,6 +363,7 @@ fn worker_loop(
     let mut last_trail = Instant::now();
     let mut last_recognition = Instant::now();
     let mut start_time = Instant::now();
+    let mut cheat_sheet_visible = false;
     let mut selected_binding_idx: usize = 0;
     let mut cached_tokens = String::new();
     let mut cached_actions: Vec<crate::actions::Action> = Vec::new();
@@ -400,6 +404,7 @@ fn worker_loop(
                     cached_candidates.clear();
                     exact_selection_key = None;
                     exact_binding_count = 0;
+                    cheat_sheet_visible = false;
                     start_time = Instant::now();
                     let pos = cursor_provider.cursor_position().unwrap_or(start_pos);
                     start_pos = pos;
@@ -452,10 +457,29 @@ fn worker_loop(
                                 if !actions.is_empty() {
                                     let idx = selected_binding_idx % actions.len();
                                     if let Some(action) = actions.get(idx).cloned() {
-                                        send_event(WatchEvent::ExecuteAction(action));
+                                        if config.practice_mode {
+                                            tracing::info!(
+                                                tokens = %tokens,
+                                                action = %action.action,
+                                                "mouse gesture practice match"
+                                            );
+                                        } else {
+                                            send_event(WatchEvent::ExecuteAction(action));
+                                        }
                                     }
                                 }
                             } else {
+                                if config.practice_mode {
+                                    let suggestion = cached_candidates
+                                        .first()
+                                        .map(|candidate| candidate.gesture_label.as_str())
+                                        .unwrap_or("none");
+                                    tracing::info!(
+                                        tokens = %tokens,
+                                        suggestion = suggestion,
+                                        "mouse gesture practice miss"
+                                    );
+                                }
                                 match config.no_match_behavior {
                                     NoMatchBehavior::DoNothing => {}
                                     NoMatchBehavior::PassThroughClick => {
@@ -485,6 +509,7 @@ fn worker_loop(
                         cached_candidates.clear();
                         exact_selection_key = None;
                         exact_binding_count = 0;
+                        cheat_sheet_visible = false;
                         #[cfg(windows)]
                         hook_dispatch().set_active(false);
                     }
@@ -558,6 +583,7 @@ fn worker_loop(
                         cached_candidates.clear();
                         exact_selection_key = None;
                         exact_binding_count = 0;
+                        cheat_sheet_visible = false;
                         #[cfg(windows)]
                         {
                             hook_dispatch().set_tracking(false);
@@ -579,9 +605,24 @@ fn worker_loop(
                     exceeded_deadzone = true;
                     #[cfg(windows)]
                     hook_dispatch().set_tracking(true);
+                    if cheat_sheet_visible {
+                        hint_overlay.update("", pos);
+                        cheat_sheet_visible = false;
+                    }
                 }
 
                 trail_overlay.update_position(pos);
+
+                if !exceeded_deadzone
+                    && cached_tokens.is_empty()
+                    && !cheat_sheet_visible
+                    && start_time.elapsed() >= CHEATSHEET_DELAY
+                {
+                    if let Some(text) = format_cheatsheet_text(&db, CHEATSHEET_MAX_GESTURES) {
+                        hint_overlay.update(&text, pos);
+                        cheat_sheet_visible = true;
+                    }
+                }
 
                 if last_recognition.elapsed() >= recognition_interval {
                     let ms = start_time.elapsed().as_millis() as u64;
@@ -628,7 +669,8 @@ fn worker_loop(
                         config.wheel_cycle_gate,
                     ) {
                         hint_overlay.update(&text, pos);
-                    } else {
+                        cheat_sheet_visible = false;
+                    } else if !cheat_sheet_visible {
                         hint_overlay.update("", pos);
                     }
                     last_recognition = Instant::now();
@@ -668,6 +710,8 @@ fn match_binding_actions(
 }
 
 const MAX_HINT_CANDIDATES: usize = 5;
+const CHEATSHEET_MAX_GESTURES: usize = 5;
+const CHEATSHEET_DELAY: Duration = Duration::from_millis(250);
 
 #[allow(dead_code)]
 fn best_match_name(
@@ -713,10 +757,10 @@ fn format_hint_text(
     }
 
     let mut lines = Vec::new();
-    if let Some(candidate) = candidates
+    let exact_candidate = candidates
         .iter()
-        .find(|candidate| candidate.match_type == GestureMatchType::Exact)
-    {
+        .find(|candidate| candidate.match_type == GestureMatchType::Exact);
+    if let Some(candidate) = exact_candidate {
         let bindings = &candidate.bindings;
         let binding_count = bindings.len();
         let selected_idx = if binding_count == 0 {
@@ -746,6 +790,16 @@ fn format_hint_text(
         lines.push(tokens.to_string());
     }
 
+    if exact_candidate.is_none() {
+        if let Some(candidate) = candidates.first() {
+            lines.push(format!(
+                "Closest: {} [{}]",
+                candidate.gesture_label,
+                match_type_label(candidate.match_type)
+            ));
+        }
+    }
+
     let cycle_hint = match wheel_cycle_gate {
         WheelCycleGate::Deadzone => "Wheel: cycle",
         WheelCycleGate::Shift => "Shift+Wheel: cycle",
@@ -754,6 +808,36 @@ fn format_hint_text(
         1,
         format!("{cycle_hint} • 1-9: select • Release: run • Esc: cancel"),
     );
+    Some(lines.join("\n"))
+}
+
+fn match_type_label(match_type: GestureMatchType) -> &'static str {
+    match match_type {
+        GestureMatchType::Exact => "exact",
+        GestureMatchType::Prefix => "prefix",
+        GestureMatchType::Fuzzy => "fuzzy",
+    }
+}
+
+fn format_cheatsheet_text(
+    db: &Option<SharedGestureDb>,
+    limit: usize,
+) -> Option<String> {
+    let db = db.as_ref()?;
+    let guard = db.lock().ok()?;
+    let mut lines = Vec::new();
+    lines.push("Cheat sheet".to_string());
+    let mut count = 0;
+    for gesture in guard.gestures.iter().filter(|gesture| gesture.enabled) {
+        lines.push(format!("• {}", format_gesture_label(gesture)));
+        count += 1;
+        if count >= limit {
+            break;
+        }
+    }
+    if count == 0 {
+        lines.push("No gestures configured".to_string());
+    }
     Some(lines.join("\n"))
 }
 
