@@ -4,7 +4,8 @@ use multi_launcher::gui::{
     send_event, set_execute_action_hook, LauncherApp, WatchEvent, EXECUTE_ACTION_COUNT,
 };
 use multi_launcher::mouse_gestures::db::{
-    load_gestures, save_gestures, BindingEntry, GestureDb, GestureEntry, SCHEMA_VERSION,
+    load_gestures, save_gestures, BindingEntry, GestureCandidate, GestureDb, GestureEntry,
+    GestureMatchType, SCHEMA_VERSION,
 };
 use multi_launcher::mouse_gestures::engine::DirMode;
 use multi_launcher::plugin::PluginManager;
@@ -164,6 +165,70 @@ fn binding_resolution_is_deterministic() {
     let (gesture, binding) = db.match_binding("LR", DirMode::Four).unwrap();
     assert_eq!(gesture.label, "First");
     assert_eq!(binding.label, "Primary");
+}
+
+#[test]
+fn candidate_matching_ranks_exact_over_prefix_over_fuzzy() {
+    let db = GestureDb {
+        schema_version: SCHEMA_VERSION,
+        gestures: vec![
+            GestureEntry {
+                label: "Exact".into(),
+                tokens: "L".into(),
+                dir_mode: DirMode::Four,
+                stroke: Vec::new(),
+                enabled: true,
+                bindings: vec![BindingEntry {
+                    label: "Exact bind".into(),
+                    action: "stopwatch:show:1".into(),
+                    args: None,
+                    enabled: true,
+                }],
+            },
+            GestureEntry {
+                label: "Prefix".into(),
+                tokens: "LR".into(),
+                dir_mode: DirMode::Four,
+                stroke: Vec::new(),
+                enabled: true,
+                bindings: vec![BindingEntry {
+                    label: "Prefix bind".into(),
+                    action: "stopwatch:show:2".into(),
+                    args: None,
+                    enabled: true,
+                }],
+            },
+            GestureEntry {
+                label: "Fuzzy".into(),
+                tokens: "UL".into(),
+                dir_mode: DirMode::Four,
+                stroke: Vec::new(),
+                enabled: true,
+                bindings: vec![BindingEntry {
+                    label: "Fuzzy bind".into(),
+                    action: "stopwatch:show:3".into(),
+                    args: None,
+                    enabled: true,
+                }],
+            },
+        ],
+    };
+
+    let candidates = db.candidate_matches("L", DirMode::Four);
+    assert_eq!(candidates.len(), 3);
+    assert_match_type(&candidates[0], GestureMatchType::Exact, "Exact bind");
+    assert_match_type(&candidates[1], GestureMatchType::Prefix, "Prefix bind");
+    assert_match_type(&candidates[2], GestureMatchType::Fuzzy, "Fuzzy bind");
+}
+
+fn assert_match_type(
+    candidate: &GestureCandidate,
+    match_type: GestureMatchType,
+    binding_label: &str,
+) {
+    assert_eq!(candidate.match_type, match_type);
+    assert_eq!(candidate.bindings.len(), 1);
+    assert_eq!(candidate.bindings[0].label, binding_label);
 }
 
 #[test]

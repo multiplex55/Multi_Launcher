@@ -1,6 +1,10 @@
-use crate::mouse_gestures::db::{load_gestures, SharedGestureDb, GESTURES_FILE};
+use crate::mouse_gestures::db::{
+    load_gestures, GestureCandidate, GestureMatchType, SharedGestureDb, GESTURES_FILE,
+};
 use crate::mouse_gestures::engine::{DirMode, GestureTracker};
-use crate::mouse_gestures::overlay::{DefaultOverlayBackend, HintOverlay, OverlayBackend, TrailOverlay};
+use crate::mouse_gestures::overlay::{
+    DefaultOverlayBackend, HintOverlay, OverlayBackend, TrailOverlay,
+};
 use anyhow::anyhow;
 use once_cell::sync::OnceCell;
 #[cfg(windows)]
@@ -329,7 +333,7 @@ fn worker_loop(
     let mut selected_binding_idx: usize = 0;
     let mut cached_tokens = String::new();
     let mut cached_actions: Vec<crate::actions::Action> = Vec::new();
-    let mut cached_gesture_label: Option<String> = None;
+    let mut cached_candidates: Vec<GestureCandidate> = Vec::new();
 
     loop {
         #[cfg(windows)]
@@ -360,7 +364,7 @@ fn worker_loop(
                     selected_binding_idx = 0;
                     cached_tokens.clear();
                     cached_actions.clear();
-                    cached_gesture_label = None;
+                    cached_candidates.clear();
                     start_time = Instant::now();
                     let pos = cursor_provider.cursor_position().unwrap_or(start_pos);
                     start_pos = pos;
@@ -423,7 +427,7 @@ fn worker_loop(
                                         right_click_backend.send_right_click();
                                     }
                                     NoMatchBehavior::ShowNoMatchHint => {
-                                        hint_overlay.update("No match", None, cursor_pos);
+                                        hint_overlay.update("No match", cursor_pos);
                                     }
                                 }
                             }
@@ -443,7 +447,7 @@ fn worker_loop(
                         selected_binding_idx = 0;
                         cached_tokens.clear();
                         cached_actions.clear();
-                        cached_gesture_label = None;
+                        cached_candidates.clear();
                         #[cfg(windows)]
                         hook_dispatch().set_active(false);
                     }
@@ -463,10 +467,14 @@ fn worker_loop(
                         }
 
                         if let Some(pos) = cursor_provider.cursor_position() {
-                            let best_match = cached_gesture_label.as_deref().map(|label| {
-                                format_selected_hint(label, &cached_actions, selected_binding_idx)
-                            });
-                            hint_overlay.update(&cached_tokens, best_match.as_deref(), pos);
+                            if let Some(text) = format_hint_text(
+                                &cached_tokens,
+                                &cached_candidates,
+                                selected_binding_idx,
+                                config.no_match_behavior,
+                            ) {
+                                hint_overlay.update(&text, pos);
+                            }
                         }
                     }
                 }
@@ -484,7 +492,7 @@ fn worker_loop(
                         selected_binding_idx = 0;
                         cached_tokens.clear();
                         cached_actions.clear();
-                        cached_gesture_label = None;
+                        cached_candidates.clear();
                         #[cfg(windows)]
                         {
                             hook_dispatch().set_tracking(false);
@@ -520,25 +528,24 @@ fn worker_loop(
                         if let Some((gesture_label, actions)) =
                             match_binding_actions(&db, &tokens, config.dir_mode)
                         {
-                            cached_gesture_label = Some(gesture_label);
                             cached_actions = actions;
                         } else {
-                            if config.no_match_behavior == NoMatchBehavior::ShowNoMatchHint
-                                && !tokens.is_empty()
-                            {
-                                cached_gesture_label = Some("No match".to_string());
-                            } else {
-                                cached_gesture_label = None;
-                            }
                             cached_actions.clear();
                         }
+                        cached_candidates =
+                            candidate_matches(&db, &tokens, config.dir_mode, MAX_HINT_CANDIDATES);
                     }
 
-                    let best_match = cached_gesture_label.as_deref().map(|label| {
-                        format_selected_hint(label, &cached_actions, selected_binding_idx)
-                    });
-
-                    hint_overlay.update(&tokens, best_match.as_deref(), pos);
+                    if let Some(text) = format_hint_text(
+                        &tokens,
+                        &cached_candidates,
+                        selected_binding_idx,
+                        config.no_match_behavior,
+                    ) {
+                        hint_overlay.update(&text, pos);
+                    } else {
+                        hint_overlay.update("", pos);
+                    }
                     last_recognition = Instant::now();
                 }
             }
@@ -575,26 +582,8 @@ fn match_binding_actions(
     Some((gesture_label, actions))
 }
 
-fn format_selected_hint(
-    gesture_label: &str,
-    actions: &[crate::actions::Action],
-    selected_idx: usize,
-) -> String {
-    if actions.is_empty() {
-        return gesture_label.to_string();
-    }
-    let idx = selected_idx.min(actions.len().saturating_sub(1));
-    if actions.len() == 1 {
-        format!("{gesture_label}: {}", actions[idx].label)
-    } else {
-        format!(
-            "{gesture_label}: {} [{}/{}]",
-            actions[idx].label,
-            idx + 1,
-            actions.len()
-        )
-    }
-}
+const MAX_HINT_CANDIDATES: usize = 5;
+const MAX_HINT_PREVIEW_BINDINGS: usize = 3;
 
 #[allow(dead_code)]
 fn best_match_name(
@@ -607,6 +596,82 @@ fn best_match_name(
     guard
         .match_binding_owned(tokens, dir_mode)
         .map(|(label, binding)| format!("{}: {}", label, binding.label))
+}
+
+fn candidate_matches(
+    db: &Option<SharedGestureDb>,
+    tokens: &str,
+    dir_mode: DirMode,
+    limit: usize,
+) -> Vec<GestureCandidate> {
+    let db = match db.as_ref() {
+        Some(db) => db,
+        None => return Vec::new(),
+    };
+    let guard = match db.lock() {
+        Ok(guard) => guard,
+        Err(_) => return Vec::new(),
+    };
+    let mut candidates = guard.candidate_matches(tokens, dir_mode);
+    candidates.truncate(limit);
+    candidates
+}
+
+fn format_hint_text(
+    tokens: &str,
+    candidates: &[GestureCandidate],
+    selected_binding_idx: usize,
+    no_match_behavior: NoMatchBehavior,
+) -> Option<String> {
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    if let Some(candidate) = candidates.first() {
+        let bindings = &candidate.bindings;
+        let binding_count = bindings.len();
+        let selected_idx = if binding_count == 0 {
+            0
+        } else {
+            selected_binding_idx % binding_count
+        };
+        let binding_label = bindings
+            .get(selected_idx)
+            .map(|binding| binding.label.as_str())
+            .unwrap_or("No binding");
+        let mut line = format!("{tokens} — {binding_label}");
+        if binding_count > 1 {
+            line.push_str(&format!(" ({}/{})", selected_idx + 1, binding_count));
+        }
+        let indicator = match candidate.match_type {
+            GestureMatchType::Exact => "[exact]".to_string(),
+            GestureMatchType::Prefix => format!("[prefix {:.2}]", candidate.score),
+            GestureMatchType::Fuzzy => format!("[fuzzy {:.2}]", candidate.score),
+        };
+        line.push_str(&format!(" {indicator}"));
+        lines.push(line);
+
+        if binding_count > 1 {
+            let preview_count = MAX_HINT_PREVIEW_BINDINGS.min(binding_count.saturating_sub(1));
+            for offset in 1..=preview_count {
+                let idx = (selected_idx + offset) % binding_count;
+                lines.push(format!(
+                    "{}/{} {}",
+                    idx + 1,
+                    binding_count,
+                    bindings[idx].label
+                ));
+            }
+        }
+    } else if no_match_behavior == NoMatchBehavior::ShowNoMatchHint {
+        lines.push(format!("{tokens} — No match"));
+    } else {
+        lines.push(tokens.to_string());
+    }
+
+    lines.insert(1, "Wheel: cycle • Release: run • Esc: cancel".to_string());
+    Some(lines.join("\n"))
 }
 
 #[cfg(windows)]
@@ -708,8 +773,7 @@ impl HookBackend for DefaultHookBackend {
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::Win32::System::Threading::GetCurrentThreadId;
         use windows::Win32::UI::WindowsAndMessaging::{
-            DispatchMessageW, GetMessageW, PeekMessageW, TranslateMessage, MSG,
-            PM_NOREMOVE,
+            DispatchMessageW, GetMessageW, PeekMessageW, TranslateMessage, MSG, PM_NOREMOVE,
         };
         use windows::Win32::UI::WindowsAndMessaging::{
             SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL,

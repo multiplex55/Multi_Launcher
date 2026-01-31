@@ -44,6 +44,32 @@ pub struct GestureDb {
 
 pub type SharedGestureDb = Arc<Mutex<GestureDb>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GestureMatchType {
+    Exact,
+    Prefix,
+    Fuzzy,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GestureCandidate {
+    pub gesture_label: String,
+    pub tokens: String,
+    pub bindings: Vec<BindingEntry>,
+    pub match_type: GestureMatchType,
+    pub score: f32,
+}
+
+impl GestureMatchType {
+    fn rank(self) -> u8 {
+        match self {
+            GestureMatchType::Exact => 3,
+            GestureMatchType::Prefix => 2,
+            GestureMatchType::Fuzzy => 1,
+        }
+    }
+}
+
 impl Default for GestureDb {
     fn default() -> Self {
         Self {
@@ -128,6 +154,79 @@ impl GestureDb {
         }
         None
     }
+
+    pub fn candidate_matches(
+        &self,
+        tokens_prefix: &str,
+        dir_mode: DirMode,
+    ) -> Vec<GestureCandidate> {
+        if tokens_prefix.is_empty() {
+            return Vec::new();
+        }
+        let mut candidates = Vec::new();
+        for gesture in self
+            .gestures
+            .iter()
+            .filter(|gesture| gesture.enabled && gesture.dir_mode == dir_mode)
+        {
+            let bindings: Vec<BindingEntry> = gesture
+                .bindings
+                .iter()
+                .filter(|binding| binding.enabled)
+                .cloned()
+                .collect();
+            if bindings.is_empty() {
+                continue;
+            }
+
+            if gesture.tokens == tokens_prefix {
+                candidates.push(GestureCandidate {
+                    gesture_label: gesture.label.clone(),
+                    tokens: gesture.tokens.clone(),
+                    bindings,
+                    match_type: GestureMatchType::Exact,
+                    score: 1.0,
+                });
+                continue;
+            }
+
+            if gesture.tokens.starts_with(tokens_prefix) {
+                let score = tokens_prefix.len() as f32 / gesture.tokens.len() as f32;
+                candidates.push(GestureCandidate {
+                    gesture_label: gesture.label.clone(),
+                    tokens: gesture.tokens.clone(),
+                    bindings,
+                    match_type: GestureMatchType::Prefix,
+                    score,
+                });
+                continue;
+            }
+
+            if let Some(score) = fuzzy_score(tokens_prefix, &gesture.tokens) {
+                candidates.push(GestureCandidate {
+                    gesture_label: gesture.label.clone(),
+                    tokens: gesture.tokens.clone(),
+                    bindings,
+                    match_type: GestureMatchType::Fuzzy,
+                    score,
+                });
+            }
+        }
+
+        candidates.sort_by(|a, b| {
+            b.match_type
+                .rank()
+                .cmp(&a.match_type.rank())
+                .then_with(|| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| a.gesture_label.cmp(&b.gesture_label))
+                .then_with(|| a.tokens.cmp(&b.tokens))
+        });
+        candidates
+    }
 }
 
 impl BindingEntry {
@@ -198,4 +297,27 @@ fn default_enabled() -> bool {
 
 fn default_schema_version() -> u32 {
     SCHEMA_VERSION
+}
+
+fn fuzzy_score(needle: &str, haystack: &str) -> Option<f32> {
+    let mut matched = 0_usize;
+    let mut start_index = 0_usize;
+    let hay_chars: Vec<char> = haystack.chars().collect();
+    for ch in needle.chars() {
+        if let Some((idx, _)) = hay_chars
+            .iter()
+            .enumerate()
+            .skip(start_index)
+            .find(|(_, candidate)| **candidate == ch)
+        {
+            matched += 1;
+            start_index = idx + 1;
+        }
+    }
+
+    if matched == 0 {
+        return None;
+    }
+
+    Some(matched as f32 / hay_chars.len() as f32)
 }
