@@ -7,6 +7,7 @@ use crate::mouse_gestures::overlay::{
 };
 use anyhow::anyhow;
 use once_cell::sync::OnceCell;
+use std::collections::HashMap;
 #[cfg(windows)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,6 +35,7 @@ pub struct MouseGestureConfig {
     pub max_tokens: usize,
     pub cancel_behavior: CancelBehavior,
     pub no_match_behavior: NoMatchBehavior,
+    pub wheel_cycle_gate: WheelCycleGate,
 }
 
 impl Default for MouseGestureConfig {
@@ -56,6 +58,7 @@ impl Default for MouseGestureConfig {
             max_tokens: 10,
             cancel_behavior: CancelBehavior::DoNothing,
             no_match_behavior: NoMatchBehavior::DoNothing,
+            wheel_cycle_gate: WheelCycleGate::Deadzone,
         }
     }
 }
@@ -77,12 +80,36 @@ pub enum NoMatchBehavior {
     ShowNoMatchHint,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WheelCycleGate {
+    Deadzone,
+    Shift,
+}
+
+impl WheelCycleGate {
+    fn as_usize(self) -> usize {
+        match self {
+            WheelCycleGate::Deadzone => 0,
+            WheelCycleGate::Shift => 1,
+        }
+    }
+
+    fn from_usize(value: usize) -> Self {
+        match value {
+            1 => WheelCycleGate::Shift,
+            _ => WheelCycleGate::Deadzone,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum HookEvent {
     RButtonDown,
     RButtonUp,
-    WheelUp,
-    WheelDown,
+    CycleNext,
+    CyclePrev,
+    SelectBinding(usize),
     Cancel,
 }
 
@@ -238,6 +265,9 @@ impl MouseGestureService {
             return;
         }
 
+        #[cfg(windows)]
+        hook_dispatch().set_wheel_gate(self.config.wheel_cycle_gate);
+
         let (event_tx, event_rx) = mpsc::channel();
         let (stop_tx, stop_rx) = mpsc::channel();
 
@@ -334,6 +364,9 @@ fn worker_loop(
     let mut cached_tokens = String::new();
     let mut cached_actions: Vec<crate::actions::Action> = Vec::new();
     let mut cached_candidates: Vec<GestureCandidate> = Vec::new();
+    let mut selection_state = load_selection_state(GESTURES_STATE_FILE);
+    let mut exact_selection_key: Option<String> = None;
+    let mut exact_binding_count: usize = 0;
 
     loop {
         #[cfg(windows)]
@@ -365,6 +398,8 @@ fn worker_loop(
                     cached_tokens.clear();
                     cached_actions.clear();
                     cached_candidates.clear();
+                    exact_selection_key = None;
+                    exact_binding_count = 0;
                     start_time = Instant::now();
                     let pos = cursor_provider.cursor_position().unwrap_or(start_pos);
                     start_pos = pos;
@@ -448,22 +483,49 @@ fn worker_loop(
                         cached_tokens.clear();
                         cached_actions.clear();
                         cached_candidates.clear();
+                        exact_selection_key = None;
+                        exact_binding_count = 0;
                         #[cfg(windows)]
                         hook_dispatch().set_active(false);
                     }
                 }
 
-                HookEvent::WheelUp | HookEvent::WheelDown => {
-                    if active && exceeded_deadzone && cached_actions.len() > 1 {
+                HookEvent::CycleNext | HookEvent::CyclePrev | HookEvent::SelectBinding(_) => {
+                    let allow_cycle = match config.wheel_cycle_gate {
+                        WheelCycleGate::Deadzone => exceeded_deadzone,
+                        WheelCycleGate::Shift => true,
+                    };
+                    if active && allow_cycle && !cached_actions.is_empty() {
                         let len = cached_actions.len();
                         match event {
-                            HookEvent::WheelUp => {
+                            HookEvent::CycleNext if len > 1 => {
                                 selected_binding_idx = (selected_binding_idx + 1) % len;
                             }
-                            HookEvent::WheelDown => {
+                            HookEvent::CyclePrev if len > 1 => {
                                 selected_binding_idx = (selected_binding_idx + len - 1) % len;
                             }
+                            HookEvent::SelectBinding(idx) => {
+                                if idx < len {
+                                    selected_binding_idx = idx;
+                                }
+                            }
                             _ => {}
+                        }
+
+                        if let Some(key) = exact_selection_key.as_ref() {
+                            if exact_binding_count > 0 {
+                                let stored_idx = selected_binding_idx % exact_binding_count;
+                                if selection_state
+                                    .selections
+                                    .get(key)
+                                    .copied()
+                                    .unwrap_or(usize::MAX)
+                                    != stored_idx
+                                {
+                                    selection_state.selections.insert(key.clone(), stored_idx);
+                                    save_selection_state(GESTURES_STATE_FILE, &selection_state);
+                                }
+                            }
                         }
 
                         if let Some(pos) = cursor_provider.cursor_position() {
@@ -472,6 +534,7 @@ fn worker_loop(
                                 &cached_candidates,
                                 selected_binding_idx,
                                 config.no_match_behavior,
+                                config.wheel_cycle_gate,
                             ) {
                                 hint_overlay.update(&text, pos);
                             }
@@ -493,6 +556,8 @@ fn worker_loop(
                         cached_tokens.clear();
                         cached_actions.clear();
                         cached_candidates.clear();
+                        exact_selection_key = None;
+                        exact_binding_count = 0;
                         #[cfg(windows)]
                         {
                             hook_dispatch().set_tracking(false);
@@ -536,11 +601,31 @@ fn worker_loop(
                             candidate_matches(&db, &tokens, config.dir_mode, MAX_HINT_CANDIDATES);
                     }
 
+                    if let Some(candidate) = cached_candidates
+                        .iter()
+                        .find(|candidate| candidate.match_type == GestureMatchType::Exact)
+                    {
+                        let new_key = selection_key(&candidate.gesture_label, &candidate.tokens);
+                        if exact_selection_key.as_deref() != Some(new_key.as_str()) {
+                            selected_binding_idx = selection_state
+                                .selections
+                                .get(&new_key)
+                                .copied()
+                                .unwrap_or(0);
+                        }
+                        exact_selection_key = Some(new_key);
+                        exact_binding_count = candidate.bindings.len();
+                    } else {
+                        exact_selection_key = None;
+                        exact_binding_count = 0;
+                    }
+
                     if let Some(text) = format_hint_text(
                         &tokens,
                         &cached_candidates,
                         selected_binding_idx,
                         config.no_match_behavior,
+                        config.wheel_cycle_gate,
                     ) {
                         hint_overlay.update(&text, pos);
                     } else {
@@ -583,7 +668,6 @@ fn match_binding_actions(
 }
 
 const MAX_HINT_CANDIDATES: usize = 5;
-const MAX_HINT_PREVIEW_BINDINGS: usize = 3;
 
 #[allow(dead_code)]
 fn best_match_name(
@@ -622,6 +706,7 @@ fn format_hint_text(
     candidates: &[GestureCandidate],
     selected_binding_idx: usize,
     no_match_behavior: NoMatchBehavior,
+    wheel_cycle_gate: WheelCycleGate,
 ) -> Option<String> {
     if tokens.is_empty() {
         return None;
@@ -651,15 +736,8 @@ fn format_hint_text(
         lines.push(line);
 
         if binding_count > 1 {
-            let preview_count = MAX_HINT_PREVIEW_BINDINGS.min(binding_count.saturating_sub(1));
-            for offset in 1..=preview_count {
-                let idx = (selected_idx + offset) % binding_count;
-                lines.push(format!(
-                    "{}/{} {}",
-                    idx + 1,
-                    binding_count,
-                    bindings[idx].label
-                ));
+            for (idx, binding) in bindings.iter().enumerate() {
+                lines.push(format!("{}) {}", idx + 1, binding.label));
             }
         }
     } else if no_match_behavior == NoMatchBehavior::ShowNoMatchHint {
@@ -668,8 +746,45 @@ fn format_hint_text(
         lines.push(tokens.to_string());
     }
 
-    lines.insert(1, "Wheel: cycle • Release: run • Esc: cancel".to_string());
+    let cycle_hint = match wheel_cycle_gate {
+        WheelCycleGate::Deadzone => "Wheel: cycle",
+        WheelCycleGate::Shift => "Shift+Wheel: cycle",
+    };
+    lines.insert(
+        1,
+        format!("{cycle_hint} • 1-9: select • Release: run • Esc: cancel"),
+    );
     Some(lines.join("\n"))
+}
+
+const GESTURES_STATE_FILE: &str = "mouse_gestures_state.json";
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct GestureSelectionState {
+    selections: HashMap<String, usize>,
+}
+
+fn selection_key(label: &str, tokens: &str) -> String {
+    format!("{label}::{tokens}")
+}
+
+fn load_selection_state(path: &str) -> GestureSelectionState {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    if content.trim().is_empty() {
+        return GestureSelectionState::default();
+    }
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn save_selection_state(path: &str, state: &GestureSelectionState) {
+    match serde_json::to_string_pretty(state) {
+        Ok(json) => {
+            if let Err(err) = std::fs::write(path, json) {
+                tracing::error!(?err, "failed to save mouse gesture selection state");
+            }
+        }
+        Err(err) => tracing::error!(?err, "failed to serialize mouse gesture selection state"),
+    }
 }
 
 #[cfg(windows)]
@@ -987,6 +1102,7 @@ struct HookDispatch {
     tracking: AtomicBool,
     injecting: AtomicBool,
     active: AtomicBool,
+    wheel_gate: AtomicUsize,
     sender: Mutex<Option<Sender<HookEvent>>>,
 }
 
@@ -1020,6 +1136,14 @@ impl HookDispatch {
         self.active.load(Ordering::Acquire)
     }
 
+    fn set_wheel_gate(&self, gate: WheelCycleGate) {
+        self.wheel_gate.store(gate.as_usize(), Ordering::Release);
+    }
+
+    fn wheel_gate(&self) -> WheelCycleGate {
+        WheelCycleGate::from_usize(self.wheel_gate.load(Ordering::Acquire))
+    }
+
     fn set_sender(&self, sender: Option<Sender<HookEvent>>) {
         if let Ok(mut guard) = self.sender.lock() {
             *guard = sender;
@@ -1037,6 +1161,7 @@ fn hook_dispatch() -> &'static HookDispatch {
         tracking: AtomicBool::new(false),
         injecting: AtomicBool::new(false),
         active: AtomicBool::new(false),
+        wheel_gate: AtomicUsize::new(WheelCycleGate::Deadzone.as_usize()),
         sender: Mutex::new(None),
     })
 }
@@ -1077,13 +1202,27 @@ unsafe extern "system" fn mouse_hook_proc(
                 }
 
                 // Only consume wheel events while a gesture is actively being tracked.
-                if msg == WM_MOUSEWHEEL && !dispatch.is_tracking() {
-                    return CallNextHookEx(
-                        windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
-                        n_code,
-                        w_param,
-                        l_param,
-                    );
+                if msg == WM_MOUSEWHEEL {
+                    let allow = match dispatch.wheel_gate() {
+                        WheelCycleGate::Deadzone => dispatch.is_tracking(),
+                        WheelCycleGate::Shift => {
+                            use windows::Win32::UI::Input::KeyboardAndMouse::{
+                                GetAsyncKeyState, VK_SHIFT,
+                            };
+                            let shift_down = unsafe {
+                                (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0
+                            };
+                            dispatch.is_active() && shift_down
+                        }
+                    };
+                    if !allow {
+                        return CallNextHookEx(
+                            windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
+                            n_code,
+                            w_param,
+                            l_param,
+                        );
+                    }
                 }
 
                 if let Ok(guard) = dispatch.sender.try_lock() {
@@ -1099,9 +1238,9 @@ unsafe extern "system" fn mouse_hook_proc(
                             // mouseData high word contains signed wheel delta (WHEEL_DELTA multiples).
                             let delta = ((info.mouseData >> 16) & 0xFFFF) as i16;
                             if delta > 0 {
-                                let _ = sender.send(HookEvent::WheelUp);
+                                let _ = sender.send(HookEvent::CycleNext);
                             } else if delta < 0 {
-                                let _ = sender.send(HookEvent::WheelDown);
+                                let _ = sender.send(HookEvent::CyclePrev);
                             }
                         }
                     }
@@ -1127,7 +1266,9 @@ unsafe extern "system" fn keyboard_hook_proc(
     w_param: windows::Win32::Foundation::WPARAM,
     l_param: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
-    use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9, VK_ESCAPE,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, HC_ACTION, KBDLLHOOKSTRUCT, KBDLLHOOKSTRUCT_FLAGS, WM_KEYDOWN,
         WM_SYSKEYDOWN,
@@ -1138,15 +1279,33 @@ unsafe extern "system" fn keyboard_hook_proc(
         if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
             let info = &*(l_param.0 as *const KBDLLHOOKSTRUCT);
             let injected = (info.flags & KBDLLHOOKSTRUCT_FLAGS(0x10)) != KBDLLHOOKSTRUCT_FLAGS(0);
-            if !injected && info.vkCode == VK_ESCAPE.0 as u32 {
+            if !injected {
                 let dispatch = hook_dispatch();
                 if dispatch.enabled.load(Ordering::Acquire) && dispatch.is_active() {
                     if let Ok(guard) = dispatch.sender.try_lock() {
                         if let Some(sender) = guard.as_ref() {
-                            let _ = sender.send(HookEvent::Cancel);
+                            if info.vkCode == VK_ESCAPE.0 as u32 {
+                                let _ = sender.send(HookEvent::Cancel);
+                                return windows::Win32::Foundation::LRESULT(1);
+                            }
+                            let selection = match info.vkCode {
+                                code if code == VK_1.0 as u32 => Some(0),
+                                code if code == VK_2.0 as u32 => Some(1),
+                                code if code == VK_3.0 as u32 => Some(2),
+                                code if code == VK_4.0 as u32 => Some(3),
+                                code if code == VK_5.0 as u32 => Some(4),
+                                code if code == VK_6.0 as u32 => Some(5),
+                                code if code == VK_7.0 as u32 => Some(6),
+                                code if code == VK_8.0 as u32 => Some(7),
+                                code if code == VK_9.0 as u32 => Some(8),
+                                _ => None,
+                            };
+                            if let Some(idx) = selection {
+                                let _ = sender.send(HookEvent::SelectBinding(idx));
+                                return windows::Win32::Foundation::LRESULT(1);
+                            }
                         }
                     }
-                    return windows::Win32::Foundation::LRESULT(1);
                 }
             }
         }

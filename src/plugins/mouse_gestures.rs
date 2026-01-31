@@ -7,6 +7,7 @@ use crate::mouse_gestures::db::{
 };
 use crate::mouse_gestures::service::{
     with_service as with_gesture_service, CancelBehavior, MouseGestureConfig, NoMatchBehavior,
+    WheelCycleGate,
 };
 use crate::plugin::Plugin;
 use eframe::egui;
@@ -41,6 +42,8 @@ pub struct MouseGestureSettings {
     pub cancel_behavior: CancelBehavior,
     #[serde(default = "default_no_match_behavior")]
     pub no_match_behavior: NoMatchBehavior,
+    #[serde(default = "default_wheel_cycle_gate")]
+    pub wheel_cycle_gate: WheelCycleGate,
 }
 
 impl Default for MouseGestureSettings {
@@ -56,6 +59,7 @@ impl Default for MouseGestureSettings {
             hint_offset: default_hint_offset(),
             cancel_behavior: default_cancel_behavior(),
             no_match_behavior: default_no_match_behavior(),
+            wheel_cycle_gate: default_wheel_cycle_gate(),
         }
     }
 }
@@ -98,6 +102,10 @@ fn default_cancel_behavior() -> CancelBehavior {
 
 fn default_no_match_behavior() -> NoMatchBehavior {
     NoMatchBehavior::DoNothing
+}
+
+fn default_wheel_cycle_gate() -> WheelCycleGate {
+    WheelCycleGate::Deadzone
 }
 
 #[derive(Debug)]
@@ -154,6 +162,7 @@ impl MouseGestureRuntime {
         config.hint_offset = self.settings.hint_offset;
         config.cancel_behavior = self.settings.cancel_behavior;
         config.no_match_behavior = self.settings.no_match_behavior;
+        config.wheel_cycle_gate = self.settings.wheel_cycle_gate;
         with_gesture_service(|svc| {
             svc.update_config(config);
             svc.update_db(Some(self.db.clone()));

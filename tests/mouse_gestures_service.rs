@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::Duration;
+use tempfile::tempdir;
 
 #[derive(Default)]
 struct TestOverlayState {
@@ -350,7 +351,180 @@ fn hint_text_includes_best_guess_and_match_type() {
 
     let hints = hint_state.hints.lock().expect("lock hints");
     let last = hints.last().expect("hint text");
-    assert_eq!(last, "R\nWheel: cycle • Release: run • Esc: cancel");
+    assert_eq!(
+        last,
+        "R\nWheel: cycle • 1-9: select • Release: run • Esc: cancel"
+    );
+
+    service.stop();
+}
+
+#[test]
+fn selection_persists_across_gesture_sessions() {
+    let dir = tempdir().expect("tempdir");
+    std::env::set_current_dir(dir.path()).expect("set current dir");
+
+    let (backend, handle) = MockHookBackend::new();
+    let hint_state = Arc::new(HintRecordingState::default());
+    let overlay_factory: Arc<dyn OverlayFactory> = Arc::new(HintRecordingFactory {
+        state: Arc::clone(&hint_state),
+    });
+    let click_backend = Arc::new(TestRightClickBackend::default());
+    let click_backend_trait: Arc<dyn RightClickBackend> = click_backend.clone();
+    let cursor_provider = Arc::new(TestCursorProvider::new((0.0, 0.0)));
+    let cursor_provider_trait: Arc<dyn CursorPositionProvider> = cursor_provider.clone();
+
+    let mut service = MouseGestureService::new_with_backend_and_overlays(
+        Box::new(backend),
+        overlay_factory,
+        Arc::clone(&click_backend_trait),
+        Arc::clone(&cursor_provider_trait),
+    );
+
+    let db = GestureDb {
+        schema_version: SCHEMA_VERSION,
+        gestures: vec![GestureEntry {
+            label: "Open Browser".into(),
+            tokens: "R".into(),
+            dir_mode: DirMode::Four,
+            stroke: Vec::new(),
+            enabled: true,
+            bindings: vec![
+                BindingEntry {
+                    label: "Primary".into(),
+                    kind: BindingKind::Execute,
+                    action: "stopwatch:show:1".into(),
+                    args: None,
+                    enabled: true,
+                },
+                BindingEntry {
+                    label: "Secondary".into(),
+                    kind: BindingKind::Execute,
+                    action: "stopwatch:show:2".into(),
+                    args: None,
+                    enabled: true,
+                },
+            ],
+        }],
+    };
+    service.update_db(Some(Arc::new(Mutex::new(db.clone()))));
+
+    let mut config = MouseGestureConfig::default();
+    config.enabled = true;
+    config.threshold_px = 1.0;
+    config.deadzone_px = 0.1;
+    config.trail_interval_ms = 1;
+    config.recognition_interval_ms = 1;
+    service.update_config(config.clone());
+
+    assert!(handle.emit(HookEvent::RButtonDown));
+    sleep(Duration::from_millis(5));
+    cursor_provider.set_position((50.0, 0.0));
+    sleep(Duration::from_millis(20));
+    assert!(handle.emit(HookEvent::SelectBinding(1)));
+    sleep(Duration::from_millis(10));
+    assert!(handle.emit(HookEvent::RButtonUp));
+    sleep(Duration::from_millis(20));
+
+    service.stop();
+
+    let (backend, handle) = MockHookBackend::new();
+    let hint_state = Arc::new(HintRecordingState::default());
+    let overlay_factory: Arc<dyn OverlayFactory> = Arc::new(HintRecordingFactory {
+        state: Arc::clone(&hint_state),
+    });
+    let mut service = MouseGestureService::new_with_backend_and_overlays(
+        Box::new(backend),
+        overlay_factory,
+        Arc::clone(&click_backend_trait),
+        Arc::clone(&cursor_provider_trait),
+    );
+    service.update_db(Some(Arc::new(Mutex::new(db))));
+    service.update_config(config);
+
+    assert!(handle.emit(HookEvent::RButtonDown));
+    sleep(Duration::from_millis(5));
+    cursor_provider.set_position((50.0, 0.0));
+    sleep(Duration::from_millis(20));
+
+    let hints = hint_state.hints.lock().expect("lock hints");
+    let last = hints.last().expect("hint text");
+    let first_line = last.lines().next().expect("first line");
+    assert!(first_line.contains("Secondary"));
+
+    service.stop();
+}
+
+#[test]
+fn numeric_selection_updates_hint_text() {
+    let dir = tempdir().expect("tempdir");
+    std::env::set_current_dir(dir.path()).expect("set current dir");
+
+    let (backend, handle) = MockHookBackend::new();
+    let hint_state = Arc::new(HintRecordingState::default());
+    let overlay_factory: Arc<dyn OverlayFactory> = Arc::new(HintRecordingFactory {
+        state: Arc::clone(&hint_state),
+    });
+    let click_backend = Arc::new(TestRightClickBackend::default());
+    let click_backend_trait: Arc<dyn RightClickBackend> = click_backend.clone();
+    let cursor_provider = Arc::new(TestCursorProvider::new((0.0, 0.0)));
+    let cursor_provider_trait: Arc<dyn CursorPositionProvider> = cursor_provider.clone();
+
+    let mut service = MouseGestureService::new_with_backend_and_overlays(
+        Box::new(backend),
+        overlay_factory,
+        Arc::clone(&click_backend_trait),
+        Arc::clone(&cursor_provider_trait),
+    );
+
+    let db = GestureDb {
+        schema_version: SCHEMA_VERSION,
+        gestures: vec![GestureEntry {
+            label: "Open Browser".into(),
+            tokens: "R".into(),
+            dir_mode: DirMode::Four,
+            stroke: Vec::new(),
+            enabled: true,
+            bindings: vec![
+                BindingEntry {
+                    label: "First".into(),
+                    kind: BindingKind::Execute,
+                    action: "stopwatch:show:1".into(),
+                    args: None,
+                    enabled: true,
+                },
+                BindingEntry {
+                    label: "Second".into(),
+                    kind: BindingKind::Execute,
+                    action: "stopwatch:show:2".into(),
+                    args: None,
+                    enabled: true,
+                },
+            ],
+        }],
+    };
+    service.update_db(Some(Arc::new(Mutex::new(db))));
+
+    let mut config = MouseGestureConfig::default();
+    config.enabled = true;
+    config.threshold_px = 1.0;
+    config.deadzone_px = 0.1;
+    config.trail_interval_ms = 1;
+    config.recognition_interval_ms = 1;
+    service.update_config(config);
+
+    assert!(handle.emit(HookEvent::RButtonDown));
+    sleep(Duration::from_millis(5));
+    cursor_provider.set_position((50.0, 0.0));
+    sleep(Duration::from_millis(20));
+
+    assert!(handle.emit(HookEvent::SelectBinding(1)));
+    sleep(Duration::from_millis(10));
+
+    let hints = hint_state.hints.lock().expect("lock hints");
+    let last = hints.last().expect("hint text");
+    let first_line = last.lines().next().expect("first line");
+    assert!(first_line.contains("Second"));
 
     service.stop();
 }
