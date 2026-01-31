@@ -56,6 +56,7 @@ fn mouse_gestures_settings_ignore_legacy_fields() {
     let value = serde_json::json!({
         "enabled": true,
         "require_button": false,
+        "debug_logging": true,
         "show_trail": true,
         "trail_color": [255, 0, 0, 255],
         "trail_width": 2.0,
@@ -70,5 +71,5 @@ fn mouse_gestures_settings_ignore_legacy_fields() {
     let parsed: MouseGestureSettings =
         serde_json::from_value(value).expect("deserialize legacy settings");
     assert!(parsed.enabled);
-    assert!(!parsed.require_button);
+    assert!(parsed.debug_logging);
 }

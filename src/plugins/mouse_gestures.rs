@@ -24,8 +24,8 @@ const PLUGIN_NAME: &str = "mouse_gestures";
 pub struct MouseGestureSettings {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    #[serde(default = "default_require_button")]
-    pub require_button: bool,
+    #[serde(default = "default_debug_logging")]
+    pub debug_logging: bool,
     #[serde(default = "default_show_trail")]
     pub show_trail: bool,
     #[serde(default = "default_trail_color")]
@@ -52,7 +52,7 @@ impl Default for MouseGestureSettings {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
-            require_button: default_require_button(),
+            debug_logging: default_debug_logging(),
             show_trail: default_show_trail(),
             trail_color: default_trail_color(),
             trail_width: default_trail_width(),
@@ -71,8 +71,8 @@ fn default_enabled() -> bool {
     true
 }
 
-fn default_require_button() -> bool {
-    true
+fn default_debug_logging() -> bool {
+    false
 }
 
 fn default_show_trail() -> bool {
@@ -104,7 +104,7 @@ fn default_cancel_behavior() -> CancelBehavior {
 }
 
 fn default_no_match_behavior() -> NoMatchBehavior {
-    NoMatchBehavior::DoNothing
+    NoMatchBehavior::PassThroughClick
 }
 
 fn default_wheel_cycle_gate() -> WheelCycleGate {
@@ -161,6 +161,7 @@ impl MouseGestureRuntime {
     fn apply(&self) {
         let mut config = MouseGestureConfig::default();
         config.enabled = self.settings.enabled && self.plugin_enabled;
+        config.debug_logging = self.settings.debug_logging;
         config.trail_start_move_px = self.settings.trail_start_move_px;
         config.show_trail = self.settings.show_trail;
         config.trail_color = self.settings.trail_color;
@@ -465,7 +466,7 @@ impl Plugin for MouseGesturesPlugin {
             .checkbox(&mut cfg.enabled, "Enable mouse gestures")
             .changed();
         changed |= ui
-            .checkbox(&mut cfg.require_button, "Require gesture button held")
+            .checkbox(&mut cfg.debug_logging, "Enable debug logging")
             .changed();
 
         changed |= ui
@@ -571,6 +572,7 @@ impl Plugin for MouseGesturesPlugin {
                         .changed();
                 });
         });
+        ui.small("Fallback runs when a gesture does not match; default is pass-through right-click.");
 
         // Only write+apply when something changed.
         if changed {
