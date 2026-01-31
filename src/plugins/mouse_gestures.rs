@@ -179,16 +179,6 @@ impl MouseGestureRuntime {
     }
 }
 
-pub fn toggle_practice_mode() -> bool {
-    let mut enabled = false;
-    with_service(|svc| {
-        svc.settings.practice_mode = !svc.settings.practice_mode;
-        enabled = svc.settings.practice_mode;
-        svc.apply();
-    });
-    enabled
-}
-
 static SERVICE: OnceCell<Mutex<MouseGestureRuntime>> = OnceCell::new();
 
 fn with_service<F>(f: F)
@@ -269,12 +259,6 @@ impl MouseGesturesPlugin {
                 action: "query:mg conflicts".into(),
                 args: None,
             },
-            Action {
-                label: "mg practice".into(),
-                desc: "Toggle mouse gesture practice mode".into(),
-                action: "mg:practice".into(),
-                args: None,
-            },
         ]
     }
 
@@ -348,14 +332,6 @@ impl Plugin for MouseGesturesPlugin {
                 label: "Add mouse gesture binding".into(),
                 desc: "Mouse gestures".into(),
                 action: "mg:dialog:binding".into(),
-                args: None,
-            }];
-        }
-        if strip_prefix_ci(trimmed, "mg practice").is_some() {
-            return vec![Action {
-                label: "Toggle mouse gesture practice mode".into(),
-                desc: "Mouse gestures".into(),
-                action: "mg:practice".into(),
                 args: None,
             }];
         }

@@ -43,6 +43,14 @@ fn dashboard_enabled_by_default() {
 }
 
 #[test]
+fn gesture_widgets_registered() {
+    let registry = WidgetRegistry::with_defaults();
+    assert!(registry.contains("gesture_cheat_sheet"));
+    assert!(registry.contains("gesture_recent"));
+    assert!(registry.contains("gesture_health"));
+}
+
+#[test]
 fn unknown_widgets_removed_during_normalization() {
     let mut cfg = DashboardConfig {
         version: 1,

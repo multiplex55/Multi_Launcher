@@ -8,6 +8,8 @@ use crate::plugins::fav::{load_favs, FavEntry, FAV_FILE};
 use crate::plugins::note::{load_notes, Note};
 use crate::plugins::snippets::{load_snippets, SnippetEntry, SNIPPETS_FILE};
 use crate::plugins::todo::{load_todos, TodoEntry, TODO_FILE};
+use crate::mouse_gestures::db::{load_gestures, GestureDb, GESTURES_FILE};
+use crate::mouse_gestures::usage::{load_usage, GestureUsageEntry, GESTURES_USAGE_FILE};
 use crate::{launcher, launcher::RecycleBinInfo};
 use chrono::Local;
 use std::sync::{Arc, Mutex};
@@ -40,6 +42,12 @@ impl From<RecycleBinInfo> for RecycleBinSnapshot {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct GestureSnapshot {
+    pub db: Arc<GestureDb>,
+    pub usage: Arc<Vec<GestureUsageEntry>>,
+}
+
 #[derive(Clone)]
 pub struct DashboardDataSnapshot {
     pub clipboard_history: Arc<Vec<String>>,
@@ -49,6 +57,7 @@ pub struct DashboardDataSnapshot {
     pub calendar: Arc<CalendarSnapshot>,
     pub processes: Arc<Vec<Action>>,
     pub favorites: Arc<Vec<FavEntry>>,
+    pub gestures: Arc<GestureSnapshot>,
     pub process_error: Option<String>,
     pub system_status: Option<SystemStatusSnapshot>,
     pub recycle_bin: Option<RecycleBinSnapshot>,
@@ -64,6 +73,7 @@ impl Default for DashboardDataSnapshot {
             calendar: Arc::new(CalendarSnapshot::default()),
             processes: Arc::new(Vec::new()),
             favorites: Arc::new(Vec::new()),
+            gestures: Arc::new(GestureSnapshot::default()),
             process_error: None,
             system_status: None,
             recycle_bin: None,
@@ -81,6 +91,7 @@ impl DashboardDataSnapshot {
             calendar: Arc::clone(&self.calendar),
             processes: Arc::clone(&self.processes),
             favorites: Arc::clone(&self.favorites),
+            gestures: Arc::clone(&self.gestures),
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
             recycle_bin: self.recycle_bin.clone(),
@@ -96,6 +107,7 @@ impl DashboardDataSnapshot {
             calendar: Arc::clone(&self.calendar),
             processes: Arc::clone(&self.processes),
             favorites: Arc::clone(&self.favorites),
+            gestures: Arc::clone(&self.gestures),
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
             recycle_bin: self.recycle_bin.clone(),
@@ -111,6 +123,7 @@ impl DashboardDataSnapshot {
             calendar: Arc::clone(&self.calendar),
             processes: Arc::clone(&self.processes),
             favorites: Arc::clone(&self.favorites),
+            gestures: Arc::clone(&self.gestures),
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
             recycle_bin: self.recycle_bin.clone(),
@@ -126,6 +139,7 @@ impl DashboardDataSnapshot {
             calendar: Arc::clone(&self.calendar),
             processes: Arc::clone(&self.processes),
             favorites: Arc::clone(&self.favorites),
+            gestures: Arc::clone(&self.gestures),
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
             recycle_bin: self.recycle_bin.clone(),
@@ -141,6 +155,7 @@ impl DashboardDataSnapshot {
             calendar: Arc::clone(&self.calendar),
             processes: Arc::clone(&self.processes),
             favorites: Arc::new(favorites),
+            gestures: Arc::clone(&self.gestures),
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
             recycle_bin: self.recycle_bin.clone(),
@@ -156,6 +171,7 @@ impl DashboardDataSnapshot {
             calendar: Arc::clone(&self.calendar),
             processes: Arc::new(processes),
             favorites: Arc::clone(&self.favorites),
+            gestures: Arc::clone(&self.gestures),
             process_error,
             system_status: self.system_status.clone(),
             recycle_bin: self.recycle_bin.clone(),
@@ -171,6 +187,7 @@ impl DashboardDataSnapshot {
             calendar: Arc::clone(&self.calendar),
             processes: Arc::clone(&self.processes),
             favorites: Arc::clone(&self.favorites),
+            gestures: Arc::clone(&self.gestures),
             process_error: self.process_error.clone(),
             system_status,
             recycle_bin: self.recycle_bin.clone(),
@@ -186,6 +203,7 @@ impl DashboardDataSnapshot {
             calendar: Arc::clone(&self.calendar),
             processes: Arc::clone(&self.processes),
             favorites: Arc::clone(&self.favorites),
+            gestures: Arc::clone(&self.gestures),
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
             recycle_bin,
@@ -201,6 +219,26 @@ impl DashboardDataSnapshot {
             calendar: Arc::new(calendar),
             processes: Arc::clone(&self.processes),
             favorites: Arc::clone(&self.favorites),
+            gestures: Arc::clone(&self.gestures),
+            process_error: self.process_error.clone(),
+            system_status: self.system_status.clone(),
+            recycle_bin: self.recycle_bin.clone(),
+        }
+    }
+
+    fn with_gestures(&self, db: GestureDb, usage: Vec<GestureUsageEntry>) -> Self {
+        Self {
+            clipboard_history: Arc::clone(&self.clipboard_history),
+            snippets: Arc::clone(&self.snippets),
+            notes: Arc::clone(&self.notes),
+            todos: Arc::clone(&self.todos),
+            calendar: Arc::clone(&self.calendar),
+            processes: Arc::clone(&self.processes),
+            favorites: Arc::clone(&self.favorites),
+            gestures: Arc::new(GestureSnapshot {
+                db: Arc::new(db),
+                usage: Arc::new(usage),
+            }),
             process_error: self.process_error.clone(),
             system_status: self.system_status.clone(),
             recycle_bin: self.recycle_bin.clone(),
@@ -259,6 +297,7 @@ impl DashboardDataCache {
         self.refresh_todos();
         self.refresh_calendar();
         self.refresh_favorites();
+        self.refresh_gestures();
         self.refresh_processes(plugins);
         self.refresh_system_status();
         self.refresh_recycle_bin();
@@ -313,6 +352,14 @@ impl DashboardDataCache {
         let favorites = load_favs(FAV_FILE).unwrap_or_default();
         if let Ok(mut state) = self.state.lock() {
             state.snapshot = Arc::new(state.snapshot.with_favorites(favorites));
+        }
+    }
+
+    pub fn refresh_gestures(&self) {
+        let db = load_gestures(GESTURES_FILE).unwrap_or_default();
+        let usage = load_usage(GESTURES_USAGE_FILE);
+        if let Ok(mut state) = self.state.lock() {
+            state.snapshot = Arc::new(state.snapshot.with_gestures(db, usage));
         }
     }
 
