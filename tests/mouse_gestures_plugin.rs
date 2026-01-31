@@ -15,7 +15,7 @@ fn mouse_gestures_commands_match_expected_labels() {
         action_strings,
         vec![
             "query:mg ",
-            "settings:dialog",
+            "mg:dialog:settings",
             "mg:dialog",
             "mg:dialog:binding",
             "query:mg list",
