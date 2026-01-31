@@ -1,5 +1,6 @@
 use crate::mouse_gestures::db::{
-    load_gestures, GestureCandidate, GestureMatchType, SharedGestureDb, GESTURES_FILE,
+    format_gesture_label, load_gestures, GestureCandidate, GestureMatchType, SharedGestureDb,
+    GESTURES_FILE,
 };
 use crate::mouse_gestures::engine::{DirMode, GestureTracker};
 use crate::mouse_gestures::overlay::{
@@ -36,6 +37,7 @@ pub struct MouseGestureConfig {
     pub cancel_behavior: CancelBehavior,
     pub no_match_behavior: NoMatchBehavior,
     pub wheel_cycle_gate: WheelCycleGate,
+    pub practice_mode: bool,
 }
 
 impl Default for MouseGestureConfig {
@@ -59,6 +61,7 @@ impl Default for MouseGestureConfig {
             cancel_behavior: CancelBehavior::DoNothing,
             no_match_behavior: NoMatchBehavior::DoNothing,
             wheel_cycle_gate: WheelCycleGate::Deadzone,
+            practice_mode: false,
         }
     }
 }
@@ -360,8 +363,11 @@ fn worker_loop(
     let mut last_trail = Instant::now();
     let mut last_recognition = Instant::now();
     let mut start_time = Instant::now();
+    let mut cheat_sheet_visible = false;
+    let mut pending_selection_idx: Option<usize> = None;
     let mut selected_binding_idx: usize = 0;
     let mut cached_tokens = String::new();
+    let mut cached_actions_tokens = String::new();
     let mut cached_actions: Vec<crate::actions::Action> = Vec::new();
     let mut cached_candidates: Vec<GestureCandidate> = Vec::new();
     let mut selection_state = load_selection_state(GESTURES_STATE_FILE);
@@ -395,11 +401,14 @@ fn worker_loop(
                     #[cfg(windows)]
                     hook_dispatch().set_tracking(false);
                     selected_binding_idx = 0;
+                    pending_selection_idx = None;
                     cached_tokens.clear();
+                    cached_actions_tokens.clear();
                     cached_actions.clear();
                     cached_candidates.clear();
                     exact_selection_key = None;
                     exact_binding_count = 0;
+                    cheat_sheet_visible = false;
                     start_time = Instant::now();
                     let pos = cursor_provider.cursor_position().unwrap_or(start_pos);
                     start_pos = pos;
@@ -424,38 +433,49 @@ fn worker_loop(
 
                         let tokens = tracker.tokens_string();
 
-                        println!(
-                            "MG release tokens='{tokens}' mode={:?} db_present={}",
-                            config.dir_mode,
-                            db.is_some()
-                        );
-                        if let Some(db) = &db {
-                            if let Ok(guard) = db.lock() {
-                                for g in &guard.gestures {
-                                    println!(
-                                        "DB: label='{}' tokens='{}' mode={:?} enabled={} bindings={}",
-                                        g.label, g.tokens, g.dir_mode, g.enabled, g.bindings.len()
-                                        );
-                                    for b in &g.bindings {
-                                        println!("  - binding: label='{}' action='{}' args={:?} enabled={}",b.label, b.action, b.args, b.enabled);
-                                    }
-                                }
-                            }
-                        }
-
                         // If we produced any tokens, treat it as a gesture (swallow right click).
                         if !tokens.is_empty() {
                             // Execute the currently selected binding (wheel-cycled) if there are multiple.
-                            if let Some((_gesture_label, actions)) =
+                            if let Some((gesture_label, actions)) =
                                 match_binding_actions(&db, &tokens, config.dir_mode)
                             {
                                 if !actions.is_empty() {
                                     let idx = selected_binding_idx % actions.len();
+                                    let key = selection_key(&gesture_label, &tokens);
+                                    if selection_state
+                                        .selections
+                                        .get(&key)
+                                        .copied()
+                                        .unwrap_or(usize::MAX)
+                                        != idx
+                                    {
+                                        selection_state.selections.insert(key, idx);
+                                        save_selection_state(GESTURES_STATE_FILE, &selection_state);
+                                    }
                                     if let Some(action) = actions.get(idx).cloned() {
-                                        send_event(WatchEvent::ExecuteAction(action));
+                                        if config.practice_mode {
+                                            tracing::info!(
+                                                tokens = %tokens,
+                                                action = %action.action,
+                                                "mouse gesture practice match"
+                                            );
+                                        } else {
+                                            send_event(WatchEvent::ExecuteAction(action));
+                                        }
                                     }
                                 }
                             } else {
+                                if config.practice_mode {
+                                    let suggestion = cached_candidates
+                                        .first()
+                                        .map(|candidate| candidate.gesture_label.as_str())
+                                        .unwrap_or("none");
+                                    tracing::info!(
+                                        tokens = %tokens,
+                                        suggestion = suggestion,
+                                        "mouse gesture practice miss"
+                                    );
+                                }
                                 match config.no_match_behavior {
                                     NoMatchBehavior::DoNothing => {}
                                     NoMatchBehavior::PassThroughClick => {
@@ -480,17 +500,58 @@ fn worker_loop(
                         exceeded_deadzone = false;
                         tracker.reset();
                         selected_binding_idx = 0;
+                        pending_selection_idx = None;
                         cached_tokens.clear();
+                        cached_actions_tokens.clear();
                         cached_actions.clear();
                         cached_candidates.clear();
                         exact_selection_key = None;
                         exact_binding_count = 0;
+                        cheat_sheet_visible = false;
                         #[cfg(windows)]
                         hook_dispatch().set_active(false);
                     }
                 }
 
-                HookEvent::CycleNext | HookEvent::CyclePrev | HookEvent::SelectBinding(_) => {
+                HookEvent::SelectBinding(idx) => {
+                    if active {
+                        pending_selection_idx = Some(idx);
+                        if !cached_actions.is_empty() {
+                            let len = cached_actions.len();
+                            selected_binding_idx = idx.min(len.saturating_sub(1));
+                            pending_selection_idx = None;
+
+                            if let Some(key) = exact_selection_key.as_ref() {
+                                if exact_binding_count > 0 {
+                                    let stored_idx = selected_binding_idx % exact_binding_count;
+                                    if selection_state
+                                        .selections
+                                        .get(key)
+                                        .copied()
+                                        .unwrap_or(usize::MAX)
+                                        != stored_idx
+                                    {
+                                        selection_state.selections.insert(key.clone(), stored_idx);
+                                        save_selection_state(GESTURES_STATE_FILE, &selection_state);
+                                    }
+                                }
+                            }
+
+                            if let Some(pos) = cursor_provider.cursor_position() {
+                                if let Some(text) = format_hint_text(
+                                    &cached_tokens,
+                                    &cached_candidates,
+                                    selected_binding_idx,
+                                    config.no_match_behavior,
+                                    config.wheel_cycle_gate,
+                                ) {
+                                    hint_overlay.update(&text, pos);
+                                }
+                            }
+                        }
+                    }
+                }
+                HookEvent::CycleNext | HookEvent::CyclePrev => {
                     let allow_cycle = match config.wheel_cycle_gate {
                         WheelCycleGate::Deadzone => exceeded_deadzone,
                         WheelCycleGate::Shift => true,
@@ -503,11 +564,6 @@ fn worker_loop(
                             }
                             HookEvent::CyclePrev if len > 1 => {
                                 selected_binding_idx = (selected_binding_idx + len - 1) % len;
-                            }
-                            HookEvent::SelectBinding(idx) => {
-                                if idx < len {
-                                    selected_binding_idx = idx;
-                                }
                             }
                             _ => {}
                         }
@@ -553,11 +609,14 @@ fn worker_loop(
                         exceeded_deadzone = false;
                         tracker.reset();
                         selected_binding_idx = 0;
+                        pending_selection_idx = None;
                         cached_tokens.clear();
+                        cached_actions_tokens.clear();
                         cached_actions.clear();
                         cached_candidates.clear();
                         exact_selection_key = None;
                         exact_binding_count = 0;
+                        cheat_sheet_visible = false;
                         #[cfg(windows)]
                         {
                             hook_dispatch().set_tracking(false);
@@ -579,9 +638,24 @@ fn worker_loop(
                     exceeded_deadzone = true;
                     #[cfg(windows)]
                     hook_dispatch().set_tracking(true);
+                    if cheat_sheet_visible {
+                        hint_overlay.update("", pos);
+                        cheat_sheet_visible = false;
+                    }
                 }
 
                 trail_overlay.update_position(pos);
+
+                if !exceeded_deadzone
+                    && cached_tokens.is_empty()
+                    && !cheat_sheet_visible
+                    && start_time.elapsed() >= CHEATSHEET_DELAY
+                {
+                    if let Some(text) = format_cheatsheet_text(&db, CHEATSHEET_MAX_GESTURES) {
+                        hint_overlay.update(&text, pos);
+                        cheat_sheet_visible = true;
+                    }
+                }
 
                 if last_recognition.elapsed() >= recognition_interval {
                     let ms = start_time.elapsed().as_millis() as u64;
@@ -590,15 +664,29 @@ fn worker_loop(
                     if tokens != cached_tokens {
                         cached_tokens = tokens.to_string();
                         selected_binding_idx = 0;
-                        if let Some((_gesture_label, actions)) =
-                            match_binding_actions(&db, &tokens, config.dir_mode)
+                        pending_selection_idx = None;
+                        cached_candidates =
+                            candidate_matches(&db, &tokens, config.dir_mode, MAX_HINT_CANDIDATES);
+                        if let Some(candidate) = cached_candidates
+                            .iter()
+                            .find(|candidate| candidate.match_type == GestureMatchType::Exact)
                         {
-                            cached_actions = actions;
+                            cached_actions_tokens = candidate.tokens.clone();
+                        } else {
+                            cached_actions_tokens.clear();
+                        }
+                        if !cached_actions_tokens.is_empty() {
+                            if let Some((_gesture_label, actions)) =
+                                match_binding_actions(&db, &cached_actions_tokens, config.dir_mode)
+                            {
+                                cached_actions = actions;
+                            } else {
+                                cached_actions.clear();
+                                cached_actions_tokens.clear();
+                            }
                         } else {
                             cached_actions.clear();
                         }
-                        cached_candidates =
-                            candidate_matches(&db, &tokens, config.dir_mode, MAX_HINT_CANDIDATES);
                     }
 
                     if let Some(candidate) = cached_candidates
@@ -620,6 +708,31 @@ fn worker_loop(
                         exact_binding_count = 0;
                     }
 
+                    if let Some(pending_idx) = pending_selection_idx.take() {
+                        if !cached_actions.is_empty() {
+                            let len = cached_actions.len();
+                            selected_binding_idx = pending_idx.min(len.saturating_sub(1));
+                            if let Some(key) = exact_selection_key.as_ref() {
+                                if exact_binding_count > 0 {
+                                    let stored_idx = selected_binding_idx % exact_binding_count;
+                                    if selection_state
+                                        .selections
+                                        .get(key)
+                                        .copied()
+                                        .unwrap_or(usize::MAX)
+                                        != stored_idx
+                                    {
+                                        selection_state.selections.insert(key.clone(), stored_idx);
+                                        save_selection_state(
+                                            GESTURES_STATE_FILE,
+                                            &selection_state,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     if let Some(text) = format_hint_text(
                         &tokens,
                         &cached_candidates,
@@ -628,7 +741,8 @@ fn worker_loop(
                         config.wheel_cycle_gate,
                     ) {
                         hint_overlay.update(&text, pos);
-                    } else {
+                        cheat_sheet_visible = false;
+                    } else if !cheat_sheet_visible {
                         hint_overlay.update("", pos);
                     }
                     last_recognition = Instant::now();
@@ -668,6 +782,8 @@ fn match_binding_actions(
 }
 
 const MAX_HINT_CANDIDATES: usize = 5;
+const CHEATSHEET_MAX_GESTURES: usize = 5;
+const CHEATSHEET_DELAY: Duration = Duration::from_millis(250);
 
 #[allow(dead_code)]
 fn best_match_name(
@@ -713,10 +829,10 @@ fn format_hint_text(
     }
 
     let mut lines = Vec::new();
-    if let Some(candidate) = candidates
+    let exact_candidate = candidates
         .iter()
-        .find(|candidate| candidate.match_type == GestureMatchType::Exact)
-    {
+        .find(|candidate| candidate.match_type == GestureMatchType::Exact);
+    if let Some(candidate) = exact_candidate {
         let bindings = &candidate.bindings;
         let binding_count = bindings.len();
         let selected_idx = if binding_count == 0 {
@@ -746,6 +862,16 @@ fn format_hint_text(
         lines.push(tokens.to_string());
     }
 
+    if exact_candidate.is_none() {
+        if let Some(candidate) = candidates.first() {
+            lines.push(format!(
+                "Closest: {} [{}]",
+                candidate.gesture_label,
+                match_type_label(candidate.match_type)
+            ));
+        }
+    }
+
     let cycle_hint = match wheel_cycle_gate {
         WheelCycleGate::Deadzone => "Wheel: cycle",
         WheelCycleGate::Shift => "Shift+Wheel: cycle",
@@ -754,6 +880,36 @@ fn format_hint_text(
         1,
         format!("{cycle_hint} • 1-9: select • Release: run • Esc: cancel"),
     );
+    Some(lines.join("\n"))
+}
+
+fn match_type_label(match_type: GestureMatchType) -> &'static str {
+    match match_type {
+        GestureMatchType::Exact => "exact",
+        GestureMatchType::Prefix => "prefix",
+        GestureMatchType::Fuzzy => "fuzzy",
+    }
+}
+
+fn format_cheatsheet_text(
+    db: &Option<SharedGestureDb>,
+    limit: usize,
+) -> Option<String> {
+    let db = db.as_ref()?;
+    let guard = db.lock().ok()?;
+    let mut lines = Vec::new();
+    lines.push("Cheat sheet".to_string());
+    let mut count = 0;
+    for gesture in guard.gestures.iter().filter(|gesture| gesture.enabled) {
+        lines.push(format!("• {}", format_gesture_label(gesture)));
+        count += 1;
+        if count >= limit {
+            break;
+        }
+    }
+    if count == 0 {
+        lines.push("No gestures configured".to_string());
+    }
     Some(lines.join("\n"))
 }
 

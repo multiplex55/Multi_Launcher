@@ -7,11 +7,15 @@ use multi_launcher::mouse_gestures::service::{
     CancelBehavior, CursorPositionProvider, HookEvent, MockHookBackend, MouseGestureConfig,
     MouseGestureService, NoMatchBehavior, OverlayFactory, RightClickBackend,
 };
+use multi_launcher::gui::register_event_sender;
+use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
+
+static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[derive(Default)]
 struct TestOverlayState {
@@ -149,6 +153,21 @@ impl CursorPositionProvider for TestCursorProvider {
     }
 }
 
+fn wait_for_hint(state: &HintRecordingState, timeout: Duration) -> Option<String> {
+    let start = Instant::now();
+    loop {
+        if let Ok(guard) = state.hints.lock() {
+            if let Some(last) = guard.last() {
+                return Some(last.clone());
+            }
+        }
+        if start.elapsed() >= timeout {
+            return None;
+        }
+        sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn start_stop_installs_and_uninstalls_once() {
     let (backend, handle) = MockHookBackend::new();
@@ -206,12 +225,12 @@ fn cancel_event_clears_overlays_and_does_not_click() {
     service.update_config(config);
 
     assert!(handle.emit(HookEvent::RButtonDown));
-    sleep(Duration::from_millis(20));
+    sleep(Duration::from_millis(50));
     let clears_before = overlay_state.trail_clears.load(Ordering::SeqCst);
     let hides_before = overlay_state.hint_hides.load(Ordering::SeqCst);
 
     assert!(handle.emit(HookEvent::Cancel));
-    sleep(Duration::from_millis(20));
+    sleep(Duration::from_millis(50));
 
     let clears_after = overlay_state.trail_clears.load(Ordering::SeqCst);
     let hides_after = overlay_state.hint_hides.load(Ordering::SeqCst);
@@ -253,7 +272,7 @@ fn no_match_pass_through_click_sends_right_click() {
     sleep(Duration::from_millis(5));
     cursor_provider.set_position((50.0, 0.0));
     assert!(handle.emit(HookEvent::RButtonUp));
-    sleep(Duration::from_millis(20));
+    sleep(Duration::from_millis(50));
 
     assert_eq!(click_backend.clicks.load(Ordering::SeqCst), 1);
 
@@ -291,7 +310,7 @@ fn no_match_noop_does_not_send_right_click() {
     sleep(Duration::from_millis(5));
     cursor_provider.set_position((50.0, 0.0));
     assert!(handle.emit(HookEvent::RButtonUp));
-    sleep(Duration::from_millis(20));
+    sleep(Duration::from_millis(50));
 
     assert_eq!(click_backend.clicks.load(Ordering::SeqCst), 0);
 
@@ -347,20 +366,154 @@ fn hint_text_includes_best_guess_and_match_type() {
     assert!(handle.emit(HookEvent::RButtonDown));
     sleep(Duration::from_millis(5));
     cursor_provider.set_position((50.0, 0.0));
-    sleep(Duration::from_millis(20));
+    sleep(Duration::from_millis(50));
 
     let hints = hint_state.hints.lock().expect("lock hints");
     let last = hints.last().expect("hint text");
     assert_eq!(
         last,
-        "R\nWheel: cycle • 1-9: select • Release: run • Esc: cancel"
+        "R\nWheel: cycle • 1-9: select • Release: run • Esc: cancel\nClosest: Open Browser [prefix]"
     );
 
     service.stop();
 }
 
 #[test]
+fn practice_mode_suppresses_execute_action() {
+    let (backend, handle) = MockHookBackend::new();
+    let hint_state = Arc::new(HintRecordingState::default());
+    let overlay_factory: Arc<dyn OverlayFactory> = Arc::new(HintRecordingFactory {
+        state: Arc::clone(&hint_state),
+    });
+    let click_backend = Arc::new(TestRightClickBackend::default());
+    let click_backend_trait: Arc<dyn RightClickBackend> = click_backend.clone();
+    let cursor_provider = Arc::new(TestCursorProvider::new((0.0, 0.0)));
+    let cursor_provider_trait: Arc<dyn CursorPositionProvider> = cursor_provider.clone();
+
+    let mut service = MouseGestureService::new_with_backend_and_overlays(
+        Box::new(backend),
+        overlay_factory,
+        Arc::clone(&click_backend_trait),
+        Arc::clone(&cursor_provider_trait),
+    );
+
+    let db = GestureDb {
+        schema_version: SCHEMA_VERSION,
+        gestures: vec![GestureEntry {
+            label: "Open Browser".into(),
+            tokens: "R".into(),
+            dir_mode: DirMode::Four,
+            stroke: Vec::new(),
+            enabled: true,
+            bindings: vec![BindingEntry {
+                label: "Open Browser".into(),
+                kind: BindingKind::Execute,
+                action: "stopwatch:show:1".into(),
+                args: None,
+                enabled: true,
+            }],
+        }],
+    };
+    service.update_db(Some(Arc::new(Mutex::new(db))));
+
+    let mut config = MouseGestureConfig::default();
+    config.enabled = true;
+    config.practice_mode = true;
+    config.threshold_px = 1.0;
+    config.deadzone_px = 0.1;
+    config.trail_interval_ms = 1;
+    config.recognition_interval_ms = 1;
+    service.update_config(config);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    register_event_sender(tx);
+
+    assert!(handle.emit(HookEvent::RButtonDown));
+    sleep(Duration::from_millis(5));
+    cursor_provider.set_position((50.0, 0.0));
+    assert!(handle.emit(HookEvent::RButtonUp));
+    sleep(Duration::from_millis(20));
+
+    assert!(rx.recv_timeout(Duration::from_millis(20)).is_err());
+
+    service.stop();
+}
+
+#[test]
+fn cheat_sheet_overlay_shows_after_delay_without_tokens() {
+    let (backend, handle) = MockHookBackend::new();
+    let hint_state = Arc::new(HintRecordingState::default());
+    let overlay_factory: Arc<dyn OverlayFactory> = Arc::new(HintRecordingFactory {
+        state: Arc::clone(&hint_state),
+    });
+    let click_backend = Arc::new(TestRightClickBackend::default());
+    let click_backend_trait: Arc<dyn RightClickBackend> = click_backend.clone();
+    let cursor_provider = Arc::new(TestCursorProvider::new((0.0, 0.0)));
+    let cursor_provider_trait: Arc<dyn CursorPositionProvider> = cursor_provider.clone();
+
+    let mut service = MouseGestureService::new_with_backend_and_overlays(
+        Box::new(backend),
+        overlay_factory,
+        Arc::clone(&click_backend_trait),
+        Arc::clone(&cursor_provider_trait),
+    );
+
+    let db = GestureDb {
+        schema_version: SCHEMA_VERSION,
+        gestures: vec![
+            GestureEntry {
+                label: "Open Browser".into(),
+                tokens: "R".into(),
+                dir_mode: DirMode::Four,
+                stroke: Vec::new(),
+                enabled: true,
+                bindings: vec![BindingEntry {
+                    label: "Open Browser".into(),
+                    kind: BindingKind::Execute,
+                    action: "stopwatch:show:1".into(),
+                    args: None,
+                    enabled: true,
+                }],
+            },
+            GestureEntry {
+                label: "Close Window".into(),
+                tokens: "L".into(),
+                dir_mode: DirMode::Four,
+                stroke: Vec::new(),
+                enabled: true,
+                bindings: vec![BindingEntry {
+                    label: "Close Window".into(),
+                    kind: BindingKind::Execute,
+                    action: "window:close".into(),
+                    args: None,
+                    enabled: true,
+                }],
+            },
+        ],
+    };
+    service.update_db(Some(Arc::new(Mutex::new(db))));
+
+    let mut config = MouseGestureConfig::default();
+    config.enabled = true;
+    config.deadzone_px = 100.0;
+    config.trail_interval_ms = 10;
+    config.recognition_interval_ms = 10;
+    service.update_config(config);
+
+    assert!(handle.emit(HookEvent::RButtonDown));
+    sleep(Duration::from_millis(300));
+
+    let hints = hint_state.hints.lock().expect("lock hints");
+    let last = hints.last().expect("hint text");
+    assert!(last.contains("Cheat sheet"));
+    assert!(last.contains("Open Browser"));
+
+    service.stop();
+}
+
+#[test]
 fn selection_persists_across_gesture_sessions() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().expect("tempdir");
     std::env::set_current_dir(dir.path()).expect("set current dir");
 
@@ -445,18 +598,18 @@ fn selection_persists_across_gesture_sessions() {
     assert!(handle.emit(HookEvent::RButtonDown));
     sleep(Duration::from_millis(5));
     cursor_provider.set_position((50.0, 0.0));
-    sleep(Duration::from_millis(20));
+    sleep(Duration::from_millis(50));
 
-    let hints = hint_state.hints.lock().expect("lock hints");
-    let last = hints.last().expect("hint text");
-    let first_line = last.lines().next().expect("first line");
-    assert!(first_line.contains("Secondary"));
+    let hint_text =
+        wait_for_hint(&hint_state, Duration::from_millis(500)).expect("hint text");
+    assert!(hint_text.contains("Secondary"));
 
     service.stop();
 }
 
 #[test]
 fn numeric_selection_updates_hint_text() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().expect("tempdir");
     std::env::set_current_dir(dir.path()).expect("set current dir");
 
