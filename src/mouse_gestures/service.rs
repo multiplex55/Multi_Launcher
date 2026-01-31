@@ -1209,8 +1209,9 @@ unsafe extern "system" fn mouse_hook_proc(
                             use windows::Win32::UI::Input::KeyboardAndMouse::{
                                 GetAsyncKeyState, VK_SHIFT,
                             };
-                            let shift_down =
-                                unsafe { (GetAsyncKeyState(VK_SHIFT.0 as i32) & 0x8000) != 0 };
+                            let shift_down = unsafe {
+                                (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0
+                            };
                             dispatch.is_active() && shift_down
                         }
                     };
