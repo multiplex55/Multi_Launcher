@@ -507,13 +507,49 @@ fn worker_loop(
                     }
                 }
 
-                HookEvent::CycleNext | HookEvent::CyclePrev | HookEvent::SelectBinding(_) => {
-                    let allow_cycle = match event {
-                        HookEvent::SelectBinding(_) => true,
-                        _ => match config.wheel_cycle_gate {
-                            WheelCycleGate::Deadzone => exceeded_deadzone,
-                            WheelCycleGate::Shift => true,
-                        },
+                HookEvent::SelectBinding(idx) => {
+                    if active {
+                        selected_binding_idx = idx;
+                        if !cached_actions.is_empty() {
+                            let len = cached_actions.len();
+                            if idx < len {
+                                selected_binding_idx = idx;
+                            }
+
+                            if let Some(key) = exact_selection_key.as_ref() {
+                                if exact_binding_count > 0 {
+                                    let stored_idx = selected_binding_idx % exact_binding_count;
+                                    if selection_state
+                                        .selections
+                                        .get(key)
+                                        .copied()
+                                        .unwrap_or(usize::MAX)
+                                        != stored_idx
+                                    {
+                                        selection_state.selections.insert(key.clone(), stored_idx);
+                                        save_selection_state(GESTURES_STATE_FILE, &selection_state);
+                                    }
+                                }
+                            }
+
+                            if let Some(pos) = cursor_provider.cursor_position() {
+                                if let Some(text) = format_hint_text(
+                                    &cached_tokens,
+                                    &cached_candidates,
+                                    selected_binding_idx,
+                                    config.no_match_behavior,
+                                    config.wheel_cycle_gate,
+                                ) {
+                                    hint_overlay.update(&text, pos);
+                                }
+                            }
+                        }
+                    }
+                }
+                HookEvent::CycleNext | HookEvent::CyclePrev => {
+                    let allow_cycle = match config.wheel_cycle_gate {
+                        WheelCycleGate::Deadzone => exceeded_deadzone,
+                        WheelCycleGate::Shift => true,
                     };
                     if active && allow_cycle && !cached_actions.is_empty() {
                         let len = cached_actions.len();
@@ -523,11 +559,6 @@ fn worker_loop(
                             }
                             HookEvent::CyclePrev if len > 1 => {
                                 selected_binding_idx = (selected_binding_idx + len - 1) % len;
-                            }
-                            HookEvent::SelectBinding(idx) => {
-                                if idx < len {
-                                    selected_binding_idx = idx;
-                                }
                             }
                             _ => {}
                         }
