@@ -247,7 +247,7 @@ fn draw_text(
     let scaled = font.as_scaled(size * tweak.scale);
     let mut caret = point(pos.x, pos.y + scaled.ascent() + tweak.y_offset * size);
     for ch in text.chars() {
-        let glyph = scaled.scaled_glyph(ch).positioned(caret);
+        let glyph = scaled.scaled_glyph(ch).with_position(caret);
         caret.x += scaled.h_advance(glyph.id);
         if let Some(outlined) = scaled.outline_glyph(glyph) {
             let bounds = outlined.px_bounds();
