@@ -168,6 +168,38 @@ fn binding_resolution_is_deterministic() {
 }
 
 #[test]
+fn binding_enabled_state_persists_and_controls_matching() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("mouse_gestures.json");
+    let mut db = GestureDb {
+        schema_version: SCHEMA_VERSION,
+        gestures: vec![GestureEntry {
+            label: "Toggle".into(),
+            tokens: "LR".into(),
+            dir_mode: DirMode::Four,
+            stroke: Vec::new(),
+            enabled: true,
+            bindings: vec![BindingEntry {
+                label: "Launch".into(),
+                action: "stopwatch:show:1".into(),
+                args: None,
+                enabled: false,
+            }],
+        }],
+    };
+
+    save_gestures(path.to_str().unwrap(), &db).unwrap();
+    let loaded = load_gestures(path.to_str().unwrap()).unwrap();
+    assert!(!loaded.gestures[0].bindings[0].enabled);
+    assert!(loaded.match_binding("LR", DirMode::Four).is_none());
+
+    db.gestures[0].bindings[0].enabled = true;
+    save_gestures(path.to_str().unwrap(), &db).unwrap();
+    let loaded_enabled = load_gestures(path.to_str().unwrap()).unwrap();
+    assert!(loaded_enabled.match_binding("LR", DirMode::Four).is_some());
+}
+
+#[test]
 fn candidate_matching_ranks_exact_over_prefix_over_fuzzy() {
     let db = GestureDb {
         schema_version: SCHEMA_VERSION,
