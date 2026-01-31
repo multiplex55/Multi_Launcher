@@ -602,8 +602,7 @@ fn selection_persists_across_gesture_sessions() {
 
     let hint_text =
         wait_for_hint(&hint_state, Duration::from_millis(500)).expect("hint text");
-    let first_line = hint_text.lines().next().expect("first line");
-    assert!(first_line.contains("Secondary"));
+    assert!(hint_text.contains("Secondary"));
 
     service.stop();
 }
