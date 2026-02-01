@@ -89,7 +89,9 @@ impl TodoViewDialog {
                         .sort_by(|a, b| self.entries[*b].priority.cmp(&self.entries[*a].priority));
                 }
                 let area_height = ui.available_height();
+                // Keep horizontal overflow for long todo text without wrapping.
                 egui::ScrollArea::both()
+                    .auto_shrink([false, false])
                     .max_height(area_height)
                     .show(ui, |ui| {
                         for idx in indices {
@@ -134,13 +136,15 @@ impl TodoViewDialog {
                                 });
                             } else {
                                 let entry = &mut self.entries[idx];
-                                ui.horizontal_wrapped(|ui| {
+                                ui.horizontal(|ui| {
                                     if ui.checkbox(&mut entry.done, "").changed() {
                                         save_now = true;
                                     }
-                                    let resp = ui.label(entry.text.replace('\n', " "));
+                                    let resp = ui.add(
+                                        egui::Label::new(entry.text.replace('\n', " ")).wrap(false),
+                                    );
                                     let idx_copy = idx;
-                                    resp.clone().context_menu(|ui| {
+                                    resp.clone().context_menu(|ui: &mut egui::Ui| {
                                         if ui.button("Edit Todo").clicked() {
                                             self.editing_idx = Some(idx_copy);
                                             self.editing_text = entry.text.clone();
@@ -149,15 +153,18 @@ impl TodoViewDialog {
                                             ui.close_menu();
                                         }
                                     });
-                                    ui.label(format!("p{}", entry.priority));
+                                    ui.add(
+                                        egui::Label::new(format!("p{}", entry.priority))
+                                            .wrap(false),
+                                    );
                                     if !entry.tags.is_empty() {
-                                        ui.label(format!("#{:?}", entry.tags.join(", ")));
-                                    }
-                                    if ui.button("Edit").clicked() {
-                                        self.editing_idx = Some(idx);
-                                        self.editing_text = entry.text.clone();
-                                        self.editing_priority = entry.priority;
-                                        self.editing_tags = entry.tags.join(", ");
+                                        ui.add(
+                                            egui::Label::new(format!(
+                                                "#{:?}",
+                                                entry.tags.join(", ")
+                                            ))
+                                            .wrap(false),
+                                        );
                                     }
                                 });
                             }
