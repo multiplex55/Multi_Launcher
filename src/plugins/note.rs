@@ -852,15 +852,9 @@ impl Plugin for NotePlugin {
                             args: None,
                         }];
                         actions.extend(guard.notes.iter().map(|n| Action {
-                            label: format!(
-                                "Outgoing links for {}",
-                                n.alias.as_ref().unwrap_or(&n.title)
-                            ),
-                            desc: "Outgoing links".into(),
-                            action: format!(
-                                "query:note link {}",
-                                n.alias.as_ref().unwrap_or(&n.title)
-                            ),
+                            label: format!("Backlinks for {}", n.alias.as_ref().unwrap_or(&n.title)),
+                            desc: "Backlinks".into(),
+                            action: format!("query:note link {}", n.alias.as_ref().unwrap_or(&n.title)),
                             args: None,
                         }));
                         return actions;
@@ -871,29 +865,25 @@ impl Plugin for NotePlugin {
                         None => {
                             return vec![Action {
                                 label: format!("No note found for \"{args}\""),
-                                desc: "Outgoing links".into(),
+                                desc: "Backlinks".into(),
                                 action: "query:note link ".into(),
                                 args: None,
                             }]
                         }
                     };
 
-                    let mut actions: Vec<Action> = note
+                    let mut actions: Vec<Action> = guard
                         .links
-                        .iter()
-                        .map(|link| {
-                            let linked_note = guard.notes.iter().find(|n| n.slug == *link);
-                            let (label, action) = match linked_note {
-                                Some(note) => (
-                                    note.alias.as_ref().unwrap_or(&note.title).as_str(),
-                                    format!("note:open:{}", note.slug),
-                                ),
-                                None => (link.as_str(), format!("query:note new {link}")),
-                            };
+                        .get(&note.slug)
+                        .into_iter()
+                        .flat_map(|backlinks| backlinks.iter())
+                        .filter_map(|slug| guard.notes.iter().find(|n| n.slug == *slug))
+                        .map(|linked_note| {
+                            let label = linked_note.alias.as_ref().unwrap_or(&linked_note.title);
                             Action {
-                                label: format!("Outgoing link: {label}"),
-                                desc: format!("Outgoing links from {}", note.title),
-                                action,
+                                label: format!("Backlink: {label}"),
+                                desc: format!("Backlinks to {}", note.title),
+                                action: format!("note:open:{}", linked_note.slug),
                                 args: None,
                             }
                         })
@@ -901,8 +891,8 @@ impl Plugin for NotePlugin {
 
                     if actions.is_empty() {
                         actions.push(Action {
-                            label: format!("No outgoing links for {}", note.title),
-                            desc: "Outgoing links".into(),
+                            label: format!("No backlinks for {}", note.title),
+                            desc: "Backlinks".into(),
                             action: format!("note:open:{}", note.slug),
                             args: None,
                         });
@@ -1327,8 +1317,9 @@ mod tests {
     }
 
     #[test]
-    fn note_link_lists_outgoing_links_for_note() {
-        let alpha_content = "See [[Beta]] and [[Gamma Note]].";
+    fn note_link_lists_backlinks_for_note() {
+        let alpha_content = "See [[Beta Note]] and [[Gamma Note]].";
+        let delta_content = "Reference [[Beta Note]].";
         let original = set_notes(vec![
             Note {
                 title: "Alpha".into(),
@@ -1337,15 +1328,24 @@ mod tests {
                 tags: Vec::new(),
                 links: extract_links(alpha_content),
                 slug: "alpha".into(),
-                alias: Some("First".into()),
+                alias: None,
             },
             Note {
-                title: "Beta".into(),
+                title: "Beta Note".into(),
                 path: PathBuf::new(),
-                content: "Backlink to [[Alpha]].".into(),
+                content: "Backlink target.".into(),
                 tags: Vec::new(),
-                links: extract_links("Backlink to [[Alpha]]."),
-                slug: "beta".into(),
+                links: Vec::new(),
+                slug: "beta-note".into(),
+                alias: Some("Second".into()),
+            },
+            Note {
+                title: "Delta".into(),
+                path: PathBuf::new(),
+                content: delta_content.into(),
+                tags: Vec::new(),
+                links: extract_links(delta_content),
+                slug: "delta".into(),
                 alias: None,
             },
             Note {
@@ -1367,13 +1367,10 @@ mod tests {
             watcher: None,
         };
 
-        let links = plugin.search("note link First");
+        let links = plugin.search("note link Second");
         let labels: Vec<&str> = links.iter().map(|a| a.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            vec!["Outgoing link: Beta", "Outgoing link: Gamma Note"]
-        );
-        assert_eq!(links[0].desc, "Outgoing links from Alpha");
+        assert_eq!(labels, vec!["Backlink: Alpha", "Backlink: Delta"]);
+        assert_eq!(links[0].desc, "Backlinks to Beta Note");
 
         restore_cache(original);
     }
