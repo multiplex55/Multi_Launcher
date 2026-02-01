@@ -2,6 +2,7 @@ use crate::gui::LauncherApp;
 use eframe::egui::{
     self, Color32, PointerButton, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
 };
+use egui_toast::{Toast, ToastKind, ToastOptions};
 use image::RgbaImage;
 use std::path::PathBuf;
 
@@ -490,36 +491,65 @@ impl ScreenshotEditor {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
+                        let mut saved_to: Option<PathBuf> = None;
                         let res = if self.auto_save {
+                            saved_to = Some(self.path.clone());
                             self.save_image(&self.path)
                         } else if let Some(path) = rfd::FileDialog::new()
                             .add_filter("PNG", &["png"])
                             .save_file()
                         {
                             self.path = path.clone();
+                            saved_to = Some(path.clone());
                             self.save_image(&path)
                         } else {
                             Ok(())
                         };
-                        if let Err(e) = res {
-                            app.set_error(format!("Failed to save screenshot: {e}"));
+                        match res {
+                            Ok(()) => {
+                                if let Some(path) = saved_to {
+                                    if app.enable_toasts {
+                                        app.add_toast(Toast {
+                                            text: format!("Saved screenshot {}", path.display())
+                                                .into(),
+                                            kind: ToastKind::Success,
+                                            options: ToastOptions::default()
+                                                .duration_in_seconds(app.toast_duration as f64),
+                                        });
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                app.set_error(format!("Failed to save screenshot: {e}"));
+                            }
                         }
                     }
                     if ui.button("Copy").clicked() {
                         if let Err(e) = self.copy_to_clipboard() {
                             app.set_error(format!("Failed to copy screenshot: {e}"));
-                        } else if app.get_screenshot_save_file() {
-                            let _ = if self.auto_save {
-                                self.save_image(&self.path)
-                            } else if let Some(path) = rfd::FileDialog::new()
-                                .add_filter("PNG", &["png"])
-                                .save_file()
-                            {
-                                self.path = path.clone();
-                                self.save_image(&path)
-                            } else {
-                                Ok(())
-                            };
+                        } else {
+                            if app.enable_toasts {
+                                app.add_toast(Toast {
+                                    text: "Copied current markup to clipboard".into(),
+                                    kind: ToastKind::Success,
+                                    options: ToastOptions::default()
+                                        .duration_in_seconds(app.toast_duration as f64),
+                                });
+                            }
+
+                            if app.get_screenshot_save_file() {
+                                let _ = if self.auto_save {
+                                    self.save_image(&self.path)
+                                } else if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("PNG", &["png"])
+                                    .save_file()
+                                {
+                                    self.path = path.clone();
+                                    self.save_image(&path)
+                                } else {
+                                    Ok(())
+                                };
+                            }
                         }
                     }
                     ui.add(egui::Slider::new(&mut self.zoom, 0.1..=4.0).text("Zoom"));
