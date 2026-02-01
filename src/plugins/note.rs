@@ -65,11 +65,17 @@ pub struct NoteCache {
 
 impl NoteCache {
     fn from_notes(notes: Vec<Note>) -> Self {
+        let mut notes = notes;
         let mut tag_set: HashSet<String> = HashSet::new();
         let mut link_map: HashMap<String, Vec<String>> = HashMap::new();
         let mut alias_map: HashMap<String, String> = HashMap::new();
 
-        for n in &notes {
+        for n in &mut notes {
+            if n.tags.is_empty() {
+                n.tags = extract_tags(&n.content);
+            } else {
+                n.tags = n.tags.iter().map(|t| t.to_lowercase()).collect();
+            }
             let slug = n.slug.clone();
             for t in &n.tags {
                 tag_set.insert(t.clone());
@@ -116,7 +122,7 @@ static CACHE: Lazy<Arc<Mutex<NoteCache>>> =
 static TEMPLATE_CACHE: Lazy<Arc<Mutex<HashMap<String, String>>>> =
     Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
-static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"#([A-Za-z0-9_]+)").unwrap());
+static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?:[#@])([A-Za-z0-9_-]+)").unwrap());
 static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
 // Matches markdown image syntax `![alt](path)` capturing the path portion.
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[[^\]]*\]\(([^)]+)\)").unwrap());
@@ -135,7 +141,9 @@ fn extract_tags(content: &str) -> Vec<String> {
             continue;
         }
         for cap in TAG_RE.captures_iter(line) {
-            tags.push(cap[1].to_lowercase());
+            if let Some(tag) = cap.get(1) {
+                tags.push(tag.as_str().to_lowercase());
+            }
         }
     }
     tags.sort();
@@ -682,7 +690,17 @@ impl Plugin for NotePlugin {
                         .collect();
                 }
                 "list" => {
-                    let filters = parse_query_filters(args, &["@", "#", "tag:"]);
+                    let mut filters = parse_query_filters(args, &["@", "#", "tag:"]);
+                    filters.include_tags = filters
+                        .include_tags
+                        .into_iter()
+                        .map(|tag| tag.to_lowercase())
+                        .collect();
+                    filters.exclude_tags = filters
+                        .exclude_tags
+                        .into_iter()
+                        .map(|tag| tag.to_lowercase())
+                        .collect();
                     let text_filter = filters.remaining_tokens.join(" ");
                     return guard
                         .notes
@@ -694,12 +712,12 @@ impl Plugin for NotePlugin {
                                 filters
                                     .include_tags
                                     .iter()
-                                    .all(|tag| n.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
+                                    .all(|tag| n.tags.iter().any(|t| t == tag))
                             };
                             let exclude_ok = !filters
                                 .exclude_tags
                                 .iter()
-                                .any(|tag| n.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)));
+                                .any(|tag| n.tags.iter().any(|t| t == tag));
                             let text_ok = if text_filter.is_empty() {
                                 true
                             } else {
@@ -1051,13 +1069,20 @@ mod tests {
     }
 
     #[test]
+    fn extract_tags_supports_hash_at_and_hyphen() {
+        let content = "Notes about @UI-Test and #Release-Prep.\n```\n#code-tag\n```\n";
+        let tags = extract_tags(content);
+        assert_eq!(tags, vec!["release-prep", "ui-test"]);
+    }
+
+    #[test]
     fn note_list_supports_hash_and_at_tags() {
         let original = set_notes(vec![
             Note {
                 title: "Alpha".into(),
                 path: PathBuf::new(),
-                content: String::new(),
-                tags: vec!["testing".into(), "ui".into()],
+                content: "Working on @testing and #ui updates.".into(),
+                tags: Vec::new(),
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
@@ -1065,8 +1090,8 @@ mod tests {
             Note {
                 title: "Beta".into(),
                 path: PathBuf::new(),
-                content: String::new(),
-                tags: vec!["testing".into()],
+                content: "Planning @testing coverage.".into(),
+                tags: Vec::new(),
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
@@ -1074,8 +1099,8 @@ mod tests {
             Note {
                 title: "Gamma".into(),
                 path: PathBuf::new(),
-                content: String::new(),
-                tags: vec!["ui".into(), "chore".into()],
+                content: "Wrap up #ui and #chore items.".into(),
+                tags: Vec::new(),
                 links: Vec::new(),
                 slug: "gamma".into(),
                 alias: None,
@@ -1117,8 +1142,8 @@ mod tests {
             Note {
                 title: "Alpha".into(),
                 path: PathBuf::new(),
-                content: String::new(),
-                tags: vec!["testing".into(), "ui".into()],
+                content: "Working on @testing and #ui updates.".into(),
+                tags: Vec::new(),
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
@@ -1126,8 +1151,8 @@ mod tests {
             Note {
                 title: "Beta".into(),
                 path: PathBuf::new(),
-                content: String::new(),
-                tags: vec!["testing".into()],
+                content: "Planning @testing coverage.".into(),
+                tags: Vec::new(),
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
@@ -1135,8 +1160,8 @@ mod tests {
             Note {
                 title: "Gamma".into(),
                 path: PathBuf::new(),
-                content: String::new(),
-                tags: vec!["ui".into(), "chore".into()],
+                content: "Wrap up #ui and #chore items.".into(),
+                tags: Vec::new(),
                 links: Vec::new(),
                 slug: "gamma".into(),
                 alias: None,
