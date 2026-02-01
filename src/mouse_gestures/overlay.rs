@@ -331,7 +331,7 @@ impl HintOverlaySurface {
     fn move_to(&mut self, position: (f32, f32)) {
         use windows::Win32::Foundation::{LPARAM, WPARAM};
         use windows::Win32::UI::Controls::TTM_TRACKPOSITION;
-        use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+        use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
         // TTM_TRACKPOSITION packs x/y into 16-bit signed halves. Mask to avoid corrupting the
         // high word when x/y are negative (common on multi-monitor layouts).
@@ -340,7 +340,7 @@ impl HintOverlaySurface {
         let packed = ((x as u32) & 0xFFFF) | (((y as u32) & 0xFFFF) << 16);
 
         unsafe {
-            let _ = SendMessageW(
+            let _ = PostMessageW(
                 self.hwnd,
                 TTM_TRACKPOSITION,
                 WPARAM(0),
@@ -918,7 +918,7 @@ impl HintTooltip {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
         use windows::Win32::UI::Controls::TTM_UPDATETIPTEXTW;
-        use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+        use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
         // build wide string with trailing 0
         self.text_buf.clear();
@@ -928,7 +928,7 @@ impl HintTooltip {
         self.toolinfo.lpszText = windows::core::PWSTR(self.text_buf.as_mut_ptr());
 
         unsafe {
-            let _ = SendMessageW(
+            let _ = PostMessageW(
                 self.hwnd,
                 TTM_UPDATETIPTEXTW,
                 windows::Win32::Foundation::WPARAM(0),
@@ -939,7 +939,7 @@ impl HintTooltip {
 
     fn move_to(&mut self, position: (f32, f32)) {
         use windows::Win32::UI::Controls::TTM_TRACKPOSITION;
-        use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+        use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
         // TTM_TRACKPOSITION packs x/y into 16-bit halves.
         // Preserve negative coordinates (common on multi-monitor layouts).
@@ -948,7 +948,7 @@ impl HintTooltip {
         let packed = ((x as u32) & 0xFFFF) | (((y as u32) & 0xFFFF) << 16);
 
         unsafe {
-            let _ = SendMessageW(
+            let _ = PostMessageW(
                 self.hwnd,
                 TTM_TRACKPOSITION,
                 windows::Win32::Foundation::WPARAM(0),
@@ -959,13 +959,13 @@ impl HintTooltip {
 
     fn show(&mut self) {
         use windows::Win32::UI::Controls::TTM_TRACKACTIVATE;
-        use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+        use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
-        // if self.visible {
-        //     return;
-        // }
+        if self.visible {
+            return;
+        }
         unsafe {
-            let _ = SendMessageW(
+            let _ = PostMessageW(
                 self.hwnd,
                 TTM_TRACKACTIVATE,
                 windows::Win32::Foundation::WPARAM(1),
@@ -978,13 +978,13 @@ impl HintTooltip {
 
     fn hide(&mut self) {
         use windows::Win32::UI::Controls::TTM_TRACKACTIVATE;
-        use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+        use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
         if !self.visible {
             return;
         }
         unsafe {
-            let _ = SendMessageW(
+            let _ = PostMessageW(
                 self.hwnd,
                 TTM_TRACKACTIVATE,
                 windows::Win32::Foundation::WPARAM(0),
