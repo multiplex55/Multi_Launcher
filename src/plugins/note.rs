@@ -1224,10 +1224,27 @@ mod tests {
         let tags = plugin.search("note tag");
         let labels: Vec<&str> = tags.iter().map(|a| a.label.as_str()).collect();
         assert_eq!(labels, vec!["#testing (2)", "#ui (2)", "#chore (1)"]);
+        let actions: Vec<&str> = tags.iter().map(|a| a.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            vec![
+                "query:note list #testing",
+                "query:note list #ui",
+                "query:note list #chore"
+            ]
+        );
 
         let tags_ui = plugin.search("note tag @ui");
         let labels_ui: Vec<&str> = tags_ui.iter().map(|a| a.label.as_str()).collect();
         assert_eq!(labels_ui, vec!["#ui (2)"]);
+
+        let tags_ui_hash = plugin.search("note tag #ui");
+        let labels_ui_hash: Vec<&str> = tags_ui_hash.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_ui_hash, vec!["#ui (2)"]);
+
+        let tags_ui_tag = plugin.search("note tag tag:ui");
+        let labels_ui_tag: Vec<&str> = tags_ui_tag.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_ui_tag, vec!["#ui (2)"]);
 
         // Verify that the drill action uses `note list`.
         assert_eq!(tags_ui[0].action, "query:note list #ui");

@@ -824,10 +824,28 @@ mod tests {
             labels,
             vec!["#testing (2)", "#ui (2)", "#chore (1)", "#high priority (1)"]
         );
+        let actions: Vec<&str> = tags.iter().map(|a| a.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            vec![
+                "query:todo list #testing",
+                "query:todo list #ui",
+                "query:todo list #chore",
+                "query:todo list #high priority"
+            ]
+        );
 
         let tags_ui = plugin.search_internal("todo tag @ui");
         let labels_ui: Vec<&str> = tags_ui.iter().map(|a| a.label.as_str()).collect();
         assert_eq!(labels_ui, vec!["#ui (2)"]);
+
+        let tags_ui_hash = plugin.search_internal("todo tag #ui");
+        let labels_ui_hash: Vec<&str> = tags_ui_hash.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_ui_hash, vec!["#ui (2)"]);
+
+        let tags_ui_tag = plugin.search_internal("todo tag tag:ui");
+        let labels_ui_tag: Vec<&str> = tags_ui_tag.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_ui_tag, vec!["#ui (2)"]);
 
         if let Ok(mut guard) = TODO_DATA.write() {
             *guard = original;
