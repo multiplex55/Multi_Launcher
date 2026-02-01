@@ -55,7 +55,6 @@ fn note_root_query_returns_actions_in_order() {
             "query:note search ",
             "query:note list",
             "query:note tag",
-            "query:note tags",
             "query:note templates",
             "query:note new ",
             "query:note add ",
