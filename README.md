@@ -1,510 +1,470 @@
 # Multi Launcher
 <img width="480" height="480" alt="Green_MultiLauncher" src="https://github.com/user-attachments/assets/8a68f544-536c-4eb5-8c0a-c5ef43e21c2d" />
 
-Multi Launcher is a lightweight application launcher for Windows built with Rust
-and `eframe`. The project targets Windows exclusively. It supports configurable
-hotkeys, basic plugin architecture and file indexing to quickly open
-applications or files.
+A fast, keyboard-first Windows launcher + dashboard built with **Rust** and **egui**.
 
+It’s designed to be “one hotkey away” from:
+- launching apps / files / bookmarks
+- running small utilities (calc, convert, clipboard tools, etc.)
+- driving **dashboard widgets** (notes, todo, system status, browser tabs, gestures, layouts, …)
+- optionally triggering actions via **mouse gestures**
 
-## Use Cases
+---
 
-- Launch installed applications or custom commands from anywhere using a single hotkey.
-- Search your clipboard history or saved bookmarks to quickly paste or open items.
-- Run shell commands without opening a terminal.
-- Perform web searches or look up documentation directly.
-- Jump to frequently used folders with the folders plugin.
-- Set timers or alarms from the launcher. Type `timer` or `alarm` and press
-  <kbd>Enter</kbd> to open the creation dialog.
-- Keep track of quick todo items or notes.
-- Insert saved text snippets, add new ones with `cs add <alias> <text>` or edit them with `cs edit`.
-- Monitor network traffic with the `net` command.
-- Control media playback using the `media` prefix.
-- Trigger sequences of commands through the `macro` plugin.
-- Capture screenshots to a file or the clipboard.
-- Switch between open browser tabs.
-- Check local and public IP addresses.
-- Generate random numbers, dice rolls or passwords.
-- Create lorem ipsum filler text or search for emoji.
-- Convert text between cases like `snake_case` or `camelCase`.
-- Pick colors and copy them as hex, RGB or HSL values.
-- Track time with a built-in stopwatch or open the Windows Task Manager.
+## Table of contents
 
+- [Quick start](#quick-start)
+- [Core workflow](#core-workflow)
+- [Command prefixes cheat sheet](#command-prefixes-cheat-sheet)
+- [Cookbook examples](#cookbook-examples)
+- [Dashboard](#dashboard)
+- [Mouse gestures](#mouse-gestures)
+- [Layouts](#layouts)
+- [Calendar](#calendar)
+- [Screenshot capture + markup editor](#screenshot-capture--markup-editor)
+- [Configuration](#configuration)
+- [Data files](#data-files)
+- [Building](#building)
+- [Troubleshooting](#troubleshooting)
 
-## Building
+---
 
-Requirements:
-- Rust toolchain
+## Quick start
 
-```
-cargo build --release
-```
+### Run
+1. Build (see [Building](#building)) and run the app.
+2. Press **`F2`** to show the launcher (default hotkey).
+3. Start typing to filter results.
+4. Press **Enter** to execute the selected result.
 
-To capture `CapsLock` reliably and suppress its normal toggle, build with the
-optional `unstable_grab` feature. Without this feature some systems may ignore
-the `CapsLock` hotkey:
+### Discoverability
+- Press **`F1`** (default) to open help.
+- Type **`help`** in the launcher to show a quick command/prefix overview.
 
-```
-cargo build --release --features unstable_grab
-```
+---
 
-This feature is defined in `Cargo.toml` and enables the underlying `rdev`
-capability used to grab keyboard events.
+## Core workflow
 
-For debugging, enable **Debug logging** in the settings window. When this
-option is active, you can further adjust the verbosity by setting the
-`RUST_LOG` environment variable before running the program:
+Multi Launcher is centered around a **single query box**:
 
-```powershell
-$env:RUST_LOG="info"; cargo run --release --features unstable_grab
-```
+- Results come from:
+  - your `actions.json` (custom actions you define)
+  - built-in commands (calculator, converters, utilities)
+  - plugins (notes, todo, clipboard, browser tabs, layouts, etc.)
+  - optional indexing of folders (fast file search)
 
-Enable persistent log files by adding a `log_file` entry to `settings.json`.
-Set it to `true` to create `launcher.log` next to the executable or supply a
-custom path.
+- Most functionality is accessed via **prefix commands** like:
+  - `b ...` (bookmarks)
+  - `note ...` (notes)
+  - `todo ...` (tasks)
+  - `tab ...` (browser tabs)
+  - `mg ...` (mouse gestures)
+  - `layout ...` (window layouts)
 
-If hotkeys do nothing, check the output for warnings starting with
-`Hotkey listener failed`. When using `CapsLock` as the hotkey you almost
-always need to build with `--features unstable_grab` so the listener can
-grab the key.
+---
 
-## Settings
+## Command prefixes cheat sheet
 
-Multi Launcher automatically creates a `settings.json` file next to the binary
-on first run. Edit this file or open the **Settings** window to customise the
-launcher. The default hotkey is `F2`. To use a different key, set the `hotkey`
-value as shown below:
+> This is the “most-used” surface area. Many prefixes also support additional subcommands—type the prefix and read the result list.
 
-```json
-{
-  "hotkey": "F2",
-  "quit_hotkey": "Shift+Escape",
-  "help_hotkey": "F1",
-  "enabled_plugins": [
-    "web_search",
-    "calculator",
-    "unit_convert",
-    "clipboard",
-    "bookmarks",
-    "folders",
-    "shell",
-    "runescape_search",
-    "weather",
-    "system",
-    "timer",
-    "macros",
-    "history",
-    "help"
-  ],
-  "enabled_capabilities": {"folders": ["search", "show_full_path"]},
-  "note_save_on_close": false,
-  "enable_toasts": true,
-  "fuzzy_weight": 1.0,
-  "usage_weight": 1.0,
-  "debug_logging": false,
-  "log_file": true,
-  "offscreen_pos": [2000, 2000],
-  "window_size": [400, 220],
-  "query_scale": 1.0,
-  "list_scale": 1.0,
-  "history_limit": 100,
-  "clipboard_limit": 20,
-  "preserve_command": false,
-  "clear_query_after_run": false,
-  "follow_mouse": true,
-  "static_location_enabled": false,
-  "static_pos": [0, 0],
-  "static_size": [400, 220],
-  "screenshot_dir": "./MultiLauncher_Screenshots",
-  "screenshot_save_file": true
-}
-```
+| Prefix | What it does | Examples |
+|---|---|---|
+| `?` | Search web (default browser) | `? rust egui` |
+| `s` | Search with Google | `s rust borrow checker` |
+| `d` | Search with DuckDuckGo | `d windows ui automation` |
+| `=` | Calculator | `= (145*3) / 7` |
+| `= history` / `calc list` | Calculator history | `= history` |
+| `b` | Bookmarks | `b youtube` |
+| `f` | Saved folders | `f downloads` |
+| `cb` | Clipboard history | `cb list` / `cb clear` |
+| `ss` / `shot` | Screenshot actions | `ss` / `shot region markup` |
+| `conv` / `convert` | Conversion panel + converters | `conv` / `conv 10 km to mi` |
+| `case` | Text case tools | `case snake Hello World` |
+| `ts` | Timestamp helpers | `ts` / `ts 1700000000` |
+| `emoji` | Emoji search | `emoji shrug` |
+| `ascii` | ASCII art | `ascii hello` |
+| `lorem` | Lorem ipsum generator | `lorem 40` |
+| `note` | Notes | `note list` / `note add project ideas` |
+| `todo` | Todo/tasks | `todo add p2 #work fix indexing` |
+| `snip` | Snippets | `snip json` |
+| `macro` | Macros | `macro add` / `macro list` |
+| `tab` | Browser tabs (UIA) | `tab slack` / `tab cache` |
+| `fav` | Favorites (pinned commands) | `fav` / `fav add build` |
+| `mg` | Mouse gesture management | `mg settings` / `mg add` |
+| `keys` / `key` | Send keystrokes | `keys ctrl+shift+t` |
+| `layout` | Window layouts | `layout add work` / `layout run work` |
+| `win` | Window list / focus | `win terminal` |
+| `ps` | Processes list | `ps chrome` |
+| `tm` | Task Manager | `tm` |
+| `sys` | System actions | `sys lock` |
+| `info` | System info | `info` |
+| `net` | Network info | `net` |
+| `ip` | Show local/public IP | `ip` |
+| `bright` | Brightness control | `bright` |
+| `vol` | Volume control | `vol` |
+| `media` | Media keys | `media next` |
+| `yt` | YouTube search | `yt rust egui` |
+| `wiki` | Wikipedia search | `wiki egui` |
+| `red` | Reddit search | `red egui` |
+| `drop` | Drop-rate calculator | `drop 1/128` |
+| `rand` | Random helpers | `rand 1..100` |
+| `tmp` | Temp file manager | `tmp new log` / `tmp list` |
+| `recycle` | Recycle bin tools | `recycle` |
+| `rs` / `osrs` | RuneScape helpers | `osrs wiki karamja gloves` |
+| `cal` | Calendar/reminders | `cal` / `cal add today 5pm Pay rent` |
 
-The `hotkey` value accepts a base key with optional modifiers separated by `+`.
-Examples include `"Ctrl+Shift+Space"` or `"Alt+F1"`. Supported modifiers are
-`Ctrl`, `Shift` and `Alt`. Valid keys cover alphanumeric characters, function
-keys (`F1`-`F12`) and common keys like `Space`, `Tab`, `Return`, `Escape`,
-`Delete`, arrow keys and `CapsLock`.
+---
 
-`quit_hotkey` can be set to another key combination to close the launcher from
-anywhere. If omitted, the application only quits when the window is closed
-through the GUI.
-`help_hotkey` toggles a quick overlay listing commands. Set it to `null` or
-uncheck the *Enable help hotkey* box in the Settings window to disable this
-shortcut.
+## Cookbook examples
 
-`offscreen_pos` specifies where the window is moved when hiding it. Choose
-coordinates outside the visible monitor area so the window stays accessible but
-off-screen. The default is `[2000, 2000]`.
+### 1) Power search & launch
+- Type part of an app name (from your `actions.json`) and hit Enter:
+  - `steam`
+  - `vscode`
+- Search indexed files (if enabled via `index_paths`):
+  - `resume` → `Resume.pdf`
 
-`window_size` stores the size of the launcher window when it was last closed.
-The window is restored to this size on the next start. The default is
-`[400, 220]` if the value is missing.
+### 2) Calculator (with history)
+- `= 12*7 + 19`
+- `= history` (or `calc list`) to open the calculator history panel.
 
-When `follow_mouse` is `true` the window is centered on the mouse cursor
-whenever it becomes visible. To keep the launcher at a specific
-position instead, set `follow_mouse` to `false` and enable
-`static_location_enabled`. Provide the desired coordinates in `static_pos`
-and optionally a fixed size via `static_size`. The **Settings** window now
-includes a *Snapshot* button to capture the current window position and size
-for these fields.
+### 3) Convert things quickly
+- Unit conversion:
+  - `conv 225 lb to kg`
+  - `conv 10 km to mi`
+- Base conversion:
+  - `conv ff hex to dec`
+  - `conv 255 dec to hex`
+- Open the conversion panel (good for repeated conversions):
+  - `conv`
 
-`query_scale` and `list_scale` control the size of the search field and the results list separately. Values around `1.0` keep the default look while higher numbers enlarge the respective element up to five times.
-`enable_toasts` controls short pop-up notifications when saving settings or commands. Set it to `false` to disable these messages.
-`note_save_on_close` automatically saves the contents of note panels whenever the window closes—whether you press `Esc`, click the close button, or trigger another close event. The default is `false`. Toggle this behaviour from the **Settings** window via the "Save note on close (Esc)" checkbox in the **Note** section.
-`fuzzy_weight` and `usage_weight` adjust how results are ranked. The fuzzy weight multiplies the match score while the usage weight favours frequently launched actions. Setting `"fuzzy_weight": 0` in `settings.json` forces case-insensitive substring matching across all plugins.
-Command aliases are checked first and a matching alias ranks above other results.
+### 4) Notes (markdown files)
+- Create a new note:
+  - `note add Meeting notes`
+- List notes:
+  - `note list`
+- Search notes (title/content):
+  - `note rustdoc`
 
-Example: typing `test` will only list entries containing `test`. If an alias matches this word it appears before the other results.
-`history_limit` defines how many entries the history plugin keeps.
-`clipboard_limit` sets how many clipboard entries are persisted for the clipboard plugin.
-`preserve_command` keeps the typed command prefix (like `bm add` or `f add`) in the search field after running an action.
-`clear_query_after_run` removes the search text after a successful action whenever you prefer starting with a blank box.
-`enabled_capabilities` maps plugin names to capability identifiers so features can be toggled individually. The folders plugin, for example, exposes `show_full_path`.
-`screenshot_dir` sets the directory used when saving screenshots. If omitted, screenshots are stored in a `MultiLauncher_Screenshots` folder in the current working directory.
-`screenshot_save_file` determines whether screenshots copied to the clipboard are also written to disk. The default is `true`.
+> Notes are markdown files stored in `notes/` by default. Set `ML_NOTES_DIR` to override.
 
+### 5) Todos (tags + priority)
+- Add tasks:
+  - `todo add p1 #work fix mouse gesture stutter`
+  - `todo add p3 #home buy coffee`
+- Filter:
+  - `todo #work`
+  - `todo p1`
+- Mark complete:
+  - `todo done fix mouse gesture stutter` (select matching item)
+
+### 6) Favorites (pin “commands you actually use”)
+Favorites are shortcuts that point at an action string (anything the launcher can execute).
+
+- Open favorites manager:
+  - `fav`
+- Add a favorite with a prefilled label:
+  - `fav add Build`
+  - then set Action to something like: `shell:cargo build`
+- Remove favorites quickly:
+  - `fav rm build`
+
+Good favorites to create:
+- “Open project folder”
+- “Run tests”
+- “Open notes”
+- “Screenshot region markup”
+- “Layout: Work”
+
+### 7) Browser tabs (UI Automation)
+- Search tabs:
+  - `tab youtube`
+  - `tab docs`
+- Refresh tab cache:
+  - `tab cache`
+- Clear tab cache:
+  - `tab clear`
+
+> If UI Automation can’t activate a tab directly, the app may simulate a click (cursor may briefly move).
+
+### 8) Temp files (scratch logs, copy/paste buffers, etc.)
+- Create a temp file:
+  - `tmp new scratch`
+- Open temp directory:
+  - `tmp open`
+- List and open:
+  - `tmp list`
+- Remove:
+  - `tmp rm scratch`
+
+---
 
 ## Dashboard
 
-The dashboard is enabled by default on first launch and appears whenever the search box is empty. Toggle it from **Settings → Dashboard** and use the **Customize Dashboard...** button in the same section to open the editor instead of editing `dashboard.json` by hand. Each slot exposes its settings inside the editor—for example:
+The dashboard is a set of configurable widgets you can pin and keep visible as an “at a glance” control panel.
 
-- **Plugin home** lets you pick from the currently loaded plugins.
-- **Notes** and **Todo** widgets offer common query shortcuts from the respective plugins so you can prefill the search box.
-- **Weather** defaults to the dashboard *Default location* value and stores the chosen location/URL template directly in the slot settings.
-- **Todo List** lists the next pending todos with checkboxes to toggle completion. Settings: `count`, `show_done`, `sort`. Sample queries: `todo edit`, `todo view`.
-- **Recent Notes List** shows the most recently modified notes and can filter by tag. Settings: `count`, `filter_tag`, `show_snippet`, `open_mode`. Sample queries: `note open <title>`, `note list #tag`.
-- **Pinned Commands/Favorites** renders a custom set of action IDs (including favorites) in either a list or wrapped grid. Settings: `action_ids`, `layout`. Sample queries: `fav add`, any pinned action label to rerun it.
-- **Pinned Query Results** runs a saved query against any plugin or the `omni_search` engine and pins the top matches as buttons. Settings: `engine`, `query`, `limit`, `refresh_interval_secs`, `click_behavior`. The default layout places it in the second row; adjust the slot in `dashboard.json` or the dashboard editor to reposition it.
-- **Active Timers** highlights running timers with quick pause/cancel controls and optional completion history. Settings: `count`, `show_completed_recently`. Sample queries: `timer list`, `timer pause`.
-- **Clipboard + Snippets/System Snapshot** surfaces the latest clipboard entries, common snippets, and a CPU/memory/disk snapshot when available. Settings: `clipboard_count`, `snippet_count`, `show_system`. Sample queries: `cb list`, `cs list`, `info`.
-- **Query List** runs a saved query across enabled plugins and pins the top matches. Settings: `query`, `count`, `refresh_ms`, `show_desc`.
-- **System Status** displays cached CPU, memory, disk, network, volume, and brightness metrics. Settings: `refresh_interval_secs`, `show_cpu`, `show_memory`, `show_disk`, `show_network`, `show_volume`, `show_brightness`.
-- **Now Playing** exposes media transport controls as buttons. Settings: `show_play`, `show_pause`, `show_prev`, `show_next`.
-- **Clipboard Recent** lists the most recent clipboard entries as copy buttons. Settings: `count`.
-- **Snippet Favorites** shows favorites that map to snippet actions. Settings: `count`. Sample queries: `fav add`, `cs list`.
-- **Notes Recent** lists recently modified notes with optional snippets/tags. Settings: `count`, `show_snippet`, `show_tags`.
-- **Notes Tags** displays the most common note tags. Settings: `count`, `show_counts`. Sample query: `note list #tag`.
-- **Todo Focus** highlights the highest priority todo with quick open/complete controls. Settings: `show_done`, `query`.
-- **Todo Burndown** summarizes todo progress with optional progress bar. Settings: `show_progress`.
-- **Windows Overview** summarizes open windows with optional close buttons. Settings: `limit`, `refresh_interval_secs`, `show_close`.
-- **Quick Tools** renders a customizable strip of query buttons. Settings: `queries`.
+### Built-in widgets (current set)
+- **Bookmarks / Folders / Commands**
+  - bookmarks list, folders list, recent commands, frequent commands
+- **Notes / Todo**
+  - scratchpad, recent notes, todo list, recent todos
+- **System / Diagnostics**
+  - system status, CPU/RAM, network status, process list, diagnostics
+- **Windows / Layouts**
+  - window list, layouts widget (apply saved layouts)
+- **Browser**
+  - browser tabs widget
+- **Mouse gestures**
+  - gesture cheat sheet, recent gestures, gesture health/stats
+- **Utilities**
+  - stopwatch widget, volume widget, recycle bin widget, tempfiles widget, system controls/actions
 
-Changes are saved back to `dashboard.json` once you click **Save** in the editor.
+> Use the dashboard editor UI to add/remove widgets and configure layout.
 
+---
 
-If you choose `CapsLock` as the hotkey, the launcher suppresses the normal
-CapsLock toggle **when compiled with the `unstable_grab` feature enabled**.
-Press `Shift`+`CapsLock` to change the keyboard state while the application is
-running. The launcher only responds when `CapsLock` is pressed on its own; any
-other modifier keys will simply toggle the caps lock state without showing the
-window.
+## Mouse gestures
 
-## Plugins
+Mouse gestures are a **right-click draw** interaction that can execute launcher actions.
 
-```mermaid
-flowchart LR
-    A[Hotkey pressed] --> B(Show launcher)
-    B --> C{User query}
-    C --> D[Plugin manager searches]
-    D --> E[Display results]
-    E --> F[Run action]
-```
+### How it works
+- Hold **Right Mouse Button** and move the mouse to draw a gesture.
+- The gesture is tokenized (default is 4-direction):
+  - `L`, `R`, `U`, `D`
+- When you release, the best match binding is chosen and executed.
 
-```mermaid
-graph TD
-    S[Startup] --> B1[Register built-in plugins]
-    S --> B2[Load plugin_dirs]
-    B2 --> L[Load dynamic plugins]
-    B1 --> PM[Plugin manager ready]
-    L --> PM
-```
+### Manage gestures
+- Open settings dialog:
+  - `mg settings`
+- Open gesture editor dialog:
+  - `mg` (or `mg gesture`)
+- Add/edit:
+  - `mg add`
+  - `mg edit <filter>`
+- Find/conflicts:
+  - `mg find <filter>`
+  - `mg conflicts`
 
-Built-in commands:
+### Binding kinds (what a gesture can do)
+Gestures can map to:
+- **Execute** an action (run something immediately)
+- **SetQuery** (populate launcher query)
+- **SetQueryAndShow** (populate + show launcher)
+- **SetQueryAndExecute** (populate + run)
+- **ToggleLauncher** (show/hide launcher)
 
-| Prefix | Example | Description |
-|-------|---------|-------------|
-| `g` | `g rust` | Google web search |
-| `=` | `= 2+2` | Calculator |
-| `conv` | `conv 10 km to mi` | Unit and base conversions |
-| `drop` | `drop 1/128 128` | Drop rate calculator |
-| `rs`/`osrs` | `rs item` | RuneScape Wiki search |
-| `yt` | `yt rust` | YouTube search |
-| `red` | `red cats` | Reddit search |
-| `wiki` | `wiki rust` | Wikipedia search |
-| `cb` | `cb list` | Clipboard history |
-| `bm` | `bm add <url>` | Manage bookmarks |
-| `f` | `f add <path>` | Folder shortcuts |
-| `o` | `o list` | Omni search |
-| `sys` | `sys shutdown` | System actions |
-| `ps` | `ps` | Process list |
-| `info` | `info cpu` | System information |
-| `net` | `net` | Network usage |
-| `ip` | `ip` | Show IP addresses |
-| `sh` | `sh echo hi` | Shell commands |
-| `hi` | `hi` | Search history |
-| `note` | `note add <text>` or `note rm <slug>` | Quick notes |
-| `todo` | `todo add <task>` | Todo items |
-| `todo edit` | `todo edit` | Edit todos |
-| `todo export` | `todo export` | Export todos |
-| `cs` | `cs add <alias> <text>` | Text snippets |
-| `macro` | `macro list` | Command macros |
-| `rec` | `rec` | Recycle Bin cleanup |
-| `tmp` | `tmp new [name]` or `tmp create [name]` | Temporary files |
-| `ascii` | `ascii text` | ASCII art |
-| `emoji` | `emoji smile` | Emoji search |
-| `case` | `case hello world` | Text and encoding conversions |
-| `color` | `color #ff0000` | Color picker and formats |
-| `ts` | `ts 0` | Timestamp conversion |
-| `tsm` | `tsm 3600000` | Midnight timestamp |
-| `rand` | `rand number 10` | Random numbers, dice and passwords |
-| `app` | `app <filter>` | Saved apps |
-| `vol` | `vol 50` | Volume control (`vol pid <pid> <level>`; dialog lists processes on Windows) |
-| `media` | `media play` | Media controls |
-| `bright` | `bright 50` | Adjust brightness |
-| `tm` | `tm` | Task Manager |
-| `win` | `win <title>` | Window management |
-| `ss` | `ss clip` | Screenshot capture |
-| `help` | `help` | Command overview |
-| `sw` | `sw start` | Stopwatch |
-| `timer` | `timer add 5m tea` | Timers |
-| `alarm` | `alarm 07:30` | Alarms |
-| `weather` | `weather Berlin` | Weather lookup |
+This makes gestures useful for both:
+- “Do the thing now”
+- “Bring up the launcher already pre-filtered to the thing”
 
-Timers and alarms are stored in `alarms.json` and reload automatically when the launcher starts. The timer plugin exposes a `completion_dialog` capability that toggles pop-up notifications when a timer completes.
+### Files
+- Gestures: `mouse_gestures.json`
+- Usage stats: `mouse_gestures_usage.json`
 
-Stopwatches use the `sw` prefix. Start one with `sw start`, stop it with `sw stop` or reset it via `sw reset`. Right click a stopwatch entry to copy the elapsed time. A precision option in the **Settings** window controls how many decimals are displayed.
+---
 
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant L as Launcher
-    participant T as Timer Plugin
-    U->>L: "timer add 5m tea"
-    L->>T: store timer
-    T-->>L: confirm
-    T->>L: timer finished
-    L->>U: show notification
-```
+## Layouts
 
-### Conversion Plugins
-The `conv`/`convert` prefix now covers two plugins:
+Layouts let you capture and restore a **window arrangement** (great for “work mode” setups).
 
-- **Unit Convert** handles common units like length, mass, temperature, volume,
-  area, speed, pressure, energy, power, data, time, fuel economy and angles.
-  Examples:
+### Commands
+- Create a layout from current windows:
+  - `layout add Work`
+- List layouts:
+  - `layout list`
+- Run (apply) a layout:
+  - `layout run Work`
+- Edit layouts file:
+  - `layout edit`
 
-  ```text
-  conv 1 kwh to j
-  conv 8 bit to byte
-  conv 30 mpg to kpl
-  conv 180 deg to rad
-  ```
+### Useful flags
+- Dry run (preview without changing anything):
+  - `layout run Work --dry-run`
+- Don’t launch missing apps:
+  - `layout run Work --no-launch`
+- Only affect the active monitor:
+  - `layout run Work --only-active-monitor`
+- Filter windows included:
+  - `layout run Work --filter chrome`
 
-- **Base Convert** translates between binary, hexadecimal, octal, decimal and
-  plain text:
+### File
+- `layouts.json`
 
-  ```text
-  conv 1010 bin to hex
-  conv ff hex to bin
-  conv "hello" text to hex
-  conv 48656c6c6f hex to text
-  conv 42 dec to bin
-  ```
+---
 
-### Volume Plugin
-Control system volume or specific processes:
-```text
-vol 75
-vol pid 1234 50
-vol name notepad.exe 20
-```
-On Windows, opening the volume dialog (`vol`) also lists running applications
-with sliders to adjust each process just like the system volume mixer.
+## Calendar
 
-### Screenshot Plugin
-Use `ss` to capture the active window, a custom region or the whole desktop. Add `clip` to copy the result to the clipboard.
-Screenshots are saved in a `MultiLauncher_Screenshots` folder in the current working directory by default or the path set in `screenshot_dir`.
-Set `screenshot_save_file` to `true` to always keep a file when copying to the clipboard.
+Lightweight reminders/events that show up in search and can be displayed via widgets.
 
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant L as Launcher
-    participant P as Screenshot Plugin
-    U->>L: "ss clip"
-    L->>P: capture screen
-    P-->>L: image path
-    L->>U: save/copy
-```
+### Commands
+- Open calendar UI:
+  - `cal`
+- Views:
+  - `cal day`
+  - `cal week`
+  - `cal month`
+- Upcoming / overdue:
+  - `cal upcoming`
+  - `cal overdue`
+- Find:
+  - `cal find dentist`
+- Add:
+  - `cal add today 5pm Pay rent`
+  - `cal add tomorrow 09:30 Standup | daily sync`
+  - `cal add 2026-02-05 all-day Vacation`
 
-### Text Case Plugin
-Convert text to different cases. Example:
+### Snooze
+- `cal snooze 15m`
+- `cal snooze 1h`
+- `cal snooze tomorrow 9am`
 
-```text
-case Hello World
-```
+### Files
+- Events: `calendar/events.json`
+- State: `calendar/state.json`
 
-The plugin shows many variations including uppercase, lowercase, capitalized,
-camelCase, PascalCase, snake_case, SCREAMING_SNAKE_CASE, kebab-case,
-Train-Case, dot.case and space case. It also offers alternating, mocking,
-inverse and backwards cases, acronym and initial forms, sentence and title
-case, Base64/hex/binary encodings, ROT13, clap and emoji text, custom
-delimiters and Morse code. Select any variant to copy it to the clipboard.
+---
 
-### Macros Plugin
-The macros plugin runs a saved sequence of launcher commands. Macros are stored in `macros.json` and can be edited by typing `macro` to open the editor.
+## Screenshot capture + markup editor
 
-```text
-macro list
-macro example
-```
+Screenshots can be taken to:
+- clipboard
+- file (auto-save supported)
+- optional **built-in editor** for markup and quick annotations
 
-### Random Plugin
-Generate random numbers, dice rolls or passwords with the `rand` prefix. Examples:
+### Commands
+- `ss` → shows all screenshot actions
+- Common actions include:
+  - screen → clipboard
+  - screen → file
+  - region → clipboard
+  - region → file
+  - region → **markup** (opens editor)
 
-```text
-rand number 10
-rand dice
-rand pw 8
-```
+### Markup editor highlights
+- Draw markup (pen/shape tools)
+- Copy to clipboard
+- Save to file
+- Optional toasts:
+  - “Copied to clipboard”
+  - “Saved screenshot”
 
-### IP Plugin
-Display local network interface addresses with the `ip` prefix. Append `public` to also retrieve the public IP via `api.ipify.org`.
+Screenshot behavior is controlled by settings:
+- `screenshot_dir`
+- `screenshot_auto_save`
+- `screenshot_use_editor`
 
-### Color Picker Plugin
-Type `color` to open an interactive picker or specify a hex value such as `color #ff0000`. The plugin outputs the selected color in multiple formats: `#RRGGBB`, `rgb(r, g, b)` and `hsl(h, s%, l%)`. Use the arrow keys to highlight a format and press <kbd>Enter</kbd> to copy it to the clipboard.
+---
 
-### Notes Plugin
-Manage quick Markdown notes with the `note` prefix. The editor window includes an **Open externally** button to open the current note in another program. A setting under the Note plugin labelled *Open externally* chooses the default opener: **WezTerm**, **Powershell**, **Notepad** or **Neither** to be asked each time. **WezTerm** is supported and is the default external editor. The **Powershell** option uses PowerShell 7 when available (listed as "Powershell" in the menu) and falls back to `powershell.exe`.
+## Configuration
 
-When the search box is empty the launcher shows these shortcuts along with `app <alias>` entries for saved actions.
+### `settings.json`
+This controls hotkeys, plugin enablement, UI behavior, dashboard, and more.
 
-Selecting a clipboard entry copies it back to the clipboard. Type `help` and press <kbd>Enter</kbd> to open the command list. The help window groups commands by plugin name and can optionally display example queries. Additional plugins can be added by building
-shared libraries. Each plugin crate should be compiled as a `cdylib` and export
-a `create_plugin` function returning `Box<dyn Plugin>`:
-
-```rust
-#[no_mangle]
-pub extern "C" fn create_plugin() -> Box<dyn Plugin> {
-    Box::new(MyPlugin::default())
+Minimal example:
+```json
+{
+  "hotkey": "F2",
+  "enable_toasts": true,
+  "index_paths": ["C:\\Workspaces", "C:\\Users\\You\\Documents"]
 }
-```
+````
 
-Place the resulting library file in one of the directories listed under
-`plugin_dirs` in `settings.json`.
+Notable settings (high impact):
 
-Plugins can be enabled or disabled from the **Settings** window. The list of
-active plugins is stored in the `enabled_plugins` section of `settings.json`.
-The **Plugin Settings** dialog enables or disables plugins and toggles
-capabilities like `show_full_path`.
+* `hotkey` / `quit_hotkey` / `help_hotkey`
+* `index_paths` (file indexing for search)
+* `enabled_plugins` (allowlist)
+* `plugin_dirs` (external plugins)
+* `enable_toasts` + `toast_duration`
+* `follow_mouse`, `always_on_top`, `hide_after_run`
+* screenshot settings (`screenshot_dir`, `screenshot_auto_save`, `screenshot_use_editor`)
+* dashboard settings (`dashboard.*`)
 
-Changes take effect immediately once the dialog is closed. Use this window to
-enable additional plugins as they become available. A plugin to expose
-environment variables is planned for a future release.
+Disable the default hotkey entirely (useful if you bind your own trigger elsewhere):
 
+* Set env var `ML_DEFAULT_HOTKEY_NONE=1`
 
-Example:
+### `actions.json`
+
+Actions are your custom launch targets / macros / shell entries.
+
+Each entry looks like:
 
 ```json
 {
-  "enabled_plugins": [
-    "web_search",
-    "calculator",
-    "clipboard",
-    "bookmarks",
-    "folders",
-    "shell",
-    "runescape_search",
-    "system",
-    "processes",
-    "network",
-    "weather",
-    "timer",
-    "media",
-    "macros",
-    "history",
-    "help"
-  ]
+  "label": "Notepad",
+  "desc": "Windows Notepad",
+  "action": "notepad.exe",
+  "args": null
 }
 ```
-The folders plugin recognises the `f` prefix. Use `f add <path>` to add a folder
-shortcut and `f rm <pattern>` to remove one via fuzzy search. Custom entries can
-be aliased by right clicking them in the results list. Hovering a folder result
-shows its full path. A plugin setting "show full path always" controls whether
-the full path is displayed next to an alias or only as a tooltip.
-The bookmarks plugin uses the `bm` prefix. Use `bm add <url>` to save a link,
-`bm rm` to list and remove bookmarks (optionally filtering with a pattern) or
-`bm list` to show all bookmarks. Searching with `bm <term>` matches both URLs
-and aliases.
-The omni search plugin uses the `o` prefix to search folders, bookmarks and saved apps at once. Use `o list` to show all entries or `o list <query>` to filter them.
-The system information plugin uses the `info` prefix. Type `info` to show CPU,
-memory and disk usage or `info cpu` for a single metric.
-Other handy prefixes include `ip` to show local and public addresses, `tab` to switch
-browser tabs, `rand` for random numbers, dice rolls or passwords, and `lorem` for filler
-text. Use `emoji` to search emoji or kaomoji, `case` to transform text casing,
-`sw` for a stopwatch, `ss` to capture screenshots, `tm` to open the Windows
-Task Manager and `settings` to bring up the settings dialog.
-### Security Considerations
-The shell plugin runs commands using the system shell without sanitising input. Only enable it if you trust the commands you type. Errors while spawning the process are logged.
-Type `sh` in the launcher to open the shell command editor for managing predefined commands. Saved commands can also be added with `sh add <name> <command>`, removed via `sh rm <pattern>` or listed with `sh list`.
-## Editing Apps
-The launcher stores its custom actions in `actions.json` next to the
-executable. This file is created automatically the first time you save an
-app. While running the application you can manage this list through
-**Edit Apps**. Open the launcher with the configured hotkey and choose
-*Edit Apps* from the menu.
-Use the **New App** button to open the *Add App* dialog where you enter
-a label, description and the executable path. Enable **Add arguments** to supply
-extra command line parameters. The **Browse** button lets you
-select the file interactively. Existing entries can be edited via the **Edit**
-button or by right clicking an app in the results list and choosing *Edit
-App*. Apps can also be removed from the list. All changes are written to
-`actions.json` immediately.
 
-Type `app <filter>` in the launcher to search these saved entries. Typing `app`
-alone lists all saved apps.
+---
 
-Custom entries can also target built-in launcher actions. Use action IDs such as
-`launcher:toggle`, `launcher:show`, `launcher:hide`, `launcher:focus`, or
-`launcher:restore` to control the launcher window from custom actions, macros,
-or mouse gestures.
+## Data files
 
-## Packaging
+These are created/updated as you use the app (typically in the working directory alongside `settings.json`):
 
-The project can be compiled for Windows using `cargo build --release`.
-Afterwards bundle the binary for distribution using a Windows packaging tool
-such as `cargo wix`.
-When compiled this way the executable is built with `windows_subsystem = "windows"`, which prevents an extra console window from appearing.
+* `actions.json` — your defined actions
+* `bookmarks.json` — saved bookmarks
+* `folders.json` — saved folders
+* `snippets.json` — snippets database
+* `macros.json` — macro definitions
+* `todo.json` — todo list
+* `alarms.json` — timers/alarms
+* `history.json` — command history
+* `history_pins.json` — pinned history items
+* `usage.json` — usage scoring data
+* `clipboard_history.json` — clipboard history
+* `calc_history.json` — calculator history
+* `fav.json` — favorites
+* `layouts.json` — window layouts
+* `mouse_gestures.json` — mouse gestures
+* `mouse_gestures_usage.json` — mouse gesture usage stats
+* `calendar/events.json` — calendar events
+* `calendar/state.json` — calendar UI state
+* `toast.log` — toast debug log (viewable from UI)
+
+---
+
+## Building
+
+### Requirements
+
+* Rust stable toolchain
+* Windows (recommended; several features use Win32/UI Automation)
+
+### Build
+
+```bash
+cargo build --release
+```
+
+### Notes
+
+* The project uses `rdev` and may require the `unstable_grab` feature for global input capture in some environments.
+* Some plugins depend on Windows-specific APIs (window management, browser tab activation, etc.).
+
+---
 
 ## Troubleshooting
 
-When diagnosing hotkey issues it can be helpful to enable info level logging:
+### “Nothing happens when I press F2”
 
-```powershell
-$env:RUST_LOG="info"; cargo run
-```
-## Tips
+* Confirm `settings.json` is being loaded from the directory you’re running in.
+* Check `hotkey` in `settings.json`.
+* If you set `ML_DEFAULT_HOTKEY_NONE`, the default hotkey is disabled.
 
-- Press the help hotkey (F1 by default) to display a quick list of available commands.
-- Right click a folder result to set a custom alias for easier access.
-- Right click a note entry to edit, remove, or open it in Neovim. The note editor's **Open externally** button uses the configured default opener.
-- On Windows, Neovim launches via `Powershell` (PowerShell 7 when available), then `powershell.exe`, falling back to `cmd.exe`.
-- Use the *Snapshot* button in Settings when adjusting static window placement.
-- Searches are case-insensitive and also match on command aliases.
-- Tweak `fuzzy_weight` and `usage_weight` if you want results to favour name matches or past usage differently.
+### Mouse gestures don’t trigger
 
+* Ensure the **mouse_gestures plugin** is enabled (if you use `enabled_plugins`).
+* Open `mg settings` and confirm “Enable mouse gestures” is checked.
+* Try enabling debug logging in `mg settings` and inspect logs.
 
-## Manual Test Plan
+### Browser tabs can’t activate
 
-1. Build and run the project with `cargo run`.
-2. **Before** the launcher window appears, press the configured hotkey once.
-3. Observe the log output. There should be a message indicating a visibility
-   change was queued.
-4. When the GUI finishes initialising, it should immediately apply the queued
-   visibility change and the window becomes visible. A log entry confirms this.
-5. Press the hotkey again to ensure normal toggling after start-up.
+* Run `tab cache` to rebuild the UI Automation cache.
+* Some browsers / window states may block UIA access; the plugin may fall back to click simulation.
 
-On Windows the launcher also checks which virtual desktop the window belongs to
-whenever it becomes visible. If it is on another desktop it is automatically
-moved to the active one before being shown.
+---
+
