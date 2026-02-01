@@ -27,6 +27,35 @@ use url::Url;
 
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
 
+fn clamp_char_index(s: &str, char_index: usize) -> usize {
+    char_index.min(s.chars().count())
+}
+
+fn char_to_byte_index(s: &str, char_index: usize) -> usize {
+    let clamped = clamp_char_index(s, char_index);
+    s.char_indices()
+        .nth(clamped)
+        .map(|(idx, _)| idx)
+        .unwrap_or_else(|| s.len())
+}
+
+fn byte_to_char_index(s: &str, byte_index: usize) -> usize {
+    let mut clamped = byte_index.min(s.len());
+    while clamped > 0 && !s.is_char_boundary(clamped) {
+        clamped -= 1;
+    }
+    s[..clamped].chars().count()
+}
+
+fn char_range_to_byte_range(s: &str, start: usize, end: usize) -> (usize, usize) {
+    let (start, end) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    (char_to_byte_index(s, start), char_to_byte_index(s, end))
+}
+
 fn preprocess_note_links(content: &str, current_slug: &str) -> String {
     static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
     WIKI_RE
@@ -78,6 +107,12 @@ pub struct NotePanel {
     link_dialog_open: bool,
     link_text: String,
     link_url: String,
+
+    // Focus management: avoid requesting focus on an ID that does not correspond to
+    // an existing widget in the current frame. This prevents AccessKit from seeing
+    // a focused node that is not present in the accessibility tree.
+    focus_textedit_next_frame: bool,
+    last_textedit_id: Option<egui::Id>,
 }
 
 impl NotePanel {
@@ -99,6 +134,8 @@ impl NotePanel {
             link_dialog_open: false,
             link_text: String::new(),
             link_url: String::new(),
+            focus_textedit_next_frame: false,
+            last_textedit_id: None,
         }
     }
 
@@ -111,7 +148,14 @@ impl NotePanel {
         let screen_rect = ctx.available_rect();
         let max_width = screen_rect.width().min(800.0);
         let max_height = screen_rect.height().min(600.0);
-        let content_id = egui::Id::new("note_content");
+        // NOTE: `egui::TextEditState` cursor indices are char-based and we also mutate `self` inside the
+        // window closure (save, open externally, etc.). Don't capture borrows of `self.note.slug` in
+        // the closure environment - keep IDs based on an owned clone instead.
+        let slug = self.note.slug.clone();
+        let content_id = egui::Id::new(("note_content", slug.clone()));
+        let scroll_id_source = ("note_scroll", slug.clone());
+        let text_id_source = ("note_text", slug);
+
         egui::Window::new(self.note.title.clone())
             .open(&mut open)
             .resizable(true)
@@ -191,10 +235,16 @@ impl NotePanel {
                     if self.preview_mode {
                         if ui.button("Edit").clicked() {
                             self.preview_mode = false;
-                            ui.ctx().memory_mut(|m| m.request_focus(content_id));
+                            // Defer focus until after the TextEdit has been created; requesting
+                            // focus for an ID that doesn't exist in the current frame can trip
+                            // AccessKit assertions (focused node missing from node tree).
+                            self.focus_textedit_next_frame = true;
                         }
                     } else if ui.button("Render").clicked() {
                         self.preview_mode = true;
+                        if let Some(id) = self.last_textedit_id {
+                            ui.ctx().memory_mut(|m| m.surrender_focus(id));
+                        }
                     }
                     ui.separator();
                     if ui.button("A-").clicked() {
@@ -206,7 +256,10 @@ impl NotePanel {
                 });
                 let tags = extract_tags(&self.note.content);
                 if !tags.is_empty() {
-                    let was_focused = ui.ctx().memory(|m| m.has_focus(content_id));
+                    let was_focused = self
+                        .last_textedit_id
+                        .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
+                        .unwrap_or(false);
                     let tag_count = tags.len();
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Tags:");
@@ -227,7 +280,7 @@ impl NotePanel {
                             if ui.button(label).clicked() {
                                 self.tags_expanded = !self.tags_expanded;
                                 if was_focused {
-                                    ui.ctx().memory_mut(|m| m.request_focus(content_id));
+                                    self.focus_textedit_next_frame = true;
                                 }
                             }
                         }
@@ -250,7 +303,10 @@ impl NotePanel {
                         .map(|(label, url)| LinkKind::Url(label, url)),
                 );
                 if !all_links.is_empty() {
-                    let was_focused = ui.ctx().memory(|m| m.has_focus(content_id));
+                    let was_focused = self
+                        .last_textedit_id
+                        .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
+                        .unwrap_or(false);
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Links:");
                         let threshold = app.note_more_limit;
@@ -276,7 +332,7 @@ impl NotePanel {
                             if ui.button(label).clicked() {
                                 self.links_expanded = !self.links_expanded;
                                 if was_focused {
-                                    ui.ctx().memory_mut(|m| m.request_focus(content_id));
+                                    self.focus_textedit_next_frame = true;
                                 }
                             }
                         }
@@ -285,7 +341,7 @@ impl NotePanel {
                 ui.separator();
                 let remaining = ui.available_height();
                 let resp = egui::ScrollArea::vertical()
-                    .id_source(content_id)
+                    .id_source(scroll_id_source)
                     .max_height(remaining)
                     .show(ui, |ui| {
                         if self.preview_mode {
@@ -413,7 +469,7 @@ impl NotePanel {
                             Some(
                                 ui.add(
                                     egui::TextEdit::multiline(&mut self.note.content)
-                                        .id_source(content_id)
+                                        .id_source(text_id_source)
                                         .desired_width(f32::INFINITY)
                                         .font(FontId::monospace(app.note_font_size))
                                         .frame(true)
@@ -425,6 +481,11 @@ impl NotePanel {
                     });
                 if !self.preview_mode {
                     if let Some(resp) = resp.inner {
+                        self.last_textedit_id = Some(resp.id);
+                        if self.focus_textedit_next_frame {
+                            resp.request_focus();
+                            self.focus_textedit_next_frame = false;
+                        }
                         if !resp.secondary_clicked() {
                             let state = egui::widgets::text_edit::TextEditState::load(ctx, resp.id)
                                 .unwrap_or_default();
@@ -462,54 +523,73 @@ impl NotePanel {
                             let mut state =
                                 egui::widgets::text_edit::TextEditState::load(ctx, resp.id)
                                     .unwrap_or_default();
+                            let total_chars = self.note.content.chars().count();
                             let mut idx = state
                                 .cursor
                                 .char_range()
                                 .map(|r| r.primary.index)
-                                .unwrap_or(0);
+                                .unwrap_or(0)
+                                .min(total_chars);
                             let mut moved = false;
-                            if ctx.input(|i| i.key_pressed(Key::H)) {
-                                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::H));
+
+                            if ctx.input(|i| i.key_pressed(egui::Key::H)) {
+                                ctx.input_mut(|i| {
+                                    i.consume_key(egui::Modifiers::NONE, egui::Key::H)
+                                });
                                 idx = idx.saturating_sub(1);
                                 moved = true;
                             }
-                            if ctx.input(|i| i.key_pressed(Key::L)) {
-                                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::L));
-                                idx = (idx + 1).min(self.note.content.chars().count());
+                            if ctx.input(|i| i.key_pressed(egui::Key::L)) {
+                                ctx.input_mut(|i| {
+                                    i.consume_key(egui::Modifiers::NONE, egui::Key::L)
+                                });
+                                idx = (idx + 1).min(total_chars);
                                 moved = true;
                             }
-                            if ctx.input(|i| i.key_pressed(Key::J)) {
-                                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::J));
-                                if let Some(pos) = self.note.content[idx..].find('\n') {
-                                    idx += pos + 1;
+                            if ctx.input(|i| i.key_pressed(egui::Key::J)) {
+                                ctx.input_mut(|i| {
+                                    i.consume_key(egui::Modifiers::NONE, egui::Key::J)
+                                });
+                                let byte_idx = char_to_byte_index(&self.note.content, idx);
+                                if let Some(pos) = self.note.content[byte_idx..].find('\n') {
+                                    let new_byte = byte_idx + pos + 1;
+                                    idx = byte_to_char_index(&self.note.content, new_byte);
                                 } else {
-                                    idx = self.note.content.chars().count();
+                                    idx = total_chars;
                                 }
                                 moved = true;
                             }
-                            if ctx.input(|i| i.key_pressed(Key::K)) {
-                                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::K));
-                                if let Some(pos) = self.note.content[..idx].rfind('\n') {
-                                    idx = pos;
+                            if ctx.input(|i| i.key_pressed(egui::Key::K)) {
+                                ctx.input_mut(|i| {
+                                    i.consume_key(egui::Modifiers::NONE, egui::Key::K)
+                                });
+                                let byte_idx = char_to_byte_index(&self.note.content, idx);
+                                if let Some(pos) = self.note.content[..byte_idx].rfind('\n') {
+                                    idx = byte_to_char_index(&self.note.content, pos);
                                 } else {
                                     idx = 0;
                                 }
                                 moved = true;
                             }
-                            if ctx.input(|i| i.key_pressed(Key::Y)) {
-                                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Y));
-                                let start = self.note.content[..idx]
+                            if ctx.input(|i| i.key_pressed(egui::Key::Y)) {
+                                ctx.input_mut(|i| {
+                                    i.consume_key(egui::Modifiers::NONE, egui::Key::Y)
+                                });
+                                let byte_idx = char_to_byte_index(&self.note.content, idx);
+                                let start_byte = self.note.content[..byte_idx]
                                     .rfind('\n')
                                     .map(|p| p + 1)
                                     .unwrap_or(0);
-                                let end = self.note.content[idx..]
+                                let end_byte = self.note.content[byte_idx..]
                                     .find('\n')
-                                    .map(|p| idx + p)
+                                    .map(|p| byte_idx + p)
                                     .unwrap_or_else(|| self.note.content.len());
                                 ctx.output_mut(|o| {
-                                    o.copied_text = self.note.content[start..end].to_string();
+                                    o.copied_text =
+                                        self.note.content[start_byte..end_byte].to_string();
                                 });
                             }
+
                             if moved {
                                 state
                                     .cursor
@@ -529,6 +609,16 @@ impl NotePanel {
                     }
                 }
             });
+
+        // If the panel is closing, ensure we don't leave egui focus on a widget
+        // that will no longer exist this frame. This avoids AccessKit panics
+        // about focused nodes missing from the accessibility tree.
+        if !open {
+            if let Some(id) = self.last_textedit_id {
+                ctx.memory_mut(|m| m.surrender_focus(id));
+            }
+        }
+
         if self.link_dialog_open {
             let mut open_link = true;
             egui::Window::new("Insert Link")
@@ -542,7 +632,10 @@ impl NotePanel {
                     ui.text_edit_singleline(&mut self.link_url);
                     ui.horizontal(|ui| {
                         if ui.button("Insert").clicked() {
-                            self.insert_link(ctx, content_id);
+                            let id = self.last_textedit_id.unwrap_or(content_id);
+                            self.insert_link(ctx, id);
+                            // Return focus to the editor after insertion.
+                            self.focus_textedit_next_frame = true;
                         }
                         if ui.button("Cancel").clicked() {
                             self.link_text.clear();
@@ -738,7 +831,8 @@ impl NotePanel {
                     .char_range()
                     .map(|r| r.primary.index)
                     .unwrap_or_else(|| self.note.content.chars().count());
-                self.note.content.insert_str(idx, "- [ ] ");
+                let idx_byte = char_to_byte_index(&self.note.content, idx);
+                self.note.content.insert_str(idx_byte, "- [ ] ");
                 state
                     .cursor
                     .set_char_range(Some(egui::text::CCursorRange::one(
@@ -749,6 +843,7 @@ impl NotePanel {
             }
             if ui.button("Insert Link...").clicked() {
                 if let Some((start, end)) = self.pending_selection {
+                    let (start, end) = char_range_to_byte_range(&self.note.content, start, end);
                     self.link_text = self.note.content[start..end].to_string();
                 } else {
                     self.link_text.clear();
@@ -789,7 +884,8 @@ impl NotePanel {
                                 .char_range()
                                 .map(|r| r.primary.index)
                                 .unwrap_or_else(|| self.note.content.chars().count());
-                            self.note.content.insert_str(idx, &insert);
+                            let idx_byte = char_to_byte_index(&self.note.content, idx);
+                            self.note.content.insert_str(idx_byte, &insert);
                             state
                                 .cursor
                                 .set_char_range(Some(egui::text::CCursorRange::one(
@@ -823,7 +919,8 @@ impl NotePanel {
                                 .char_range()
                                 .map(|r| r.primary.index)
                                 .unwrap_or_else(|| self.note.content.chars().count());
-                            self.note.content.insert_str(idx, &insert);
+                            let idx_byte = char_to_byte_index(&self.note.content, idx);
+                            self.note.content.insert_str(idx_byte, &insert);
                             state
                                 .cursor
                                 .set_char_range(Some(egui::text::CCursorRange::one(
@@ -857,7 +954,8 @@ impl NotePanel {
                                     .char_range()
                                     .map(|r| r.primary.index)
                                     .unwrap_or_else(|| self.note.content.chars().count());
-                                self.note.content.insert_str(idx, &insert);
+                                let idx_byte = char_to_byte_index(&self.note.content, idx);
+                                self.note.content.insert_str(idx_byte, &insert);
                                 state
                                     .cursor
                                     .set_char_range(Some(egui::text::CCursorRange::one(
@@ -893,7 +991,8 @@ impl NotePanel {
                                 .char_range()
                                 .map(|r| r.primary.index)
                                 .unwrap_or_else(|| self.note.content.chars().count());
-                            self.note.content.insert_str(idx, &insert);
+                            let idx_byte = char_to_byte_index(&self.note.content, idx);
+                            self.note.content.insert_str(idx_byte, &insert);
                             state
                                 .cursor
                                 .set_char_range(Some(egui::text::CCursorRange::one(
@@ -936,8 +1035,9 @@ impl NotePanel {
         }
 
         if let Some((start, end)) = range {
-            self.note.content.insert_str(end, end_marker);
-            self.note.content.insert_str(start, start_marker);
+            let (start_byte, end_byte) = char_range_to_byte_range(&self.note.content, start, end);
+            self.note.content.insert_str(end_byte, end_marker);
+            self.note.content.insert_str(start_byte, start_marker);
             let new_start = start + start_marker.chars().count();
             let new_end = end + start_marker.chars().count();
             state
@@ -953,6 +1053,7 @@ impl NotePanel {
     pub fn insert_link(&mut self, ctx: &egui::Context, id: egui::Id) {
         let text = if self.link_text.is_empty() {
             if let Some((start, end)) = self.pending_selection {
+                let (start, end) = char_range_to_byte_range(&self.note.content, start, end);
                 self.note.content[start..end].to_string()
             } else {
                 String::new()
@@ -962,7 +1063,10 @@ impl NotePanel {
         };
         let insert = format!("[{text}]({})", self.link_url);
         if let Some((start, end)) = self.pending_selection.take() {
-            self.note.content.replace_range(start..end, &insert);
+            let (start_byte, end_byte) = char_range_to_byte_range(&self.note.content, start, end);
+            self.note
+                .content
+                .replace_range(start_byte..end_byte, &insert);
             let mut state =
                 egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
             let cursor = start + insert.chars().count();
@@ -980,7 +1084,8 @@ impl NotePanel {
                 .char_range()
                 .map(|r| r.primary.index)
                 .unwrap_or_else(|| self.note.content.chars().count());
-            self.note.content.insert_str(idx, &insert);
+            let idx_byte = char_to_byte_index(&self.note.content, idx);
+            self.note.content.insert_str(idx_byte, &insert);
             let cursor = idx + insert.chars().count();
             state
                 .cursor
@@ -1074,7 +1179,8 @@ fn insert_tag_menu(
                         .char_range()
                         .map(|r| r.primary.index)
                         .unwrap_or_else(|| content.chars().count());
-                    content.insert_str(idx, &insert);
+                    let idx_byte = char_to_byte_index(content, idx);
+                    content.insert_str(idx_byte, &insert);
                     state
                         .cursor
                         .set_char_range(Some(egui::text::CCursorRange::one(

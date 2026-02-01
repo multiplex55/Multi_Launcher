@@ -3135,6 +3135,7 @@ dependencies = [
 name = "multi_launcher"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "arboard",
  "base64",
