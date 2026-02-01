@@ -46,6 +46,8 @@ pub struct MouseGestureSettings {
     pub wheel_cycle_gate: WheelCycleGate,
     #[serde(default = "default_practice_mode")]
     pub practice_mode: bool,
+    #[serde(default)]
+    pub ignore_window_titles: Vec<String>,
 }
 
 impl Default for MouseGestureSettings {
@@ -63,6 +65,7 @@ impl Default for MouseGestureSettings {
             no_match_behavior: default_no_match_behavior(),
             wheel_cycle_gate: default_wheel_cycle_gate(),
             practice_mode: default_practice_mode(),
+            ignore_window_titles: Vec::new(),
         }
     }
 }
@@ -172,6 +175,7 @@ impl MouseGestureRuntime {
         config.no_match_behavior = self.settings.no_match_behavior;
         config.wheel_cycle_gate = self.settings.wheel_cycle_gate;
         config.practice_mode = self.settings.practice_mode;
+        config.ignore_window_titles = self.settings.ignore_window_titles.clone();
         with_gesture_service(|svc| {
             svc.update_config(config);
             svc.update_db(Some(self.db.clone()));

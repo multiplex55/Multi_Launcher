@@ -4,8 +4,9 @@ use multi_launcher::mouse_gestures::db::{
 use multi_launcher::mouse_gestures::engine::DirMode;
 use multi_launcher::mouse_gestures::overlay::OverlayBackend;
 use multi_launcher::mouse_gestures::service::{
-    CancelBehavior, CursorPositionProvider, HookEvent, MockHookBackend, MouseGestureConfig,
-    MouseGestureService, NoMatchBehavior, OverlayFactory, RightClickBackend,
+    should_ignore_window_title, CancelBehavior, CursorPositionProvider, HookEvent,
+    MockHookBackend, MouseGestureConfig, MouseGestureService, NoMatchBehavior, OverlayFactory,
+    RightClickBackend,
 };
 use multi_launcher::gui::register_event_sender;
 use once_cell::sync::Lazy;
@@ -180,6 +181,21 @@ fn start_stop_installs_and_uninstalls_once() {
 
     assert_eq!(handle.install_count(), 1);
     assert_eq!(handle.uninstall_count(), 1);
+}
+
+#[test]
+fn should_ignore_window_title_handles_matches() {
+    let ignore = vec!["Notepad".to_string(), "  firefox  ".to_string()];
+    assert!(should_ignore_window_title(&ignore, "Notepad"));
+    assert!(should_ignore_window_title(&ignore, "Mozilla Firefox"));
+    assert!(should_ignore_window_title(&ignore, "FIREFOX - Private Browsing"));
+    assert!(!should_ignore_window_title(&ignore, "Terminal"));
+}
+
+#[test]
+fn should_ignore_window_title_skips_empty_entries() {
+    let ignore = vec!["".to_string(), "   ".to_string()];
+    assert!(!should_ignore_window_title(&ignore, "Notepad"));
 }
 
 #[test]
