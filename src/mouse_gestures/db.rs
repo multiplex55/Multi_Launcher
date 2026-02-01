@@ -14,6 +14,7 @@ pub enum BindingKind {
     Execute,
     SetQuery,
     SetQueryAndShow,
+    SetQueryAndExecute,
     ToggleLauncher,
 }
 
@@ -446,6 +447,7 @@ impl BindingEntry {
             BindingKind::Execute => self.action.clone(),
             BindingKind::SetQuery => format!("query:{}", self.action),
             BindingKind::SetQueryAndShow => "launcher:show".to_string(),
+            BindingKind::SetQueryAndExecute => format!("queryexec:{}", self.action),
             BindingKind::ToggleLauncher => "launcher:toggle".to_string(),
         }
     }
@@ -458,6 +460,7 @@ impl BindingEntry {
             },
             BindingKind::SetQuery => format!("query:{}", self.action),
             BindingKind::SetQueryAndShow => format!("launcher:show (query: {})", self.action),
+            BindingKind::SetQueryAndExecute => format!("queryexec:{}", self.action),
             BindingKind::ToggleLauncher => "launcher:toggle".to_string(),
         }
     }
@@ -469,6 +472,7 @@ impl BindingEntry {
             BindingKind::SetQueryAndShow => {
                 ("launcher:show".to_string(), Some(self.action.clone()))
             }
+            BindingKind::SetQueryAndExecute => (format!("queryexec:{}", self.action), None),
             BindingKind::ToggleLauncher => ("launcher:toggle".to_string(), None),
         };
         Action {
