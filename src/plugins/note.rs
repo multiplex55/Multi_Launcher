@@ -122,7 +122,7 @@ static CACHE: Lazy<Arc<Mutex<NoteCache>>> =
 static TEMPLATE_CACHE: Lazy<Arc<Mutex<HashMap<String, String>>>> =
     Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
-static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?:[#@])([A-Za-z0-9_-]+)").unwrap());
+static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?:[#@])([A-Za-z0-9_]+)").unwrap());
 static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
 // Matches markdown image syntax `![alt](path)` capturing the path portion.
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[[^\]]*\]\(([^)]+)\)").unwrap());
@@ -1069,10 +1069,10 @@ mod tests {
     }
 
     #[test]
-    fn extract_tags_supports_hash_at_and_hyphen() {
-        let content = "Notes about @UI-Test and #Release-Prep.\n```\n#code-tag\n```\n";
+    fn extract_tags_supports_hash_and_at_tags() {
+        let content = "Notes about @UI and #Release.\n```\n#code-tag\n```\n";
         let tags = extract_tags(content);
-        assert_eq!(tags, vec!["release-prep", "ui-test"]);
+        assert_eq!(tags, vec!["release", "ui"]);
     }
 
     #[test]
