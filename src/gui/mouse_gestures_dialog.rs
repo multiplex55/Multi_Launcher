@@ -523,6 +523,11 @@ impl MgGesturesDialog {
                     );
                     ui.radio_value(
                         &mut editor.kind,
+                        BindingKind::SetQueryAndExecute,
+                        "Set query + execute",
+                    );
+                    ui.radio_value(
+                        &mut editor.kind,
                         BindingKind::ToggleLauncher,
                         "Toggle launcher",
                     );
@@ -538,7 +543,9 @@ impl MgGesturesDialog {
                             ui.text_edit_singleline(&mut editor.args);
                         });
                     }
-                    BindingKind::SetQuery | BindingKind::SetQueryAndShow => {
+                    BindingKind::SetQuery
+                    | BindingKind::SetQueryAndShow
+                    | BindingKind::SetQueryAndExecute => {
                         ui.horizontal(|ui| {
                             ui.label("Query");
                             ui.text_edit_singleline(&mut editor.action);
@@ -555,7 +562,9 @@ impl MgGesturesDialog {
                 if editor.kind != BindingKind::ToggleLauncher {
                     let picker_label = match editor.kind {
                         BindingKind::Execute => "Pick an action",
-                        BindingKind::SetQuery | BindingKind::SetQueryAndShow => "Pick a query",
+                        BindingKind::SetQuery
+                        | BindingKind::SetQueryAndShow
+                        | BindingKind::SetQueryAndExecute => "Pick a query",
                         BindingKind::ToggleLauncher => "Pick an action",
                     };
                     ui.label(picker_label);
@@ -610,6 +619,9 @@ impl MgGesturesDialog {
                                             editor.kind = match editor.kind {
                                                 BindingKind::SetQueryAndShow => {
                                                     BindingKind::SetQueryAndShow
+                                                }
+                                                BindingKind::SetQueryAndExecute => {
+                                                    BindingKind::SetQueryAndExecute
                                                 }
                                                 _ => BindingKind::SetQuery,
                                             };
@@ -668,6 +680,9 @@ impl MgGesturesDialog {
                                                 BindingKind::SetQueryAndShow => {
                                                     BindingKind::SetQueryAndShow
                                                 }
+                                                BindingKind::SetQueryAndExecute => {
+                                                    BindingKind::SetQueryAndExecute
+                                                }
                                                 _ => BindingKind::SetQuery,
                                             };
                                             editor.action = query;
@@ -697,6 +712,7 @@ impl MgGesturesDialog {
                             BindingKind::Execute
                                 | BindingKind::SetQuery
                                 | BindingKind::SetQueryAndShow
+                                | BindingKind::SetQueryAndExecute
                         );
                         if editor.label.trim().is_empty()
                             || (action_required && editor.action.trim().is_empty())

@@ -2088,7 +2088,18 @@ impl LauncherApp {
         let mut refresh = false;
         let mut set_focus = false;
         let mut command_changed_query = false;
-        if let Some(new_q) = a.action.strip_prefix("query:") {
+        if let Some(new_q) = a.action.strip_prefix("queryexec:") {
+            tracing::debug!("queryexec action via activation: {new_q}");
+            self.query = new_q.to_string();
+            self.last_timer_query =
+                new_q.starts_with("timer list") || new_q.starts_with("alarm list");
+            self.search();
+            self.move_cursor_end = true;
+            if let Some(action) = self.results.first().cloned() {
+                self.activate_action(action, None, source);
+            }
+            return;
+        } else if let Some(new_q) = a.action.strip_prefix("query:") {
             tracing::debug!("query action via activation: {new_q}");
             self.query = new_q.to_string();
             self.last_timer_query =
