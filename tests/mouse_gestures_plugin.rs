@@ -47,6 +47,14 @@ fn mouse_gestures_default_settings_round_trip() {
     assert!(value.get("max_duration_ms").is_none());
     let defaults = MouseGestureSettings::default();
     assert_eq!(parsed, defaults);
+
+    let mut custom_value = value.clone();
+    custom_value["ignore_window_titles"] = serde_json::json!(["Notepad", "Firefox"]);
+    let custom_parsed: MouseGestureSettings =
+        serde_json::from_value(custom_value.clone()).expect("deserialize custom settings");
+    let custom_serialized =
+        serde_json::to_value(&custom_parsed).expect("serialize custom settings");
+    assert_eq!(custom_value, custom_serialized);
 }
 
 #[test]

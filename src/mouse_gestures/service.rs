@@ -41,6 +41,7 @@ pub struct MouseGestureConfig {
     pub no_match_behavior: NoMatchBehavior,
     pub wheel_cycle_gate: WheelCycleGate,
     pub practice_mode: bool,
+    pub ignore_window_titles: Vec<String>,
 }
 
 impl Default for MouseGestureConfig {
@@ -66,11 +67,26 @@ impl Default for MouseGestureConfig {
             no_match_behavior: NoMatchBehavior::PassThroughClick,
             wheel_cycle_gate: WheelCycleGate::Deadzone,
             practice_mode: false,
+            ignore_window_titles: Vec::new(),
         }
     }
 }
 
 use crate::gui::{send_event, WatchEvent};
+
+pub fn should_ignore_window_title(ignore: &[String], title: &str) -> bool {
+    if ignore.is_empty() {
+        return false;
+    }
+    let normalized_title = title.trim().to_lowercase();
+    if normalized_title.is_empty() {
+        return false;
+    }
+    ignore.iter().any(|entry| {
+        let normalized_entry = entry.trim().to_lowercase();
+        !normalized_entry.is_empty() && normalized_title.contains(&normalized_entry)
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -240,6 +256,8 @@ impl MouseGestureService {
         let enabled = config.enabled;
         let should_restart = self.worker.is_some();
         self.config = config;
+        #[cfg(windows)]
+        hook_dispatch().set_ignore_window_titles(self.config.ignore_window_titles.clone());
 
         if enabled {
             if should_restart {
@@ -273,7 +291,10 @@ impl MouseGestureService {
         }
 
         #[cfg(windows)]
-        hook_dispatch().set_wheel_gate(self.config.wheel_cycle_gate);
+        {
+            hook_dispatch().set_wheel_gate(self.config.wheel_cycle_gate);
+            hook_dispatch().set_ignore_window_titles(self.config.ignore_window_titles.clone());
+        }
 
         let (event_tx, event_rx) = mpsc::channel();
         let (stop_tx, stop_rx) = mpsc::channel();
@@ -995,6 +1016,29 @@ fn get_cursor_position() -> Option<(f32, f32)> {
 }
 
 #[cfg(windows)]
+fn get_foreground_window_title() -> Option<String> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
+    };
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0 == 0 {
+        return None;
+    }
+    let len = unsafe { GetWindowTextLengthW(hwnd) };
+    if len == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u16; (len + 1) as usize];
+    let copied = unsafe { GetWindowTextW(hwnd, &mut buffer) };
+    if copied == 0 {
+        return None;
+    }
+    buffer.truncate(copied as usize);
+    String::from_utf16(&buffer).ok()
+}
+
+#[cfg(windows)]
 const MG_INJECT_TAG: usize = 0x4D47_494E_4A; // "MG_INJ"
 
 #[cfg(windows)]
@@ -1292,6 +1336,7 @@ struct HookDispatch {
     injecting: AtomicBool,
     active: AtomicBool,
     wheel_gate: AtomicUsize,
+    ignore_window_titles: Mutex<Vec<String>>,
     sender: Mutex<Option<Sender<HookEvent>>>,
 }
 
@@ -1333,6 +1378,20 @@ impl HookDispatch {
         WheelCycleGate::from_usize(self.wheel_gate.load(Ordering::Acquire))
     }
 
+    fn set_ignore_window_titles(&self, titles: Vec<String>) {
+        if let Ok(mut guard) = self.ignore_window_titles.lock() {
+            *guard = titles;
+        }
+    }
+
+    fn should_ignore_window_title(&self, title: &str) -> bool {
+        if let Ok(guard) = self.ignore_window_titles.lock() {
+            should_ignore_window_title(&guard, title)
+        } else {
+            false
+        }
+    }
+
     fn set_sender(&self, sender: Option<Sender<HookEvent>>) {
         if let Ok(mut guard) = self.sender.lock() {
             *guard = sender;
@@ -1351,6 +1410,7 @@ fn hook_dispatch() -> &'static HookDispatch {
         injecting: AtomicBool::new(false),
         active: AtomicBool::new(false),
         wheel_gate: AtomicUsize::new(WheelCycleGate::Deadzone.as_usize()),
+        ignore_window_titles: Mutex::new(Vec::new()),
         sender: Mutex::new(None),
     })
 }
@@ -1388,6 +1448,17 @@ unsafe extern "system" fn mouse_hook_proc(
                         w_param,
                         l_param,
                     );
+                }
+
+                if let Some(title) = get_foreground_window_title() {
+                    if dispatch.should_ignore_window_title(&title) {
+                        return CallNextHookEx(
+                            windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
+                            n_code,
+                            w_param,
+                            l_param,
+                        );
+                    }
                 }
 
                 // Only consume wheel events while a gesture is actively being tracked.
