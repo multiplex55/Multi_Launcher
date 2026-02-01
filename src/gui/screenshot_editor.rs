@@ -44,6 +44,17 @@ pub struct MarkupText {
     pub size: f32,
 }
 
+/// Ephemeral state for the Text tool while the user is typing directly onto the canvas.
+///
+/// This intentionally captures color/size at creation time so each text instance is independent.
+#[derive(Clone, Debug, PartialEq)]
+struct ActiveText {
+    position: Pos2,
+    text: String,
+    color: Color32,
+    size: f32,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum MarkupLayer {
     Stroke(MarkupStroke),
@@ -342,9 +353,7 @@ pub struct ScreenshotEditor {
     active_start: Option<Pos2>,
     active_end: Option<Pos2>,
     active_stroke: Option<MarkupStroke>,
-    text_anchor: Option<Pos2>,
-    text_input: String,
-    text_focus: bool,
+    active_text: Option<ActiveText>,
     history: MarkupHistory,
     path: PathBuf,
     _clip: bool,
@@ -377,9 +386,7 @@ impl ScreenshotEditor {
             active_start: None,
             active_end: None,
             active_stroke: None,
-            text_anchor: None,
-            text_input: String::new(),
-            text_focus: false,
+            active_text: None,
             history: MarkupHistory::default(),
             path,
             _clip: clip,
@@ -459,6 +466,19 @@ impl ScreenshotEditor {
         self.history.redo();
     }
 
+    fn commit_active_text(&mut self) {
+        if let Some(active) = self.active_text.take() {
+            if !active.text.is_empty() {
+                self.push_layer(MarkupLayer::Text(MarkupText {
+                    position: active.position,
+                    text: active.text,
+                    color: active.color,
+                    size: active.size,
+                }));
+            }
+        }
+    }
+
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         if !self.open {
             return;
@@ -505,6 +525,7 @@ impl ScreenshotEditor {
                     ui.add(egui::Slider::new(&mut self.zoom, 0.1..=4.0).text("Zoom"));
                     ui.add(egui::Slider::new(&mut self.text_size, 6.0..=48.0).text("Text Size"));
                 });
+                let prev_tool = self.tool;
                 ui.horizontal(|ui| {
                     ui.label("Tool");
                     ui.selectable_value(&mut self.tool, MarkupTool::Pen, "Pen");
@@ -540,14 +561,13 @@ impl ScreenshotEditor {
                     if ui.button("Redo").clicked() {
                         self.redo();
                     }
-                    ui.separator();
-                    ui.label("Text");
-                    let text_edit = ui.text_edit_singleline(&mut self.text_input);
-                    if self.text_focus {
-                        ui.memory_mut(|mem| mem.request_focus(text_edit.id));
-                        self.text_focus = false;
-                    }
                 });
+
+                // If we switched away from the Text tool, commit any active text.
+                if prev_tool == MarkupTool::Text && self.tool != MarkupTool::Text {
+                    self.commit_active_text();
+                }
+
                 let pressed_undo = ctx.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl);
                 let pressed_redo = ctx.input(|i| {
                     (i.key_pressed(egui::Key::Y) && i.modifiers.ctrl)
@@ -565,24 +585,41 @@ impl ScreenshotEditor {
                 if ctx.input(|i| i.key_pressed(egui::Key::CloseBracket)) {
                     self.thickness = (self.thickness + 1.0).min(20.0);
                 }
-                if self.tool == MarkupTool::Text && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    if let Some(anchor) = self.text_anchor.take() {
-                        if !self.text_input.is_empty() {
-                            let text = MarkupText {
-                                position: anchor,
-                                text: self.text_input.clone(),
-                                color: self.current_color(),
-                                size: self.text_size,
-                            };
-                            self.push_layer(MarkupLayer::Text(text));
-                            self.text_input.clear();
+                // Text tool (Paint-like): click to place an insertion point, then type directly onto the canvas.
+                // Each text instance captures color/size at creation time.
+                if self.tool == MarkupTool::Text {
+                    if let Some(active) = &mut self.active_text {
+                        // Collect typed characters from this frame.
+                        let events = ctx.input(|i| i.events.clone());
+                        for ev in events {
+                            if let egui::Event::Text(s) = ev {
+                                for ch in s.chars() {
+                                    // Conservative filter: alphanumeric + whitespace.
+                                    if ch.is_alphanumeric() || ch.is_whitespace() {
+                                        active.text.push(ch);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Basic editing.
+                        if ctx.input(|i| i.key_pressed(egui::Key::Backspace)) {
+                            active.text.pop();
+                        }
+
+                        // Enter commits and returns to "waiting for click".
+                        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            self.commit_active_text();
+                        }
+
+                        // Escape cancels the active text instance.
+                        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            self.active_text = None;
                         }
                     }
-                }
-                if self.tool == MarkupTool::Text && ctx.input(|i| i.key_pressed(egui::Key::Escape))
-                {
-                    self.text_anchor = None;
-                    self.text_input.clear();
+                } else if self.active_text.is_some() {
+                    // Switching away from the Text tool commits the active text (Paint-like behavior).
+                    self.commit_active_text();
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::Num1)) {
                     self.color_index = 0;
@@ -651,8 +688,16 @@ impl ScreenshotEditor {
                                 self.active_end = Some(start);
                             }
                             MarkupTool::Text => {
-                                self.text_anchor = Some(start);
-                                self.text_focus = true;
+                                // If a text instance is currently active, commit it and start a new one.
+                                if self.active_text.is_some() {
+                                    self.commit_active_text();
+                                }
+                                self.active_text = Some(ActiveText {
+                                    position: start,
+                                    text: String::new(),
+                                    color: self.current_color(),
+                                    size: self.text_size,
+                                });
                             }
                         }
                     }
@@ -816,14 +861,14 @@ impl ScreenshotEditor {
                         );
                     }
                 }
-                if let Some(anchor) = self.text_anchor {
-                    if !self.text_input.is_empty() {
+                if let Some(active) = &self.active_text {
+                    if !active.text.is_empty() {
                         painter.text(
-                            to_screen(anchor),
+                            to_screen(active.position),
                             egui::Align2::LEFT_TOP,
-                            &self.text_input,
-                            egui::FontId::proportional(self.text_size),
-                            self.current_color(),
+                            &active.text,
+                            egui::FontId::proportional(active.size),
+                            active.color,
                         );
                     }
                 }
