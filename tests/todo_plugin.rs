@@ -117,11 +117,24 @@ fn search_plain_todo_opens_dialog() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo");
-    assert_eq!(results.len(), 2);
-    assert!(results.iter().any(|action| action.action == "todo:dialog"));
-    assert!(results
-        .iter()
-        .any(|action| action.label.starts_with("Usage: todo")));
+    let labels: Vec<&str> = results.iter().map(|action| action.label.as_str()).collect();
+    let actions: Vec<&str> = results.iter().map(|action| action.action.as_str()).collect();
+    assert_eq!(
+        labels,
+        vec![
+            "todo: edit todos",
+            "todo edit",
+            "todo list",
+            "todo tag",
+            "todo view",
+            "todo add",
+            "todo rm",
+            "todo clear",
+            "todo pset",
+            "todo export",
+        ]
+    );
+    assert_eq!(actions[0], "todo:dialog");
 }
 
 #[test]

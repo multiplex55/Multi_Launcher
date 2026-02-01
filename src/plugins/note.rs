@@ -65,11 +65,17 @@ pub struct NoteCache {
 
 impl NoteCache {
     fn from_notes(notes: Vec<Note>) -> Self {
+        let mut notes = notes;
         let mut tag_set: HashSet<String> = HashSet::new();
         let mut link_map: HashMap<String, Vec<String>> = HashMap::new();
         let mut alias_map: HashMap<String, String> = HashMap::new();
 
-        for n in &notes {
+        for n in &mut notes {
+            if n.tags.is_empty() {
+                n.tags = extract_tags(&n.content);
+            } else {
+                n.tags = n.tags.iter().map(|t| t.to_lowercase()).collect();
+            }
             let slug = n.slug.clone();
             for t in &n.tags {
                 tag_set.insert(t.clone());
@@ -91,7 +97,9 @@ impl NoteCache {
         let index = notes
             .iter()
             .map(|n| {
-                let mut txt = n.content.to_lowercase();
+                let mut txt = n.title.to_lowercase();
+                txt.push('\n');
+                txt.push_str(&n.content.to_lowercase());
                 if let Some(a) = &n.alias {
                     txt.push('\n');
                     txt.push_str(&a.to_lowercase());
@@ -116,7 +124,7 @@ static CACHE: Lazy<Arc<Mutex<NoteCache>>> =
 static TEMPLATE_CACHE: Lazy<Arc<Mutex<HashMap<String, String>>>> =
     Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
-static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"#([A-Za-z0-9_]+)").unwrap());
+static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?:[#@])([A-Za-z0-9_]+)").unwrap());
 static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
 // Matches markdown image syntax `![alt](path)` capturing the path portion.
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[[^\]]*\]\(([^)]+)\)").unwrap());
@@ -135,7 +143,9 @@ fn extract_tags(content: &str) -> Vec<String> {
             continue;
         }
         for cap in TAG_RE.captures_iter(line) {
-            tags.push(cap[1].to_lowercase());
+            if let Some(tag) = cap.get(1) {
+                tags.push(tag.as_str().to_lowercase());
+            }
         }
     }
     tags.sort();
@@ -151,6 +161,33 @@ fn extract_links(content: &str) -> Vec<String> {
     links.sort();
     links.dedup();
     links
+}
+
+fn resolve_note<'a>(cache: &'a NoteCache, query: &str) -> Option<&'a Note> {
+    let query = query.trim();
+    if query.is_empty() {
+        return None;
+    }
+    let query_lower = query.to_lowercase();
+    if let Some(slug) = cache.aliases.get(&query_lower) {
+        return cache.notes.iter().find(|n| n.slug == *slug);
+    }
+    if let Some(note) = cache
+        .notes
+        .iter()
+        .find(|n| n.title.eq_ignore_ascii_case(query))
+    {
+        return Some(note);
+    }
+    if let Some(note) = cache
+        .notes
+        .iter()
+        .find(|n| n.slug.eq_ignore_ascii_case(query))
+    {
+        return Some(note);
+    }
+    let slug = slugify(query);
+    cache.notes.iter().find(|n| n.slug == slug)
 }
 
 pub fn extract_alias(content: &str) -> Option<String> {
@@ -550,12 +587,6 @@ impl Plugin for NotePlugin {
                         args: None,
                     },
                     Action {
-                        label: "note tags".into(),
-                        desc: "Note".into(),
-                        action: "query:note tags".into(),
-                        args: None,
-                    },
-                    Action {
                         label: "note templates".into(),
                         desc: "Note".into(),
                         action: "query:note templates".into(),
@@ -682,7 +713,17 @@ impl Plugin for NotePlugin {
                         .collect();
                 }
                 "list" => {
-                    let filters = parse_query_filters(args, &["@", "#", "tag:"]);
+                    let mut filters = parse_query_filters(args, &["@", "#", "tag:"]);
+                    filters.include_tags = filters
+                        .include_tags
+                        .into_iter()
+                        .map(|tag| tag.to_lowercase())
+                        .collect();
+                    filters.exclude_tags = filters
+                        .exclude_tags
+                        .into_iter()
+                        .map(|tag| tag.to_lowercase())
+                        .collect();
                     let text_filter = filters.remaining_tokens.join(" ");
                     return guard
                         .notes
@@ -694,12 +735,12 @@ impl Plugin for NotePlugin {
                                 filters
                                     .include_tags
                                     .iter()
-                                    .all(|tag| n.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
+                                    .all(|tag| n.tags.iter().any(|t| t == tag))
                             };
                             let exclude_ok = !filters
                                 .exclude_tags
                                 .iter()
-                                .any(|tag| n.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)));
+                                .any(|tag| n.tags.iter().any(|t| t == tag));
                             let text_ok = if text_filter.is_empty() {
                                 true
                             } else {
@@ -727,19 +768,11 @@ impl Plugin for NotePlugin {
                 }
                 "search" => {
                     let filter = args.to_lowercase();
-                    let mut matches: Vec<(i64, &Note)> = guard
+                    return guard
                         .index
                         .iter()
                         .zip(guard.notes.iter())
-                        .filter_map(|(text, note)| {
-                            self.matcher
-                                .fuzzy_match(text, &filter)
-                                .map(|score| (score, note))
-                        })
-                        .collect();
-                    matches.sort_by(|a, b| b.0.cmp(&a.0));
-                    return matches
-                        .into_iter()
+                        .filter(|(text, _)| filter.is_empty() || text.contains(&filter))
                         .map(|(_, n)| Action {
                             label: n.alias.as_ref().unwrap_or(&n.title).clone(),
                             desc: "Note".into(),
@@ -811,25 +844,61 @@ impl Plugin for NotePlugin {
                     }];
                 }
                 "link" => {
-                    let target = slugify(args);
-                    if let Some(back) = guard.links.get(&target) {
-                        return back
-                            .iter()
-                            .filter_map(|slug| {
-                                guard
-                                    .notes
-                                    .iter()
-                                    .find(|n| n.slug == *slug)
-                                    .map(|n| Action {
-                                        label: n.alias.as_ref().unwrap_or(&n.title).clone(),
-                                        desc: "Note".into(),
-                                        action: format!("note:open:{slug}"),
-                                        args: None,
-                                    })
-                            })
-                            .collect();
+                    if args.is_empty() {
+                        let mut actions = vec![Action {
+                            label: "note link <note>".into(),
+                            desc: "Usage".into(),
+                            action: "query:note link ".into(),
+                            args: None,
+                        }];
+                        actions.extend(guard.notes.iter().map(|n| Action {
+                            label: format!("Backlinks for {}", n.alias.as_ref().unwrap_or(&n.title)),
+                            desc: "Backlinks".into(),
+                            action: format!("query:note link {}", n.alias.as_ref().unwrap_or(&n.title)),
+                            args: None,
+                        }));
+                        return actions;
                     }
-                    return Vec::new();
+
+                    let note = match resolve_note(&guard, args) {
+                        Some(note) => note,
+                        None => {
+                            return vec![Action {
+                                label: format!("No note found for \"{args}\""),
+                                desc: "Backlinks".into(),
+                                action: "query:note link ".into(),
+                                args: None,
+                            }]
+                        }
+                    };
+
+                    let mut actions: Vec<Action> = guard
+                        .links
+                        .get(&note.slug)
+                        .into_iter()
+                        .flat_map(|backlinks| backlinks.iter())
+                        .filter_map(|slug| guard.notes.iter().find(|n| n.slug == *slug))
+                        .map(|linked_note| {
+                            let label = linked_note.alias.as_ref().unwrap_or(&linked_note.title);
+                            Action {
+                                label: format!("Backlink: {label}"),
+                                desc: format!("Backlinks to {}", note.title),
+                                action: format!("note:open:{}", linked_note.slug),
+                                args: None,
+                            }
+                        })
+                        .collect();
+
+                    if actions.is_empty() {
+                        actions.push(Action {
+                            label: format!("No backlinks for {}", note.title),
+                            desc: "Backlinks".into(),
+                            action: format!("note:open:{}", note.slug),
+                            args: None,
+                        });
+                    }
+
+                    return actions;
                 }
                 "rm" => {
                     let filter = args;
@@ -952,12 +1021,6 @@ impl Plugin for NotePlugin {
                 args: None,
             },
             Action {
-                label: "note tags".into(),
-                desc: "Note".into(),
-                action: "query:note tags".into(),
-                args: None,
-            },
-            Action {
                 label: "note templates".into(),
                 desc: "Note".into(),
                 action: "query:note templates".into(),
@@ -1051,13 +1114,20 @@ mod tests {
     }
 
     #[test]
+    fn extract_tags_supports_hash_and_at_tags() {
+        let content = "Notes about @UI and #Release.\n```\n#code-tag\n```\n";
+        let tags = extract_tags(content);
+        assert_eq!(tags, vec!["release", "ui"]);
+    }
+
+    #[test]
     fn note_list_supports_hash_and_at_tags() {
         let original = set_notes(vec![
             Note {
                 title: "Alpha".into(),
                 path: PathBuf::new(),
-                content: String::new(),
-                tags: vec!["testing".into(), "ui".into()],
+                content: "Working on @testing and #ui updates.".into(),
+                tags: Vec::new(),
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
@@ -1065,8 +1135,8 @@ mod tests {
             Note {
                 title: "Beta".into(),
                 path: PathBuf::new(),
-                content: String::new(),
-                tags: vec!["testing".into()],
+                content: "Planning @testing coverage.".into(),
+                tags: Vec::new(),
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
@@ -1074,8 +1144,8 @@ mod tests {
             Note {
                 title: "Gamma".into(),
                 path: PathBuf::new(),
-                content: String::new(),
-                tags: vec!["ui".into(), "chore".into()],
+                content: "Wrap up #ui and #chore items.".into(),
+                tags: Vec::new(),
                 links: Vec::new(),
                 slug: "gamma".into(),
                 alias: None,
@@ -1117,8 +1187,8 @@ mod tests {
             Note {
                 title: "Alpha".into(),
                 path: PathBuf::new(),
-                content: String::new(),
-                tags: vec!["testing".into(), "ui".into()],
+                content: "Working on @testing and #ui updates.".into(),
+                tags: Vec::new(),
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
@@ -1126,8 +1196,8 @@ mod tests {
             Note {
                 title: "Beta".into(),
                 path: PathBuf::new(),
-                content: String::new(),
-                tags: vec!["testing".into()],
+                content: "Planning @testing coverage.".into(),
+                tags: Vec::new(),
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
@@ -1135,8 +1205,8 @@ mod tests {
             Note {
                 title: "Gamma".into(),
                 path: PathBuf::new(),
-                content: String::new(),
-                tags: vec!["ui".into(), "chore".into()],
+                content: "Wrap up #ui and #chore items.".into(),
+                tags: Vec::new(),
                 links: Vec::new(),
                 slug: "gamma".into(),
                 alias: None,
@@ -1154,13 +1224,170 @@ mod tests {
         let tags = plugin.search("note tag");
         let labels: Vec<&str> = tags.iter().map(|a| a.label.as_str()).collect();
         assert_eq!(labels, vec!["#testing (2)", "#ui (2)", "#chore (1)"]);
+        let actions: Vec<&str> = tags.iter().map(|a| a.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            vec![
+                "query:note list #testing",
+                "query:note list #ui",
+                "query:note list #chore"
+            ]
+        );
 
         let tags_ui = plugin.search("note tag @ui");
         let labels_ui: Vec<&str> = tags_ui.iter().map(|a| a.label.as_str()).collect();
         assert_eq!(labels_ui, vec!["#ui (2)"]);
 
+        let tags_ui_hash = plugin.search("note tag #ui");
+        let labels_ui_hash: Vec<&str> = tags_ui_hash.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_ui_hash, vec!["#ui (2)"]);
+
+        let tags_ui_tag = plugin.search("note tag tag:ui");
+        let labels_ui_tag: Vec<&str> = tags_ui_tag.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_ui_tag, vec!["#ui (2)"]);
+
         // Verify that the drill action uses `note list`.
         assert_eq!(tags_ui[0].action, "query:note list #ui");
+
+        restore_cache(original);
+    }
+
+    #[test]
+    fn note_tags_alias_is_not_exposed_in_commands() {
+        let original = set_notes(vec![
+            Note {
+                title: "Alpha".into(),
+                path: PathBuf::new(),
+                content: "Working on @testing and #ui updates.".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "alpha".into(),
+                alias: None,
+            },
+            Note {
+                title: "Beta".into(),
+                path: PathBuf::new(),
+                content: "Planning @testing coverage.".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "beta".into(),
+                alias: None,
+            },
+        ]);
+
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: CACHE.clone(),
+            templates: TEMPLATE_CACHE.clone(),
+            external_open: NoteExternalOpen::Wezterm,
+            watcher: None,
+        };
+
+        let tags = plugin.search("note tag");
+        let tags_alias = plugin.search("note tags");
+        let labels: Vec<&str> = tags.iter().map(|a| a.label.as_str()).collect();
+        let labels_alias: Vec<&str> = tags_alias.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_alias, labels);
+
+        let commands = plugin.commands();
+        assert!(!commands.iter().any(|a| a.label == "note tags"));
+
+        restore_cache(original);
+    }
+
+    #[test]
+    fn note_search_matches_content_substring() {
+        let original = set_notes(vec![
+            Note {
+                title: "Alpha".into(),
+                path: PathBuf::new(),
+                content: "The cat naps on the keyboard.".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "alpha".into(),
+                alias: None,
+            },
+            Note {
+                title: "Beta".into(),
+                path: PathBuf::new(),
+                content: "No pets here.".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "beta".into(),
+                alias: None,
+            },
+        ]);
+
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: CACHE.clone(),
+            templates: TEMPLATE_CACHE.clone(),
+            external_open: NoteExternalOpen::Wezterm,
+            watcher: None,
+        };
+
+        let matches = plugin.search("note search cat");
+        let labels: Vec<&str> = matches.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels, vec!["Alpha"]);
+
+        restore_cache(original);
+    }
+
+    #[test]
+    fn note_link_lists_backlinks_for_note() {
+        let alpha_content = "See [[Beta Note]] and [[Gamma Note]].";
+        let delta_content = "Reference [[Beta Note]].";
+        let original = set_notes(vec![
+            Note {
+                title: "Alpha".into(),
+                path: PathBuf::new(),
+                content: alpha_content.into(),
+                tags: Vec::new(),
+                links: extract_links(alpha_content),
+                slug: "alpha".into(),
+                alias: None,
+            },
+            Note {
+                title: "Beta Note".into(),
+                path: PathBuf::new(),
+                content: "Backlink target.".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "beta-note".into(),
+                alias: Some("Second".into()),
+            },
+            Note {
+                title: "Delta".into(),
+                path: PathBuf::new(),
+                content: delta_content.into(),
+                tags: Vec::new(),
+                links: extract_links(delta_content),
+                slug: "delta".into(),
+                alias: None,
+            },
+            Note {
+                title: "Gamma Note".into(),
+                path: PathBuf::new(),
+                content: "Gamma note content.".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "gamma-note".into(),
+                alias: None,
+            },
+        ]);
+
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: CACHE.clone(),
+            templates: TEMPLATE_CACHE.clone(),
+            external_open: NoteExternalOpen::Wezterm,
+            watcher: None,
+        };
+
+        let links = plugin.search("note link Second");
+        let labels: Vec<&str> = links.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels, vec!["Backlink: Alpha", "Backlink: Delta"]);
+        assert_eq!(links[0].desc, "Backlinks to Beta Note");
 
         restore_cache(original);
     }

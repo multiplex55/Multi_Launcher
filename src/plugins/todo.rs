@@ -218,15 +218,69 @@ impl TodoPlugin {
     fn search_internal(&self, trimmed: &str) -> Vec<Action> {
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "todo") {
             if rest.trim().is_empty() {
-                return vec![
+                let mut actions = vec![Action {
+                    label: "todo: edit todos".into(),
+                    desc: "Todo".into(),
+                    action: "todo:dialog".into(),
+                    args: None,
+                }];
+                actions.extend([
                     Action {
-                        label: "todo: edit todos".into(),
+                        label: "todo edit".into(),
                         desc: "Todo".into(),
-                        action: "todo:dialog".into(),
+                        action: "query:todo edit".into(),
                         args: None,
                     },
-                    usage_action(TODO_USAGE, "todo "),
-                ];
+                    Action {
+                        label: "todo list".into(),
+                        desc: "Todo".into(),
+                        action: "query:todo list".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "todo tag".into(),
+                        desc: "Todo".into(),
+                        action: "query:todo tag ".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "todo view".into(),
+                        desc: "Todo".into(),
+                        action: "query:todo view ".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "todo add".into(),
+                        desc: "Todo".into(),
+                        action: "query:todo add ".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "todo rm".into(),
+                        desc: "Todo".into(),
+                        action: "query:todo rm ".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "todo clear".into(),
+                        desc: "Todo".into(),
+                        action: "query:todo clear".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "todo pset".into(),
+                        desc: "Todo".into(),
+                        action: "query:todo pset ".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "todo export".into(),
+                        desc: "Todo".into(),
+                        action: "query:todo export".into(),
+                        args: None,
+                    },
+                ]);
+                return actions;
             }
         }
 
@@ -770,14 +824,63 @@ mod tests {
             labels,
             vec!["#testing (2)", "#ui (2)", "#chore (1)", "#high priority (1)"]
         );
+        let actions: Vec<&str> = tags.iter().map(|a| a.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            vec![
+                "query:todo list #testing",
+                "query:todo list #ui",
+                "query:todo list #chore",
+                "query:todo list #high priority"
+            ]
+        );
 
         let tags_ui = plugin.search_internal("todo tag @ui");
         let labels_ui: Vec<&str> = tags_ui.iter().map(|a| a.label.as_str()).collect();
         assert_eq!(labels_ui, vec!["#ui (2)"]);
 
+        let tags_ui_hash = plugin.search_internal("todo tag #ui");
+        let labels_ui_hash: Vec<&str> = tags_ui_hash.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_ui_hash, vec!["#ui (2)"]);
+
+        let tags_ui_tag = plugin.search_internal("todo tag tag:ui");
+        let labels_ui_tag: Vec<&str> = tags_ui_tag.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_ui_tag, vec!["#ui (2)"]);
+
         if let Ok(mut guard) = TODO_DATA.write() {
             *guard = original;
         }
+    }
+
+    #[test]
+    fn todo_root_query_lists_subcommands_in_order() {
+        let plugin = TodoPlugin {
+            matcher: SkimMatcherV2::default(),
+            data: TODO_DATA.clone(),
+            cache: TODO_CACHE.clone(),
+            watcher: None,
+        };
+
+        let actions = plugin.search_internal("todo");
+        let labels: Vec<&str> = actions.iter().map(|a| a.label.as_str()).collect();
+        let actions_list: Vec<&str> = actions.iter().map(|a| a.action.as_str()).collect();
+
+        assert_eq!(
+            labels,
+            vec![
+                "todo: edit todos",
+                "todo edit",
+                "todo list",
+                "todo tag",
+                "todo view",
+                "todo add",
+                "todo rm",
+                "todo clear",
+                "todo pset",
+                "todo export",
+            ]
+        );
+        assert_eq!(actions_list[0], "todo:dialog");
     }
 
 }
