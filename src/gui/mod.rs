@@ -120,6 +120,7 @@ const SUBCOMMANDS: &[&str] = &[
 
 /// Prefix used to search user saved applications.
 pub const APP_PREFIX: &str = "app";
+const NOTE_SEARCH_DEBOUNCE: Duration = Duration::from_secs(1);
 
 fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
@@ -518,6 +519,7 @@ pub struct LauncherApp {
     last_results_valid: bool,
     last_timer_query: bool,
     last_stopwatch_query: bool,
+    last_note_search_change: Option<Instant>,
     pending_query: Option<String>,
     confirm_modal: ConfirmationModal,
     pending_confirm: Option<PendingConfirmAction>,
@@ -711,6 +713,39 @@ impl LauncherApp {
                     break;
                 }
             }
+        }
+    }
+
+    fn is_note_search_query(query: &str) -> bool {
+        query
+            .trim_start()
+            .to_lowercase()
+            .starts_with("note search")
+    }
+
+    fn note_search_debounce_ready(
+        last_change: Option<Instant>,
+        now: Instant,
+        debounce: Duration,
+    ) -> bool {
+        last_change
+            .map(|changed_at| now.duration_since(changed_at) >= debounce)
+            .unwrap_or(false)
+    }
+
+    fn maybe_run_note_search_debounce(&mut self) {
+        if !Self::is_note_search_query(&self.query) {
+            self.last_note_search_change = None;
+            return;
+        }
+
+        if Self::note_search_debounce_ready(
+            self.last_note_search_change,
+            Instant::now(),
+            NOTE_SEARCH_DEBOUNCE,
+        ) {
+            self.search();
+            self.last_note_search_change = None;
         }
     }
 
@@ -1315,6 +1350,7 @@ impl LauncherApp {
             last_results_valid: false,
             last_timer_query: false,
             last_stopwatch_query: false,
+            last_note_search_change: None,
             pending_query: None,
             confirm_modal: ConfirmationModal::default(),
             pending_confirm: None,
@@ -3477,6 +3513,7 @@ impl eframe::App for LauncherApp {
             self.search();
             self.focus_input();
         }
+        self.maybe_run_note_search_debounce();
         if let (Some(t), Some(_)) = (self.error_time, self.error.as_ref()) {
             if t.elapsed().as_secs_f32() >= 3.0 {
                 self.error = None;
@@ -3690,7 +3727,12 @@ impl eframe::App for LauncherApp {
 
                 if input.changed() {
                     self.autocomplete_index = 0;
-                    self.search();
+                    if Self::is_note_search_query(&self.query) {
+                        self.last_note_search_change = Some(Instant::now());
+                    } else {
+                        self.last_note_search_change = None;
+                        self.search();
+                    }
                 }
 
                 if self.query_autocomplete && !use_dashboard && !self.suggestions.is_empty() {
@@ -4854,6 +4896,7 @@ mod tests {
         Arc, Mutex,
     };
     use tempfile::tempdir;
+    use std::time::{Duration, Instant};
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -5147,5 +5190,25 @@ mod tests {
         assert!(log.contains("Removed note special-name"));
 
         std::env::set_current_dir(orig_dir).unwrap();
+    }
+
+    #[test]
+    fn note_search_debounce_respects_delay() {
+        let start = Instant::now();
+        assert!(!LauncherApp::note_search_debounce_ready(
+            Some(start),
+            start,
+            NOTE_SEARCH_DEBOUNCE,
+        ));
+        assert!(!LauncherApp::note_search_debounce_ready(
+            Some(start),
+            start + Duration::from_millis(999),
+            NOTE_SEARCH_DEBOUNCE,
+        ));
+        assert!(LauncherApp::note_search_debounce_ready(
+            Some(start),
+            start + NOTE_SEARCH_DEBOUNCE,
+            NOTE_SEARCH_DEBOUNCE,
+        ));
     }
 }

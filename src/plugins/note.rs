@@ -97,7 +97,9 @@ impl NoteCache {
         let index = notes
             .iter()
             .map(|n| {
-                let mut txt = n.content.to_lowercase();
+                let mut txt = n.title.to_lowercase();
+                txt.push('\n');
+                txt.push_str(&n.content.to_lowercase());
                 if let Some(a) = &n.alias {
                     txt.push('\n');
                     txt.push_str(&a.to_lowercase());
@@ -739,19 +741,11 @@ impl Plugin for NotePlugin {
                 }
                 "search" => {
                     let filter = args.to_lowercase();
-                    let mut matches: Vec<(i64, &Note)> = guard
+                    return guard
                         .index
                         .iter()
                         .zip(guard.notes.iter())
-                        .filter_map(|(text, note)| {
-                            self.matcher
-                                .fuzzy_match(text, &filter)
-                                .map(|score| (score, note))
-                        })
-                        .collect();
-                    matches.sort_by(|a, b| b.0.cmp(&a.0));
-                    return matches
-                        .into_iter()
+                        .filter(|(text, _)| filter.is_empty() || text.contains(&filter))
                         .map(|(_, n)| Action {
                             label: n.alias.as_ref().unwrap_or(&n.title).clone(),
                             desc: "Note".into(),
@@ -1217,6 +1211,44 @@ mod tests {
 
         let commands = plugin.commands();
         assert!(!commands.iter().any(|a| a.label == "note tags"));
+
+        restore_cache(original);
+    }
+
+    #[test]
+    fn note_search_matches_content_substring() {
+        let original = set_notes(vec![
+            Note {
+                title: "Alpha".into(),
+                path: PathBuf::new(),
+                content: "The cat naps on the keyboard.".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "alpha".into(),
+                alias: None,
+            },
+            Note {
+                title: "Beta".into(),
+                path: PathBuf::new(),
+                content: "No pets here.".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "beta".into(),
+                alias: None,
+            },
+        ]);
+
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: CACHE.clone(),
+            templates: TEMPLATE_CACHE.clone(),
+            external_open: NoteExternalOpen::Wezterm,
+            watcher: None,
+        };
+
+        let matches = plugin.search("note search cat");
+        let labels: Vec<&str> = matches.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels, vec!["Alpha"]);
 
         restore_cache(original);
     }
