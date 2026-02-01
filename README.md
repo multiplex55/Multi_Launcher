@@ -1,7 +1,10 @@
 # Multi Launcher
 <img width="480" height="480" alt="Green_MultiLauncher" src="https://github.com/user-attachments/assets/8a68f544-536c-4eb5-8c0a-c5ef43e21c2d" />
 
-A fast, keyboard-first Windows launcher + dashboard built with **Rust** and **egui**.
+Multi Launcher is a lightweight application launcher for Windows built with Rust
+and `eframe`. The project targets Windows exclusively. It supports configurable
+hotkeys, basic plugin architecture and file indexing to quickly open
+applications or files.
 
 It’s designed to be “one hotkey away” from:
 - launching apps / files / bookmarks
