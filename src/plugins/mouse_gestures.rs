@@ -150,7 +150,8 @@ pub fn add_ignore_window_title(values: &mut Vec<String>, title: &str) -> bool {
         return false;
     }
     values.push(trimmed.to_string());
-    normalize_ignore_window_titles(values)
+    normalize_ignore_window_titles(values);
+    true
 }
 
 pub fn collect_visible_window_titles() -> anyhow::Result<Vec<String>> {
