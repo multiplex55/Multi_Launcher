@@ -185,6 +185,10 @@ impl GestureTracker {
     }
 }
 
+pub fn token_from_delta(dx: f32, dy: f32, mode: DirMode) -> Option<char> {
+    direction_from_delta(dx, dy, mode).map(|dir| dir.token(mode))
+}
+
 fn direction_from_delta(dx: f32, dy: f32, mode: DirMode) -> Option<Dir> {
     let abs_x = dx.abs();
     let abs_y = dy.abs();

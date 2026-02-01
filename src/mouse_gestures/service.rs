@@ -2,7 +2,7 @@ use crate::mouse_gestures::db::{
     format_gesture_label, load_gestures, GestureCandidate, GestureMatchType, SharedGestureDb,
     GESTURES_FILE,
 };
-use crate::mouse_gestures::engine::{DirMode, GestureTracker};
+use crate::mouse_gestures::engine::{token_from_delta, DirMode, GestureTracker};
 use crate::mouse_gestures::overlay::{
     DefaultOverlayBackend, HintOverlay, OverlayBackend, TrailOverlay,
 };
@@ -435,7 +435,16 @@ fn worker_loop(
                         let ms = start_time.elapsed().as_millis() as u64;
                         let _ = tracker.feed_point(cursor_pos, ms);
 
-                        let tokens = tracker.tokens_string();
+                        let mut tokens = tracker.tokens_string();
+                        if tokens.is_empty() {
+                            let dx = cursor_pos.0 - start_pos.0;
+                            let dy = cursor_pos.1 - start_pos.1;
+                            if dx * dx + dy * dy >= config.threshold_px * config.threshold_px {
+                                if let Some(token) = token_from_delta(dx, dy, config.dir_mode) {
+                                    tokens = token.to_string();
+                                }
+                            }
+                        }
                         if config.debug_logging {
                             tracing::debug!(tokens = %tokens, "mouse gesture tokens");
                         }
@@ -533,9 +542,13 @@ fn worker_loop(
                 HookEvent::SelectBinding(idx) => {
                     if active {
                         pending_selection_idx = Some(idx);
-                        if !cached_actions.is_empty() {
-                            let len = cached_actions.len();
-                            selected_binding_idx = idx.min(len.saturating_sub(1));
+                        let binding_len = if exact_binding_count > 0 {
+                            exact_binding_count
+                        } else {
+                            cached_actions.len()
+                        };
+                        if binding_len > 0 {
+                            selected_binding_idx = idx.min(binding_len.saturating_sub(1));
                             pending_selection_idx = None;
 
                             if let Some(key) = exact_selection_key.as_ref() {
@@ -677,7 +690,16 @@ fn worker_loop(
                 if last_recognition.elapsed() >= recognition_interval {
                     let ms = start_time.elapsed().as_millis() as u64;
                     let _ = tracker.feed_point(pos, ms);
-                    let tokens = tracker.tokens_string();
+                    let mut tokens = tracker.tokens_string();
+                    if tokens.is_empty() {
+                        let dx = pos.0 - start_pos.0;
+                        let dy = pos.1 - start_pos.1;
+                        if dx * dx + dy * dy >= config.threshold_px * config.threshold_px {
+                            if let Some(token) = token_from_delta(dx, dy, config.dir_mode) {
+                                tokens = token.to_string();
+                            }
+                        }
+                    }
                     if tokens != cached_tokens {
                         cached_tokens = tokens.to_string();
                         selected_binding_idx = 0;
@@ -740,10 +762,7 @@ fn worker_loop(
                                         != stored_idx
                                     {
                                         selection_state.selections.insert(key.clone(), stored_idx);
-                                        save_selection_state(
-                                            GESTURES_STATE_FILE,
-                                            &selection_state,
-                                        );
+                                        save_selection_state(GESTURES_STATE_FILE, &selection_state);
                                     }
                                 }
                             }
@@ -908,10 +927,7 @@ fn match_type_label(match_type: GestureMatchType) -> &'static str {
     }
 }
 
-fn format_cheatsheet_text(
-    db: &Option<SharedGestureDb>,
-    limit: usize,
-) -> Option<String> {
+fn format_cheatsheet_text(db: &Option<SharedGestureDb>, limit: usize) -> Option<String> {
     let db = db.as_ref()?;
     let guard = db.lock().ok()?;
     let mut lines = Vec::new();

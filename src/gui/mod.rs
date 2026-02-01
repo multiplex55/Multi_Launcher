@@ -53,7 +53,10 @@ pub use note_panel::{
     NotePanel,
 };
 pub use notes_dialog::NotesDialog;
-pub use screenshot_editor::ScreenshotEditor;
+pub use screenshot_editor::{
+    render_markup_layers, MarkupArrow, MarkupHistory, MarkupLayer, MarkupRect, MarkupStroke,
+    MarkupText, MarkupTool, ScreenshotEditor,
+};
 pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;
 pub use tempfile_alias_dialog::TempfileAliasDialog;
@@ -2542,16 +2545,17 @@ impl LauncherApp {
             }
         } else if let Some(mode) = a.action.strip_prefix("screenshot:") {
             use crate::actions::screenshot::Mode as ScreenshotMode;
-            let (mode, clip) = match mode {
-                "window" => (ScreenshotMode::Window, false),
-                "region" => (ScreenshotMode::Region, false),
-                "desktop" => (ScreenshotMode::Desktop, false),
-                "window_clip" => (ScreenshotMode::Window, true),
-                "region_clip" => (ScreenshotMode::Region, true),
-                "desktop_clip" => (ScreenshotMode::Desktop, true),
-                _ => (ScreenshotMode::Desktop, false),
+            let (mode, clip, tool) = match mode {
+                "window" => (ScreenshotMode::Window, false, MarkupTool::Rectangle),
+                "region" => (ScreenshotMode::Region, false, MarkupTool::Rectangle),
+                "region_markup" => (ScreenshotMode::Region, false, MarkupTool::Pen),
+                "desktop" => (ScreenshotMode::Desktop, false, MarkupTool::Rectangle),
+                "window_clip" => (ScreenshotMode::Window, true, MarkupTool::Rectangle),
+                "region_clip" => (ScreenshotMode::Region, true, MarkupTool::Rectangle),
+                "desktop_clip" => (ScreenshotMode::Desktop, true, MarkupTool::Rectangle),
+                _ => (ScreenshotMode::Desktop, false, MarkupTool::Rectangle),
             };
-            if let Err(e) = crate::plugins::screenshot::launch_editor(self, mode, clip) {
+            if let Err(e) = crate::plugins::screenshot::launch_editor(self, mode, clip, tool) {
                 self.set_error(format!("Failed: {e}"));
             } else if a.action != "help:show" {
                 self.record_history_usage(&a, &current, source);
@@ -4583,7 +4587,7 @@ impl LauncherApp {
     }
 
     /// Open the screenshot editor for a captured image.
-    pub fn open_screenshot_editor(&mut self, img: image::RgbaImage, clip: bool) {
+    pub fn open_screenshot_editor(&mut self, img: image::RgbaImage, clip: bool, tool: MarkupTool) {
         use chrono::Local;
         let dir = crate::plugins::screenshot::screenshot_dir();
         let _ = std::fs::create_dir_all(&dir);
@@ -4597,6 +4601,7 @@ impl LauncherApp {
             path,
             clip,
             self.screenshot_auto_save,
+            tool,
         ));
         self.update_panel_stack();
     }

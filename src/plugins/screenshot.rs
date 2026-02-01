@@ -45,12 +45,13 @@ pub fn launch_editor(
     app: &mut crate::gui::LauncherApp,
     mode: crate::actions::screenshot::Mode,
     clip: bool,
+    tool: crate::gui::MarkupTool,
 ) -> anyhow::Result<()> {
     use chrono::Local;
     use std::borrow::Cow;
     let img = crate::actions::screenshot::capture_raw(mode)?;
     if app.get_screenshot_use_editor() {
-        app.open_screenshot_editor(img, clip);
+        app.open_screenshot_editor(img, clip, tool);
     } else {
         if clip {
             let (w, h) = img.dimensions();
@@ -106,6 +107,12 @@ impl Plugin for ScreenshotPlugin {
                 args: None,
             },
             Action {
+                label: "Screenshot region (markup pen)".into(),
+                desc: "Screenshot".into(),
+                action: "screenshot:region_markup".into(),
+                args: None,
+            },
+            Action {
                 label: "Screenshot desktop".into(),
                 desc: "Screenshot".into(),
                 action: "screenshot:desktop".into(),
@@ -156,6 +163,12 @@ impl Plugin for ScreenshotPlugin {
                 label: "shot clip".into(),
                 desc: "Screenshot".into(),
                 action: "query:ss clip".into(),
+                args: None,
+            },
+            Action {
+                label: "shot region markup".into(),
+                desc: "Screenshot".into(),
+                action: "screenshot:region_markup".into(),
                 args: None,
             },
         ]
