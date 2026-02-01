@@ -140,10 +140,11 @@ impl TodoViewDialog {
                                     if ui.checkbox(&mut entry.done, "").changed() {
                                         save_now = true;
                                     }
-                                    let resp =
-                                        ui.label(entry.text.replace('\n', " ")).wrap(false);
+                                    let resp = ui.add(
+                                        egui::Label::new(entry.text.replace('\n', " ")).wrap(false),
+                                    );
                                     let idx_copy = idx;
-                                    resp.clone().context_menu(|ui| {
+                                    resp.clone().context_menu(|ui: &mut egui::Ui| {
                                         if ui.button("Edit Todo").clicked() {
                                             self.editing_idx = Some(idx_copy);
                                             self.editing_text = entry.text.clone();
@@ -152,10 +153,18 @@ impl TodoViewDialog {
                                             ui.close_menu();
                                         }
                                     });
-                                    ui.label(format!("p{}", entry.priority)).wrap(false);
+                                    ui.add(
+                                        egui::Label::new(format!("p{}", entry.priority))
+                                            .wrap(false),
+                                    );
                                     if !entry.tags.is_empty() {
-                                        ui.label(format!("#{:?}", entry.tags.join(", ")))
-                                            .wrap(false);
+                                        ui.add(
+                                            egui::Label::new(format!(
+                                                "#{:?}",
+                                                entry.tags.join(", ")
+                                            ))
+                                            .wrap(false),
+                                        );
                                     }
                                 });
                             }
