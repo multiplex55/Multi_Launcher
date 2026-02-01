@@ -15,6 +15,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, RwLock,
@@ -28,7 +29,7 @@ const TODO_USAGE: &str = "Usage: todo <add|list|rm|clear|pset|tag|edit|view|expo
 const TODO_ADD_USAGE: &str = "Usage: todo add <text> [p=<priority>] [#tag ...]";
 const TODO_RM_USAGE: &str = "Usage: todo rm <text>";
 const TODO_PSET_USAGE: &str = "Usage: todo pset <index> <priority>";
-const TODO_TAG_USAGE: &str = "Usage: todo tag <index> [#tag ...] | todo tag <tag>";
+const TODO_TAG_USAGE: &str = "Usage: todo tag [<filter>] | todo tag <index> [#tag|@tag ...]";
 const TODO_CLEAR_USAGE: &str = "Usage: todo clear";
 const TODO_VIEW_USAGE: &str = "Usage: todo view";
 const TODO_EXPORT_USAGE: &str = "Usage: todo export";
@@ -377,25 +378,22 @@ impl TodoPlugin {
             }
         }
 
-        const TAG_PREFIX: &str = "todo tag ";
+        const TAG_PREFIX: &str = "todo tag";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, TAG_PREFIX) {
             let rest = rest.trim();
             let args: Vec<&str> = rest.split_whitespace().collect();
-            if let ParseArgsResult::Parsed((idx, tags)) =
-                parse_args(&args, TODO_TAG_USAGE, |args| {
-                    let first = args.get(0)?;
-                    let idx = first.parse::<usize>().ok()?;
-                    let mut tags: Vec<String> = Vec::new();
-                    for t in args.iter().skip(1) {
-                        if let Some(tag) = t.strip_prefix('#') {
-                            if !tag.is_empty() {
-                                tags.push(tag.to_string());
-                            }
+
+            // `todo tag <index> [#tag|@tag ...]` updates tags for a specific todo.
+            if let Some(idx) = args.first().and_then(|s| s.parse::<usize>().ok()) {
+                let mut tags: Vec<String> = Vec::new();
+                for t in args.iter().skip(1) {
+                    if let Some(tag) = t.strip_prefix('#').or_else(|| t.strip_prefix('@')) {
+                        let tag = tag.trim();
+                        if !tag.is_empty() {
+                            tags.push(tag.to_string());
                         }
                     }
-                    Some((idx, tags))
-                })
-            {
+                }
                 let tag_str = tags.join(",");
                 return vec![Action {
                     label: format!("Set tags for todo {idx}"),
@@ -405,28 +403,55 @@ impl TodoPlugin {
                 }];
             }
 
-            if rest.is_empty() {
-                return vec![usage_action(TODO_TAG_USAGE, "todo tag ")];
+            // Otherwise, `todo tag [<filter>]` lists all known tags and lets you drill into `todo list`.
+            let mut filter = rest;
+            if let Some(stripped) = filter.strip_prefix("tag:") {
+                filter = stripped.trim();
+            }
+            if let Some(stripped) = filter.strip_prefix('#').or_else(|| filter.strip_prefix('@')) {
+                filter = stripped.trim();
             }
 
-            let filter = rest;
             let guard = match self.data.read() {
                 Ok(g) => g,
                 Err(_) => return Vec::new(),
             };
-            let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
-            entries.retain(|(_, t)| t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(filter)));
-            entries.sort_by(|a, b| b.1.priority.cmp(&a.1.priority));
-            return entries
+
+            let mut counts: HashMap<String, (String, usize)> = HashMap::new();
+            for entry in guard.iter() {
+                let mut seen: HashSet<String> = HashSet::new();
+                for tag in &entry.tags {
+                    let key = tag.to_lowercase();
+                    if !seen.insert(key.clone()) {
+                        continue;
+                    }
+                    let e = counts.entry(key).or_insert((tag.clone(), 0));
+                    e.1 += 1;
+                }
+            }
+
+            let mut tags: Vec<(String, usize)> = counts
+                .into_values()
+                .map(|(display, count)| (display, count))
+                .collect();
+
+            if !filter.is_empty() {
+                tags.retain(|(tag, _)| self.matcher.fuzzy_match(tag, filter).is_some());
+            }
+
+            tags.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+            return tags
                 .into_iter()
-                .map(|(idx, t)| Action {
-                    label: format!("{} {}", if t.done { "[x]" } else { "[ ]" }, t.text.clone()),
+                .map(|(tag, count)| Action {
+                    label: format!("#{tag} ({count})"),
                     desc: "Todo".into(),
-                    action: format!("query:todo tag {idx} "),
+                    action: format!("query:todo list #{tag}"),
                     args: None,
                 })
                 .collect();
         }
+
 
         const RM_PREFIX: &str = "todo rm ";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, RM_PREFIX) {
@@ -671,10 +696,20 @@ mod tests {
         let labels_testing: Vec<&str> = list_testing.iter().map(|a| a.label.as_str()).collect();
         assert_eq!(labels_testing, vec!["[ ] foo alpha", "[ ] bar beta"]);
 
+        let list_testing_hash = plugin.search_internal("todo list #testing");
+        let labels_testing_hash: Vec<&str> =
+            list_testing_hash.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_testing_hash, vec!["[ ] foo alpha", "[ ] bar beta"]);
+
         let list_testing_ui = plugin.search_internal("todo list @testing @ui");
         let labels_testing_ui: Vec<&str> =
             list_testing_ui.iter().map(|a| a.label.as_str()).collect();
         assert_eq!(labels_testing_ui, vec!["[ ] foo alpha"]);
+
+        let list_testing_ui_hash = plugin.search_internal("todo list #testing #ui");
+        let labels_testing_ui_hash: Vec<&str> =
+            list_testing_ui_hash.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_testing_ui_hash, vec!["[ ] foo alpha"]);
 
         let list_negated = plugin.search_internal("todo list !foo @testing");
         let labels_negated: Vec<&str> = list_negated.iter().map(|a| a.label.as_str()).collect();
@@ -692,4 +727,57 @@ mod tests {
             *guard = original;
         }
     }
+
+    #[test]
+    fn tag_command_lists_tags_and_filters() {
+        let original = set_todos(vec![
+            TodoEntry {
+                text: "foo alpha".into(),
+                done: false,
+                priority: 3,
+                tags: vec!["testing".into(), "ui".into()],
+            },
+            TodoEntry {
+                text: "bar beta".into(),
+                done: false,
+                priority: 1,
+                tags: vec!["testing".into()],
+            },
+            TodoEntry {
+                text: "foo gamma".into(),
+                done: false,
+                priority: 2,
+                tags: vec!["ui".into()],
+            },
+            TodoEntry {
+                text: "urgent delta".into(),
+                done: false,
+                priority: 4,
+                tags: vec!["high priority".into(), "chore".into()],
+            },
+        ]);
+
+        let plugin = TodoPlugin {
+            matcher: SkimMatcherV2::default(),
+            data: TODO_DATA.clone(),
+            cache: TODO_CACHE.clone(),
+            watcher: None,
+        };
+
+        let tags = plugin.search_internal("todo tag");
+        let labels: Vec<&str> = tags.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["#testing (2)", "#ui (2)", "#chore (1)", "#high priority (1)"]
+        );
+
+        let tags_ui = plugin.search_internal("todo tag @ui");
+        let labels_ui: Vec<&str> = tags_ui.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_ui, vec!["#ui (2)"]);
+
+        if let Ok(mut guard) = TODO_DATA.write() {
+            *guard = original;
+        }
+    }
+
 }
