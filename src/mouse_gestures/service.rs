@@ -1022,7 +1022,7 @@ fn get_foreground_window_title() -> Option<String> {
     };
 
     let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.0 == 0 {
+    if hwnd.0.is_null() {
         return None;
     }
     let len = unsafe { GetWindowTextLengthW(hwnd) };

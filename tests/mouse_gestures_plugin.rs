@@ -47,6 +47,7 @@ fn mouse_gestures_default_settings_round_trip() {
     assert!(value.get("max_duration_ms").is_none());
     let defaults = MouseGestureSettings::default();
     assert_eq!(parsed, defaults);
+    assert!(parsed.ignore_window_titles.is_empty());
 
     let mut custom_value = value.clone();
     custom_value["ignore_window_titles"] = serde_json::json!(["Notepad", "Firefox"]);
@@ -72,10 +73,12 @@ fn mouse_gestures_settings_ignore_legacy_fields() {
         "cancel_behavior": "do_nothing",
         "no_match_behavior": "do_nothing",
         "min_distance_px": 20.0,
-        "max_duration_ms": 5000
+        "max_duration_ms": 5000,
+        "unexpected_field": "ok"
     });
     let parsed: MouseGestureSettings =
         serde_json::from_value(value).expect("deserialize legacy settings");
     assert!(parsed.enabled);
     assert!(parsed.debug_logging);
+    assert!(parsed.ignore_window_titles.is_empty());
 }

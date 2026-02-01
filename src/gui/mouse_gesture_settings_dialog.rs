@@ -1,4 +1,7 @@
-use crate::plugins::mouse_gestures::{apply_runtime_settings, MouseGestureSettings};
+use crate::plugins::mouse_gestures::{
+    add_ignore_window_title, apply_runtime_settings, collect_visible_window_titles,
+    normalize_ignore_window_titles, MouseGestureSettings,
+};
 use crate::settings::Settings;
 use eframe::egui;
 
@@ -13,6 +16,10 @@ pub struct MouseGestureSettingsDialog {
     dirty: bool,
     settings: MouseGestureSettings,
     last_error: Option<String>,
+    ignore_input: String,
+    window_picker_open: bool,
+    window_picker_titles: Vec<String>,
+    window_picker_error: Option<String>,
 }
 
 impl MouseGestureSettingsDialog {
@@ -245,6 +252,107 @@ impl MouseGestureSettingsDialog {
                         });
                 });
                 ui.small("Fallback runs when a gesture does not match; default is pass-through right-click.");
+
+                ui.separator();
+                ui.heading("Ignore windows (disable gestures)");
+                ui.small(
+                    "Gestures will be ignored when the active window title contains one of these entries.",
+                );
+
+                let mut remove_index: Option<usize> = None;
+                if self.settings.ignore_window_titles.is_empty() {
+                    ui.label("No ignored windows.");
+                } else {
+                    for (index, title) in self.settings.ignore_window_titles.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(title);
+                            if ui.button("Remove").clicked() {
+                                remove_index = Some(index);
+                            }
+                        });
+                    }
+                }
+                if let Some(index) = remove_index {
+                    self.settings.ignore_window_titles.remove(index);
+                    changed = true;
+                }
+
+                ui.horizontal(|ui| {
+                    let response = ui.text_edit_singleline(&mut self.ignore_input);
+                    let mut add_now = ui.button("Add").clicked();
+                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        add_now = true;
+                    }
+                    if add_now {
+                        if add_ignore_window_title(
+                            &mut self.settings.ignore_window_titles,
+                            &self.ignore_input,
+                        ) {
+                            changed = true;
+                        }
+                        self.ignore_input.clear();
+                    }
+                });
+
+                let window_button = ui.add_enabled(cfg!(windows), egui::Button::new("Select window..."));
+                if !cfg!(windows) {
+                    window_button.on_hover_text("Window picker is only available on Windows.");
+                } else if window_button.clicked() {
+                    self.window_picker_error = None;
+                    match collect_visible_window_titles() {
+                        Ok(titles) => {
+                            self.window_picker_titles = titles;
+                            self.window_picker_open = true;
+                        }
+                        Err(err) => {
+                            self.window_picker_error = Some(format!(
+                                "Failed to enumerate windows: {err}"
+                            ));
+                            self.window_picker_titles.clear();
+                            self.window_picker_open = true;
+                        }
+                    }
+                }
+
+                if self.window_picker_open {
+                    let mut open_picker = self.window_picker_open;
+                    egui::Window::new("Select window to ignore")
+                        .open(&mut open_picker)
+                        .resizable(true)
+                        .show(ctx, |ui| {
+                            if let Some(err) = &self.window_picker_error {
+                                ui.colored_label(egui::Color32::RED, err);
+                                ui.separator();
+                            }
+
+                            if self.window_picker_titles.is_empty() {
+                                ui.label("No windows found.");
+                            } else {
+                                egui::ScrollArea::vertical()
+                                    .max_height(220.0)
+                                    .show(ui, |ui| {
+                                        for title in self.window_picker_titles.clone() {
+                                            ui.horizontal(|ui| {
+                                                ui.label(&title);
+                                                if ui.button("Add").clicked() {
+                                                    if add_ignore_window_title(
+                                                        &mut self.settings.ignore_window_titles,
+                                                        &title,
+                                                    ) {
+                                                        changed = true;
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    });
+                            }
+                        });
+                    self.window_picker_open = open_picker;
+                }
+
+                if normalize_ignore_window_titles(&mut self.settings.ignore_window_titles) {
+                    changed = true;
+                }
 
                 if changed {
                     self.dirty = true;
