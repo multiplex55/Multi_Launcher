@@ -544,6 +544,12 @@ impl Plugin for NotePlugin {
                         args: None,
                     },
                     Action {
+                        label: "note tag".into(),
+                        desc: "Note".into(),
+                        action: "query:note tag".into(),
+                        args: None,
+                    },
+                    Action {
                         label: "note tags".into(),
                         desc: "Note".into(),
                         action: "query:note tags".into(),
@@ -676,7 +682,7 @@ impl Plugin for NotePlugin {
                         .collect();
                 }
                 "list" => {
-                    let filters = parse_query_filters(args, &["#", "tag:"]);
+                    let filters = parse_query_filters(args, &["@", "#", "tag:"]);
                     let text_filter = filters.remaining_tokens.join(" ");
                     return guard
                         .notes
@@ -742,20 +748,39 @@ impl Plugin for NotePlugin {
                         })
                         .collect();
                 }
-                "tags" => {
-                    let filter = args;
-                    let tags = guard
-                        .tags
-                        .iter()
-                        .filter(|t| {
-                            filter.is_empty() || self.matcher.fuzzy_match(t, filter).is_some()
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
+                "tags" | "tag" => {
+                    let mut filter = args.trim();
+                    if let Some(stripped) = filter.strip_prefix("tag:") {
+                        filter = stripped.trim();
+                    }
+                    if let Some(stripped) = filter.strip_prefix('#').or_else(|| filter.strip_prefix('@')) {
+                        filter = stripped.trim();
+                    }
+
+                    let mut counts: HashMap<String, (String, usize)> = HashMap::new();
+                    for note in &guard.notes {
+                        for tag in &note.tags {
+                            let key = tag.to_lowercase();
+                            let entry = counts.entry(key).or_insert((tag.clone(), 0));
+                            entry.1 += 1;
+                        }
+                    }
+
+                    let mut tags: Vec<(String, usize)> = counts
+                        .into_values()
+                        .map(|(display, count)| (display, count))
+                        .collect();
+
+                    if !filter.is_empty() {
+                        tags.retain(|(tag, _)| self.matcher.fuzzy_match(tag, filter).is_some());
+                    }
+
+                    tags.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
                     return tags
                         .into_iter()
-                        .map(|t| Action {
-                            label: format!("#{t}"),
+                        .map(|(t, count)| Action {
+                            label: format!("#{t} ({count})"),
                             desc: "Note".into(),
                             action: format!("query:note list #{t}"),
                             args: None,
@@ -921,6 +946,12 @@ impl Plugin for NotePlugin {
                 args: None,
             },
             Action {
+                label: "note tag".into(),
+                desc: "Note".into(),
+                action: "query:note tag".into(),
+                args: None,
+            },
+            Action {
                 label: "note tags".into(),
                 desc: "Note".into(),
                 action: "query:note tags".into(),
@@ -999,5 +1030,138 @@ impl Plugin for NotePlugin {
             Err(e) => tracing::error!("failed to serialize note settings: {e}"),
         }
         self.external_open = cfg.external_open;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn set_notes(notes: Vec<Note>) -> NoteCache {
+        let mut guard = CACHE.lock().expect("note cache lock poisoned");
+        let original = std::mem::take(&mut *guard);
+        *guard = NoteCache::from_notes(notes);
+        original
+    }
+
+    fn restore_cache(original: NoteCache) {
+        let mut guard = CACHE.lock().expect("note cache lock poisoned");
+        *guard = original;
+    }
+
+    #[test]
+    fn note_list_supports_hash_and_at_tags() {
+        let original = set_notes(vec![
+            Note {
+                title: "Alpha".into(),
+                path: PathBuf::new(),
+                content: String::new(),
+                tags: vec!["testing".into(), "ui".into()],
+                links: Vec::new(),
+                slug: "alpha".into(),
+                alias: None,
+            },
+            Note {
+                title: "Beta".into(),
+                path: PathBuf::new(),
+                content: String::new(),
+                tags: vec!["testing".into()],
+                links: Vec::new(),
+                slug: "beta".into(),
+                alias: None,
+            },
+            Note {
+                title: "Gamma".into(),
+                path: PathBuf::new(),
+                content: String::new(),
+                tags: vec!["ui".into(), "chore".into()],
+                links: Vec::new(),
+                slug: "gamma".into(),
+                alias: None,
+            },
+        ]);
+
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: CACHE.clone(),
+            templates: TEMPLATE_CACHE.clone(),
+            external_open: NoteExternalOpen::Wezterm,
+            watcher: None,
+        };
+
+        let list_testing = plugin.search("note list @testing");
+        let labels_testing: Vec<&str> = list_testing.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_testing, vec!["Alpha", "Beta"]);
+
+        let list_testing_hash = plugin.search("note list #testing");
+        let labels_testing_hash: Vec<&str> =
+            list_testing_hash.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_testing_hash, vec!["Alpha", "Beta"]);
+
+        let list_both = plugin.search("note list @testing @ui");
+        let labels_both: Vec<&str> = list_both.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_both, vec!["Alpha"]);
+
+        let list_both_hash = plugin.search("note list #testing #ui");
+        let labels_both_hash: Vec<&str> =
+            list_both_hash.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_both_hash, vec!["Alpha"]);
+
+        restore_cache(original);
+    }
+
+    #[test]
+    fn note_tag_lists_tags_and_drills_into_list() {
+        let original = set_notes(vec![
+            Note {
+                title: "Alpha".into(),
+                path: PathBuf::new(),
+                content: String::new(),
+                tags: vec!["testing".into(), "ui".into()],
+                links: Vec::new(),
+                slug: "alpha".into(),
+                alias: None,
+            },
+            Note {
+                title: "Beta".into(),
+                path: PathBuf::new(),
+                content: String::new(),
+                tags: vec!["testing".into()],
+                links: Vec::new(),
+                slug: "beta".into(),
+                alias: None,
+            },
+            Note {
+                title: "Gamma".into(),
+                path: PathBuf::new(),
+                content: String::new(),
+                tags: vec!["ui".into(), "chore".into()],
+                links: Vec::new(),
+                slug: "gamma".into(),
+                alias: None,
+            },
+        ]);
+
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: CACHE.clone(),
+            templates: TEMPLATE_CACHE.clone(),
+            external_open: NoteExternalOpen::Wezterm,
+            watcher: None,
+        };
+
+        let tags = plugin.search("note tag");
+        let labels: Vec<&str> = tags.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels, vec!["#testing (2)", "#ui (2)", "#chore (1)"]);
+
+        let tags_ui = plugin.search("note tag @ui");
+        let labels_ui: Vec<&str> = tags_ui.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_ui, vec!["#ui (2)"]);
+
+        // Verify that the drill action uses `note list`.
+        assert_eq!(tags_ui[0].action, "query:note list #ui");
+
+        restore_cache(original);
     }
 }
