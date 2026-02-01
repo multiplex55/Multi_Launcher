@@ -279,7 +279,8 @@ fn tag_command_filters_by_tag() {
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo tag urgent");
     assert_eq!(results.len(), 1);
-    assert!(results[0].label.contains("urgent task"));
+    assert_eq!(results[0].label, "#urgent (1)");
+    assert_eq!(results[0].action, "query:todo list #urgent");
 }
 #[test]
 fn search_view_opens_dialog() {

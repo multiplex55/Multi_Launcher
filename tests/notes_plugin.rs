@@ -54,6 +54,7 @@ fn note_root_query_returns_actions_in_order() {
             "note:dialog",
             "query:note search ",
             "query:note list",
+            "query:note tag",
             "query:note tags",
             "query:note templates",
             "query:note new ",
@@ -144,12 +145,18 @@ fn note_tags_parses_edge_cases() {
     let results = plugin.search("note tags");
     assert_eq!(results.len(), 4);
     let labels: Vec<String> = results.iter().map(|a| a.label.clone()).collect();
-    assert_eq!(labels.iter().filter(|l| l.as_str() == "#foo").count(), 1);
-    assert!(labels.contains(&"#foo".to_string()));
-    assert!(!labels.iter().any(|l| l.as_str() == "#Foo"));
-    assert!(labels.contains(&"#bar".to_string()));
-    assert!(labels.contains(&"#baz_1".to_string()));
-    assert!(labels.contains(&"#dup".to_string()));
+    assert_eq!(
+        labels
+            .iter()
+            .filter(|l| l.as_str() == "#foo (1)")
+            .count(),
+        1
+    );
+    assert!(labels.contains(&"#foo (1)".to_string()));
+    assert!(!labels.iter().any(|l| l.as_str() == "#Foo (1)"));
+    assert!(labels.contains(&"#bar (1)".to_string()));
+    assert!(labels.contains(&"#baz_1 (1)".to_string()));
+    assert!(labels.contains(&"#dup (1)".to_string()));
     let notes = load_notes().unwrap();
     let note = notes.iter().find(|n| n.title == "alpha").unwrap();
     assert_eq!(
