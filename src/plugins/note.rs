@@ -558,12 +558,6 @@ impl Plugin for NotePlugin {
                         args: None,
                     },
                     Action {
-                        label: "note tags".into(),
-                        desc: "Note".into(),
-                        action: "query:note tags".into(),
-                        args: None,
-                    },
-                    Action {
                         label: "note templates".into(),
                         desc: "Note".into(),
                         action: "query:note templates".into(),
@@ -970,12 +964,6 @@ impl Plugin for NotePlugin {
                 args: None,
             },
             Action {
-                label: "note tags".into(),
-                desc: "Note".into(),
-                action: "query:note tags".into(),
-                args: None,
-            },
-            Action {
                 label: "note templates".into(),
                 desc: "Note".into(),
                 action: "query:note templates".into(),
@@ -1186,6 +1174,49 @@ mod tests {
 
         // Verify that the drill action uses `note list`.
         assert_eq!(tags_ui[0].action, "query:note list #ui");
+
+        restore_cache(original);
+    }
+
+    #[test]
+    fn note_tags_alias_is_not_exposed_in_commands() {
+        let original = set_notes(vec![
+            Note {
+                title: "Alpha".into(),
+                path: PathBuf::new(),
+                content: "Working on @testing and #ui updates.".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "alpha".into(),
+                alias: None,
+            },
+            Note {
+                title: "Beta".into(),
+                path: PathBuf::new(),
+                content: "Planning @testing coverage.".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "beta".into(),
+                alias: None,
+            },
+        ]);
+
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: CACHE.clone(),
+            templates: TEMPLATE_CACHE.clone(),
+            external_open: NoteExternalOpen::Wezterm,
+            watcher: None,
+        };
+
+        let tags = plugin.search("note tag");
+        let tags_alias = plugin.search("note tags");
+        let labels: Vec<&str> = tags.iter().map(|a| a.label.as_str()).collect();
+        let labels_alias: Vec<&str> = tags_alias.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_alias, labels);
+
+        let commands = plugin.commands();
+        assert!(!commands.iter().any(|a| a.label == "note tags"));
 
         restore_cache(original);
     }
