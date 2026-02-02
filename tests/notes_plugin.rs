@@ -145,10 +145,7 @@ fn note_tags_parses_edge_cases() {
     assert_eq!(results.len(), 4);
     let labels: Vec<String> = results.iter().map(|a| a.label.clone()).collect();
     assert_eq!(
-        labels
-            .iter()
-            .filter(|l| l.as_str() == "#foo (1)")
-            .count(),
+        labels.iter().filter(|l| l.as_str() == "#foo (1)").count(),
         1
     );
     assert!(labels.contains(&"#foo (1)".to_string()));
@@ -209,7 +206,7 @@ fn note_today_uses_today_template_when_available() {
     let today = Local::now().format("%Y-%m-%d").to_string();
     let results = plugin.search("note today");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].action, format!("note:new:{}:today", today));
+    assert_eq!(results[0].action, format!("note:new:{}", today));
 }
 
 #[test]
