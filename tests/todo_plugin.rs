@@ -256,12 +256,26 @@ fn list_filters_by_tag() {
     std::env::set_current_dir(dir.path()).unwrap();
 
     append_todo(TODO_FILE, "alpha", 1, &["rs3".into()]).unwrap();
-    append_todo(TODO_FILE, "beta", 1, &["other".into()]).unwrap();
+    append_todo(TODO_FILE, "beta", 1, &["work".into()]).unwrap();
+    append_todo(TODO_FILE, "gamma", 1, &["workshop".into()]).unwrap();
+    append_todo(TODO_FILE, "delta", 1, &["ui-kit".into()]).unwrap();
+    append_todo(TODO_FILE, "epsilon", 1, &["backend".into()]).unwrap();
 
     let plugin = TodoPlugin::default();
-    let results = plugin.search("todo list #rs3");
+    let results = plugin.search("todo list #rs");
     assert_eq!(results.len(), 1);
     assert!(results[0].label.contains("alpha"));
+
+    let results = plugin.search("todo list @wor");
+    let labels: Vec<&str> = results.iter().map(|action| action.label.as_str()).collect();
+    assert_eq!(results.len(), 2);
+    assert!(labels.iter().any(|label| label.contains("beta")));
+    assert!(labels.iter().any(|label| label.contains("gamma")));
+
+    let results = plugin.search("todo list !#ui");
+    let labels: Vec<&str> = results.iter().map(|action| action.label.as_str()).collect();
+    assert_eq!(results.len(), 4);
+    assert!(!labels.iter().any(|label| label.contains("delta")));
 }
 
 #[test]

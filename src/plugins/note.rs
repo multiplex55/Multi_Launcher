@@ -732,15 +732,14 @@ impl Plugin for NotePlugin {
                             let tag_ok = if filters.include_tags.is_empty() {
                                 true
                             } else {
-                                filters
-                                    .include_tags
-                                    .iter()
-                                    .all(|tag| n.tags.iter().any(|t| t == tag))
+                                filters.include_tags.iter().all(|tag| {
+                                    n.tags.iter().any(|t| t.contains(tag))
+                                })
                             };
                             let exclude_ok = !filters
                                 .exclude_tags
                                 .iter()
-                                .any(|tag| n.tags.iter().any(|t| t == tag));
+                                .any(|tag| n.tags.iter().any(|t| t.contains(tag)));
                             let text_ok = if text_filter.is_empty() {
                                 true
                             } else {
@@ -1178,6 +1177,61 @@ mod tests {
         let labels_both_hash: Vec<&str> =
             list_both_hash.iter().map(|a| a.label.as_str()).collect();
         assert_eq!(labels_both_hash, vec!["Alpha"]);
+
+        restore_cache(original);
+    }
+
+    #[test]
+    fn note_list_supports_partial_tag_filters() {
+        let original = set_notes(vec![
+            Note {
+                title: "Alpha".into(),
+                path: PathBuf::new(),
+                content: "Review #testing and #ui-kit changes.".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "alpha".into(),
+                alias: None,
+            },
+            Note {
+                title: "Beta".into(),
+                path: PathBuf::new(),
+                content: "Follow up on #testing checklist.".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "beta".into(),
+                alias: None,
+            },
+            Note {
+                title: "Gamma".into(),
+                path: PathBuf::new(),
+                content: "Finalize #ui rollout.".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "gamma".into(),
+                alias: None,
+            },
+        ]);
+
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: CACHE.clone(),
+            templates: TEMPLATE_CACHE.clone(),
+            external_open: NoteExternalOpen::Wezterm,
+            watcher: None,
+        };
+
+        let list_test = plugin.search("note list #test");
+        let labels_test: Vec<&str> = list_test.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_test, vec!["Alpha", "Beta"]);
+
+        let list_ui = plugin.search("note list @ui");
+        let labels_ui: Vec<&str> = list_ui.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_ui, vec!["Alpha", "Gamma"]);
+
+        let list_not_ui = plugin.search("note list !#ui");
+        let labels_not_ui: Vec<&str> = list_not_ui.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels_not_ui, vec!["Beta"]);
 
         restore_cache(original);
     }

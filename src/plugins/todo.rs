@@ -301,10 +301,16 @@ impl TodoPlugin {
             };
             let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
 
-            let tag_filter = filter.starts_with('#');
+            let tag_filter = filter.starts_with('#') || filter.starts_with('@');
             if tag_filter {
-                let tag = filter.trim_start_matches('#');
-                entries.retain(|(_, t)| t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(tag)));
+                let tag = filter.trim_start_matches(['#', '@']);
+                let requested = tag.to_lowercase();
+                entries.retain(|(_, t)| {
+                    !requested.is_empty()
+                        && t.tags
+                            .iter()
+                            .any(|tg| tg.to_lowercase().contains(&requested))
+                });
             } else if !filter.is_empty() {
                 entries.retain(|(_, t)| self.matcher.fuzzy_match(&t.text, filter).is_some());
             }
@@ -567,7 +573,10 @@ impl TodoPlugin {
             if !filters.include_tags.is_empty() {
                 entries.retain(|(_, t)| {
                     filters.include_tags.iter().all(|requested| {
-                        t.tags.iter().any(|tag| tag.eq_ignore_ascii_case(requested))
+                        let requested = requested.to_lowercase();
+                        t.tags
+                            .iter()
+                            .any(|tag| tag.to_lowercase().contains(&requested))
                     })
                 });
             }
@@ -577,7 +586,12 @@ impl TodoPlugin {
                     !filters
                         .exclude_tags
                         .iter()
-                        .any(|excluded| t.tags.iter().any(|tag| tag.eq_ignore_ascii_case(excluded)))
+                        .any(|excluded| {
+                            let excluded = excluded.to_lowercase();
+                            t.tags
+                                .iter()
+                                .any(|tag| tag.to_lowercase().contains(&excluded))
+                        })
                 });
             }
 
