@@ -145,10 +145,7 @@ fn note_tags_parses_edge_cases() {
     assert_eq!(results.len(), 4);
     let labels: Vec<String> = results.iter().map(|a| a.label.clone()).collect();
     assert_eq!(
-        labels
-            .iter()
-            .filter(|l| l.as_str() == "#foo (1)")
-            .count(),
+        labels.iter().filter(|l| l.as_str() == "#foo (1)").count(),
         1
     );
     assert!(labels.contains(&"#foo (1)".to_string()));
@@ -188,14 +185,28 @@ fn note_link_dedupes_backlinks() {
 }
 
 #[test]
-fn note_today_opens_daily_note() {
+fn note_today_creates_daily_note_without_template() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let _tmp = setup();
     let plugin = NotePlugin::default();
     let today = Local::now().format("%Y-%m-%d").to_string();
     let results = plugin.search("note today");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].action, format!("note:open:{}", today));
+    assert_eq!(results[0].action, format!("note:new:{}", today));
+}
+
+#[test]
+fn note_today_uses_today_template_when_available() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let tmp = setup();
+    let templates_dir = tmp.path().join(".multi_launcher").join("templates");
+    std::fs::create_dir_all(&templates_dir).unwrap();
+    std::fs::write(templates_dir.join("today.md"), "# Today\n").unwrap();
+    let plugin = NotePlugin::default();
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    let results = plugin.search("note today");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, format!("note:new:{}", today));
 }
 
 #[test]
