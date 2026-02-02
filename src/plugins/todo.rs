@@ -861,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn todo_root_query_lists_subcommands_in_order() {
+    fn todo_root_query_with_space_lists_subcommands_in_order() {
         let plugin = TodoPlugin {
             matcher: SkimMatcherV2::default(),
             data: TODO_DATA.clone(),
@@ -869,7 +869,7 @@ mod tests {
             watcher: None,
         };
 
-        let actions = plugin.search_internal("todo");
+        let actions = plugin.search_internal("todo ");
         let labels: Vec<&str> = actions.iter().map(|a| a.label.as_str()).collect();
         let actions_list: Vec<&str> = actions.iter().map(|a| a.action.as_str()).collect();
 
