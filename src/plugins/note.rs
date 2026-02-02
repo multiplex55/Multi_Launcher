@@ -834,10 +834,11 @@ impl Plugin for NotePlugin {
                     let action = if let Some(t) = tmpl {
                         format!("note:new:{slug}:{t}")
                     } else {
-                        format!("note:open:{slug}")
+                        format!("note:new:{slug}")
                     };
+                    let title = slug.replace('-', " ");
                     return vec![Action {
-                        label: format!("Open {slug}"),
+                        label: format!("Create {title}"),
                         desc: "Note".into(),
                         action,
                         args: None,
