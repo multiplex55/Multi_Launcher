@@ -466,13 +466,24 @@ impl TodoPlugin {
             }
 
             // Otherwise, `todo tag [<filter>]` lists all known tags and lets you drill into `todo list`.
-            let mut filter = rest;
-            if let Some(stripped) = filter.strip_prefix("tag:") {
-                filter = stripped.trim();
-            }
-            if let Some(stripped) = filter.strip_prefix('#').or_else(|| filter.strip_prefix('@')) {
-                filter = stripped.trim();
-            }
+            let filter = if rest.is_empty() {
+                None
+            } else {
+                let mut filter = rest;
+                if let Some(stripped) = filter.strip_prefix("tag:") {
+                    filter = stripped.trim();
+                }
+                if let Some(stripped) =
+                    filter.strip_prefix('#').or_else(|| filter.strip_prefix('@'))
+                {
+                    filter = stripped.trim();
+                }
+                if filter.is_empty() {
+                    None
+                } else {
+                    Some(filter)
+                }
+            };
 
             let guard = match self.data.read() {
                 Ok(g) => g,
@@ -497,7 +508,7 @@ impl TodoPlugin {
                 .map(|(display, count)| (display, count))
                 .collect();
 
-            if !filter.is_empty() {
+            if let Some(filter) = filter {
                 tags.retain(|(tag, _)| self.matcher.fuzzy_match(tag, filter).is_some());
             }
 
