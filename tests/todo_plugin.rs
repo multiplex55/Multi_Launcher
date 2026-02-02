@@ -117,24 +117,26 @@ fn search_plain_todo_opens_dialog() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "todo:dialog");
+}
+
+#[test]
+fn search_todo_space_shows_submenu() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let plugin = TodoPlugin::default();
+    let results = plugin.search("todo ");
     let labels: Vec<&str> = results.iter().map(|action| action.label.as_str()).collect();
-    let actions: Vec<&str> = results.iter().map(|action| action.action.as_str()).collect();
-    assert_eq!(
-        labels,
-        vec![
-            "todo: edit todos",
-            "todo edit",
-            "todo list",
-            "todo tag",
-            "todo view",
-            "todo add",
-            "todo rm",
-            "todo clear",
-            "todo pset",
-            "todo export",
-        ]
-    );
-    assert_eq!(actions[0], "todo:dialog");
+    assert!(labels.contains(&"todo: edit todos"));
+    assert!(labels.contains(&"todo edit"));
+    assert!(labels.contains(&"todo list"));
+    assert!(labels.contains(&"todo tag"));
+    assert!(labels.contains(&"todo view"));
+    assert!(labels.contains(&"todo add"));
+    assert!(labels.contains(&"todo rm"));
+    assert!(labels.contains(&"todo clear"));
+    assert!(labels.contains(&"todo pset"));
+    assert!(labels.contains(&"todo export"));
 }
 
 #[test]

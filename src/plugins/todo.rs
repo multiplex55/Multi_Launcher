@@ -217,6 +217,14 @@ impl TodoPlugin {
 
     fn search_internal(&self, trimmed: &str) -> Vec<Action> {
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "todo") {
+            if rest.is_empty() {
+                return vec![Action {
+                    label: "todo: edit todos".into(),
+                    desc: "Todo".into(),
+                    action: "todo:dialog".into(),
+                    args: None,
+                }];
+            }
             if rest.trim().is_empty() {
                 let mut actions = vec![Action {
                     label: "todo: edit todos".into(),
@@ -604,7 +612,7 @@ impl Default for TodoPlugin {
 
 impl Plugin for TodoPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        let trimmed = query.trim();
+        let trimmed = query.trim_start();
         let key = trimmed.to_string();
         if let Ok(mut cache) = self.cache.write() {
             if let Some(res) = cache.get(&key).cloned() {
