@@ -297,6 +297,26 @@ fn tag_command_filters_by_tag() {
     assert_eq!(results[0].label, "#urgent (1)");
     assert_eq!(results[0].action, "query:todo list #urgent");
 }
+
+#[test]
+fn tag_command_without_filter_lists_all_tags() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    append_todo(TODO_FILE, "alpha task", 1, &["alpha".into(), "beta".into()]).unwrap();
+    append_todo(TODO_FILE, "beta task", 1, &["beta".into()]).unwrap();
+    append_todo(TODO_FILE, "gamma task", 1, &["gamma".into(), "alpha".into()]).unwrap();
+
+    let plugin = TodoPlugin::default();
+    let results = plugin.search("todo tag");
+    let labels: Vec<&str> = results.iter().map(|action| action.label.as_str()).collect();
+
+    assert_eq!(
+        labels,
+        vec!["#alpha (2)", "#beta (2)", "#gamma (1)"]
+    );
+}
 #[test]
 fn search_view_opens_dialog() {
     let _lock = TEST_MUTEX.lock().unwrap();
