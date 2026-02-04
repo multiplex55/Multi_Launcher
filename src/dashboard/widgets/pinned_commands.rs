@@ -38,6 +38,7 @@ pub struct PinnedCommandsWidget {
     cached_resolved: Vec<Action>,
     last_actions_version: u64,
     last_fav_version: u64,
+    last_action_ids_hash: u64,
 }
 
 impl PinnedCommandsWidget {
@@ -48,6 +49,7 @@ impl PinnedCommandsWidget {
             cached_resolved: Vec::new(),
             last_actions_version: u64::MAX,
             last_fav_version: u64::MAX,
+            last_action_ids_hash: u64::MAX,
         }
     }
 
@@ -143,8 +145,10 @@ impl PinnedCommandsWidget {
     }
 
     fn refresh_cache(&mut self, ctx: &DashboardContext<'_>) {
+        let action_ids_hash = action_ids_hash(&self.cfg.action_ids);
         if self.last_actions_version == ctx.actions_version
             && self.last_fav_version == ctx.fav_version
+            && self.last_action_ids_hash == action_ids_hash
         {
             return;
         }
@@ -160,6 +164,7 @@ impl PinnedCommandsWidget {
         }
         self.last_actions_version = ctx.actions_version;
         self.last_fav_version = ctx.fav_version;
+        self.last_action_ids_hash = action_ids_hash;
     }
 }
 
@@ -171,6 +176,7 @@ impl Default for PinnedCommandsWidget {
             cached_resolved: Vec::new(),
             last_actions_version: u64::MAX,
             last_fav_version: u64::MAX,
+            last_action_ids_hash: u64::MAX,
         }
     }
 }
@@ -244,4 +250,141 @@ fn label_for(id: &str, options: &[(String, String)]) -> String {
         .find(|(opt_id, _)| opt_id == id)
         .map(|(_, label)| label.clone())
         .unwrap_or_else(|| id.to_string())
+}
+
+fn action_ids_hash(action_ids: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    action_ids.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dashboard::data_cache::DashboardDataCache;
+    use crate::plugin::PluginManager;
+    use std::collections::HashMap;
+
+    fn make_action(id: &str, label: &str) -> Action {
+        Action {
+            label: label.into(),
+            desc: "desc".into(),
+            action: id.into(),
+            args: None,
+        }
+    }
+
+    fn make_context<'a>(
+        actions: &'a [Action],
+        actions_by_id: &'a HashMap<String, Action>,
+        data_cache: &'a DashboardDataCache,
+        plugins: &'a PluginManager,
+        usage: &'a HashMap<String, u32>,
+        actions_version: u64,
+        fav_version: u64,
+    ) -> DashboardContext<'a> {
+        DashboardContext {
+            actions,
+            actions_by_id,
+            usage,
+            plugins,
+            enabled_plugins: None,
+            default_location: None,
+            data_cache,
+            actions_version,
+            fav_version,
+            notes_version: 0,
+            todo_version: 0,
+            calendar_version: 0,
+            clipboard_version: 0,
+            snippets_version: 0,
+            dashboard_visible: true,
+            dashboard_focused: true,
+            reduce_dashboard_work_when_unfocused: false,
+            diagnostics: None,
+            show_diagnostics_widget: false,
+        }
+    }
+
+    #[test]
+    fn refreshes_when_action_ids_change() {
+        let data_cache = DashboardDataCache::new();
+        let plugins = PluginManager::new();
+        let usage = HashMap::new();
+        let mut widget = PinnedCommandsWidget::new(PinnedCommandsConfig {
+            action_ids: vec!["a".into()],
+            layout: PinnedLayout::List,
+        });
+        let mut actions_by_id = HashMap::new();
+        actions_by_id.insert("a".into(), make_action("a", "First"));
+        actions_by_id.insert("b".into(), make_action("b", "Second"));
+        let actions = vec![
+            actions_by_id.get("a").cloned().unwrap(),
+            actions_by_id.get("b").cloned().unwrap(),
+        ];
+        let ctx = make_context(
+            &actions,
+            &actions_by_id,
+            &data_cache,
+            &plugins,
+            &usage,
+            1,
+            1,
+        );
+        widget.refresh_cache(&ctx);
+        assert_eq!(widget.cached_resolved[0].label, "First");
+
+        widget.cfg.action_ids = vec!["b".into()];
+        let ctx = make_context(
+            &actions,
+            &actions_by_id,
+            &data_cache,
+            &plugins,
+            &usage,
+            1,
+            1,
+        );
+        widget.refresh_cache(&ctx);
+        assert_eq!(widget.cached_resolved[0].label, "Second");
+    }
+
+    #[test]
+    fn refreshes_when_actions_version_changes() {
+        let data_cache = DashboardDataCache::new();
+        let plugins = PluginManager::new();
+        let usage = HashMap::new();
+        let mut widget = PinnedCommandsWidget::new(PinnedCommandsConfig {
+            action_ids: vec!["a".into()],
+            layout: PinnedLayout::List,
+        });
+        let mut actions_by_id = HashMap::new();
+        actions_by_id.insert("a".into(), make_action("a", "First"));
+        let actions = vec![actions_by_id.get("a").cloned().unwrap()];
+        let ctx = make_context(
+            &actions,
+            &actions_by_id,
+            &data_cache,
+            &plugins,
+            &usage,
+            1,
+            1,
+        );
+        widget.refresh_cache(&ctx);
+        assert_eq!(widget.cached_resolved[0].label, "First");
+
+        actions_by_id.insert("a".into(), make_action("a", "Updated"));
+        let actions = vec![actions_by_id.get("a").cloned().unwrap()];
+        let ctx = make_context(
+            &actions,
+            &actions_by_id,
+            &data_cache,
+            &plugins,
+            &usage,
+            2,
+            1,
+        );
+        widget.refresh_cache(&ctx);
+        assert_eq!(widget.cached_resolved[0].label, "Updated");
+    }
 }
