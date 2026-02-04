@@ -11,6 +11,7 @@ pub struct TodoDialog {
     tags: String,
     filter: String,
     pub persist_tags: bool,
+    pending_clear_confirm: bool,
 }
 
 impl TodoDialog {
@@ -21,6 +22,7 @@ impl TodoDialog {
         self.priority = 0;
         self.tags.clear();
         self.filter.clear();
+        self.pending_clear_confirm = false;
     }
 
     fn save(&mut self, app: &mut LauncherApp, focus: bool) {
@@ -97,6 +99,20 @@ impl TodoDialog {
         true
     }
 
+    fn confirm_clear_completed(&mut self, app: &mut LauncherApp, confirmed: bool) {
+        if !self.pending_clear_confirm {
+            return;
+        }
+        if confirmed {
+            let original_len = self.entries.len();
+            self.entries.retain(|e| !e.done);
+            if self.entries.len() != original_len {
+                self.save(app, false);
+            }
+        }
+        self.pending_clear_confirm = false;
+    }
+
     pub fn test_set_text(&mut self, text: &str) {
         self.text = text.to_owned();
     }
@@ -119,6 +135,7 @@ impl TodoDialog {
         }
         let mut save_now = false;
         let mut add_now = false;
+        let mut clear_confirmed: Option<bool> = None;
         egui::Window::new("Todos")
             .open(&mut self.open)
             .resizable(true)
@@ -189,10 +206,20 @@ impl TodoDialog {
                         });
                     ui.horizontal(|ui| {
                         if ui.button("Clear Completed").clicked() {
-                            self.entries.retain(|e| !e.done);
-                            save_now = true;
+                            self.pending_clear_confirm = true;
                         }
                     });
+                    if self.pending_clear_confirm {
+                        ui.horizontal(|ui| {
+                            ui.label("Clear completed todos?");
+                            if ui.button("Confirm").clicked() {
+                                clear_confirmed = Some(true);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                clear_confirmed = Some(false);
+                            }
+                        });
+                    }
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.label("Filter");
@@ -254,6 +281,9 @@ impl TodoDialog {
             } else {
                 tracing::debug!("Enter pressed but todo text empty; ignoring");
             }
+        }
+        if let Some(confirmed) = clear_confirmed {
+            self.confirm_clear_completed(app, confirmed);
         }
         if save_now {
             self.save(app, false);
@@ -343,5 +373,66 @@ mod tests {
         assert_eq!(dlg.entries.len(), 1);
         assert_eq!(dlg.entries[0].text, "tagged");
         assert_eq!(dlg.entries[0].tags, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn clear_completed_requires_confirmation() {
+        let dir = tempdir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut dlg = TodoDialog::default();
+        dlg.entries = vec![
+            TodoEntry {
+                text: "done".into(),
+                done: true,
+                priority: 0,
+                tags: Vec::new(),
+            },
+            TodoEntry {
+                text: "pending".into(),
+                done: false,
+                priority: 0,
+                tags: Vec::new(),
+            },
+        ];
+        dlg.pending_clear_confirm = true;
+
+        dlg.confirm_clear_completed(&mut app, false);
+
+        assert_eq!(dlg.entries.len(), 2);
+        assert!(dlg.entries.iter().any(|e| e.done));
+    }
+
+    #[test]
+    fn clear_completed_after_confirmation_saves() {
+        let dir = tempdir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut dlg = TodoDialog::default();
+        dlg.entries = vec![
+            TodoEntry {
+                text: "done".into(),
+                done: true,
+                priority: 0,
+                tags: Vec::new(),
+            },
+            TodoEntry {
+                text: "pending".into(),
+                done: false,
+                priority: 0,
+                tags: Vec::new(),
+            },
+        ];
+        dlg.pending_clear_confirm = true;
+
+        dlg.confirm_clear_completed(&mut app, true);
+
+        assert_eq!(dlg.entries.len(), 1);
+        assert!(!dlg.entries[0].done);
+        let saved = load_todos(TODO_FILE).unwrap_or_default();
+        assert_eq!(saved.len(), 1);
+        assert!(!saved[0].done);
     }
 }
