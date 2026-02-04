@@ -154,6 +154,7 @@ impl AddActionDialog {
                                         app.custom_len += 1;
                                         app.actions = Arc::new(new_actions);
                                         app.update_action_cache();
+                                        crate::actions::bump_actions_version();
                                     }
                                     DialogMode::Edit(idx) => {
                                         let mut new_actions = (*app.actions).clone();
@@ -169,6 +170,7 @@ impl AddActionDialog {
                                                 };
                                             app.actions = Arc::new(new_actions);
                                             app.update_action_cache();
+                                            crate::actions::bump_actions_version();
                                         }
                                     }
                                 }
