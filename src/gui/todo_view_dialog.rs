@@ -2,6 +2,13 @@ use crate::gui::LauncherApp;
 use crate::plugins::todo::{load_todos, save_todos, TodoEntry, TODO_FILE};
 use eframe::egui;
 
+const TODO_VIEW_SIZE: egui::Vec2 = egui::vec2(360.0, 260.0);
+const TODO_VIEW_LIST_HEIGHT: f32 = 170.0;
+
+pub fn todo_view_layout_sizes() -> (egui::Vec2, f32) {
+    (TODO_VIEW_SIZE, TODO_VIEW_LIST_HEIGHT)
+}
+
 #[derive(Default)]
 pub struct TodoViewDialog {
     pub open: bool,
@@ -51,14 +58,15 @@ impl TodoViewDialog {
         if !self.open {
             return;
         }
+        let (window_size, list_height) = todo_view_layout_sizes();
         let mut close = false;
         let mut save_now = false;
         egui::Window::new("View Todos")
             .open(&mut self.open)
-            .resizable(true)
-            .default_size((320.0, 240.0))
-            .min_width(200.0)
-            .min_height(150.0)
+            .resizable(false)
+            .default_size(window_size)
+            .min_size(window_size)
+            .max_size(window_size)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.sort_by_priority, "Sort by priority");
@@ -88,11 +96,10 @@ impl TodoViewDialog {
                     indices
                         .sort_by(|a, b| self.entries[*b].priority.cmp(&self.entries[*a].priority));
                 }
-                let area_height = ui.available_height();
                 // Keep horizontal overflow for long todo text without wrapping.
                 egui::ScrollArea::both()
                     .auto_shrink([false, false])
-                    .max_height(area_height)
+                    .max_height(list_height)
                     .show(ui, |ui| {
                         for idx in indices {
                             if Some(idx) == self.editing_idx {
@@ -182,5 +189,18 @@ impl TodoViewDialog {
         if close {
             self.open = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn todo_view_layout_sizes_constants() {
+        let (window_size, list_height) = todo_view_layout_sizes();
+        assert_eq!(window_size, TODO_VIEW_SIZE);
+        assert_eq!(list_height, TODO_VIEW_LIST_HEIGHT);
+        assert!(list_height < window_size.y);
     }
 }
