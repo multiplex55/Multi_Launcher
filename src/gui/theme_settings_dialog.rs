@@ -351,7 +351,6 @@ fn swatch(ui: &mut egui::Ui, label: &str, fill: ThemeColor, stroke: ThemeColor) 
         4.0,
         to_egui(fill),
         egui::Stroke::new(1.0, to_egui(stroke)),
-        egui::StrokeKind::Outside,
     );
     ui.painter().text(
         rect.center(),
