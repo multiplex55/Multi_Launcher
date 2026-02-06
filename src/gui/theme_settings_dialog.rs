@@ -52,6 +52,40 @@ impl ThemeSettingsDialogState {
         self.dirty = false;
         Ok(())
     }
+
+    fn active_scheme_mut(&mut self) -> &mut ColorScheme {
+        match self.draft.mode {
+            ThemeMode::Custom => &mut self.draft.custom_scheme,
+            ThemeMode::Dark | ThemeMode::System => self
+                .draft
+                .named_presets
+                .entry("dark".to_string())
+                .or_insert_with(ColorScheme::dark),
+            ThemeMode::Light => self
+                .draft
+                .named_presets
+                .entry("light".to_string())
+                .or_insert_with(ColorScheme::light),
+        }
+    }
+
+    fn active_scheme(&self) -> ColorScheme {
+        match self.draft.mode {
+            ThemeMode::Custom => self.draft.custom_scheme.clone(),
+            ThemeMode::Dark | ThemeMode::System => self
+                .draft
+                .named_presets
+                .get("dark")
+                .cloned()
+                .unwrap_or_else(ColorScheme::dark),
+            ThemeMode::Light => self
+                .draft
+                .named_presets
+                .get("light")
+                .cloned()
+                .unwrap_or_else(ColorScheme::light),
+        }
+    }
 }
 
 pub fn ui(
@@ -84,17 +118,19 @@ pub fn ui(
             let mut changed = false;
             changed |= section_base_mode(ui, &mut state.draft.mode);
             ui.separator();
-            changed |= section_core_surfaces(ui, &mut state.draft.custom_scheme, state.draft.mode);
+            let mode = state.draft.mode;
+            let scheme = state.active_scheme_mut();
+            changed |= section_core_surfaces(ui, scheme, mode);
             ui.separator();
-            changed |= section_text_and_links(ui, &mut state.draft.custom_scheme, state.draft.mode);
+            changed |= section_text_and_links(ui, scheme, mode);
             ui.separator();
-            changed |= section_widgets(ui, &mut state.draft.custom_scheme, state.draft.mode);
+            changed |= section_widgets(ui, scheme, mode);
             ui.separator();
-            changed |= section_selection(ui, &mut state.draft.custom_scheme, state.draft.mode);
+            changed |= section_selection(ui, scheme, mode);
             ui.separator();
-            changed |= section_semantic(ui, &mut state.draft.custom_scheme, state.draft.mode);
+            changed |= section_semantic(ui, scheme, mode);
             ui.separator();
-            preview(ui, &state.draft.custom_scheme);
+            preview(ui, &state.active_scheme());
 
             if changed {
                 state.dirty = true;
