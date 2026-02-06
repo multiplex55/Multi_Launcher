@@ -1,5 +1,7 @@
 use eframe::egui;
-use multi_launcher::gui::{LauncherApp, TodoDialog};
+use multi_launcher::gui::{
+    todo_view_layout_sizes, todo_view_window_constraints, LauncherApp, TodoDialog, TodoViewDialog,
+};
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::plugins::todo::{
@@ -418,4 +420,32 @@ fn dialog_scrolls_with_many_entries() {
         .memory(|m| m.area_rect(egui::Id::new("Todos")))
         .expect("window rect");
     assert!(rect.height() < 800.0);
+}
+
+#[test]
+fn todo_view_dialog_has_fixed_size() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = new_app(&ctx);
+    let mut dlg = TodoViewDialog::default();
+    dlg.open();
+
+    ctx.begin_frame(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1000.0, 2000.0),
+        )),
+        ..Default::default()
+    });
+    dlg.ui(&ctx, &mut app);
+    let _ = ctx.end_frame();
+
+    let (min_size, max_size) = todo_view_window_constraints();
+    let _rect = ctx
+        .memory(|m| m.area_rect(egui::Id::new("View Todos")))
+        .expect("window rect");
+    let (_window_size, _) = todo_view_layout_sizes();
+    assert_eq!(min_size, max_size);
 }
