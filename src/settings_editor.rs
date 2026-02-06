@@ -320,6 +320,7 @@ impl SettingsEditor {
                 },
                 show_when_query_empty: self.dashboard_show_when_empty,
             },
+            theme: current.theme.clone(),
         }
     }
 
