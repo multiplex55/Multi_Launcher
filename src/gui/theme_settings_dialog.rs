@@ -1,8 +1,29 @@
 use crate::settings::{ColorScheme, Settings, ThemeColor, ThemeMode, ThemeSettings};
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
+
+fn theme_json_path(settings_path: &str) -> PathBuf {
+    let path = Path::new(settings_path);
+    path.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("theme_settings.json")
+}
+
+fn persist_theme_json(settings_path: &str, theme: &ThemeSettings) -> Result<(), String> {
+    let theme_path = theme_json_path(settings_path);
+    let json = serde_json::to_string_pretty(theme)
+        .map_err(|err| format!("Failed to serialize theme settings: {err}"))?;
+    std::fs::write(&theme_path, json).map_err(|err| {
+        format!(
+            "Failed to save theme file ({}): {err}",
+            theme_path.display()
+        )
+    })
+}
+
 pub struct ThemeSettingsDialogState {
     pub draft: ThemeSettings,
     pub dirty: bool,
@@ -49,6 +70,7 @@ impl ThemeSettingsDialogState {
         settings
             .save(settings_path)
             .map_err(|err| format!("Failed to save settings: {err}"))?;
+        persist_theme_json(settings_path, &self.draft)?;
         self.dirty = false;
         Ok(())
     }
