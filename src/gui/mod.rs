@@ -64,7 +64,7 @@ pub use tempfile_dialog::TempfileDialog;
 pub use timer_dialog::{TimerCompletionDialog, TimerDialog};
 pub use toast_log_dialog::ToastLogDialog;
 pub use todo_dialog::TodoDialog;
-pub use todo_view_dialog::{todo_view_layout_sizes, TodoViewDialog};
+pub use todo_view_dialog::{todo_view_layout_sizes, todo_view_window_constraints, TodoViewDialog};
 pub use unused_assets_dialog::UnusedAssetsDialog;
 pub use volume_dialog::VolumeDialog;
 

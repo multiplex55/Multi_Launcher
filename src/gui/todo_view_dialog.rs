@@ -9,6 +9,10 @@ pub fn todo_view_layout_sizes() -> (egui::Vec2, f32) {
     (TODO_VIEW_SIZE, TODO_VIEW_LIST_HEIGHT)
 }
 
+pub fn todo_view_window_constraints() -> (egui::Vec2, egui::Vec2) {
+    (TODO_VIEW_SIZE, TODO_VIEW_SIZE)
+}
+
 #[derive(Default)]
 pub struct TodoViewDialog {
     pub open: bool,
@@ -59,14 +63,15 @@ impl TodoViewDialog {
             return;
         }
         let (window_size, list_height) = todo_view_layout_sizes();
+        let (min_size, max_size) = todo_view_window_constraints();
         let mut close = false;
         let mut save_now = false;
         egui::Window::new("View Todos")
             .open(&mut self.open)
             .resizable(false)
             .default_size(window_size)
-            .min_size(window_size)
-            .max_size(window_size)
+            .min_size(min_size)
+            .max_size(max_size)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.sort_by_priority, "Sort by priority");
@@ -199,8 +204,11 @@ mod tests {
     #[test]
     fn todo_view_layout_sizes_constants() {
         let (window_size, list_height) = todo_view_layout_sizes();
+        let (min_size, max_size) = todo_view_window_constraints();
         assert_eq!(window_size, TODO_VIEW_SIZE);
         assert_eq!(list_height, TODO_VIEW_LIST_HEIGHT);
+        assert_eq!(min_size, max_size);
+        assert_eq!(window_size, min_size);
         assert!(list_height < window_size.y);
     }
 }

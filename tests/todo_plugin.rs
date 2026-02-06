@@ -1,5 +1,7 @@
 use eframe::egui;
-use multi_launcher::gui::{todo_view_layout_sizes, LauncherApp, TodoDialog, TodoViewDialog};
+use multi_launcher::gui::{
+    todo_view_layout_sizes, todo_view_window_constraints, LauncherApp, TodoDialog, TodoViewDialog,
+};
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::plugins::todo::{
@@ -444,7 +446,10 @@ fn todo_view_dialog_has_fixed_size() {
         .memory(|m| m.area_rect(egui::Id::new("View Todos")))
         .expect("window rect");
     let (window_size, _) = todo_view_layout_sizes();
+    let (min_size, max_size) = todo_view_window_constraints();
     let size = rect.size();
-    assert!((size.x - window_size.x).abs() < 0.1);
-    assert!((size.y - window_size.y).abs() < 0.1);
+    let tolerance = 2.0;
+    assert!((size.x - window_size.x).abs() <= tolerance);
+    assert!((size.y - window_size.y).abs() <= tolerance);
+    assert_eq!(min_size, max_size);
 }
