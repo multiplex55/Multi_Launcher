@@ -39,6 +39,7 @@ fn search_add_returns_action() {
     let results = plugin.search("todo add task   ");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "todo:add:task|0|");
+    assert_eq!(results[0].label, "Add todo task");
 }
 
 #[test]
@@ -48,6 +49,7 @@ fn search_add_with_priority_and_tags() {
     let results = plugin.search("todo add task p=3 #a #b");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "todo:add:task|3|a,b");
+    assert_eq!(results[0].label, "Add todo task Tag: a, b; priority: 3");
 }
 
 #[test]
@@ -57,6 +59,7 @@ fn search_add_with_at_tags() {
     let results = plugin.search("todo add task @a @b");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "todo:add:task|0|a,b");
+    assert_eq!(results[0].label, "Add todo task Tag: a, b");
 }
 
 #[test]
