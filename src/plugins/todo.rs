@@ -409,8 +409,20 @@ impl TodoPlugin {
             }) {
                 ParseArgsResult::Parsed((text, priority, tags)) => {
                     let tag_str = tags.join(",");
+                    let mut label_suffix_parts: Vec<String> = Vec::new();
+                    if !tags.is_empty() {
+                        label_suffix_parts.push(format!("Tag: {}", tags.join(", ")));
+                    }
+                    if priority > 0 {
+                        label_suffix_parts.push(format!("priority: {priority}"));
+                    }
+                    let label = if label_suffix_parts.is_empty() {
+                        format!("Add todo {text}")
+                    } else {
+                        format!("Add todo {text} {}", label_suffix_parts.join("; "))
+                    };
                     return vec![Action {
-                        label: format!("Add todo {text}"),
+                        label,
                         desc: "Todo".into(),
                         action: format!("todo:add:{text}|{priority}|{tag_str}"),
                         args: None,
