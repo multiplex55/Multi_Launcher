@@ -449,6 +449,9 @@ impl SettingsEditor {
                             ui.label("List scale");
                             ui.add(egui::Slider::new(&mut self.list_scale, 0.5..=5.0).text(""));
                         });
+                        if ui.button("Open Theme Settings...").clicked() {
+                            app.open_theme_settings_dialog();
+                        }
                         ui.horizontal(|ui| {
                             ui.label("Fuzzy weight");
                             ui.add(egui::Slider::new(&mut self.fuzzy_weight, 0.0..=5.0).text(""));
