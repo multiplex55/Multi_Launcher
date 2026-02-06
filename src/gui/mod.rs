@@ -536,16 +536,19 @@ pub struct LauncherApp {
 impl LauncherApp {
     pub fn apply_theme_visuals(&mut self, ctx: &egui::Context, theme: &ThemeSettings) {
         let defaults = ctx.style().visuals.clone();
-        if let Err(reason) = crate::gui::theme::preset_for_mode(theme, theme.mode) {
-            let msg = format!("Theme settings are incomplete; using default visuals ({reason})");
-            tracing::warn!("{msg}");
-            if self.enable_toasts {
-                self.add_toast(Toast {
-                    text: msg.into(),
-                    kind: ToastKind::Warning,
-                    options: ToastOptions::default()
-                        .duration_in_seconds(self.toast_duration as f64),
-                });
+        if !matches!(theme.mode, crate::settings::ThemeMode::System) {
+            if let Err(reason) = crate::gui::theme::preset_for_mode(theme, theme.mode) {
+                let msg =
+                    format!("Theme settings are incomplete; using default visuals ({reason})");
+                tracing::warn!("{msg}");
+                if self.enable_toasts {
+                    self.add_toast(Toast {
+                        text: msg.into(),
+                        kind: ToastKind::Warning,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(self.toast_duration as f64),
+                    });
+                }
             }
         }
         ctx.set_visuals(crate::gui::theme::theme_settings_to_visuals(

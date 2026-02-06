@@ -21,15 +21,15 @@ pub fn preset_for_mode(
             .get("light")
             .cloned()
             .ok_or("missing light preset"),
-        ThemeMode::System => theme
-            .named_presets
-            .get("dark")
-            .cloned()
-            .ok_or("missing system/dark preset"),
+        ThemeMode::System => Err("system mode uses context defaults"),
     }
 }
 
 pub fn theme_settings_to_visuals(theme: &ThemeSettings, defaults: &egui::Visuals) -> egui::Visuals {
+    if matches!(theme.mode, ThemeMode::System) {
+        return defaults.clone();
+    }
+
     let Ok(scheme) = preset_for_mode(theme, theme.mode) else {
         return defaults.clone();
     };
@@ -111,12 +111,20 @@ mod tests {
             },
             &base,
         );
+        let system = theme_settings_to_visuals(
+            &ThemeSettings {
+                mode: ThemeMode::System,
+                ..theme.clone()
+            },
+            &base,
+        );
 
         assert!(dark.dark_mode);
         assert!(!light.dark_mode);
         assert!(custom.dark_mode);
         assert_ne!(dark.window_fill, light.window_fill);
         assert_eq!(dark.window_fill, custom.window_fill);
+        assert_eq!(system, base);
     }
 
     #[test]
