@@ -23,6 +23,7 @@ mod shell_cmd_dialog;
 mod snippet_dialog;
 mod tempfile_alias_dialog;
 mod tempfile_dialog;
+pub mod theme;
 mod theme_settings_dialog;
 mod timer_dialog;
 mod toast_log_dialog;
@@ -88,7 +89,7 @@ use crate::plugin::PluginManager;
 use crate::plugin_editor::PluginEditor;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
-use crate::settings::Settings;
+use crate::settings::{Settings, ThemeSettings};
 use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{append_toast_log, TOAST_LOG_FILE};
 use crate::usage::{self, USAGE_FILE};
@@ -533,6 +534,25 @@ pub struct LauncherApp {
 }
 
 impl LauncherApp {
+    pub fn apply_theme_visuals(&mut self, ctx: &egui::Context, theme: &ThemeSettings) {
+        let defaults = ctx.style().visuals.clone();
+        if let Err(reason) = crate::gui::theme::preset_for_mode(theme, theme.mode) {
+            let msg = format!("Theme settings are incomplete; using default visuals ({reason})");
+            tracing::warn!("{msg}");
+            if self.enable_toasts {
+                self.add_toast(Toast {
+                    text: msg.into(),
+                    kind: ToastKind::Warning,
+                    options: ToastOptions::default()
+                        .duration_in_seconds(self.toast_duration as f64),
+                });
+            }
+        }
+        ctx.set_visuals(crate::gui::theme::theme_settings_to_visuals(
+            theme, &defaults,
+        ));
+    }
+
     fn has_diagnostics_widget(&self) -> bool {
         self.dashboard
             .slots
@@ -1383,6 +1403,7 @@ impl LauncherApp {
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
+        app.apply_theme_visuals(ctx, &settings.theme);
         apply_visibility(
             initial_visible,
             ctx,

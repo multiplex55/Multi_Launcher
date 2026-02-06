@@ -116,6 +116,7 @@ pub fn ui(
                 {
                     match state.save_to_path(&app.settings_path) {
                         Ok(_) => {
+                            app.apply_theme_visuals(ctx, &state.draft);
                             if app.enable_toasts {
                                 app.add_toast(Toast {
                                     text: "Theme settings applied".into(),
@@ -144,6 +145,7 @@ pub fn ui(
                 {
                     match state.save_to_path(&app.settings_path) {
                         Ok(_) => {
+                            app.apply_theme_visuals(ctx, &state.draft);
                             if app.enable_toasts {
                                 app.add_toast(Toast {
                                     text: "Theme settings saved".into(),
