@@ -3,8 +3,6 @@ use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone)]
-
 fn theme_json_path(settings_path: &str) -> PathBuf {
     let path = Path::new(settings_path);
     path.parent()
@@ -24,6 +22,7 @@ fn persist_theme_json(settings_path: &str, theme: &ThemeSettings) -> Result<(), 
     })
 }
 
+#[derive(Debug, Clone)]
 pub struct ThemeSettingsDialogState {
     pub draft: ThemeSettings,
     pub dirty: bool,
