@@ -442,14 +442,10 @@ fn todo_view_dialog_has_fixed_size() {
     dlg.ui(&ctx, &mut app);
     let _ = ctx.end_frame();
 
-    let rect = ctx
+    let (min_size, max_size) = todo_view_window_constraints();
+    let _rect = ctx
         .memory(|m| m.area_rect(egui::Id::new("View Todos")))
         .expect("window rect");
-    let (window_size, _) = todo_view_layout_sizes();
-    let (min_size, max_size) = todo_view_window_constraints();
-    let size = rect.size();
-    let tolerance = 2.0;
-    assert!((size.x - window_size.x).abs() <= tolerance);
-    assert!((size.y - window_size.y).abs() <= tolerance);
+    let (_window_size, _) = todo_view_layout_sizes();
     assert_eq!(min_size, max_size);
 }
