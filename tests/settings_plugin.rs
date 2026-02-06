@@ -90,3 +90,34 @@ fn dashboard_settings_action_opens_editor() {
     assert!(app.show_dashboard_editor);
     assert!(app.dashboard_editor.open);
 }
+
+#[test]
+fn theme_action_is_discoverable_and_opens_dialog() {
+    let plugin = SettingsPlugin;
+    let results = plugin.search("theme");
+    assert!(results.iter().any(|a| a.action == "theme:dialog"));
+
+    let commands = plugin.commands();
+    assert!(commands.iter().any(|a| {
+        a.action == "theme:dialog"
+            && a.label == "Theme settings"
+            && a.desc == "Configure launcher theme colors"
+    }));
+
+    let ctx = egui::Context::default();
+    let mut app = new_app(&ctx, Vec::new());
+    assert!(!app.is_theme_settings_dialog_open());
+    app.activate_action(
+        Action {
+            label: "Theme settings".into(),
+            desc: "Configure launcher theme colors".into(),
+            action: "theme:dialog".into(),
+            args: None,
+        },
+        None,
+        ActivationSource::Enter,
+    );
+    assert!(app.is_theme_settings_dialog_open());
+    app.close_theme_settings_dialog();
+    assert!(!app.is_theme_settings_dialog_open());
+}

@@ -107,6 +107,18 @@ pub struct ColorScheme {
     #[serde(default)]
     pub hyperlink: ThemeColor,
     #[serde(default)]
+    pub widget_inactive_fill: ThemeColor,
+    #[serde(default)]
+    pub widget_inactive_stroke: ThemeColor,
+    #[serde(default)]
+    pub widget_hovered_fill: ThemeColor,
+    #[serde(default)]
+    pub widget_hovered_stroke: ThemeColor,
+    #[serde(default)]
+    pub widget_active_fill: ThemeColor,
+    #[serde(default)]
+    pub widget_active_stroke: ThemeColor,
+    #[serde(default)]
     pub selection_bg: ThemeColor,
     #[serde(default)]
     pub selection_stroke: ThemeColor,
@@ -125,6 +137,12 @@ impl ColorScheme {
             panel_fill: ThemeColor::rgba(31, 31, 35, 255),
             text: ThemeColor::rgba(235, 235, 240, 255),
             hyperlink: ThemeColor::rgba(94, 173, 255, 255),
+            widget_inactive_fill: ThemeColor::rgba(49, 49, 55, 255),
+            widget_inactive_stroke: ThemeColor::rgba(90, 90, 102, 255),
+            widget_hovered_fill: ThemeColor::rgba(64, 64, 74, 255),
+            widget_hovered_stroke: ThemeColor::rgba(133, 133, 152, 255),
+            widget_active_fill: ThemeColor::rgba(84, 84, 100, 255),
+            widget_active_stroke: ThemeColor::rgba(170, 170, 194, 255),
             selection_bg: ThemeColor::rgba(67, 121, 201, 210),
             selection_stroke: ThemeColor::rgba(170, 204, 255, 255),
             warn_accent: ThemeColor::rgba(255, 192, 92, 255),
@@ -139,6 +157,12 @@ impl ColorScheme {
             panel_fill: ThemeColor::rgba(255, 255, 255, 255),
             text: ThemeColor::rgba(26, 30, 40, 255),
             hyperlink: ThemeColor::rgba(35, 102, 214, 255),
+            widget_inactive_fill: ThemeColor::rgba(240, 241, 246, 255),
+            widget_inactive_stroke: ThemeColor::rgba(183, 186, 198, 255),
+            widget_hovered_fill: ThemeColor::rgba(229, 234, 246, 255),
+            widget_hovered_stroke: ThemeColor::rgba(145, 160, 196, 255),
+            widget_active_fill: ThemeColor::rgba(206, 220, 246, 255),
+            widget_active_stroke: ThemeColor::rgba(103, 130, 184, 255),
             selection_bg: ThemeColor::rgba(153, 194, 255, 220),
             selection_stroke: ThemeColor::rgba(48, 96, 170, 255),
             warn_accent: ThemeColor::rgba(219, 131, 0, 255),

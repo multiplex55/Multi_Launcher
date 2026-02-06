@@ -27,6 +27,16 @@ impl Plugin for SettingsPlugin {
                 });
             }
         }
+        if let Some(rest) = crate::common::strip_prefix_ci(q, "theme") {
+            if rest.is_empty() || rest.starts_with(' ') {
+                actions.push(Action {
+                    label: "Theme settings".into(),
+                    desc: "Configure launcher theme colors".into(),
+                    action: "theme:dialog".into(),
+                    args: None,
+                });
+            }
+        }
         actions
     }
 
@@ -54,6 +64,12 @@ impl Plugin for SettingsPlugin {
                 label: "Dashboard Settings".into(),
                 desc: "Dashboard settings".into(),
                 action: "dashboard:settings".into(),
+                args: None,
+            },
+            Action {
+                label: "Theme settings".into(),
+                desc: "Configure launcher theme colors".into(),
+                action: "theme:dialog".into(),
                 args: None,
             },
         ]
