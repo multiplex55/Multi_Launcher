@@ -16,6 +16,20 @@ pub enum TodoSort {
     Alphabetical,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatusFilter {
+    All,
+    Open,
+    Done,
+}
+
+impl Default for TodoStatusFilter {
+    fn default() -> Self {
+        TodoStatusFilter::Open
+    }
+}
+
 impl Default for TodoSort {
     fn default() -> Self {
         TodoSort::Priority
@@ -34,12 +48,16 @@ fn default_show_progress() -> bool {
 pub struct TodoWidgetConfig {
     #[serde(default = "default_count")]
     pub count: usize,
-    #[serde(default)]
-    pub show_done: bool,
     #[serde(default = "default_show_progress")]
     pub show_progress: bool,
     #[serde(default)]
+    pub status: TodoStatusFilter,
+    #[serde(default)]
+    pub min_priority: u8,
+    #[serde(default)]
     pub filter_tags: Vec<String>,
+    #[serde(default)]
+    pub show_done: bool,
     #[serde(default)]
     pub sort: TodoSort,
     #[serde(default)]
@@ -50,9 +68,11 @@ impl Default for TodoWidgetConfig {
     fn default() -> Self {
         Self {
             count: default_count(),
-            show_done: false,
             show_progress: default_show_progress(),
+            status: TodoStatusFilter::default(),
+            min_priority: 0,
             filter_tags: Vec::new(),
+            show_done: false,
             sort: TodoSort::default(),
             query: None,
         }
@@ -65,7 +85,9 @@ pub struct TodoWidget {
 
 impl TodoWidget {
     pub fn new(cfg: TodoWidgetConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg: migrate_config(cfg),
+        }
     }
 
     pub fn settings_ui(
@@ -84,11 +106,31 @@ impl TodoWidget {
                 ui.label("todos");
             });
             changed |= ui
-                .checkbox(&mut cfg.show_done, "Include completed")
-                .changed();
-            changed |= ui
                 .checkbox(&mut cfg.show_progress, "Show progress bar")
                 .changed();
+            egui::ComboBox::from_label("Status")
+                .selected_text(match cfg.status {
+                    TodoStatusFilter::All => "All",
+                    TodoStatusFilter::Open => "Open",
+                    TodoStatusFilter::Done => "Done",
+                })
+                .show_ui(ui, |ui| {
+                    changed |= ui
+                        .selectable_value(&mut cfg.status, TodoStatusFilter::All, "All")
+                        .changed();
+                    changed |= ui
+                        .selectable_value(&mut cfg.status, TodoStatusFilter::Open, "Open")
+                        .changed();
+                    changed |= ui
+                        .selectable_value(&mut cfg.status, TodoStatusFilter::Done, "Done")
+                        .changed();
+                });
+            ui.horizontal(|ui| {
+                ui.label("Min priority");
+                changed |= ui
+                    .add(egui::DragValue::new(&mut cfg.min_priority).clamp_range(0..=255))
+                    .changed();
+            });
             egui::ComboBox::from_label("Sort by")
                 .selected_text(match cfg.sort {
                     TodoSort::Priority => "Priority",
@@ -165,6 +207,43 @@ impl TodoWidget {
         })
     }
 
+    fn status_match(&self, entry: &TodoEntry) -> bool {
+        match self.cfg.status {
+            TodoStatusFilter::All => true,
+            TodoStatusFilter::Open => !entry.done,
+            TodoStatusFilter::Done => entry.done,
+        }
+    }
+
+    fn priority_match(&self, entry: &TodoEntry) -> bool {
+        entry.priority >= self.cfg.min_priority
+    }
+
+    fn entry_matches_filters(&self, entry: &TodoEntry) -> bool {
+        self.status_match(entry) && self.priority_match(entry) && self.tags_match(entry)
+    }
+
+    fn filter_entries(&self, todos: &[TodoEntry]) -> Vec<(usize, TodoEntry)> {
+        todos
+            .iter()
+            .cloned()
+            .enumerate()
+            .filter(|(_, t)| self.entry_matches_filters(t))
+            .collect()
+    }
+
+    fn available_tags(todos: &[TodoEntry]) -> Vec<String> {
+        let mut tags: Vec<String> = todos
+            .iter()
+            .flat_map(|todo| todo.tags.iter())
+            .map(|tag| tag.trim().to_string())
+            .filter(|tag| !tag.is_empty())
+            .collect();
+        tags.sort_by_key(|tag| tag.to_lowercase());
+        tags.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        tags
+    }
+
     fn sort_entries(entries: &mut Vec<(usize, TodoEntry)>, sort: TodoSort) {
         match sort {
             TodoSort::Priority => {
@@ -181,18 +260,67 @@ impl TodoWidget {
     }
 
     fn render_summary(&mut self, ui: &mut egui::Ui, todos: &[TodoEntry]) -> Option<WidgetAction> {
-        let filtered: Vec<&TodoEntry> = todos.iter().filter(|t| self.tags_match(t)).collect();
+        let filtered: Vec<&TodoEntry> = todos
+            .iter()
+            .filter(|t| self.priority_match(t) && self.tags_match(t))
+            .collect();
         let done = filtered.iter().filter(|t| t.done).count();
         let total = filtered.len();
         let remaining = total.saturating_sub(done);
         let mut action = None;
         ui.vertical(|ui| {
-            let mut tags_value = self.cfg.filter_tags.join(", ");
             ui.horizontal(|ui| {
-                ui.label("Filter tags");
-                if ui.text_edit_singleline(&mut tags_value).changed() {
-                    self.cfg.filter_tags = parse_tags(&tags_value);
-                }
+                egui::ComboBox::from_id_source(ui.id().with("todo_filter_status"))
+                    .selected_text(match self.cfg.status {
+                        TodoStatusFilter::All => "All",
+                        TodoStatusFilter::Open => "Open",
+                        TodoStatusFilter::Done => "Done",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.cfg.status, TodoStatusFilter::All, "All");
+                        ui.selectable_value(&mut self.cfg.status, TodoStatusFilter::Open, "Open");
+                        ui.selectable_value(&mut self.cfg.status, TodoStatusFilter::Done, "Done");
+                    });
+                ui.add(
+                    egui::DragValue::new(&mut self.cfg.min_priority)
+                        .clamp_range(0..=255)
+                        .prefix("p≥"),
+                );
+                let available_tags = Self::available_tags(todos);
+                let selected = if self.cfg.filter_tags.is_empty() {
+                    "Tag: any".to_string()
+                } else {
+                    format!("Tags: {}", self.cfg.filter_tags.join(","))
+                };
+                egui::ComboBox::from_id_source(ui.id().with("todo_filter_tags"))
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        if ui.button("Clear tags").clicked() {
+                            self.cfg.filter_tags.clear();
+                        }
+                        for tag in available_tags {
+                            let mut enabled = self
+                                .cfg
+                                .filter_tags
+                                .iter()
+                                .any(|selected| selected.eq_ignore_ascii_case(&tag));
+                            if ui.checkbox(&mut enabled, &tag).changed() {
+                                if enabled {
+                                    self.cfg.filter_tags.push(tag.clone());
+                                } else {
+                                    self.cfg
+                                        .filter_tags
+                                        .retain(|selected| !selected.eq_ignore_ascii_case(&tag));
+                                }
+                                self.cfg
+                                    .filter_tags
+                                    .sort_by_key(|value| value.to_lowercase());
+                                self.cfg
+                                    .filter_tags
+                                    .dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+                            }
+                        }
+                    });
             });
             ui.horizontal(|ui| {
                 ui.label(format!("Todos: {done}/{total} done"));
@@ -225,15 +353,7 @@ impl TodoWidget {
         ctx: &DashboardContext<'_>,
         todos: &[TodoEntry],
     ) -> Option<WidgetAction> {
-        let mut entries: Vec<(usize, TodoEntry)> = todos
-            .iter()
-            .cloned()
-            .enumerate()
-            .filter(|(_, t)| self.tags_match(t))
-            .collect();
-        if !self.cfg.show_done {
-            entries.retain(|(_, t)| !t.done);
-        }
+        let mut entries = self.filter_entries(todos);
         Self::sort_entries(&mut entries, self.cfg.sort);
         entries.truncate(self.cfg.count);
 
@@ -306,6 +426,14 @@ fn parse_tags(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn migrate_config(mut cfg: TodoWidgetConfig) -> TodoWidgetConfig {
+    if cfg.show_done && cfg.status == TodoStatusFilter::Open {
+        cfg.status = TodoStatusFilter::All;
+    }
+    cfg.filter_tags = parse_tags(&cfg.filter_tags.join(","));
+    cfg
+}
+
 impl Default for TodoWidget {
     fn default() -> Self {
         Self {
@@ -331,5 +459,76 @@ impl Widget for TodoWidget {
             self.render_list(ui, ctx, todos);
         }
         action
+    }
+
+    fn on_config_updated(&mut self, settings: &serde_json::Value) {
+        if let Ok(cfg) = serde_json::from_value::<TodoWidgetConfig>(settings.clone()) {
+            self.cfg = migrate_config(cfg);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TodoSort, TodoStatusFilter, TodoWidget, TodoWidgetConfig};
+    use crate::plugins::todo::TodoEntry;
+
+    fn sample_entries() -> Vec<TodoEntry> {
+        vec![
+            TodoEntry {
+                text: "alpha".into(),
+                done: false,
+                priority: 1,
+                tags: vec!["work".into()],
+            },
+            TodoEntry {
+                text: "beta".into(),
+                done: true,
+                priority: 4,
+                tags: vec!["home".into(), "urgent".into()],
+            },
+            TodoEntry {
+                text: "gamma".into(),
+                done: false,
+                priority: 5,
+                tags: vec!["urgent".into()],
+            },
+        ]
+    }
+
+    #[test]
+    fn filters_combine_before_sorting() {
+        let mut cfg = TodoWidgetConfig::default();
+        cfg.status = TodoStatusFilter::Open;
+        cfg.min_priority = 3;
+        cfg.filter_tags = vec!["urgent".into()];
+        cfg.sort = TodoSort::Priority;
+        let widget = TodoWidget::new(cfg);
+
+        let mut filtered = widget.filter_entries(&sample_entries());
+        TodoWidget::sort_entries(&mut filtered, TodoSort::Priority);
+        let texts: Vec<String> = filtered.into_iter().map(|(_, entry)| entry.text).collect();
+        assert_eq!(texts, vec!["gamma"]);
+    }
+
+    #[test]
+    fn config_serialization_persists_filter_state() {
+        let cfg = TodoWidgetConfig {
+            count: 7,
+            show_progress: false,
+            status: TodoStatusFilter::Done,
+            min_priority: 2,
+            filter_tags: vec!["urgent".into(), "home".into()],
+            show_done: false,
+            sort: TodoSort::Alphabetical,
+            query: Some("todo list".into()),
+        };
+
+        let json = serde_json::to_value(&cfg).expect("serialize todo config");
+        let restored: TodoWidgetConfig =
+            serde_json::from_value(json).expect("deserialize todo config");
+        assert_eq!(restored.status, TodoStatusFilter::Done);
+        assert_eq!(restored.min_priority, 2);
+        assert_eq!(restored.filter_tags, vec!["urgent", "home"]);
     }
 }
