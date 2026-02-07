@@ -1,4 +1,6 @@
 use crate::actions::Action;
+use crate::mouse_gestures::db::{load_gestures, GestureDb, GESTURES_FILE};
+use crate::mouse_gestures::usage::{load_usage, GestureUsageEntry, GESTURES_USAGE_FILE};
 use crate::plugin::PluginManager;
 use crate::plugins::calendar::{
     build_snapshot, refresh_events_from_disk, CalendarSnapshot, CALENDAR_EVENTS_FILE,
@@ -8,8 +10,6 @@ use crate::plugins::fav::{load_favs, FavEntry, FAV_FILE};
 use crate::plugins::note::{load_notes, Note};
 use crate::plugins::snippets::{load_snippets, SnippetEntry, SNIPPETS_FILE};
 use crate::plugins::todo::{load_todos, TodoEntry, TODO_FILE};
-use crate::mouse_gestures::db::{load_gestures, GestureDb, GESTURES_FILE};
-use crate::mouse_gestures::usage::{load_usage, GestureUsageEntry, GESTURES_USAGE_FILE};
 use crate::{launcher, launcher::RecycleBinInfo};
 use chrono::Local;
 use std::sync::{Arc, Mutex};

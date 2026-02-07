@@ -16,7 +16,11 @@ fn normalize_ignore_window_titles_dedupes_and_trims() {
     assert!(changed);
     assert_eq!(
         titles,
-        vec!["Notepad".to_string(), "firefox".to_string(), "Terminal".to_string()]
+        vec![
+            "Notepad".to_string(),
+            "firefox".to_string(),
+            "Terminal".to_string()
+        ]
     );
 }
 

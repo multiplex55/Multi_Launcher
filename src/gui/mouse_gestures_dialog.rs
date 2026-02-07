@@ -328,9 +328,7 @@ impl MgGesturesDialog {
             .gestures
             .iter()
             .position(|gesture| {
-                gesture.label == label
-                    && gesture.tokens == tokens
-                    && gesture.dir_mode == dir_mode
+                gesture.label == label && gesture.tokens == tokens && gesture.dir_mode == dir_mode
             })
             .or(self.selected_idx);
         self.ensure_selection();

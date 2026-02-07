@@ -56,7 +56,9 @@ impl GestureCheatSheetWidget {
                         .add(egui::DragValue::new(&mut cfg.count).clamp_range(1..=50))
                         .changed();
                 });
-                changed |= ui.checkbox(&mut cfg.show_disabled, "Show disabled").changed();
+                changed |= ui
+                    .checkbox(&mut cfg.show_disabled, "Show disabled")
+                    .changed();
                 changed
             },
         )
@@ -111,7 +113,11 @@ impl Widget for GestureCheatSheetWidget {
             .cloned()
             .map(|gesture| {
                 let count = counts
-                    .get(&(gesture.label.clone(), gesture.tokens.clone(), gesture.dir_mode))
+                    .get(&(
+                        gesture.label.clone(),
+                        gesture.tokens.clone(),
+                        gesture.dir_mode,
+                    ))
                     .copied()
                     .unwrap_or(0);
                 (gesture, count)
@@ -122,10 +128,7 @@ impl Widget for GestureCheatSheetWidget {
             rows.retain(|(gesture, _)| gesture.enabled);
         }
 
-        rows.sort_by(|a, b| {
-            b.1.cmp(&a.1)
-                .then_with(|| a.0.label.cmp(&b.0.label))
-        });
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.label.cmp(&b.0.label)));
 
         let mut clicked = None;
         let count = self.cfg.count.max(1);
@@ -153,10 +156,7 @@ impl Widget for GestureCheatSheetWidget {
                             enabled,
                         ));
                     }
-                    if ui
-                        .selectable_label(false, gesture.label.clone())
-                        .clicked()
-                    {
+                    if ui.selectable_label(false, gesture.label.clone()).clicked() {
                         clicked = Some(gesture_focus_action(
                             &gesture.label,
                             &gesture.tokens,

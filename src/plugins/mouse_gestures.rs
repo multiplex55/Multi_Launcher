@@ -632,11 +632,15 @@ impl Plugin for MouseGesturesPlugin {
                         .changed();
                 });
         });
-        ui.small("Fallback runs when a gesture does not match; default is pass-through right-click.");
+        ui.small(
+            "Fallback runs when a gesture does not match; default is pass-through right-click.",
+        );
 
         ui.separator();
         ui.heading("Ignore windows (disable gestures)");
-        ui.small("Gestures will be ignored when the active window title contains one of these entries.");
+        ui.small(
+            "Gestures will be ignored when the active window title contains one of these entries.",
+        );
 
         let mut remove_index: Option<usize> = None;
         if cfg.ignore_window_titles.is_empty() {
@@ -702,21 +706,23 @@ impl Plugin for MouseGesturesPlugin {
                     if self.window_picker_titles.is_empty() {
                         ui.label("No windows found.");
                     } else {
-                        egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                            for title in self.window_picker_titles.clone() {
-                                ui.horizontal(|ui| {
-                                    ui.label(&title);
-                                    if ui.button("Add").clicked() {
-                                        if add_ignore_window_title(
-                                            &mut cfg.ignore_window_titles,
-                                            &title,
-                                        ) {
-                                            changed = true;
+                        egui::ScrollArea::vertical()
+                            .max_height(220.0)
+                            .show(ui, |ui| {
+                                for title in self.window_picker_titles.clone() {
+                                    ui.horizontal(|ui| {
+                                        ui.label(&title);
+                                        if ui.button("Add").clicked() {
+                                            if add_ignore_window_title(
+                                                &mut cfg.ignore_window_titles,
+                                                &title,
+                                            ) {
+                                                changed = true;
+                                            }
                                         }
-                                    }
-                                });
-                            }
-                        });
+                                    });
+                                }
+                            });
                     }
                 });
             self.window_picker_open = open;
