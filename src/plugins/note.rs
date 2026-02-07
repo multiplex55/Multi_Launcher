@@ -49,6 +49,20 @@ pub struct Note {
     pub alias: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoteTarget {
+    Resolved(String),
+    Broken,
+    Ambiguous(Vec<String>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WikiReference {
+    pub raw: String,
+    pub target: String,
+    pub resolved: NoteTarget,
+}
+
 #[derive(Default)]
 pub struct NoteCache {
     /// All loaded notes.
@@ -76,18 +90,39 @@ impl NoteCache {
             } else {
                 n.tags = n.tags.iter().map(|t| t.to_lowercase()).collect();
             }
-            let slug = n.slug.clone();
+            if let Some(a) = &n.alias {
+                alias_map.insert(a.to_lowercase(), n.slug.clone());
+            }
             for t in &n.tags {
                 tag_set.insert(t.clone());
             }
-            for l in &n.links {
-                let entry = link_map.entry(l.clone()).or_default();
-                if !entry.contains(&slug) {
-                    entry.push(slug.clone());
+        }
+
+        let resolver = NoteCache {
+            notes: notes.clone(),
+            tags: Vec::new(),
+            links: HashMap::new(),
+            index: Vec::new(),
+            aliases: alias_map.clone(),
+        };
+
+        for n in &mut notes {
+            let mut resolved: Vec<String> = resolve_wiki_references(&resolver, &n.content)
+                .into_iter()
+                .filter_map(|r| match r.resolved {
+                    NoteTarget::Resolved(slug) if slug != n.slug => Some(slug),
+                    _ => None,
+                })
+                .collect();
+            resolved.sort();
+            resolved.dedup();
+            n.links = resolved;
+
+            for target_slug in &n.links {
+                let entry = link_map.entry(target_slug.clone()).or_default();
+                if !entry.contains(&n.slug) {
+                    entry.push(n.slug.clone());
                 }
-            }
-            if let Some(a) = &n.alias {
-                alias_map.insert(a.to_lowercase(), slug.clone());
             }
         }
 
@@ -163,6 +198,106 @@ fn extract_links(content: &str) -> Vec<String> {
     links
 }
 
+fn parse_wiki_references(content: &str) -> Vec<String> {
+    WIKI_RE
+        .captures_iter(content)
+        .filter_map(|cap| cap.get(1).map(|m| m.as_str().trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn target_from_reference(raw: &str) -> &str {
+    raw.split('|').next().unwrap_or(raw).trim()
+}
+
+fn path_matches_note(path_query: &str, note: &Note) -> bool {
+    let q = path_query.trim().trim_start_matches("./").to_lowercase();
+    if q.is_empty() {
+        return false;
+    }
+    let file_name = note
+        .path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+    let full = note.path.to_string_lossy().to_lowercase();
+    file_name == q || full.ends_with(&q)
+}
+
+fn resolve_target(cache: &NoteCache, query: &str) -> NoteTarget {
+    let query = query.trim();
+    if query.is_empty() {
+        return NoteTarget::Broken;
+    }
+    let query_lower = query.to_lowercase();
+    if let Some(slug) = cache.aliases.get(&query_lower) {
+        return NoteTarget::Resolved(slug.clone());
+    }
+    if let Some(slug) = query_lower.strip_prefix("slug:") {
+        let slug = slug.trim();
+        return if cache.notes.iter().any(|n| n.slug == slug) {
+            NoteTarget::Resolved(slug.to_string())
+        } else {
+            NoteTarget::Broken
+        };
+    }
+    if let Some(path) = query_lower.strip_prefix("path:") {
+        let mut matches: Vec<String> = cache
+            .notes
+            .iter()
+            .filter(|n| path_matches_note(path, n))
+            .map(|n| n.slug.clone())
+            .collect();
+        matches.sort();
+        matches.dedup();
+        return match matches.len() {
+            0 => NoteTarget::Broken,
+            1 => NoteTarget::Resolved(matches.remove(0)),
+            _ => NoteTarget::Ambiguous(matches),
+        };
+    }
+    if let Some(note) = cache
+        .notes
+        .iter()
+        .find(|n| n.slug.eq_ignore_ascii_case(query))
+    {
+        return NoteTarget::Resolved(note.slug.clone());
+    }
+
+    let title_matches: Vec<String> = cache
+        .notes
+        .iter()
+        .filter(|n| n.title.eq_ignore_ascii_case(query))
+        .map(|n| n.slug.clone())
+        .collect();
+    if title_matches.len() == 1 {
+        return NoteTarget::Resolved(title_matches[0].clone());
+    }
+    if !title_matches.is_empty() {
+        return NoteTarget::Ambiguous(title_matches);
+    }
+    let slug = slugify(query);
+    if cache.notes.iter().any(|n| n.slug == slug) {
+        NoteTarget::Resolved(slug)
+    } else {
+        NoteTarget::Broken
+    }
+}
+
+fn resolve_wiki_references(cache: &NoteCache, content: &str) -> Vec<WikiReference> {
+    let mut refs = Vec::new();
+    for raw in parse_wiki_references(content) {
+        let target = target_from_reference(&raw).to_string();
+        refs.push(WikiReference {
+            raw,
+            resolved: resolve_target(cache, &target),
+            target,
+        });
+    }
+    refs
+}
+
 fn resolve_note<'a>(cache: &'a NoteCache, query: &str) -> Option<&'a Note> {
     let query = query.trim();
     if query.is_empty() {
@@ -172,22 +307,66 @@ fn resolve_note<'a>(cache: &'a NoteCache, query: &str) -> Option<&'a Note> {
     if let Some(slug) = cache.aliases.get(&query_lower) {
         return cache.notes.iter().find(|n| n.slug == *slug);
     }
-    if let Some(note) = cache
-        .notes
-        .iter()
-        .find(|n| n.title.eq_ignore_ascii_case(query))
-    {
-        return Some(note);
+    match resolve_target(cache, query) {
+        NoteTarget::Resolved(slug) => cache.notes.iter().find(|n| n.slug == slug),
+        NoteTarget::Ambiguous(slugs) => slugs
+            .first()
+            .and_then(|slug| cache.notes.iter().find(|n| n.slug == *slug)),
+        NoteTarget::Broken => None,
     }
-    if let Some(note) = cache
-        .notes
-        .iter()
-        .find(|n| n.slug.eq_ignore_ascii_case(query))
-    {
-        return Some(note);
-    }
-    let slug = slugify(query);
-    cache.notes.iter().find(|n| n.slug == slug)
+}
+
+pub fn resolve_note_query(query: &str) -> NoteTarget {
+    CACHE
+        .lock()
+        .map(|cache| resolve_target(&cache, query))
+        .unwrap_or(NoteTarget::Broken)
+}
+
+pub fn note_backlinks(slug: &str) -> Vec<Note> {
+    CACHE
+        .lock()
+        .ok()
+        .map(|cache| {
+            cache
+                .links
+                .get(slug)
+                .into_iter()
+                .flat_map(|v| v.iter())
+                .filter_map(|s| cache.notes.iter().find(|n| n.slug == *s).cloned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn note_refs_for(slug: &str) -> Vec<WikiReference> {
+    CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| {
+            cache
+                .notes
+                .iter()
+                .find(|n| n.slug == slug)
+                .map(|n| resolve_wiki_references(&cache, &n.content))
+        })
+        .unwrap_or_default()
+}
+
+pub fn note_relationship_edges() -> Vec<(String, String)> {
+    CACHE
+        .lock()
+        .ok()
+        .map(|cache| {
+            let mut edges = Vec::new();
+            for n in &cache.notes {
+                for to in &n.links {
+                    edges.push((n.slug.clone(), to.clone()));
+                }
+            }
+            edges
+        })
+        .unwrap_or_default()
 }
 
 pub fn extract_alias(content: &str) -> Option<String> {
@@ -732,9 +911,10 @@ impl Plugin for NotePlugin {
                             let tag_ok = if filters.include_tags.is_empty() {
                                 true
                             } else {
-                                filters.include_tags.iter().all(|tag| {
-                                    n.tags.iter().any(|t| t.contains(tag))
-                                })
+                                filters
+                                    .include_tags
+                                    .iter()
+                                    .all(|tag| n.tags.iter().any(|t| t.contains(tag)))
                             };
                             let exclude_ok = !filters
                                 .exclude_tags
@@ -785,7 +965,10 @@ impl Plugin for NotePlugin {
                     if let Some(stripped) = filter.strip_prefix("tag:") {
                         filter = stripped.trim();
                     }
-                    if let Some(stripped) = filter.strip_prefix('#').or_else(|| filter.strip_prefix('@')) {
+                    if let Some(stripped) = filter
+                        .strip_prefix('#')
+                        .or_else(|| filter.strip_prefix('@'))
+                    {
                         filter = stripped.trim();
                     }
 
@@ -852,9 +1035,15 @@ impl Plugin for NotePlugin {
                             args: None,
                         }];
                         actions.extend(guard.notes.iter().map(|n| Action {
-                            label: format!("Backlinks for {}", n.alias.as_ref().unwrap_or(&n.title)),
+                            label: format!(
+                                "Backlinks for {}",
+                                n.alias.as_ref().unwrap_or(&n.title)
+                            ),
                             desc: "Backlinks".into(),
-                            action: format!("query:note link {}", n.alias.as_ref().unwrap_or(&n.title)),
+                            action: format!(
+                                "query:note link {}",
+                                n.alias.as_ref().unwrap_or(&n.title)
+                            ),
                             args: None,
                         }));
                         return actions;
@@ -1174,8 +1363,7 @@ mod tests {
         assert_eq!(labels_both, vec!["Alpha"]);
 
         let list_both_hash = plugin.search("note list #testing #ui");
-        let labels_both_hash: Vec<&str> =
-            list_both_hash.iter().map(|a| a.label.as_str()).collect();
+        let labels_both_hash: Vec<&str> = list_both_hash.iter().map(|a| a.label.as_str()).collect();
         assert_eq!(labels_both_hash, vec!["Alpha"]);
 
         restore_cache(original);
@@ -1443,6 +1631,74 @@ mod tests {
         let labels: Vec<&str> = links.iter().map(|a| a.label.as_str()).collect();
         assert_eq!(labels, vec!["Backlink: Alpha", "Backlink: Delta"]);
         assert_eq!(links[0].desc, "Backlinks to Beta Note");
+
+        restore_cache(original);
+    }
+    #[test]
+    fn resolve_target_handles_duplicate_titles_with_slug_or_path() {
+        let original = set_notes(vec![
+            Note {
+                title: "Roadmap".into(),
+                path: PathBuf::from("/tmp/alpha-roadmap.md"),
+                content: String::new(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "roadmap-alpha".into(),
+                alias: None,
+            },
+            Note {
+                title: "Roadmap".into(),
+                path: PathBuf::from("/tmp/beta-roadmap.md"),
+                content: String::new(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "roadmap-beta".into(),
+                alias: None,
+            },
+        ]);
+
+        assert!(matches!(
+            resolve_note_query("Roadmap"),
+            NoteTarget::Ambiguous(_)
+        ));
+        assert_eq!(
+            resolve_note_query("slug:roadmap-beta"),
+            NoteTarget::Resolved("roadmap-beta".into())
+        );
+        assert_eq!(
+            resolve_note_query("path:beta-roadmap.md"),
+            NoteTarget::Resolved("roadmap-beta".into())
+        );
+
+        restore_cache(original);
+    }
+
+    #[test]
+    fn backlinks_index_uses_resolved_title_links() {
+        let original = set_notes(vec![
+            Note {
+                title: "Main".into(),
+                path: PathBuf::new(),
+                content: "Link to [[Target]].".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "main".into(),
+                alias: None,
+            },
+            Note {
+                title: "Target".into(),
+                path: PathBuf::new(),
+                content: "target".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "target".into(),
+                alias: None,
+            },
+        ]);
+
+        let backlinks = note_backlinks("target");
+        assert_eq!(backlinks.len(), 1);
+        assert_eq!(backlinks[0].slug, "main");
 
         restore_cache(original);
     }

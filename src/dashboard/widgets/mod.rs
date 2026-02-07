@@ -21,6 +21,7 @@ mod gesture_cheat_sheet;
 mod gesture_health;
 mod gesture_recent;
 mod layouts;
+mod notes_graph;
 mod notes_recent;
 mod notes_tags;
 mod now_playing;
@@ -59,6 +60,7 @@ pub use gesture_cheat_sheet::GestureCheatSheetWidget;
 pub use gesture_health::GestureHealthWidget;
 pub use gesture_recent::GestureRecentWidget;
 pub use layouts::LayoutsWidget;
+pub use notes_graph::NotesGraphWidget;
 pub use notes_recent::NotesRecentWidget;
 pub use notes_tags::NotesTagsWidget;
 pub use now_playing::NowPlayingWidget;
@@ -362,6 +364,11 @@ impl WidgetRegistry {
         reg.register(
             "notes_tags",
             WidgetFactory::new(NotesTagsWidget::new).with_settings_ui(NotesTagsWidget::settings_ui),
+        );
+        reg.register(
+            "notes_graph",
+            WidgetFactory::new(NotesGraphWidget::new)
+                .with_settings_ui(NotesGraphWidget::settings_ui),
         );
         reg.register(
             "todo_focus",
