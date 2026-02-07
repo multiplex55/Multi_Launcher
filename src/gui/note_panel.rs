@@ -3,8 +3,8 @@ use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::plugin::Plugin;
 use crate::plugins::note::{
-    assets_dir, available_tags, image_files, load_notes, save_note, Note, NoteExternalOpen,
-    NotePlugin,
+    assets_dir, available_tags, image_files, note_backlinks, resolve_note_query, save_note, Note,
+    NoteExternalOpen, NotePlugin, NoteTarget,
 };
 use eframe::egui::{self, popup, Color32, FontId, Key};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
@@ -61,7 +61,8 @@ fn preprocess_note_links(content: &str, current_slug: &str) -> String {
     WIKI_RE
         .replace_all(content, |caps: &regex::Captures| {
             let text = &caps[1];
-            let slug = slugify(text);
+            let target = text.split('|').next().unwrap_or(text).trim();
+            let slug = slugify(target);
             if slug == current_slug {
                 caps[0].to_string()
             } else {
@@ -137,6 +138,10 @@ impl NotePanel {
             focus_textedit_next_frame: false,
             last_textedit_id: None,
         }
+    }
+
+    pub fn note_slug(&self) -> &str {
+        &self.note.slug
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
@@ -321,6 +326,38 @@ impl NotePanel {
                                 LinkKind::Url(label, url) => {
                                     let _ = ui.hyperlink_to(label, url);
                                 }
+                            }
+                        }
+                        if total > threshold {
+                            let label = if self.links_expanded {
+                                "collapse"
+                            } else {
+                                "... (more)"
+                            };
+                            if ui.button(label).clicked() {
+                                self.links_expanded = !self.links_expanded;
+                                if was_focused {
+                                    self.focus_textedit_next_frame = true;
+                                }
+                            }
+                        }
+                    });
+                }
+                let backlinks = note_backlinks(&self.note.slug);
+                if !backlinks.is_empty() {
+                    let was_focused = self
+                        .last_textedit_id
+                        .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
+                        .unwrap_or(false);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Backlinks:");
+                        let threshold = app.note_more_limit;
+                        let total = backlinks.len();
+                        let show_all = self.links_expanded || total <= threshold;
+                        let limit = if show_all { total } else { threshold };
+                        for linked_note in backlinks.iter().take(limit) {
+                            if ui.link(format!("[[{}]]", linked_note.title)).clicked() {
+                                app.open_note_panel(&linked_note.slug, None);
                             }
                         }
                         if total > threshold {
@@ -1129,26 +1166,45 @@ pub fn spawn_external(path: &Path, choice: NoteExternalOpen) -> std::io::Result<
 }
 
 pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui::Response {
-    // Display wiki style links with brackets and allow clicking to
-    // navigate to the referenced note. Missing targets are colored red.
-    let slug = slugify(l);
-    let exists = load_notes()
-        .ok()
-        .map(|notes| notes.iter().any(|n| n.slug == slug))
-        .unwrap_or(false);
     let text = format!("[[{l}]]");
-    let resp = if exists {
-        ui.link(text)
-    } else {
-        ui.add(
-            egui::Label::new(egui::RichText::new(text).color(Color32::RED))
+    let target = l.split('|').next().unwrap_or(l).trim();
+    match resolve_note_query(target) {
+        NoteTarget::Resolved(slug) => {
+            let resp = ui.link(text);
+            if resp.clicked() {
+                app.open_note_panel(&slug, None);
+            }
+            resp
+        }
+        NoteTarget::Ambiguous(slugs) => {
+            let label = format!("{text} (ambiguous)");
+            let resp = ui.add(
+                egui::Label::new(egui::RichText::new(label).color(Color32::YELLOW))
+                    .sense(egui::Sense::click()),
+            );
+            if resp.clicked() {
+                app.set_error(format!(
+                    "Ambiguous link [[{target}]]; use [[slug:<slug>]] or [[path:<file.md>]]. Candidates: {}",
+                    slugs.join(", ")
+                ));
+            }
+            resp
+        }
+        NoteTarget::Broken => {
+            let slug = slugify(target);
+            let resp = ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("{text} (missing)")).color(Color32::RED),
+                )
                 .sense(egui::Sense::click()),
-        )
-    };
-    if resp.clicked() {
-        app.open_note_panel(&slug, None);
+            );
+            if resp.clicked() {
+                app.set_error(format!("Broken note link: [[{target}]]"));
+                app.open_note_panel(&slug, None);
+            }
+            resp
+        }
     }
-    resp
 }
 
 fn insert_tag_menu(

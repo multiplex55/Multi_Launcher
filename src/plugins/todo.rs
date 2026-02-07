@@ -29,7 +29,6 @@ const TODO_USAGE: &str = "Usage: todo <add|list|rm|clear|pset|tag|edit|view|expo
 const TODO_ADD_USAGE: &str = "Usage: todo add <text> [p=<priority>] [#tag ...]";
 const TODO_RM_USAGE: &str = "Usage: todo rm <text>";
 const TODO_PSET_USAGE: &str = "Usage: todo pset <index> <priority>";
-const TODO_TAG_USAGE: &str = "Usage: todo tag [<filter>] | todo tag <index> [#tag|@tag ...]";
 const TODO_CLEAR_USAGE: &str = "Usage: todo clear";
 const TODO_VIEW_USAGE: &str = "Usage: todo view";
 const TODO_EXPORT_USAGE: &str = "Usage: todo export";
@@ -491,8 +490,9 @@ impl TodoPlugin {
                 if let Some(stripped) = filter.strip_prefix("tag:") {
                     filter = stripped.trim();
                 }
-                if let Some(stripped) =
-                    filter.strip_prefix('#').or_else(|| filter.strip_prefix('@'))
+                if let Some(stripped) = filter
+                    .strip_prefix('#')
+                    .or_else(|| filter.strip_prefix('@'))
                 {
                     filter = stripped.trim();
                 }
@@ -542,7 +542,6 @@ impl TodoPlugin {
                 })
                 .collect();
         }
-
 
         const RM_PREFIX: &str = "todo rm ";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, RM_PREFIX) {
@@ -595,15 +594,12 @@ impl TodoPlugin {
 
             if !filters.exclude_tags.is_empty() {
                 entries.retain(|(_, t)| {
-                    !filters
-                        .exclude_tags
-                        .iter()
-                        .any(|excluded| {
-                            let excluded = excluded.to_lowercase();
-                            t.tags
-                                .iter()
-                                .any(|tag| tag.to_lowercase().contains(&excluded))
-                        })
+                    !filters.exclude_tags.iter().any(|excluded| {
+                        let excluded = excluded.to_lowercase();
+                        t.tags
+                            .iter()
+                            .any(|tag| tag.to_lowercase().contains(&excluded))
+                    })
                 });
             }
 
@@ -806,8 +802,10 @@ mod tests {
         assert_eq!(labels_testing_ui, vec!["[ ] foo alpha"]);
 
         let list_testing_ui_hash = plugin.search_internal("todo list #testing #ui");
-        let labels_testing_ui_hash: Vec<&str> =
-            list_testing_ui_hash.iter().map(|a| a.label.as_str()).collect();
+        let labels_testing_ui_hash: Vec<&str> = list_testing_ui_hash
+            .iter()
+            .map(|a| a.label.as_str())
+            .collect();
         assert_eq!(labels_testing_ui_hash, vec!["[ ] foo alpha"]);
 
         let list_negated = plugin.search_internal("todo list !foo @testing");
@@ -867,7 +865,12 @@ mod tests {
         let labels: Vec<&str> = tags.iter().map(|a| a.label.as_str()).collect();
         assert_eq!(
             labels,
-            vec!["#testing (2)", "#ui (2)", "#chore (1)", "#high priority (1)"]
+            vec![
+                "#testing (2)",
+                "#ui (2)",
+                "#chore (1)",
+                "#high priority (1)"
+            ]
         );
         let actions: Vec<&str> = tags.iter().map(|a| a.action.as_str()).collect();
         assert_eq!(
@@ -927,5 +930,4 @@ mod tests {
         );
         assert_eq!(actions_list[0], "todo:dialog");
     }
-
 }
