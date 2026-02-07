@@ -94,6 +94,56 @@ mod tests {
             ActionKind::PowerPlanSet { guid: "balanced" }
         );
     }
+
+    #[test]
+    fn parse_todo_add_payload_with_delimiters_and_whitespace() {
+        let payload = crate::plugins::todo::TodoAddActionPayload {
+            text: "ship | release, notes now".into(),
+            priority: 9,
+            tags: vec!["team|alpha,beta".into(), "has space".into()],
+        };
+        let encoded = crate::plugins::todo::encode_todo_add_action_payload(&payload)
+            .expect("encode todo add payload");
+        let action = Action {
+            label: String::new(),
+            desc: String::new(),
+            action: format!("todo:add:{encoded}"),
+            args: None,
+        };
+
+        assert_eq!(
+            parse_action_kind(&action),
+            ActionKind::TodoAdd {
+                text: "ship | release, notes now".into(),
+                priority: 9,
+                tags: vec!["team|alpha,beta".into(), "has space".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_todo_tag_payload_with_delimiters_and_whitespace() {
+        let payload = crate::plugins::todo::TodoTagActionPayload {
+            idx: 12,
+            tags: vec!["owner|dev,ops".into(), "needs review".into()],
+        };
+        let encoded = crate::plugins::todo::encode_todo_tag_action_payload(&payload)
+            .expect("encode todo tag payload");
+        let action = Action {
+            label: String::new(),
+            desc: String::new(),
+            action: format!("todo:tag:{encoded}"),
+            args: None,
+        };
+
+        assert_eq!(
+            parse_action_kind(&action),
+            ActionKind::TodoSetTags {
+                idx: 12,
+                tags: vec!["owner|dev,ops".into(), "needs review".into()],
+            }
+        );
+    }
 }
 
 pub(crate) fn mute_active_window() {
@@ -383,7 +433,7 @@ enum ActionKind<'a> {
     },
     StopwatchShow(u64),
     TodoAdd {
-        text: &'a str,
+        text: String,
         priority: u8,
         tags: Vec<String>,
     },
@@ -629,24 +679,13 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
         }
     }
     if let Some(rest) = s.strip_prefix("todo:add:") {
-        let mut parts = rest.splitn(3, '|');
-        let text = parts.next().unwrap_or("");
-        let priority = parts.next().and_then(|p| p.parse::<u8>().ok()).unwrap_or(0);
-        let tags: Vec<String> = parts
-            .next()
-            .map(|t| {
-                if t.is_empty() {
-                    Vec::new()
-                } else {
-                    t.split(',').map(|s| s.to_string()).collect()
-                }
-            })
-            .unwrap_or_default();
-        return ActionKind::TodoAdd {
-            text,
-            priority,
-            tags,
-        };
+        if let Some(payload) = crate::plugins::todo::decode_todo_add_action_payload(rest) {
+            return ActionKind::TodoAdd {
+                text: payload.text,
+                priority: payload.priority,
+                tags: payload.tags,
+            };
+        }
     }
     if let Some(rest) = s.strip_prefix("todo:pset:") {
         if let Some((idx, p)) = rest.split_once('|') {
@@ -659,15 +698,11 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
         }
     }
     if let Some(rest) = s.strip_prefix("todo:tag:") {
-        if let Some((idx, tags_str)) = rest.split_once('|') {
-            if let Ok(i) = idx.parse::<usize>() {
-                let tags: Vec<String> = if tags_str.is_empty() {
-                    Vec::new()
-                } else {
-                    tags_str.split(',').map(|s| s.to_string()).collect()
-                };
-                return ActionKind::TodoSetTags { idx: i, tags };
-            }
+        if let Some(payload) = crate::plugins::todo::decode_todo_tag_action_payload(rest) {
+            return ActionKind::TodoSetTags {
+                idx: payload.idx,
+                tags: payload.tags,
+            };
         }
     }
     if let Some(idx) = s.strip_prefix("todo:remove:") {
@@ -970,7 +1005,7 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
             text,
             priority,
             tags,
-        } => todo::add(text, priority, &tags),
+        } => todo::add(&text, priority, &tags),
         ActionKind::TodoSetPriority { idx, priority } => todo::set_priority(idx, priority),
         ActionKind::TodoSetTags { idx, tags } => todo::set_tags(idx, &tags),
         ActionKind::TodoRemove(i) => todo::remove(i),
