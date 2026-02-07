@@ -1,3 +1,5 @@
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use eframe::egui;
 use multi_launcher::gui::{
     todo_view_layout_sizes, todo_view_window_constraints, LauncherApp, TodoDialog, TodoViewDialog,
@@ -5,9 +7,8 @@ use multi_launcher::gui::{
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::plugins::todo::{
-    append_todo, decode_todo_add_action_payload, decode_todo_tag_action_payload, load_todos,
-    mark_done, remove_todo, set_priority, set_tags, TodoAddActionPayload, TodoEntry, TodoPlugin,
-    TodoTagActionPayload, TODO_FILE,
+    append_todo, load_todos, mark_done, remove_todo, set_priority, set_tags, TodoAddActionPayload,
+    TodoEntry, TodoPlugin, TodoTagActionPayload, TODO_FILE,
 };
 use multi_launcher::settings::Settings;
 use once_cell::sync::Lazy;
@@ -15,6 +16,11 @@ use std::sync::{atomic::AtomicBool, Arc, Mutex};
 use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+fn decode_payload<T: serde::de::DeserializeOwned>(encoded: &str) -> T {
+    let json = URL_SAFE_NO_PAD.decode(encoded).unwrap();
+    serde_json::from_slice(&json).unwrap()
+}
 
 fn new_app(ctx: &egui::Context) -> LauncherApp {
     LauncherApp::new(
@@ -42,7 +48,7 @@ fn search_add_returns_action() {
     let results = plugin.search("todo add task   ");
     assert_eq!(results.len(), 1);
     let encoded = results[0].action.strip_prefix("todo:add:").unwrap();
-    let payload = decode_todo_add_action_payload(encoded).unwrap();
+    let payload: TodoAddActionPayload = decode_payload(encoded);
     assert_eq!(
         payload,
         TodoAddActionPayload {
@@ -61,7 +67,7 @@ fn search_add_with_priority_and_tags() {
     let results = plugin.search("todo add task p=3 #a #b");
     assert_eq!(results.len(), 1);
     let encoded = results[0].action.strip_prefix("todo:add:").unwrap();
-    let payload = decode_todo_add_action_payload(encoded).unwrap();
+    let payload: TodoAddActionPayload = decode_payload(encoded);
     assert_eq!(
         payload,
         TodoAddActionPayload {
@@ -80,7 +86,7 @@ fn search_add_with_at_tags() {
     let results = plugin.search("todo add task @a @b");
     assert_eq!(results.len(), 1);
     let encoded = results[0].action.strip_prefix("todo:add:").unwrap();
-    let payload = decode_todo_add_action_payload(encoded).unwrap();
+    let payload: TodoAddActionPayload = decode_payload(encoded);
     assert_eq!(
         payload,
         TodoAddActionPayload {
@@ -264,7 +270,7 @@ fn search_pset_and_tag_actions() {
     let res = plugin.search("todo tag 2 #x #y");
     assert_eq!(res.len(), 1);
     let encoded = res[0].action.strip_prefix("todo:tag:").unwrap();
-    let payload = decode_todo_tag_action_payload(encoded).unwrap();
+    let payload: TodoTagActionPayload = decode_payload(encoded);
     assert_eq!(
         payload,
         TodoTagActionPayload {
