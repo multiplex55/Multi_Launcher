@@ -13,6 +13,9 @@ fn bench_search(c: &mut Criterion) {
             desc: String::new(),
             action: format!("{i}"),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         })
         .collect();
     let actions_arc = Arc::new(actions);

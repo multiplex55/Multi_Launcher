@@ -63,6 +63,9 @@ mod tests {
             desc: String::new(),
             action: "volume:pid_toggle_mute:42".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         };
         assert_eq!(
             parse_action_kind(&action),
@@ -77,6 +80,9 @@ mod tests {
             desc: String::new(),
             action: "volume:toggle_mute".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         };
         assert_eq!(parse_action_kind(&action), ActionKind::VolumeToggleMute);
     }
@@ -88,6 +94,9 @@ mod tests {
             desc: String::new(),
             action: "power:plan:set:balanced".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         };
         assert_eq!(
             parse_action_kind(&action),
@@ -109,6 +118,9 @@ mod tests {
             desc: String::new(),
             action: format!("todo:add:{encoded}"),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         };
 
         assert_eq!(
@@ -134,6 +146,9 @@ mod tests {
             desc: String::new(),
             action: format!("todo:tag:{encoded}"),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         };
 
         assert_eq!(

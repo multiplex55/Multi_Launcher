@@ -49,18 +49,27 @@ impl Plugin for ColorPickerPlugin {
                 desc: "Color hex".into(),
                 action: format!("clipboard:{hex}"),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: rgb.clone(),
                 desc: "Color rgb".into(),
                 action: format!("clipboard:{rgb}"),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: hsl.clone(),
                 desc: "Color hsl".into(),
                 action: format!("clipboard:{hsl}"),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }
@@ -84,12 +93,18 @@ impl Plugin for ColorPickerPlugin {
                 desc: "Color picker".into(),
                 action: "query:color ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "color #ff0000".into(),
                 desc: "Color picker".into(),
                 action: "query:color #ff0000".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

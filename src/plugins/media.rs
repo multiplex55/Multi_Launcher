@@ -19,6 +19,9 @@ impl Plugin for MediaPlugin {
                 desc: "Media".into(),
                 action: format!("media:{}", op),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             })
             .collect()
     }
@@ -42,24 +45,36 @@ impl Plugin for MediaPlugin {
                 desc: "Media".into(),
                 action: "query:media play".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "media pause".into(),
                 desc: "Media".into(),
                 action: "query:media pause".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "media next".into(),
                 desc: "Media".into(),
                 action: "query:media next".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "media prev".into(),
                 desc: "Media".into(),
                 action: "query:media prev".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

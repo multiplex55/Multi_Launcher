@@ -15,6 +15,9 @@ impl Plugin for RunescapeSearchPlugin {
                     desc: "Web search".into(),
                     action: format!("https://runescape.wiki/?search={}", encode(q)),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -27,6 +30,9 @@ impl Plugin for RunescapeSearchPlugin {
                     desc: "Web search".into(),
                     action: format!("https://oldschool.runescape.wiki/?search={}", encode(q)),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -52,12 +58,18 @@ impl Plugin for RunescapeSearchPlugin {
                 desc: "Runescape".into(),
                 action: "query:rs ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "osrs".into(),
                 desc: "Runescape".into(),
                 action: "query:osrs ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

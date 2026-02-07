@@ -16,6 +16,9 @@ impl Plugin for WebSearchPlugin {
                 desc: "Web search".into(),
                 action: format!("https://www.google.com/search?q={}", encode(q)),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }]
         } else {
             Vec::new()
@@ -40,6 +43,9 @@ impl Plugin for WebSearchPlugin {
             desc: "Web search".into(),
             action: "query:g ".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }]
     }
 }
@@ -71,6 +77,9 @@ impl Plugin for CalculatorPlugin {
                     desc: "Calculator".into(),
                     action: format!("calc:history:{idx}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -89,6 +98,9 @@ impl Plugin for CalculatorPlugin {
                             desc: "Calculator".into(),
                             action: format!("calc:{}", result),
                             args: Some(expr.to_string()),
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         }]
                     } else {
                         let entry = CalcHistoryEntry {
@@ -101,6 +113,9 @@ impl Plugin for CalculatorPlugin {
                             desc: "Calculator".into(),
                             action: format!("calc:{}", result),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         }]
                     }
                 }
@@ -130,18 +145,27 @@ impl Plugin for CalculatorPlugin {
                 desc: "Calculator".into(),
                 action: "query:= ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "= history".into(),
                 desc: "Calculator".into(),
                 action: "query:= history".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "calc list".into(),
                 desc: "Calculator".into(),
                 action: "query:calc list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

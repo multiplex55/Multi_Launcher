@@ -15,6 +15,9 @@ impl Plugin for RedditPlugin {
                     desc: "Web search".into(),
                     action: format!("https://www.reddit.com/search/?q={}", encode(q)),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -39,6 +42,9 @@ impl Plugin for RedditPlugin {
             desc: "Reddit".into(),
             action: "query:red ".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }]
     }
 }

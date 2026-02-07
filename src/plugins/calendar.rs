@@ -1146,6 +1146,9 @@ impl Plugin for CalendarPlugin {
                 desc: "Calendar".into(),
                 action: "calendar:open".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
         let rest_lc = rest.to_lowercase();
@@ -1155,6 +1158,9 @@ impl Plugin for CalendarPlugin {
                 desc: "Calendar".into(),
                 action: format!("calendar:open:{rest_lc}"),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
         if rest_lc == "upcoming" {
@@ -1163,6 +1169,9 @@ impl Plugin for CalendarPlugin {
                 desc: "Calendar".into(),
                 action: "calendar:upcoming".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
         if let Some(find) = strip_prefix_ci(rest, "find") {
@@ -1175,6 +1184,9 @@ impl Plugin for CalendarPlugin {
                 desc: "Calendar".into(),
                 action: format!("calendar:search:{query}"),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
         if let Some(add) = strip_prefix_ci(rest, "add") {
@@ -1206,6 +1218,9 @@ impl Plugin for CalendarPlugin {
                 desc: "Calendar".into(),
                 action: format!("calendar:add:{input}"),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
         if let Some(snooze) = strip_prefix_ci(rest, "snooze") {
@@ -1218,6 +1233,9 @@ impl Plugin for CalendarPlugin {
                 desc: "Calendar".into(),
                 action: format!("calendar:snooze:{input}"),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
         if let Some(date) = parse_date_reference(rest, chrono::Local::now().naive_local().date()) {
@@ -1226,6 +1244,9 @@ impl Plugin for CalendarPlugin {
                 desc: "Calendar".into(),
                 action: format!("calendar:jump:{rest}"),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
         Vec::new()
@@ -1250,66 +1271,99 @@ impl Plugin for CalendarPlugin {
                 desc: "Calendar".into(),
                 action: "query:cal".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "cal day".into(),
                 desc: "Calendar".into(),
                 action: "query:cal day".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "cal week".into(),
                 desc: "Calendar".into(),
                 action: "query:cal week".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "cal month".into(),
                 desc: "Calendar".into(),
                 action: "query:cal month".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "cal today".into(),
                 desc: "Calendar".into(),
                 action: "query:cal today".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "cal tomorrow".into(),
                 desc: "Calendar".into(),
                 action: "query:cal tomorrow".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "cal next mon".into(),
                 desc: "Calendar".into(),
                 action: "query:cal next mon".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "cal add".into(),
                 desc: "Calendar".into(),
                 action: "query:cal add ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "cal find".into(),
                 desc: "Calendar".into(),
                 action: "query:cal find ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "cal upcoming".into(),
                 desc: "Calendar".into(),
                 action: "query:cal upcoming".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "cal snooze".into(),
                 desc: "Calendar".into(),
                 action: "query:cal snooze ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

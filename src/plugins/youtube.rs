@@ -16,6 +16,9 @@ impl Plugin for YoutubePlugin {
                     desc: "Web search".into(),
                     action: format!("https://www.youtube.com/results?search_query={}", encode(q)),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -40,6 +43,9 @@ impl Plugin for YoutubePlugin {
             desc: "YouTube".into(),
             action: "query:yt ".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }]
     }
 }

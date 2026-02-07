@@ -140,6 +140,9 @@ fn activation_applies_query_override_first() {
         desc: "".into(),
         action: "query:after".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     };
     app.activate_action(action, Some("override".into()), ActivationSource::Dashboard);
     assert_eq!(app.query, "after");

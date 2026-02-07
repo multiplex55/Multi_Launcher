@@ -43,6 +43,9 @@ fn history_poisoned_lock_does_not_panic() {
         desc: "d".into(),
         action: "a".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     };
     let entry = HistoryEntry {
         query: "q".into(),

@@ -296,6 +296,12 @@ pub struct Settings {
     /// Scale factor for the action list. Defaults to `1.0`.
     #[serde(default = "default_scale")]
     pub list_scale: Option<f32>,
+    /// Show preview pane for selected action in launcher results.
+    #[serde(default = "default_preview_enabled")]
+    pub preview_enabled: bool,
+    /// Use compact preview presentation in the preview pane.
+    #[serde(default)]
+    pub preview_compact_mode: bool,
     /// Weight of the fuzzy match score when ranking results.
     #[serde(default = "default_fuzzy_weight")]
     pub fuzzy_weight: f32,
@@ -484,6 +490,10 @@ fn default_launcher_hotkey() -> Option<String> {
     }
 }
 
+fn default_preview_enabled() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -507,6 +517,8 @@ impl Default for Settings {
             toast_duration: default_toast_duration(),
             query_scale: Some(1.0),
             list_scale: Some(1.0),
+            preview_enabled: default_preview_enabled(),
+            preview_compact_mode: false,
             fuzzy_weight: default_fuzzy_weight(),
             usage_weight: default_usage_weight(),
             query_autocomplete: default_query_autocomplete(),

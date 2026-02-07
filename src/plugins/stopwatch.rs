@@ -224,6 +224,9 @@ impl Plugin for StopwatchPlugin {
                 desc: "Stopwatch".into(),
                 action,
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
         if crate::common::strip_prefix_ci(rest, "list").is_some() || rest.is_empty() {
@@ -241,6 +244,9 @@ impl Plugin for StopwatchPlugin {
                         desc: "Stopwatch".into(),
                         action: format!("stopwatch:show:{id}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }
                 })
                 .collect();
@@ -255,6 +261,9 @@ impl Plugin for StopwatchPlugin {
                         desc: "Stopwatch".into(),
                         action: format!("stopwatch:pause:{id}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     })
                     .collect();
             } else if let Ok(id) = tail.parse::<u64>() {
@@ -263,6 +272,9 @@ impl Plugin for StopwatchPlugin {
                     desc: "Stopwatch".into(),
                     action: format!("stopwatch:pause:{id}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -276,6 +288,9 @@ impl Plugin for StopwatchPlugin {
                         desc: "Stopwatch".into(),
                         action: format!("stopwatch:resume:{id}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     })
                     .collect();
             } else if let Ok(id) = tail.parse::<u64>() {
@@ -284,6 +299,9 @@ impl Plugin for StopwatchPlugin {
                     desc: "Stopwatch".into(),
                     action: format!("stopwatch:resume:{id}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -297,6 +315,9 @@ impl Plugin for StopwatchPlugin {
                         desc: "Stopwatch".into(),
                         action: format!("stopwatch:stop:{id}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     })
                     .collect();
             } else if let Ok(id) = tail.parse::<u64>() {
@@ -305,6 +326,9 @@ impl Plugin for StopwatchPlugin {
                     desc: "Stopwatch".into(),
                     action: format!("stopwatch:stop:{id}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -325,6 +349,9 @@ impl Plugin for StopwatchPlugin {
                             desc: "Stopwatch".into(),
                             action: format!("stopwatch:show:{id}"),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         }
                     })
                     .collect();
@@ -335,6 +362,9 @@ impl Plugin for StopwatchPlugin {
                         desc: "Stopwatch".into(),
                         action: format!("stopwatch:show:{id}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }];
                 }
             }
@@ -361,30 +391,45 @@ impl Plugin for StopwatchPlugin {
                 desc: "Stopwatch".into(),
                 action: "query:sw start ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "sw list".into(),
                 desc: "Stopwatch".into(),
                 action: "query:sw list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "sw pause".into(),
                 desc: "Stopwatch".into(),
                 action: "query:sw pause".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "sw resume".into(),
                 desc: "Stopwatch".into(),
                 action: "query:sw resume".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "sw stop".into(),
                 desc: "Stopwatch".into(),
                 action: "query:sw stop".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

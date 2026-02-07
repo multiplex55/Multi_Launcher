@@ -105,6 +105,9 @@ pub fn run_fav(label: &str) -> anyhow::Result<()> {
             desc: String::new(),
             action: entry.action.clone(),
             args: entry.args.clone(),
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         };
         launch_action(&act)?;
     }
@@ -156,6 +159,9 @@ impl FavPlugin {
                 desc: "Fav".into(),
                 action: f.action.clone(),
                 args: f.args.clone(),
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             })
             .collect()
     }
@@ -176,6 +182,9 @@ impl Plugin for FavPlugin {
                 desc: "Fav".into(),
                 action: "fav:dialog:".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
 
@@ -190,6 +199,9 @@ impl Plugin for FavPlugin {
                 desc: "Fav".into(),
                 action: format!("fav:dialog:{label}"),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
 
@@ -207,6 +219,9 @@ impl Plugin for FavPlugin {
                     desc: "Fav".into(),
                     action: format!("fav:remove:{}", f.label),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -241,24 +256,36 @@ impl Plugin for FavPlugin {
                 desc: "Fav".into(),
                 action: "query:fav ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "fav add".into(),
                 desc: "Fav".into(),
                 action: "query:fav add ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "fav rm".into(),
                 desc: "Fav".into(),
                 action: "query:fav rm ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "fav list".into(),
                 desc: "Fav".into(),
                 action: "query:fav list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

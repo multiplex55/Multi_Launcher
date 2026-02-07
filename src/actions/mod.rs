@@ -10,6 +10,21 @@ pub struct Action {
     pub action: String, // Path to folder or exe
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_level: Option<ActionRiskLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionRiskLevel {
+    Low,
+    Medium,
+    High,
+    Critical,
 }
 
 pub fn load_actions(path: &str) -> anyhow::Result<Vec<Action>> {

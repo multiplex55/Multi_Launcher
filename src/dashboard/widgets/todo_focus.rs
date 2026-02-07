@@ -201,6 +201,9 @@ impl Widget for TodoFocusWidget {
                         desc: "Todo".into(),
                         action: format!("todo:edit:{idx}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     query_override: self
                         .cfg

@@ -81,6 +81,9 @@ fn empty_query_lists_commands() {
         desc: "web".into(),
         action: "chrome".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     }];
     let mut app = new_app(&ctx, actions);
     app.query.clear();

@@ -126,6 +126,9 @@ fn launch_action_add_saves_snippet() {
         desc: String::new(),
         action: "snippet:add:alias|text".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     };
     launch_action(&action).unwrap();
     let list = load_snippets(SNIPPETS_FILE).unwrap();

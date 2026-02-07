@@ -130,6 +130,9 @@ impl PinnedCommandsWidget {
                     desc: "Fav".into(),
                     action: f.action.clone(),
                     args: f.args.clone(),
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -140,6 +143,9 @@ impl PinnedCommandsWidget {
                 desc: "Fav".into(),
                 action: fav.action.clone(),
                 args: fav.args.clone(),
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             })
         })
     }
@@ -272,6 +278,9 @@ mod tests {
             desc: "desc".into(),
             action: id.into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }
     }
 

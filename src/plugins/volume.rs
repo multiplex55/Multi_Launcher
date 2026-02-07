@@ -20,6 +20,9 @@ impl Plugin for VolumePlugin {
                     desc: "Volume".into(),
                     action: "volume:dialog".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -32,6 +35,9 @@ impl Plugin for VolumePlugin {
                         desc: "Volume".into(),
                         action: "volume:mute_active".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }];
                 }
                 [level] => {
@@ -42,6 +48,9 @@ impl Plugin for VolumePlugin {
                                 desc: "Volume".into(),
                                 action: format!("volume:set:{val}"),
                                 args: None,
+                                preview_text: None,
+                                risk_level: None,
+                                icon: None,
                             }];
                         }
                     }
@@ -55,6 +64,9 @@ impl Plugin for VolumePlugin {
                                 desc: "Volume".into(),
                                 action: format!("volume:pid:{pid}:{level}"),
                                 args: None,
+                                preview_text: None,
+                                risk_level: None,
+                                icon: None,
                             }];
                         }
                     }
@@ -81,6 +93,9 @@ impl Plugin for VolumePlugin {
                                     desc: format!("PID {pid}"),
                                     action: format!("volume:pid:{pid}:{level}"),
                                     args: None,
+                                    preview_text: None,
+                                    risk_level: None,
+                                    icon: None,
                                 }];
                             }
                         }
@@ -111,12 +126,18 @@ impl Plugin for VolumePlugin {
                 desc: "Volume".into(),
                 action: "query:vol ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "vol ma".into(),
                 desc: "Volume".into(),
                 action: "query:vol ma".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

@@ -96,6 +96,9 @@ impl Plugin for ShellPlugin {
                     desc: "Shell".into(),
                     action: "shell:dialog".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -111,6 +114,9 @@ impl Plugin for ShellPlugin {
                     desc: "Shell".into(),
                     action: format!("shell:add:{name}|{args}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -132,6 +138,9 @@ impl Plugin for ShellPlugin {
                         desc: "Shell".into(),
                         action: format!("shell:remove:{}", c.name),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     })
                     .collect();
             }
@@ -155,6 +164,9 @@ impl Plugin for ShellPlugin {
                             desc: "Shell".into(),
                             action: format!("{}{}", prefix, c.args),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         }
                     })
                     .collect();
@@ -188,6 +200,9 @@ impl Plugin for ShellPlugin {
                         desc: "Shell".into(),
                         action: format!("{}{}", prefix, entry.args),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }];
                 }
             }
@@ -196,6 +211,9 @@ impl Plugin for ShellPlugin {
                 desc: "Shell".into(),
                 action: format!("shell:{}", arg),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
         Vec::new()
@@ -220,24 +238,36 @@ impl Plugin for ShellPlugin {
                 desc: "Shell".into(),
                 action: "query:sh".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "sh add".into(),
                 desc: "Shell".into(),
                 action: "query:sh add ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "sh rm".into(),
                 desc: "Shell".into(),
                 action: "query:sh rm ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "sh list".into(),
                 desc: "Shell".into(),
                 action: "query:sh list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

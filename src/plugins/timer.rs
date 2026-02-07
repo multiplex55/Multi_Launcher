@@ -664,6 +664,9 @@ impl Plugin for TimerPlugin {
                     desc: "Timer".into(),
                     action: "timer:dialog:timer".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -674,6 +677,9 @@ impl Plugin for TimerPlugin {
                     desc: "Timer".into(),
                     action: "timer:dialog:alarm".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -687,6 +693,9 @@ impl Plugin for TimerPlugin {
                     desc: "Timer".into(),
                     action: format!("timer:show:{id}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -698,6 +707,9 @@ impl Plugin for TimerPlugin {
                     desc: "Timer".into(),
                     action: format!("timer:cancel:{id}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -709,6 +721,9 @@ impl Plugin for TimerPlugin {
                     desc: "Timer".into(),
                     action: format!("timer:cancel:{id}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -722,6 +737,9 @@ impl Plugin for TimerPlugin {
                         desc: "Timer".into(),
                         action: format!("timer:pause:{id}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     })
                     .collect();
             } else if let Ok(id) = tail.parse::<u64>() {
@@ -730,6 +748,9 @@ impl Plugin for TimerPlugin {
                     desc: "Timer".into(),
                     action: format!("timer:pause:{id}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -743,6 +764,9 @@ impl Plugin for TimerPlugin {
                         desc: "Timer".into(),
                         action: format!("timer:resume:{id}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     })
                     .collect();
             } else if let Ok(id) = tail.parse::<u64>() {
@@ -751,6 +775,9 @@ impl Plugin for TimerPlugin {
                     desc: "Timer".into(),
                     action: format!("timer:resume:{id}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -775,6 +802,9 @@ impl Plugin for TimerPlugin {
                     desc: "Timer".into(),
                     action,
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -799,6 +829,9 @@ impl Plugin for TimerPlugin {
                     desc: "Timer".into(),
                     action,
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -824,48 +857,72 @@ impl Plugin for TimerPlugin {
                 desc: "Timer".into(),
                 action: "query:timer".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "timer add".into(),
                 desc: "Timer".into(),
                 action: "query:timer add ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "timer list".into(),
                 desc: "Timer".into(),
                 action: "query:timer list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "timer pause".into(),
                 desc: "Timer".into(),
                 action: "query:timer pause".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "timer resume".into(),
                 desc: "Timer".into(),
                 action: "query:timer resume".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "timer cancel".into(),
                 desc: "Timer".into(),
                 action: "query:timer cancel".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "timer rm".into(),
                 desc: "Timer".into(),
                 action: "query:timer rm".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "alarm".into(),
                 desc: "Timer".into(),
                 action: "query:alarm".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

@@ -8,3 +8,12 @@ fn search_returns_action() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "shell:taskmgr");
 }
+
+#[test]
+fn search_has_metadata() {
+    let plugin = TaskManagerPlugin;
+    let results = plugin.search("tm");
+    assert!(results[0].preview_text.is_some());
+    assert!(results[0].risk_level.is_some());
+    assert!(results[0].icon.is_some());
+}

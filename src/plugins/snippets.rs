@@ -135,6 +135,9 @@ impl Plugin for SnippetsPlugin {
                     desc: "Snippet".into(),
                     action: "snippet:dialog".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -156,6 +159,9 @@ impl Plugin for SnippetsPlugin {
                     desc: "Snippet".into(),
                     action: format!("snippet:remove:{}", s.alias.clone()),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -170,6 +176,9 @@ impl Plugin for SnippetsPlugin {
                     desc: "Snippet".into(),
                     action: format!("snippet:add:{alias}|{text}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -185,6 +194,9 @@ impl Plugin for SnippetsPlugin {
                         desc: "Snippet".into(),
                         action: format!("snippet:add:{alias}|{text}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }];
                 }
             }
@@ -205,6 +217,9 @@ impl Plugin for SnippetsPlugin {
                     desc: "Snippet".into(),
                     action: format!("snippet:edit:{}", s.alias.clone()),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -226,6 +241,9 @@ impl Plugin for SnippetsPlugin {
                     desc: "Snippet".into(),
                     action: format!("clipboard:{}", s.text.clone()),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -247,6 +265,9 @@ impl Plugin for SnippetsPlugin {
                     desc: "Snippet".into(),
                     action: format!("clipboard:{}", s.text.clone()),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -272,30 +293,45 @@ impl Plugin for SnippetsPlugin {
                 desc: "Snippet".into(),
                 action: "query:cs".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "cs add".into(),
                 desc: "Snippet".into(),
                 action: "query:cs add ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "cs rm".into(),
                 desc: "Snippet".into(),
                 action: "query:cs rm ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "cs list".into(),
                 desc: "Snippet".into(),
                 action: "query:cs list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "cs edit".into(),
                 desc: "Snippet".into(),
                 action: "query:cs edit".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

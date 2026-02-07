@@ -44,6 +44,9 @@ impl VolumeDialog {
                             desc: "Volume".into(),
                             action: format!("volume:set:{}", self.value),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         });
                         close = true;
                         app.focus_input();
@@ -65,6 +68,9 @@ impl VolumeDialog {
                                     desc: "Volume".into(),
                                     action,
                                     args: None,
+                                    preview_text: None,
+                                    risk_level: None,
+                                    icon: None,
                                 });
                             }
                         }
@@ -74,6 +80,9 @@ impl VolumeDialog {
                                 desc: "Volume".into(),
                                 action: format!("volume:pid:{}:{}", proc.pid, proc.value),
                                 args: None,
+                                preview_text: None,
+                                risk_level: None,
+                                icon: None,
                             });
                         }
                         if ui.button("Mute").clicked() {
@@ -82,6 +91,9 @@ impl VolumeDialog {
                                 desc: "Volume".into(),
                                 action: format!("volume:pid_toggle_mute:{}", proc.pid),
                                 args: None,
+                                preview_text: None,
+                                risk_level: None,
+                                icon: None,
                             });
                             proc.muted = !proc.muted;
                         }

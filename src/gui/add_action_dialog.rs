@@ -150,6 +150,9 @@ impl AddActionDialog {
                                             } else {
                                                 None
                                             },
+                                            preview_text: None,
+                                            risk_level: None,
+                                            icon: None,
                                         });
                                         app.custom_len += 1;
                                         app.actions = Arc::new(new_actions);

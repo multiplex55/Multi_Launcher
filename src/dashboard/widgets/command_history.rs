@@ -153,6 +153,9 @@ impl CommandHistoryWidget {
                 desc: "Fav".into(),
                 action: fav.action.clone(),
                 args: fav.args.clone(),
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             });
         }
 
@@ -163,6 +166,9 @@ impl CommandHistoryWidget {
                     desc: "Note".into(),
                     action: action_id.to_string(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -177,6 +183,9 @@ impl CommandHistoryWidget {
                     desc: "Clipboard".into(),
                     action: action_id.to_string(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -191,6 +200,9 @@ impl CommandHistoryWidget {
                     desc: "Todo".into(),
                     action: action_id.to_string(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -205,6 +217,9 @@ impl CommandHistoryWidget {
                     desc: "Todo".into(),
                     action: action_id.to_string(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -219,6 +234,9 @@ impl CommandHistoryWidget {
                     desc: "Todo".into(),
                     action: action_id.to_string(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -230,6 +248,9 @@ impl CommandHistoryWidget {
                     desc: "Snippet".into(),
                     action: action_id.to_string(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -241,6 +262,9 @@ impl CommandHistoryWidget {
                     desc: "Snippet".into(),
                     action: action_id.to_string(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -252,6 +276,9 @@ impl CommandHistoryWidget {
                     desc: "Snippet".into(),
                     action: action_id.to_string(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -279,6 +306,9 @@ impl CommandHistoryWidget {
             desc: pin.desc.clone(),
             action: pin.action_id.clone(),
             args: pin.args.clone(),
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         };
         let resolved = Self::resolve_action(ctx, &pin.action_id, pin.args.as_deref());
         let action = resolved.clone().unwrap_or(fallback);

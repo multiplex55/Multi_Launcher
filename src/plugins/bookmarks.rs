@@ -91,6 +91,9 @@ impl BookmarksPlugin {
                     desc: "Bookmark".into(),
                     action: "bookmark:dialog".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -105,6 +108,9 @@ impl BookmarksPlugin {
                     desc: "Bookmark".into(),
                     action: format!("bookmark:add:{norm}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -129,6 +135,9 @@ impl BookmarksPlugin {
                     desc: "Bookmark".into(),
                     action: format!("bookmark:remove:{}", b.url.clone()),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -155,6 +164,9 @@ impl BookmarksPlugin {
                         desc: "Bookmark".into(),
                         action: b.url.clone(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }
                 })
                 .collect();
@@ -185,6 +197,9 @@ impl BookmarksPlugin {
                     desc: "Bookmark".into(),
                     action: b.url.clone(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }
             })
             .collect()
@@ -332,24 +347,36 @@ impl Plugin for BookmarksPlugin {
                 desc: "Bookmark".into(),
                 action: "query:bm ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "bm add".into(),
                 desc: "Bookmark".into(),
                 action: "query:bm add ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "bm rm".into(),
                 desc: "Bookmark".into(),
                 action: "query:bm rm ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "bm list".into(),
                 desc: "Bookmark".into(),
                 action: "query:bm list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

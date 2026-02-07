@@ -98,6 +98,9 @@ impl RecycleBinWidget {
             desc: "Recycle Bin".into(),
             action: "recycle:clean".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }
     }
 }

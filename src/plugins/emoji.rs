@@ -134,6 +134,9 @@ impl Plugin for EmojiPlugin {
                     desc: "Emoji".into(),
                     action: format!("clipboard:{emoji}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -150,6 +153,9 @@ impl Plugin for EmojiPlugin {
                         desc: "Emoji".into(),
                         action: format!("clipboard:{emoji}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     })
                     .collect();
             }
@@ -176,12 +182,18 @@ impl Plugin for EmojiPlugin {
                 desc: "Emoji".into(),
                 action: "query:emoji ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "emoji list".into(),
                 desc: "Emoji".into(),
                 action: "query:emoji list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

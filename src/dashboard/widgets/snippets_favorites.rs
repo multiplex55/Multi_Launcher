@@ -101,6 +101,9 @@ impl Widget for SnippetsFavoritesWidget {
                         desc: "Fav".into(),
                         action: entry.action.clone(),
                         args: entry.args.clone(),
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     query_override: Some("fav".into()),
                 });

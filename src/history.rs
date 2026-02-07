@@ -347,6 +347,9 @@ mod tests {
                     desc: "Fresh".into(),
                     action: pin.action_id.clone(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
             } else {
                 None

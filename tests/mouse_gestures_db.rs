@@ -501,6 +501,9 @@ fn watch_event_executes_action() {
         desc: "".into(),
         action: "query:after".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     }));
     app.process_watch_events();
     assert_eq!(app.query, "after");

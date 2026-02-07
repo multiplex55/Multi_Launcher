@@ -480,6 +480,9 @@ impl BindingEntry {
             desc: format!("Mouse gesture: {gesture_label}"),
             action,
             args,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }
     }
 }

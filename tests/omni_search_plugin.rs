@@ -39,6 +39,9 @@ fn o_list_combines_all_sources() {
         desc: "app".into(),
         action: "myapp".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     }]);
     let plugin = OmniSearchPlugin::new(actions);
 
@@ -78,6 +81,9 @@ fn o_list_filters_results() {
         desc: "app".into(),
         action: "bar".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     }]);
     let plugin = OmniSearchPlugin::new(actions);
 
@@ -98,6 +104,9 @@ fn label_and_desc_same_returns_action() {
         desc: "dup".into(),
         action: "dup_action".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     };
     let actions = Arc::new(vec![action]);
 

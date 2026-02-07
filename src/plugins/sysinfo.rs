@@ -13,6 +13,9 @@ impl SysInfoPlugin {
             desc: "SysInfo".into(),
             action: "sysinfo:cpu".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }
     }
 
@@ -29,6 +32,9 @@ impl SysInfoPlugin {
             desc: "SysInfo".into(),
             action: "sysinfo:mem".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }
     }
 
@@ -51,6 +57,9 @@ impl SysInfoPlugin {
             desc: "SysInfo".into(),
             action: "sysinfo:disk".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }
     }
 
@@ -60,6 +69,9 @@ impl SysInfoPlugin {
             desc: "SysInfo".into(),
             action: format!("sysinfo:cpu_list:{count}"),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }
     }
 }
@@ -113,24 +125,36 @@ impl Plugin for SysInfoPlugin {
                 desc: "SysInfo".into(),
                 action: "query:info".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "info cpu".into(),
                 desc: "SysInfo".into(),
                 action: "query:info cpu".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "info mem".into(),
                 desc: "SysInfo".into(),
                 action: "query:info mem".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "info disk".into(),
                 desc: "SysInfo".into(),
                 action: "query:info disk".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

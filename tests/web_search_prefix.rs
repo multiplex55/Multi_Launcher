@@ -44,6 +44,9 @@ fn g_prefix_filters_web_search() {
         desc: "test".into(),
         action: "custom".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     }];
     let mut app = new_app_with_plugins(&ctx, actions);
     app.query = "g hello".into();

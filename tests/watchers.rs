@@ -44,6 +44,9 @@ fn actions_watcher_sends_event() {
         desc: "".into(),
         action: "a".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     }];
     save_actions("actions.json", &acts).unwrap();
     save_folders(FOLDERS_FILE, &[]).unwrap();

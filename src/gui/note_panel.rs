@@ -1531,6 +1531,9 @@ mod tests {
             desc: String::new(),
             action: "query:changed".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }];
         app.selected = Some(0);
 

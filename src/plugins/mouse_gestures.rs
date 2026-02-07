@@ -300,48 +300,72 @@ impl MouseGesturesPlugin {
                 desc: "Mouse gestures".into(),
                 action: "query:mg ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "mg settings".into(),
                 desc: "Mouse gestures".into(),
                 action: "mg:dialog:settings".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "mg edit".into(),
                 desc: "Mouse gestures".into(),
                 action: "mg:dialog".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "mg add".into(),
                 desc: "Mouse gestures".into(),
                 action: "mg:dialog:binding".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "mg list".into(),
                 desc: "Mouse gestures".into(),
                 action: "query:mg list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "mg find".into(),
                 desc: "Mouse gestures".into(),
                 action: "query:mg find ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "mg where".into(),
                 desc: "Mouse gestures".into(),
                 action: "query:mg where ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "mg conflicts".into(),
                 desc: "Mouse gestures".into(),
                 action: "query:mg conflicts".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }
@@ -364,6 +388,9 @@ impl MouseGesturesPlugin {
                 desc: "Mouse gestures".into(),
                 action: "mg:dialog".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             })
             .collect()
     }
@@ -401,6 +428,9 @@ impl Plugin for MouseGesturesPlugin {
                 desc: "Mouse gestures".into(),
                 action: "mg:dialog:settings".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
         if strip_prefix_ci(trimmed, "mg edit").is_some() {
@@ -409,6 +439,9 @@ impl Plugin for MouseGesturesPlugin {
                 desc: "Mouse gestures".into(),
                 action: "mg:dialog".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
         if strip_prefix_ci(trimmed, "mg add").is_some() {
@@ -417,6 +450,9 @@ impl Plugin for MouseGesturesPlugin {
                 desc: "Mouse gestures".into(),
                 action: "mg:dialog:binding".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
         if let Some(rest) = strip_prefix_ci(trimmed, "mg find") {
@@ -430,6 +466,9 @@ impl Plugin for MouseGesturesPlugin {
                     desc: Self::format_match_desc(&context),
                     action: "mg:dialog".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -444,6 +483,9 @@ impl Plugin for MouseGesturesPlugin {
                     desc: "Mouse gestures".into(),
                     action: "mg:dialog".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -474,6 +516,9 @@ impl Plugin for MouseGesturesPlugin {
                             desc: conflict_desc.into(),
                             action: "mg:dialog".into(),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         });
                     }
                 }

@@ -172,6 +172,9 @@ fn launch_actions_modify_file() {
         desc: String::new(),
         action: "shell:add:test|dir".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     };
     launch_action(&add).unwrap();
     let list = load_shell_cmds(SHELL_CMDS_FILE).unwrap();
@@ -183,6 +186,9 @@ fn launch_actions_modify_file() {
         desc: String::new(),
         action: "shell:remove:test".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     };
     launch_action(&rm).unwrap();
     let list = load_shell_cmds(SHELL_CMDS_FILE).unwrap();

@@ -64,6 +64,9 @@ impl Plugin for TimestampPlugin {
                         desc: "Midnight TS".into(),
                         action: format!("clipboard:{out}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }];
                 }
             } else if let Some(ms) = Self::string_to_ms(arg) {
@@ -73,6 +76,9 @@ impl Plugin for TimestampPlugin {
                     desc: "Midnight TS".into(),
                     action: format!("clipboard:{out}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         } else if let Some(rest) = crate::common::strip_prefix_ci(trimmed, PREFIX) {
@@ -97,6 +103,9 @@ impl Plugin for TimestampPlugin {
                         desc: "Timestamp".into(),
                         action: format!("clipboard:{out}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }];
                 }
             } else {
@@ -110,6 +119,9 @@ impl Plugin for TimestampPlugin {
                             desc: "Timestamp".into(),
                             action: format!("clipboard:{ts}"),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         }];
                     }
                 }
@@ -137,12 +149,18 @@ impl Plugin for TimestampPlugin {
                 desc: "Timestamp".into(),
                 action: "query:ts ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "tsm <value>".into(),
                 desc: "Midnight TS".into(),
                 action: "query:tsm ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

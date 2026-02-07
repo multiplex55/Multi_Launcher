@@ -66,6 +66,9 @@ impl FrequentCommandsWidget {
                     desc: "Command".into(),
                     action: key.to_string(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
             })
     }

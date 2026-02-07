@@ -119,6 +119,9 @@ impl Widget for NotesTagsWidget {
                         desc: "Note".into(),
                         action: format!("query:note list #{tag}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     query_override: Some(format!("note list #{tag}")),
                 });

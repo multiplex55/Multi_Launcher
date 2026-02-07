@@ -38,12 +38,18 @@ fn usage_ranking() {
             desc: "".into(),
             action: "a".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         },
         Action {
             label: "foo".into(),
             desc: "".into(),
             action: "b".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         },
     ];
     let settings = Settings::default();
@@ -63,12 +69,18 @@ fn fuzzy_vs_usage_weight() {
             desc: "".into(),
             action: "a".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         },
         Action {
             label: "defabc".into(),
             desc: "".into(),
             action: "b".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         },
     ];
     let mut settings = Settings::default();

@@ -32,6 +32,9 @@ impl Plugin for HistoryPlugin {
                     desc: "History".into(),
                     action: "history:clear".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -46,6 +49,9 @@ impl Plugin for HistoryPlugin {
                     desc: "History".into(),
                     action: format!("history:{idx}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect()
         })
@@ -71,12 +77,18 @@ impl Plugin for HistoryPlugin {
                 desc: "History".into(),
                 action: "query:hi".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "hi clear".into(),
                 desc: "History".into(),
                 action: "query:hi clear".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

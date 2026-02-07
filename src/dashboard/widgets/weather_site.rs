@@ -118,6 +118,9 @@ impl Widget for WeatherSiteWidget {
                     desc: "Weather".into(),
                     action: url,
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 },
                 query_override: Some(format!("weather {loc}")),
             });

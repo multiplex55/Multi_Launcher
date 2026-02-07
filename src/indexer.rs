@@ -23,6 +23,9 @@ pub fn index_paths(paths: &[String]) -> anyhow::Result<Vec<Action>> {
                         desc: entry.path().display().to_string(),
                         action: entry.path().display().to_string(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     });
                 }
             }

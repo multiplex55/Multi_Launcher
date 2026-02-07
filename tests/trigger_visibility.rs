@@ -95,6 +95,9 @@ fn launcher_toggle_action_sets_visibility_and_restore() {
         desc: "".into(),
         action: "launcher:toggle".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     };
     app.activate_action(action, None, ActivationSource::Enter);
 

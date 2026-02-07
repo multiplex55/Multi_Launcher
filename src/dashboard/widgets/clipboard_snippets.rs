@@ -138,6 +138,9 @@ impl Widget for ClipboardSnippetsWidget {
                                     desc: "Clipboard".into(),
                                     action: format!("clipboard:copy:{idx}"),
                                     args: None,
+                                    preview_text: None,
+                                    risk_level: None,
+                                    icon: None,
                                 },
                                 query_override: Some("cb list".into()),
                             });
@@ -165,6 +168,9 @@ impl Widget for ClipboardSnippetsWidget {
                             desc: "Snippet".into(),
                             action: format!("clipboard:{}", snippet.text),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                         query_override: Some(format!("cs {}", snippet.alias)),
                     });

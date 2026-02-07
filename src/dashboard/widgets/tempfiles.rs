@@ -196,6 +196,9 @@ impl TempfilesWidget {
             desc: "Tempfile".into(),
             action: "tempfile:dialog".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }
     }
 
@@ -205,6 +208,9 @@ impl TempfilesWidget {
             desc: "Tempfile".into(),
             action: "tempfile:clear".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }
     }
 
@@ -214,6 +220,9 @@ impl TempfilesWidget {
             desc: "Tempfile".into(),
             action: format!("tempfile:remove:{}", path.to_string_lossy()),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }
     }
 
@@ -223,6 +232,9 @@ impl TempfilesWidget {
             desc: "Tempfile".into(),
             action: format!("tempfile:open:{}", path.to_string_lossy()),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }
     }
 }

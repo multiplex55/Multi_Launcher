@@ -190,6 +190,9 @@ pub fn run_macro(name: &str) -> anyhow::Result<()> {
                 desc: String::new(),
                 action: command,
                 args,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             };
             if let Err(e) = launch_action(&act) {
                 tracing::error!(?e, "failed to run macro step");
@@ -260,6 +263,9 @@ impl MacrosPlugin {
                 desc: "Macro".into(),
                 action: format!("macro:{}", m.label),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             })
             .collect()
     }
@@ -280,6 +286,9 @@ impl Plugin for MacrosPlugin {
                 desc: "Macro".into(),
                 action: "macro:dialog".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
 
@@ -315,12 +324,18 @@ impl Plugin for MacrosPlugin {
                 desc: "Macro".into(),
                 action: "query:macro ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "macro list".into(),
                 desc: "Macro".into(),
                 action: "query:macro list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

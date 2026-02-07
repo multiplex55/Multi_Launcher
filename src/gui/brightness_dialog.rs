@@ -40,6 +40,9 @@ impl BrightnessDialog {
                             desc: "Brightness".into(),
                             action: format!("brightness:set:{}", self.value),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         });
                         close = true;
                         app.focus_input();

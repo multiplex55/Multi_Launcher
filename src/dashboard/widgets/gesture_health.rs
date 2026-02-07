@@ -19,6 +19,9 @@ impl GestureHealthWidget {
                 desc: "Mouse gestures".into(),
                 action: action.into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             query_override: None,
         }

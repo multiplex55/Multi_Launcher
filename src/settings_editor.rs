@@ -36,6 +36,8 @@ pub struct SettingsEditor {
     note_more_limit: usize,
     query_scale: f32,
     list_scale: f32,
+    preview_enabled: bool,
+    preview_compact_mode: bool,
     history_limit: usize,
     clipboard_limit: usize,
     fuzzy_weight: f32,
@@ -133,6 +135,8 @@ impl SettingsEditor {
             note_more_limit: settings.note_more_limit,
             query_scale: settings.query_scale.unwrap_or(1.0),
             list_scale: settings.list_scale.unwrap_or(1.0),
+            preview_enabled: settings.preview_enabled,
+            preview_compact_mode: settings.preview_compact_mode,
             history_limit: settings.history_limit,
             clipboard_limit: settings.clipboard_limit,
             fuzzy_weight: settings.fuzzy_weight,
@@ -274,6 +278,8 @@ impl SettingsEditor {
             note_more_limit: self.note_more_limit,
             query_scale: Some(self.query_scale),
             list_scale: Some(self.list_scale),
+            preview_enabled: self.preview_enabled,
+            preview_compact_mode: self.preview_compact_mode,
             history_limit: self.history_limit,
             clipboard_limit: self.clipboard_limit,
             fuzzy_weight: self.fuzzy_weight,
@@ -449,6 +455,8 @@ impl SettingsEditor {
                             ui.label("List scale");
                             ui.add(egui::Slider::new(&mut self.list_scale, 0.5..=5.0).text(""));
                         });
+                        ui.checkbox(&mut self.preview_enabled, "Enable action preview panel");
+                        ui.checkbox(&mut self.preview_compact_mode, "Use compact preview mode");
                         if ui.button("Open Theme Settings...").clicked() {
                             app.open_theme_settings_dialog();
                         }
@@ -795,6 +803,9 @@ impl SettingsEditor {
                                                 new_settings.query_scale.unwrap_or(1.0).min(5.0);
                                             app.list_scale =
                                                 new_settings.list_scale.unwrap_or(1.0).min(5.0);
+                                            app.preview_enabled = new_settings.preview_enabled;
+                                            app.preview_compact_mode =
+                                                new_settings.preview_compact_mode;
                                             app.history_limit = new_settings.history_limit;
                                             app.clipboard_limit = new_settings.clipboard_limit;
                                             app.page_jump = new_settings.page_jump;

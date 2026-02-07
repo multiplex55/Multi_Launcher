@@ -334,6 +334,9 @@ impl PinnedQueryResultsWidget {
                     desc: action.desc.clone(),
                     action: format!("query:{}", action.label),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 },
             },
         }

@@ -1,4 +1,4 @@
-use crate::actions::Action;
+use crate::actions::{Action, ActionRiskLevel};
 use crate::plugin::Plugin;
 
 pub struct SystemPlugin;
@@ -20,6 +20,13 @@ impl Plugin for SystemPlugin {
                 desc: "System".into(),
                 action: format!("system:{}", o),
                 args: None,
+                preview_text: Some(format!("Performs a system-level {o} operation.")),
+                risk_level: Some(match *o {
+                    "shutdown" | "reboot" => ActionRiskLevel::Critical,
+                    "logoff" => ActionRiskLevel::High,
+                    _ => ActionRiskLevel::Medium,
+                }),
+                icon: Some("power".into()),
             })
             .collect()
     }
@@ -42,6 +49,9 @@ impl Plugin for SystemPlugin {
             desc: "System".into(),
             action: "query:sys ".into(),
             args: None,
+            preview_text: Some("Search system power actions.".into()),
+            risk_level: Some(ActionRiskLevel::Low),
+            icon: Some("power".into()),
         }]
     }
 }

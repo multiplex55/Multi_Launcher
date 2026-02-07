@@ -44,6 +44,9 @@ fn run_action(action: &str) -> bool {
         desc: "".into(),
         action: action.into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     }];
     let (mut app, flag) = new_app_with_settings(&ctx, actions, Settings::default());
     app.update_paths(

@@ -26,6 +26,9 @@ impl Plugin for MissingPlugin {
                         desc: "Maintenance".into(),
                         action: format!("folder:remove:{}", f.path),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     });
                 }
             }
@@ -39,6 +42,9 @@ impl Plugin for MissingPlugin {
                         desc: "Maintenance".into(),
                         action: format!("bookmark:remove:{}", b.url),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     });
                 }
             }
@@ -64,6 +70,9 @@ impl Plugin for MissingPlugin {
                         desc: "Maintenance".into(),
                         action: format!("fav:remove:{}", f.label),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     });
                 }
             }
@@ -75,6 +84,9 @@ impl Plugin for MissingPlugin {
                 desc: "Maintenance".into(),
                 action: "noop:".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             });
         }
 
@@ -99,6 +111,9 @@ impl Plugin for MissingPlugin {
             desc: "Maintenance".into(),
             action: "query:check miss".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }]
     }
 }

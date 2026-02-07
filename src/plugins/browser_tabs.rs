@@ -320,6 +320,9 @@ mod imp {
                         },
                         action: format!("tab:switch:{id_str}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     });
                 }
             }
@@ -414,6 +417,9 @@ impl Plugin for BrowserTabsPlugin {
                 desc: "Remove cached browser tabs".into(),
                 action: "tab:clear".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
         if rest.eq_ignore_ascii_case("cache") {
@@ -422,6 +428,9 @@ impl Plugin for BrowserTabsPlugin {
                 desc: "Enumerate browser tabs".into(),
                 action: "tab:cache".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
 
@@ -449,18 +458,27 @@ impl Plugin for BrowserTabsPlugin {
                 desc: "Browser tabs".into(),
                 action: "query:tab ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "tab cache".into(),
                 desc: "Rebuild browser tab cache".into(),
                 action: "tab:cache".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "tab clear".into(),
                 desc: "Clear browser tab cache".into(),
                 action: "tab:clear".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }
