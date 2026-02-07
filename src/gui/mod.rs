@@ -4640,6 +4640,17 @@ impl LauncherApp {
                     alias,
                 }
             });
+        if let Some(existing_idx) = self
+            .note_panels
+            .iter()
+            .position(|panel| panel.note_slug() == note.slug)
+        {
+            let panel = self.note_panels.remove(existing_idx);
+            self.note_panels.push(panel);
+            self.update_panel_stack();
+            return;
+        }
+
         let word_count = note.content.split_whitespace().count();
         if self.enable_toasts {
             push_toast(
@@ -4958,6 +4969,28 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn open_note_panel_reuses_existing_panel_for_same_slug() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let dir = tempdir().unwrap();
+        let prev = std::env::var("ML_NOTES_DIR").ok();
+        std::env::set_var("ML_NOTES_DIR", dir.path());
+
+        append_note("Second Note", "body").unwrap();
+        app.open_note_panel("second-note", None);
+        app.open_note_panel("second-note", None);
+
+        assert_eq!(app.note_panels.len(), 1);
+
+        if let Some(prev) = prev {
+            std::env::set_var("ML_NOTES_DIR", prev);
+        } else {
+            std::env::remove_var("ML_NOTES_DIR");
+        }
     }
 
     #[test]

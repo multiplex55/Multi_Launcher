@@ -140,6 +140,10 @@ impl NotePanel {
         }
     }
 
+    pub fn note_slug(&self) -> &str {
+        &self.note.slug
+    }
+
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         if !self.open {
             return;
