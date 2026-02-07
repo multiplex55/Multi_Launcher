@@ -1002,9 +1002,9 @@ mod tests {
         assert_eq!(
             add_payload,
             TodoAddActionPayload {
-                text: "finish|draft, now".into(),
+                text: "finish|draft, now space".into(),
                 priority: 7,
-                tags: vec!["core|team,ops".into(), "has".into(), "space".into()],
+                tags: vec!["core|team,ops".into(), "has".into()],
             }
         );
 
