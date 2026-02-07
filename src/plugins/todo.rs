@@ -11,6 +11,8 @@ use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::common::lru::LruCache;
 use crate::common::query::parse_query_filters;
 use crate::plugin::Plugin;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use once_cell::sync::Lazy;
@@ -50,6 +52,45 @@ pub struct TodoEntry {
     pub priority: u8,
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TodoAddActionPayload {
+    pub text: String,
+    pub priority: u8,
+    pub tags: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TodoTagActionPayload {
+    pub idx: usize,
+    pub tags: Vec<String>,
+}
+
+fn encode_action_payload<T: Serialize>(payload: &T) -> Option<String> {
+    let json = serde_json::to_vec(payload).ok()?;
+    Some(URL_SAFE_NO_PAD.encode(json))
+}
+
+fn decode_action_payload<T: for<'de> Deserialize<'de>>(payload: &str) -> Option<T> {
+    let json = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    serde_json::from_slice(&json).ok()
+}
+
+pub(crate) fn encode_todo_add_action_payload(payload: &TodoAddActionPayload) -> Option<String> {
+    encode_action_payload(payload)
+}
+
+pub(crate) fn decode_todo_add_action_payload(payload: &str) -> Option<TodoAddActionPayload> {
+    decode_action_payload(payload)
+}
+
+pub(crate) fn encode_todo_tag_action_payload(payload: &TodoTagActionPayload) -> Option<String> {
+    encode_action_payload(payload)
+}
+
+pub(crate) fn decode_todo_tag_action_payload(payload: &str) -> Option<TodoTagActionPayload> {
+    decode_action_payload(payload)
 }
 
 /// Shared in-memory todo cache kept in sync with `todo.json`.
@@ -407,7 +448,6 @@ impl TodoPlugin {
                 Some((text, priority, tags))
             }) {
                 ParseArgsResult::Parsed((text, priority, tags)) => {
-                    let tag_str = tags.join(",");
                     let mut label_suffix_parts: Vec<String> = Vec::new();
                     if !tags.is_empty() {
                         label_suffix_parts.push(format!("Tag: {}", tags.join(", ")));
@@ -420,10 +460,18 @@ impl TodoPlugin {
                     } else {
                         format!("Add todo {text} {}", label_suffix_parts.join("; "))
                     };
+                    let payload = TodoAddActionPayload {
+                        text,
+                        priority,
+                        tags,
+                    };
+                    let Some(encoded_payload) = encode_todo_add_action_payload(&payload) else {
+                        return Vec::new();
+                    };
                     return vec![Action {
                         label,
                         desc: "Todo".into(),
-                        action: format!("todo:add:{text}|{priority}|{tag_str}"),
+                        action: format!("todo:add:{encoded_payload}"),
                         args: None,
                     }];
                 }
@@ -473,11 +521,14 @@ impl TodoPlugin {
                         }
                     }
                 }
-                let tag_str = tags.join(",");
+                let payload = TodoTagActionPayload { idx, tags };
+                let Some(encoded_payload) = encode_todo_tag_action_payload(&payload) else {
+                    return Vec::new();
+                };
                 return vec![Action {
                     label: format!("Set tags for todo {idx}"),
                     desc: "Todo".into(),
-                    action: format!("todo:tag:{idx}|{tag_str}"),
+                    action: format!("todo:tag:{encoded_payload}"),
                     args: None,
                 }];
             }
@@ -929,5 +980,47 @@ mod tests {
             ]
         );
         assert_eq!(actions_list[0], "todo:dialog");
+    }
+
+    #[test]
+    fn todo_add_and_tag_actions_encode_payload_for_round_trip() {
+        let plugin = TodoPlugin {
+            matcher: SkimMatcherV2::default(),
+            data: TODO_DATA.clone(),
+            cache: TODO_CACHE.clone(),
+            watcher: None,
+        };
+
+        let add_actions =
+            plugin.search_internal("todo add finish|draft, now p=7 #core|team,ops #has space");
+        assert_eq!(add_actions.len(), 1);
+        let add_encoded = add_actions[0]
+            .action
+            .strip_prefix("todo:add:")
+            .expect("todo:add: prefix");
+        let add_payload = decode_todo_add_action_payload(add_encoded).expect("decode add payload");
+        assert_eq!(
+            add_payload,
+            TodoAddActionPayload {
+                text: "finish|draft, now space".into(),
+                priority: 7,
+                tags: vec!["core|team,ops".into(), "has".into()],
+            }
+        );
+
+        let tag_actions = plugin.search_internal("todo tag 4 #alpha|beta,gamma #needs space");
+        assert_eq!(tag_actions.len(), 1);
+        let tag_encoded = tag_actions[0]
+            .action
+            .strip_prefix("todo:tag:")
+            .expect("todo:tag: prefix");
+        let tag_payload = decode_todo_tag_action_payload(tag_encoded).expect("decode tag payload");
+        assert_eq!(
+            tag_payload,
+            TodoTagActionPayload {
+                idx: 4,
+                tags: vec!["alpha|beta,gamma".into(), "needs".into()],
+            }
+        );
     }
 }

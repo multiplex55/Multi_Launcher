@@ -1,3 +1,5 @@
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use eframe::egui;
 use multi_launcher::gui::{
     todo_view_layout_sizes, todo_view_window_constraints, LauncherApp, TodoDialog, TodoViewDialog,
@@ -5,8 +7,8 @@ use multi_launcher::gui::{
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::plugins::todo::{
-    append_todo, load_todos, mark_done, remove_todo, set_priority, set_tags, TodoEntry, TodoPlugin,
-    TODO_FILE,
+    append_todo, load_todos, mark_done, remove_todo, set_priority, set_tags, TodoAddActionPayload,
+    TodoEntry, TodoPlugin, TodoTagActionPayload, TODO_FILE,
 };
 use multi_launcher::settings::Settings;
 use once_cell::sync::Lazy;
@@ -14,6 +16,11 @@ use std::sync::{atomic::AtomicBool, Arc, Mutex};
 use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+fn decode_payload<T: serde::de::DeserializeOwned>(encoded: &str) -> T {
+    let json = URL_SAFE_NO_PAD.decode(encoded).unwrap();
+    serde_json::from_slice(&json).unwrap()
+}
 
 fn new_app(ctx: &egui::Context) -> LauncherApp {
     LauncherApp::new(
@@ -40,7 +47,16 @@ fn search_add_returns_action() {
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo add task   ");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].action, "todo:add:task|0|");
+    let encoded = results[0].action.strip_prefix("todo:add:").unwrap();
+    let payload: TodoAddActionPayload = decode_payload(encoded);
+    assert_eq!(
+        payload,
+        TodoAddActionPayload {
+            text: "task".into(),
+            priority: 0,
+            tags: vec![],
+        }
+    );
     assert_eq!(results[0].label, "Add todo task");
 }
 
@@ -50,7 +66,16 @@ fn search_add_with_priority_and_tags() {
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo add task p=3 #a #b");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].action, "todo:add:task|3|a,b");
+    let encoded = results[0].action.strip_prefix("todo:add:").unwrap();
+    let payload: TodoAddActionPayload = decode_payload(encoded);
+    assert_eq!(
+        payload,
+        TodoAddActionPayload {
+            text: "task".into(),
+            priority: 3,
+            tags: vec!["a".into(), "b".into()],
+        }
+    );
     assert_eq!(results[0].label, "Add todo task Tag: a, b; priority: 3");
 }
 
@@ -60,7 +85,16 @@ fn search_add_with_at_tags() {
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo add task @a @b");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].action, "todo:add:task|0|a,b");
+    let encoded = results[0].action.strip_prefix("todo:add:").unwrap();
+    let payload: TodoAddActionPayload = decode_payload(encoded);
+    assert_eq!(
+        payload,
+        TodoAddActionPayload {
+            text: "task".into(),
+            priority: 0,
+            tags: vec!["a".into(), "b".into()],
+        }
+    );
     assert_eq!(results[0].label, "Add todo task Tag: a, b");
 }
 
@@ -235,7 +269,15 @@ fn search_pset_and_tag_actions() {
     assert_eq!(res[0].action, "todo:pset:1|4");
     let res = plugin.search("todo tag 2 #x #y");
     assert_eq!(res.len(), 1);
-    assert_eq!(res[0].action, "todo:tag:2|x,y");
+    let encoded = res[0].action.strip_prefix("todo:tag:").unwrap();
+    let payload: TodoTagActionPayload = decode_payload(encoded);
+    assert_eq!(
+        payload,
+        TodoTagActionPayload {
+            idx: 2,
+            tags: vec!["x".into(), "y".into()],
+        }
+    );
 }
 
 #[test]
@@ -325,16 +367,19 @@ fn tag_command_without_filter_lists_all_tags() {
 
     append_todo(TODO_FILE, "alpha task", 1, &["alpha".into(), "beta".into()]).unwrap();
     append_todo(TODO_FILE, "beta task", 1, &["beta".into()]).unwrap();
-    append_todo(TODO_FILE, "gamma task", 1, &["gamma".into(), "alpha".into()]).unwrap();
+    append_todo(
+        TODO_FILE,
+        "gamma task",
+        1,
+        &["gamma".into(), "alpha".into()],
+    )
+    .unwrap();
 
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo tag");
     let labels: Vec<&str> = results.iter().map(|action| action.label.as_str()).collect();
 
-    assert_eq!(
-        labels,
-        vec!["#alpha (2)", "#beta (2)", "#gamma (1)"]
-    );
+    assert_eq!(labels, vec!["#alpha (2)", "#beta (2)", "#gamma (1)"]);
 }
 #[test]
 fn search_view_opens_dialog() {
