@@ -53,6 +53,175 @@ pub struct DashboardSettings {
     pub show_when_query_empty: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeMode {
+    System,
+    Dark,
+    Light,
+    Custom,
+}
+
+impl Default for ThemeMode {
+    fn default() -> Self {
+        Self::System
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThemeColor {
+    #[serde(default)]
+    pub r: u8,
+    #[serde(default)]
+    pub g: u8,
+    #[serde(default)]
+    pub b: u8,
+    #[serde(default = "default_alpha")]
+    pub a: u8,
+}
+
+impl ThemeColor {
+    const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self { r, g, b, a }
+    }
+}
+
+fn default_alpha() -> u8 {
+    255
+}
+
+impl Default for ThemeColor {
+    fn default() -> Self {
+        Self::rgba(0, 0, 0, default_alpha())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColorScheme {
+    #[serde(default)]
+    pub window_fill: ThemeColor,
+    #[serde(default)]
+    pub panel_fill: ThemeColor,
+    #[serde(default)]
+    pub text: ThemeColor,
+    #[serde(default)]
+    pub hyperlink: ThemeColor,
+    #[serde(default)]
+    pub widget_inactive_fill: ThemeColor,
+    #[serde(default)]
+    pub widget_inactive_stroke: ThemeColor,
+    #[serde(default)]
+    pub widget_hovered_fill: ThemeColor,
+    #[serde(default)]
+    pub widget_hovered_stroke: ThemeColor,
+    #[serde(default)]
+    pub widget_active_fill: ThemeColor,
+    #[serde(default)]
+    pub widget_active_stroke: ThemeColor,
+    #[serde(default)]
+    pub selection_bg: ThemeColor,
+    #[serde(default)]
+    pub selection_stroke: ThemeColor,
+    #[serde(default)]
+    pub warn_accent: ThemeColor,
+    #[serde(default)]
+    pub error_accent: ThemeColor,
+    #[serde(default)]
+    pub success_accent: ThemeColor,
+}
+
+impl ColorScheme {
+    pub fn dark() -> Self {
+        Self {
+            window_fill: ThemeColor::rgba(24, 24, 27, 255),
+            panel_fill: ThemeColor::rgba(31, 31, 35, 255),
+            text: ThemeColor::rgba(235, 235, 240, 255),
+            hyperlink: ThemeColor::rgba(94, 173, 255, 255),
+            widget_inactive_fill: ThemeColor::rgba(49, 49, 55, 255),
+            widget_inactive_stroke: ThemeColor::rgba(90, 90, 102, 255),
+            widget_hovered_fill: ThemeColor::rgba(64, 64, 74, 255),
+            widget_hovered_stroke: ThemeColor::rgba(133, 133, 152, 255),
+            widget_active_fill: ThemeColor::rgba(84, 84, 100, 255),
+            widget_active_stroke: ThemeColor::rgba(170, 170, 194, 255),
+            selection_bg: ThemeColor::rgba(67, 121, 201, 210),
+            selection_stroke: ThemeColor::rgba(170, 204, 255, 255),
+            warn_accent: ThemeColor::rgba(255, 192, 92, 255),
+            error_accent: ThemeColor::rgba(255, 104, 104, 255),
+            success_accent: ThemeColor::rgba(116, 219, 149, 255),
+        }
+    }
+
+    pub fn light() -> Self {
+        Self {
+            window_fill: ThemeColor::rgba(245, 246, 250, 255),
+            panel_fill: ThemeColor::rgba(255, 255, 255, 255),
+            text: ThemeColor::rgba(26, 30, 40, 255),
+            hyperlink: ThemeColor::rgba(35, 102, 214, 255),
+            widget_inactive_fill: ThemeColor::rgba(240, 241, 246, 255),
+            widget_inactive_stroke: ThemeColor::rgba(183, 186, 198, 255),
+            widget_hovered_fill: ThemeColor::rgba(229, 234, 246, 255),
+            widget_hovered_stroke: ThemeColor::rgba(145, 160, 196, 255),
+            widget_active_fill: ThemeColor::rgba(206, 220, 246, 255),
+            widget_active_stroke: ThemeColor::rgba(103, 130, 184, 255),
+            selection_bg: ThemeColor::rgba(153, 194, 255, 220),
+            selection_stroke: ThemeColor::rgba(48, 96, 170, 255),
+            warn_accent: ThemeColor::rgba(219, 131, 0, 255),
+            error_accent: ThemeColor::rgba(196, 36, 43, 255),
+            success_accent: ThemeColor::rgba(34, 145, 93, 255),
+        }
+    }
+}
+
+impl Default for ColorScheme {
+    fn default() -> Self {
+        Self::dark()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThemeSettings {
+    #[serde(default)]
+    pub mode: ThemeMode,
+    #[serde(default)]
+    pub named_presets: std::collections::HashMap<String, ColorScheme>,
+    #[serde(default = "ThemeSettings::default_custom_scheme")]
+    pub custom_scheme: ColorScheme,
+}
+
+impl ThemeSettings {
+    pub fn default_dark() -> Self {
+        Self {
+            mode: ThemeMode::System,
+            named_presets: std::collections::HashMap::from([
+                ("dark".to_string(), ColorScheme::dark()),
+                ("light".to_string(), ColorScheme::light()),
+            ]),
+            custom_scheme: ColorScheme::dark(),
+        }
+    }
+
+    pub fn default_light() -> Self {
+        Self {
+            mode: ThemeMode::Light,
+            named_presets: std::collections::HashMap::from([
+                ("dark".to_string(), ColorScheme::dark()),
+                ("light".to_string(), ColorScheme::light()),
+            ]),
+            custom_scheme: ColorScheme::light(),
+        }
+    }
+
+    fn default_custom_scheme() -> ColorScheme {
+        ColorScheme::dark()
+    }
+}
+
+impl Default for ThemeSettings {
+    fn default() -> Self {
+        Self::default_dark()
+    }
+}
+
 impl Default for DashboardSettings {
     fn default() -> Self {
         Self {
@@ -207,6 +376,8 @@ pub struct Settings {
     pub show_dashboard_diagnostics: bool,
     #[serde(default)]
     pub dashboard: DashboardSettings,
+    #[serde(default)]
+    pub theme: ThemeSettings,
 }
 
 static SETTINGS_PATH: OnceCell<PathBuf> = OnceCell::new();
@@ -371,6 +542,7 @@ impl Default for Settings {
             reduce_dashboard_work_when_unfocused: true,
             show_dashboard_diagnostics: false,
             dashboard: DashboardSettings::default(),
+            theme: ThemeSettings::default(),
         }
     }
 }

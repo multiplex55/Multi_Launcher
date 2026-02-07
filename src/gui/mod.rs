@@ -23,6 +23,7 @@ mod shell_cmd_dialog;
 mod snippet_dialog;
 mod tempfile_alias_dialog;
 mod tempfile_dialog;
+mod theme_settings_dialog;
 mod timer_dialog;
 mod toast_log_dialog;
 mod todo_dialog;
@@ -61,6 +62,7 @@ pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;
 pub use tempfile_alias_dialog::TempfileAliasDialog;
 pub use tempfile_dialog::TempfileDialog;
+pub use theme_settings_dialog::ThemeSettingsDialogState;
 pub use timer_dialog::{TimerCompletionDialog, TimerDialog};
 pub use toast_log_dialog::ToastLogDialog;
 pub use todo_dialog::TodoDialog;
@@ -307,6 +309,7 @@ pub enum Panel {
     MacroDialog,
     MouseGesturesDialog,
     MouseGestureSettingsDialog,
+    ThemeSettingsDialog,
     FavDialog,
     NotesDialog,
     UnusedAssetsDialog,
@@ -345,6 +348,7 @@ struct PanelStates {
     macro_dialog: bool,
     mouse_gestures_dialog: bool,
     mouse_gesture_settings_dialog: bool,
+    theme_settings_dialog: bool,
     fav_dialog: bool,
     notes_dialog: bool,
     unused_assets_dialog: bool,
@@ -449,6 +453,8 @@ pub struct LauncherApp {
     macro_dialog: MacroDialog,
     mouse_gestures_dialog: MgGesturesDialog,
     mouse_gesture_settings_dialog: MouseGestureSettingsDialog,
+    theme_settings_dialog_open: bool,
+    theme_settings_dialog: ThemeSettingsDialogState,
     fav_dialog: FavDialog,
     notes_dialog: NotesDialog,
     unused_assets_dialog: UnusedAssetsDialog,
@@ -717,10 +723,7 @@ impl LauncherApp {
     }
 
     fn is_note_search_query(query: &str) -> bool {
-        query
-            .trim_start()
-            .to_lowercase()
-            .starts_with("note search")
+        query.trim_start().to_lowercase().starts_with("note search")
     }
 
     fn note_search_debounce_ready(
@@ -799,6 +802,20 @@ impl LauncherApp {
     /// trigger it without reaching into private `LauncherApp` fields.
     pub fn open_mouse_gesture_settings_dialog(&mut self) {
         self.mouse_gesture_settings_dialog.open();
+    }
+
+    pub fn open_theme_settings_dialog(&mut self) {
+        self.theme_settings_dialog_open = true;
+        self.theme_settings_dialog.request_reload();
+    }
+
+    pub fn is_theme_settings_dialog_open(&self) -> bool {
+        self.theme_settings_dialog_open
+    }
+
+    pub fn close_theme_settings_dialog(&mut self) {
+        self.theme_settings_dialog_open = false;
+        self.update_panel_stack();
     }
     pub fn update_paths(
         &mut self,
@@ -1281,6 +1298,8 @@ impl LauncherApp {
             macro_dialog: MacroDialog::default(),
             mouse_gestures_dialog: MgGesturesDialog::default(),
             mouse_gesture_settings_dialog: MouseGestureSettingsDialog::default(),
+            theme_settings_dialog_open: false,
+            theme_settings_dialog: ThemeSettingsDialogState::default(),
             fav_dialog: FavDialog::default(),
             notes_dialog: NotesDialog::default(),
             unused_assets_dialog: UnusedAssetsDialog::default(),
@@ -2561,6 +2580,8 @@ impl LauncherApp {
             let registry = self.dashboard.registry().clone();
             self.dashboard_editor.open(&self.dashboard_path, &registry);
             self.show_dashboard_editor = true;
+        } else if a.action == "theme:dialog" {
+            self.open_theme_settings_dialog();
         } else if a.action == "volume:dialog" {
             self.volume_dialog.open();
         } else if a.action == "brightness:dialog" {
@@ -2930,6 +2951,7 @@ impl LauncherApp {
             || self.macro_dialog.open
             || self.mouse_gestures_dialog.open
             || self.mouse_gesture_settings_dialog.open
+            || self.theme_settings_dialog_open
             || self.fav_dialog.open
             || self.notes_dialog.open
             || self.unused_assets_dialog.open
@@ -3053,6 +3075,10 @@ impl LauncherApp {
             Panel::MouseGestureSettingsDialog => {
                 self.mouse_gesture_settings_dialog.open = false;
                 self.panel_states.mouse_gesture_settings_dialog = false;
+            }
+            Panel::ThemeSettingsDialog => {
+                self.theme_settings_dialog_open = false;
+                self.panel_states.theme_settings_dialog = false;
             }
             Panel::FavDialog => {
                 self.fav_dialog.open = false;
@@ -3200,6 +3226,10 @@ impl LauncherApp {
                 self.mouse_gesture_settings_dialog.open = false;
                 self.panel_states.mouse_gesture_settings_dialog = false;
             }
+            Panel::ThemeSettingsDialog => {
+                self.theme_settings_dialog_open = false;
+                self.panel_states.theme_settings_dialog = false;
+            }
             Panel::FavDialog => {
                 self.fav_dialog.open = false;
                 self.panel_states.fav_dialog = false;
@@ -3304,6 +3334,7 @@ impl LauncherApp {
             Panel::MacroDialog => self.macro_dialog.open = true,
             Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open = true,
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_dialog.open(),
+            Panel::ThemeSettingsDialog => self.open_theme_settings_dialog(),
             Panel::FavDialog => self.fav_dialog.open = true,
             Panel::NotesDialog => self.notes_dialog.open = true,
             Panel::UnusedAssetsDialog => self.unused_assets_dialog.open = true,
@@ -3430,6 +3461,11 @@ impl LauncherApp {
             self.mouse_gesture_settings_dialog.open,
             mouse_gesture_settings_dialog,
             Panel::MouseGestureSettingsDialog
+        );
+        check!(
+            self.theme_settings_dialog_open,
+            theme_settings_dialog,
+            Panel::ThemeSettingsDialog
         );
         check!(self.fav_dialog.open, fav_dialog, Panel::FavDialog);
         check!(self.notes_dialog.open, notes_dialog, Panel::NotesDialog);
@@ -4451,6 +4487,11 @@ impl eframe::App for LauncherApp {
         let mut mg_settings_dlg = std::mem::take(&mut self.mouse_gesture_settings_dialog);
         mg_settings_dlg.ui(ctx, self);
         self.mouse_gesture_settings_dialog = mg_settings_dlg;
+        let mut theme_state = std::mem::take(&mut self.theme_settings_dialog);
+        let mut theme_open = self.theme_settings_dialog_open;
+        crate::gui::theme_settings_dialog::ui(ctx, self, &mut theme_open, &mut theme_state);
+        self.theme_settings_dialog_open = theme_open;
+        self.theme_settings_dialog = theme_state;
         let mut fav_dlg = std::mem::take(&mut self.fav_dialog);
         fav_dlg.ui(ctx, self);
         self.fav_dialog = fav_dlg;
@@ -4895,8 +4936,8 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     };
-    use tempfile::tempdir;
     use std::time::{Duration, Instant};
+    use tempfile::tempdir;
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
