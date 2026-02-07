@@ -3,8 +3,8 @@ use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::plugin::Plugin;
 use crate::plugins::note::{
-    assets_dir, available_tags, image_files, load_notes, note_backlinks, resolve_note_query,
-    save_note, Note, NoteExternalOpen, NotePlugin, NoteTarget,
+    assets_dir, available_tags, image_files, note_backlinks, resolve_note_query, save_note, Note,
+    NoteExternalOpen, NotePlugin, NoteTarget,
 };
 use eframe::egui::{self, popup, Color32, FontId, Key};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};

@@ -68,7 +68,6 @@ pub enum MarkupLayer {
 #[derive(Clone, Debug, Default)]
 pub struct MarkupHistory {
     layers: Vec<MarkupLayer>,
-    undo_stack: Vec<MarkupLayer>,
     redo_stack: Vec<MarkupLayer>,
 }
 
