@@ -3,7 +3,38 @@ use multi_launcher::actions::Action;
 use multi_launcher::gui::LauncherApp;
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
+use once_cell::sync::Lazy;
+use std::path::PathBuf;
 use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Mutex, MutexGuard};
+
+static CWD_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+struct CurrentDirGuard {
+    _lock: MutexGuard<'static, ()>,
+    original: PathBuf,
+    _tmp: tempfile::TempDir,
+}
+
+impl CurrentDirGuard {
+    fn new() -> Self {
+        let lock = CWD_TEST_LOCK.lock().expect("cwd test lock poisoned");
+        let original = std::env::current_dir().expect("resolve current dir");
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        std::env::set_current_dir(tmp.path()).expect("switch to temp dir");
+        Self {
+            _lock: lock,
+            original,
+            _tmp: tmp,
+        }
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.original);
+    }
+}
 
 fn new_app(ctx: &egui::Context, actions: Vec<Action>, preserve: bool) -> LauncherApp {
     let custom_len = actions.len();
@@ -105,8 +136,7 @@ fn todo_add_preserves_prefix() {
         args: None,
     }];
     let mut app = new_app(&ctx, actions, true);
-    let dir = tempfile::tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
+    let _cwd_guard = CurrentDirGuard::new();
     app.query = "todo add test".into();
     let a = app.results[0].clone();
     if multi_launcher::launcher::launch_action(&a).is_ok() {
@@ -129,8 +159,7 @@ fn tmp_new_preserves_prefix() {
         args: None,
     }];
     let mut app = new_app(&ctx, actions, true);
-    let dir = tempfile::tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
+    let _cwd_guard = CurrentDirGuard::new();
     app.query = "tmp new".into();
     if app.preserve_command {
         app.query = "tmp new ".into();
