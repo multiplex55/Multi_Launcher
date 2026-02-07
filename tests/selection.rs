@@ -34,12 +34,18 @@ fn arrow_keys_update_selection() {
             desc: "".into(),
             action: "one".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         },
         Action {
             label: "two".into(),
             desc: "".into(),
             action: "two".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         },
     ];
     let mut app = new_app(&ctx, acts);
@@ -63,12 +69,18 @@ fn enter_returns_selected_index() {
             desc: "".into(),
             action: "one".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         },
         Action {
             label: "two".into(),
             desc: "".into(),
             action: "two".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         },
     ];
     let mut app = new_app(&ctx, acts);
@@ -88,6 +100,9 @@ fn page_keys_update_selection() {
             desc: "".into(),
             action: format!("act{i}"),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         })
         .collect();
     let mut app = new_app(&ctx, acts);
@@ -117,6 +132,9 @@ fn page_keys_respect_setting() {
             desc: "".into(),
             action: format!("act{i}"),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         })
         .collect();
     let mut settings = Settings::default();
@@ -147,4 +165,24 @@ fn page_keys_respect_setting() {
     assert_eq!(app.selected, Some(3));
     app.handle_key(egui::Key::PageUp);
     assert_eq!(app.selected, Some(0));
+}
+
+#[test]
+fn selected_action_exposes_preview_metadata() {
+    let ctx = egui::Context::default();
+    let acts = vec![Action {
+        label: "danger".into(),
+        desc: "System".into(),
+        action: "system:shutdown".into(),
+        args: None,
+        preview_text: Some("Will shutdown".into()),
+        risk_level: Some(multi_launcher::actions::ActionRiskLevel::Critical),
+        icon: Some("power".into()),
+    }];
+    let mut app = new_app(&ctx, acts);
+    app.query = APP_PREFIX.into();
+    app.search();
+    app.handle_key(egui::Key::ArrowDown);
+    let selected = app.selected.and_then(|i| app.results.get(i));
+    assert!(selected.and_then(|a| a.preview_text.as_ref()).is_some());
 }

@@ -36,6 +36,9 @@ pub struct MacroStep {
     pub command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<String>,
+    preview_text: None,
+    risk_level: None,
+    icon: None,
     /// Delay in milliseconds after this step when using manual delays.
     #[serde(default)]
     pub delay_ms: u64,
@@ -260,6 +263,9 @@ impl MacrosPlugin {
                 desc: "Macro".into(),
                 action: format!("macro:{}", m.label),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             })
             .collect()
     }
@@ -280,6 +286,9 @@ impl Plugin for MacrosPlugin {
                 desc: "Macro".into(),
                 action: "macro:dialog".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
 
@@ -315,12 +324,18 @@ impl Plugin for MacrosPlugin {
                 desc: "Macro".into(),
                 action: "query:macro ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "macro list".into(),
                 desc: "Macro".into(),
                 action: "query:macro list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

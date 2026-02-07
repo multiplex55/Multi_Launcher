@@ -124,6 +124,9 @@ fn launch_action_remove_deletes_file() {
         desc: "".into(),
         action: format!("tempfile:remove:{}", file.to_string_lossy()),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     };
     launch_action(&action).unwrap();
     assert!(!file.exists());

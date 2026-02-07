@@ -267,6 +267,9 @@ impl CalendarWidget {
                             desc: "Calendar".into(),
                             action: format!("calendar:add:{input}"),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                         query_override: Some("cal add".into()),
                     });
@@ -283,6 +286,9 @@ impl CalendarWidget {
                             desc: "Calendar".into(),
                             action: format!("calendar:open:{view}"),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                         query_override: None,
                     });
@@ -376,6 +382,9 @@ impl CalendarWidget {
                         desc: "Calendar".into(),
                         action: "calendar:open".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     query_override: None,
                 });

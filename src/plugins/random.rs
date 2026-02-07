@@ -58,6 +58,9 @@ impl Plugin for RandomPlugin {
                         desc: "Random number".into(),
                         action: format!("clipboard:{value}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }];
                 }
             }
@@ -69,6 +72,9 @@ impl Plugin for RandomPlugin {
                     desc: "Dice roll".into(),
                     action: format!("clipboard:{value}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
             "pw" | "password" => {
@@ -87,6 +93,9 @@ impl Plugin for RandomPlugin {
                         desc: "Random password".into(),
                         action: format!("clipboard:{pw}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }];
                 }
             }
@@ -114,18 +123,27 @@ impl Plugin for RandomPlugin {
                 desc: "Random number".into(),
                 action: "query:rand number ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "rand dice".into(),
                 desc: "Dice".into(),
                 action: "query:rand dice".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "rand pw <len>".into(),
                 desc: "Random password".into(),
                 action: "query:rand pw ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

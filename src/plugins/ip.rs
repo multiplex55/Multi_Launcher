@@ -18,6 +18,9 @@ impl Plugin for IpPlugin {
                         desc: "IP".into(),
                         action: format!("clipboard:{ip}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     });
                 }
             }
@@ -31,6 +34,9 @@ impl Plugin for IpPlugin {
                         desc: "IP".into(),
                         action: format!("clipboard:{ip}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     });
                 }
             }
@@ -56,6 +62,9 @@ impl Plugin for IpPlugin {
             desc: "IP".into(),
             action: "query:ip".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }]
     }
 }

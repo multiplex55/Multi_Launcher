@@ -42,12 +42,18 @@ impl Plugin for ProcessesPlugin {
                     desc: format!("PID {pid}"),
                     action: format!("process:switch:{pid}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 };
                 let kill_action = Action {
                     label: format!("Kill {name}"),
                     desc: format!("PID {pid}"),
                     action: format!("process:kill:{pid}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 };
                 match mode {
                     Mode::Both => vec![switch_action, kill_action],
@@ -77,18 +83,27 @@ impl Plugin for ProcessesPlugin {
                 desc: "Processes".into(),
                 action: "query:ps ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "psk".into(),
                 desc: "Kill process".into(),
                 action: "query:psk ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "pss".into(),
                 desc: "Switch process".into(),
                 action: "query:pss ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

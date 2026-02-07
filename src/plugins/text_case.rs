@@ -319,6 +319,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Uppercase".into(),
                             action: format!("clipboard:{}", upper),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -328,6 +331,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Lowercase".into(),
                             action: format!("clipboard:{}", lower),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -337,6 +343,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Capitalized".into(),
                             action: format!("clipboard:{}", capitalized),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -346,6 +355,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Camel".into(),
                             action: format!("clipboard:{}", camel),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -355,6 +367,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Pascal".into(),
                             action: format!("clipboard:{}", pascal),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -364,6 +379,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Snake".into(),
                             action: format!("clipboard:{}", snake),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -373,6 +391,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Screaming".into(),
                             action: format!("clipboard:{}", screaming),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -382,6 +403,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Kebab".into(),
                             action: format!("clipboard:{}", kebab),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -391,6 +415,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Train".into(),
                             action: format!("clipboard:{}", train),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -400,6 +427,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Dot".into(),
                             action: format!("clipboard:{}", dot),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -409,6 +439,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Alternating".into(),
                             action: format!("clipboard:{}", alt_case),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -418,6 +451,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Mocking".into(),
                             action: format!("clipboard:{}", mocking),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -427,6 +463,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Inverse".into(),
                             action: format!("clipboard:{}", inverse),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -436,6 +475,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Backwards".into(),
                             action: format!("clipboard:{}", backwards),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -445,6 +487,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Acronym".into(),
                             action: format!("clipboard:{}", acronym),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -454,6 +499,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Initials".into(),
                             action: format!("clipboard:{}", initial_caps),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -463,6 +511,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Title".into(),
                             action: format!("clipboard:{}", title_case),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -472,6 +523,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Sentence".into(),
                             action: format!("clipboard:{}", sentence),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -481,6 +535,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Base64".into(),
                             action: format!("clipboard:{}", b64),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -490,6 +547,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Hex".into(),
                             action: format!("clipboard:{}", hex_enc),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -499,6 +559,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Binary".into(),
                             action: format!("clipboard:{}", binary),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -508,6 +571,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-ROT13".into(),
                             action: format!("clipboard:{}", rot13),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -517,6 +583,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Clap".into(),
                             action: format!("clipboard:{}", clap),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -526,6 +595,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Emoji".into(),
                             action: format!("clipboard:{}", emoji_case),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -535,6 +607,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Custom".into(),
                             action: format!("clipboard:{}", custom),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                     (
@@ -544,6 +619,9 @@ impl Plugin for TextCasePlugin {
                             desc: "Text Case-Morse".into(),
                             action: format!("clipboard:{}", morse),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                     ),
                 ];
@@ -578,6 +656,9 @@ impl Plugin for TextCasePlugin {
             desc: "Text Case".into(),
             action: "query:case ".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }]
     }
 }

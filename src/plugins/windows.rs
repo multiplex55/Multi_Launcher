@@ -36,12 +36,18 @@ impl Plugin for WindowsPlugin {
                             desc: "Windows".into(),
                             action: format!("window:switch:{}", hwnd.0 as usize),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         });
                         ctx.out.push(Action {
                             label: format!("Close {title}"),
                             desc: "Windows".into(),
                             action: format!("window:close:{}", hwnd.0 as usize),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         });
                     }
                 }
@@ -77,6 +83,9 @@ impl Plugin for WindowsPlugin {
             desc: "Windows".into(),
             action: "query:win ".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }]
     }
 }

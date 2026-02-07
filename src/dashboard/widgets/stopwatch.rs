@@ -117,6 +117,9 @@ impl StopwatchWidget {
                 desc: "Stopwatch".into(),
                 action: action.to_string(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             query_override: Some(query.to_string()),
         }

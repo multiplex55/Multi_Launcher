@@ -41,6 +41,9 @@ fn usage_action(usage: &str, query: &str) -> Action {
         desc: "Todo".into(),
         action: format!("query:{query}"),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     }
 }
 
@@ -263,6 +266,9 @@ impl TodoPlugin {
                     desc: "Todo".into(),
                     action: "todo:dialog".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
             if rest.trim().is_empty() {
@@ -271,6 +277,9 @@ impl TodoPlugin {
                     desc: "Todo".into(),
                     action: "todo:dialog".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
                 actions.extend([
                     Action {
@@ -278,54 +287,81 @@ impl TodoPlugin {
                         desc: "Todo".into(),
                         action: "query:todo edit".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "todo list".into(),
                         desc: "Todo".into(),
                         action: "query:todo list".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "todo tag".into(),
                         desc: "Todo".into(),
                         action: "query:todo tag ".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "todo view".into(),
                         desc: "Todo".into(),
                         action: "query:todo view ".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "todo add".into(),
                         desc: "Todo".into(),
                         action: "query:todo add ".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "todo rm".into(),
                         desc: "Todo".into(),
                         action: "query:todo rm ".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "todo clear".into(),
                         desc: "Todo".into(),
                         action: "query:todo clear".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "todo pset".into(),
                         desc: "Todo".into(),
                         action: "query:todo pset ".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "todo export".into(),
                         desc: "Todo".into(),
                         action: "query:todo export".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                 ]);
                 return actions;
@@ -366,6 +402,9 @@ impl TodoPlugin {
                     desc: "Todo".into(),
                     action: format!("todo:edit:{idx}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -377,6 +416,9 @@ impl TodoPlugin {
                     desc: "Todo".into(),
                     action: "todo:view".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
             return vec![usage_action(TODO_VIEW_USAGE, "todo view")];
@@ -389,6 +431,9 @@ impl TodoPlugin {
                     desc: "Todo".into(),
                     action: "todo:export".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
             return vec![usage_action(TODO_EXPORT_USAGE, "todo export")];
@@ -401,6 +446,9 @@ impl TodoPlugin {
                     desc: "Todo".into(),
                     action: "todo:clear".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
             return vec![usage_action(TODO_CLEAR_USAGE, "todo clear")];
@@ -413,6 +461,9 @@ impl TodoPlugin {
                     desc: "Todo".into(),
                     action: "todo:dialog".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 },
                 usage_action(TODO_ADD_USAGE, "todo add "),
             ];
@@ -473,6 +524,9 @@ impl TodoPlugin {
                         desc: "Todo".into(),
                         action: format!("todo:add:{encoded_payload}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }];
                 }
                 ParseArgsResult::Usage(usage) => {
@@ -497,6 +551,9 @@ impl TodoPlugin {
                         desc: "Todo".into(),
                         action: format!("todo:pset:{idx}|{priority}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }];
                 }
                 ParseArgsResult::Usage(usage) => {
@@ -530,6 +587,9 @@ impl TodoPlugin {
                     desc: "Todo".into(),
                     action: format!("todo:tag:{encoded_payload}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
 
@@ -590,6 +650,9 @@ impl TodoPlugin {
                     desc: "Todo".into(),
                     action: format!("query:todo list #{tag}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -613,6 +676,9 @@ impl TodoPlugin {
                     desc: "Todo".into(),
                     action: format!("todo:remove:{idx}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -676,6 +742,9 @@ impl TodoPlugin {
                     desc: "Todo".into(),
                     action: format!("todo:done:{idx}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -732,60 +801,90 @@ impl Plugin for TodoPlugin {
                 desc: "Todo".into(),
                 action: "query:todo".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "todo add".into(),
                 desc: "Todo".into(),
                 action: "query:todo add ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "todo list".into(),
                 desc: "Todo".into(),
                 action: "query:todo list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "todo rm".into(),
                 desc: "Todo".into(),
                 action: "query:todo rm ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "todo clear".into(),
                 desc: "Todo".into(),
                 action: "query:todo clear".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "todo pset".into(),
                 desc: "Todo".into(),
                 action: "query:todo pset ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "todo tag".into(),
                 desc: "Todo".into(),
                 action: "query:todo tag ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "todo edit".into(),
                 desc: "Todo".into(),
                 action: "query:todo edit".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "todo view".into(),
                 desc: "Todo".into(),
                 action: "query:todo view ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "todo export".into(),
                 desc: "Todo".into(),
                 action: "query:todo export".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

@@ -481,6 +481,8 @@ pub struct LauncherApp {
     pub help_hotkey_str: Option<String>,
     pub query_scale: f32,
     pub list_scale: f32,
+    pub preview_enabled: bool,
+    pub preview_compact_mode: bool,
     /// Number of user defined commands at the start of `actions`.
     pub custom_len: usize,
     pub history_limit: usize,
@@ -1326,6 +1328,8 @@ impl LauncherApp {
             help_hotkey_str: settings.help_hotkey.clone(),
             query_scale,
             list_scale,
+            preview_enabled: settings.preview_enabled,
+            preview_compact_mode: settings.preview_compact_mode,
             custom_len,
             history_limit: settings.history_limit,
             clipboard_limit: settings.clipboard_limit,
@@ -1439,6 +1443,9 @@ impl LauncherApp {
                     desc: a.desc.clone(),
                     action: a.action.clone(),
                     args: a.args.clone(),
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
             self.results = res;
@@ -1801,6 +1808,9 @@ impl LauncherApp {
                 desc: "Fav".into(),
                 action: fav.action.clone(),
                 args: fav.args.clone(),
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             });
         }
 
@@ -1811,6 +1821,9 @@ impl LauncherApp {
                     desc: "Note".into(),
                     action: pin.action_id.clone(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -1826,6 +1839,9 @@ impl LauncherApp {
                     desc: "Clipboard".into(),
                     action: pin.action_id.clone(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -1841,6 +1857,9 @@ impl LauncherApp {
                     desc: "Todo".into(),
                     action: pin.action_id.clone(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -1856,6 +1875,9 @@ impl LauncherApp {
                     desc: "Todo".into(),
                     action: pin.action_id.clone(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -1871,6 +1893,9 @@ impl LauncherApp {
                     desc: "Todo".into(),
                     action: pin.action_id.clone(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -1882,6 +1907,9 @@ impl LauncherApp {
                     desc: "Snippet".into(),
                     action: pin.action_id.clone(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -1893,6 +1921,9 @@ impl LauncherApp {
                     desc: "Snippet".into(),
                     action: pin.action_id.clone(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -1904,6 +1935,9 @@ impl LauncherApp {
                     desc: "Snippet".into(),
                     action: pin.action_id.clone(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -1920,6 +1954,9 @@ impl LauncherApp {
             label: action.label.clone(),
             desc: action.desc.clone(),
             args: action.args.clone(),
+            preview_text: None,
+            risk_level: None,
+            icon: None,
             query: self.query.clone(),
             timestamp: chrono::Utc::now().timestamp(),
         };
@@ -2339,6 +2376,9 @@ impl LauncherApp {
                             desc: "Calendar".into(),
                             action: format!("calendar:jump:{}", event.start.format("%Y-%m-%d")),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         })
                         .collect();
                     self.query = format!("cal find {input}");
@@ -2408,6 +2448,9 @@ impl LauncherApp {
                         desc: "Calendar".into(),
                         action: format!("calendar:jump:{}", instance.start.format("%Y-%m-%d")),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }
                 })
                 .collect();
@@ -3899,10 +3942,14 @@ impl eframe::App for LauncherApp {
                 }
             } else {
                 let area_height = ui.available_height();
-                ScrollArea::vertical()
-                    .max_height(area_height)
-                    .show(ui, |ui| {
-                        scale_ui(ui, self.list_scale, |ui| {
+                ui.horizontal(|ui| {
+                    let show_preview_pane = self.preview_enabled && self.selected.is_some();
+                    let list_width = if show_preview_pane { ui.available_width() * 0.62 } else { ui.available_width() };
+                    ui.set_width(list_width);
+                    ScrollArea::vertical()
+                        .max_height(area_height)
+                        .show(ui, |ui| {
+                            scale_ui(ui, self.list_scale, |ui| {
                             let mut refresh = false;
                             let mut set_focus = false;
                             let show_full = self
@@ -4398,6 +4445,32 @@ impl eframe::App for LauncherApp {
                             }
                         });
                     });
+                    if show_preview_pane {
+                        ui.separator();
+                        ui.vertical(|ui| {
+                            if let Some(idx) = self.selected {
+                                if let Some(action) = self.results.get(idx) {
+                                    ui.heading(&action.label);
+                                    if !self.preview_compact_mode {
+                                        ui.label(&action.desc);
+                                    }
+                                    if let Some(icon) = &action.icon {
+                                        ui.small(format!("Icon: {icon}"));
+                                    }
+                                    if let Some(level) = action.risk_level {
+                                        ui.colored_label(egui::Color32::from_rgb(230, 170, 70), format!("Risk: {:?}", level));
+                                    }
+                                    ui.separator();
+                                    if let Some(text) = &action.preview_text {
+                                        ui.label(text);
+                                    } else {
+                                        ui.weak(action.action.clone());
+                                    }
+                                }
+                            }
+                        });
+                    }
+                });
             }
         });
         let show_editor = self.show_editor;

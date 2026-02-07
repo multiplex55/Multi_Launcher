@@ -178,6 +178,9 @@ impl Plugin for ClipboardPlugin {
                     desc: "Clipboard".into(),
                     action: "clipboard:dialog".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -189,6 +192,9 @@ impl Plugin for ClipboardPlugin {
                     desc: "Clipboard".into(),
                     action: "clipboard:clear".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -204,6 +210,9 @@ impl Plugin for ClipboardPlugin {
                         desc: "Clipboard".into(),
                         action: format!("clipboard:copy:{idx}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     })
                     .collect();
             }
@@ -220,6 +229,9 @@ impl Plugin for ClipboardPlugin {
                 desc: "Clipboard".into(),
                 action: format!("clipboard:copy:{idx}"),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             })
             .collect()
     }
@@ -243,18 +255,27 @@ impl Plugin for ClipboardPlugin {
                 desc: "Clipboard".into(),
                 action: "query:cb".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "cb list".into(),
                 desc: "Clipboard".into(),
                 action: "query:cb list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "cb clear".into(),
                 desc: "Clipboard".into(),
                 action: "query:cb clear".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

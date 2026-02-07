@@ -20,6 +20,9 @@ pub struct FavEntry {
     pub action: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<String>,
+    preview_text: None,
+    risk_level: None,
+    icon: None,
 }
 
 pub fn load_favs(path: &str) -> anyhow::Result<Vec<FavEntry>> {
@@ -51,6 +54,9 @@ pub fn set_fav(path: &str, label: &str, action: &str, args: Option<&str>) -> any
             label: label.to_string(),
             action: action.to_string(),
             args: args.map(|s| s.to_string()),
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         });
     }
     save_favs(path, &list)
@@ -85,6 +91,9 @@ pub fn resolve_with_plugin(
     plugin: &dyn Plugin,
     command: &str,
     args: Option<&str>,
+    preview_text: None,
+    risk_level: None,
+    icon: None,
 ) -> (String, Option<String>) {
     let mut query = command.to_string();
     if let Some(a) = args {
@@ -105,6 +114,9 @@ pub fn run_fav(label: &str) -> anyhow::Result<()> {
             desc: String::new(),
             action: entry.action.clone(),
             args: entry.args.clone(),
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         };
         launch_action(&act)?;
     }
@@ -156,6 +168,9 @@ impl FavPlugin {
                 desc: "Fav".into(),
                 action: f.action.clone(),
                 args: f.args.clone(),
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             })
             .collect()
     }
@@ -176,6 +191,9 @@ impl Plugin for FavPlugin {
                 desc: "Fav".into(),
                 action: "fav:dialog:".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
 
@@ -190,6 +208,9 @@ impl Plugin for FavPlugin {
                 desc: "Fav".into(),
                 action: format!("fav:dialog:{label}"),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
 
@@ -207,6 +228,9 @@ impl Plugin for FavPlugin {
                     desc: "Fav".into(),
                     action: format!("fav:remove:{}", f.label),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -241,24 +265,36 @@ impl Plugin for FavPlugin {
                 desc: "Fav".into(),
                 action: "query:fav ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "fav add".into(),
                 desc: "Fav".into(),
                 action: "query:fav add ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "fav rm".into(),
                 desc: "Fav".into(),
                 action: "query:fav rm ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "fav list".into(),
                 desc: "Fav".into(),
                 action: "query:fav list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

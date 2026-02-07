@@ -1,4 +1,4 @@
-use crate::actions::Action;
+use crate::actions::{Action, ActionRiskLevel};
 use crate::plugin::Plugin;
 
 pub struct RecyclePlugin;
@@ -13,6 +13,9 @@ impl Plugin for RecyclePlugin {
                 desc: "Recycle Bin".into(),
                 action: "recycle:clean".into(),
                 args: None,
+                preview_text: Some("Empties all items currently in the recycle bin.".into()),
+                risk_level: Some(ActionRiskLevel::High),
+                icon: Some("recycle".into()),
             }];
         }
         Vec::new()
@@ -36,6 +39,9 @@ impl Plugin for RecyclePlugin {
             desc: "Recycle".into(),
             action: "query:rec".into(),
             args: None,
+            preview_text: Some("Query shortcut for recycle-bin operations.".into()),
+            risk_level: Some(ActionRiskLevel::Low),
+            icon: Some("recycle".into()),
         }]
     }
 }

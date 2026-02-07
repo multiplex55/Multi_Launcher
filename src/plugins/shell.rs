@@ -12,6 +12,9 @@ pub const SHELL_CMDS_FILE: &str = "shell_cmds.json";
 pub struct ShellCmdEntry {
     pub name: String,
     pub args: String,
+    preview_text: None,
+    risk_level: None,
+    icon: None,
     /// When false this command will not be suggested when typing `sh <query>`.
     #[serde(default = "default_autocomplete")]
     pub autocomplete: bool,
@@ -66,6 +69,9 @@ pub fn append_shell_cmd(path: &str, name: &str, args: &str) -> anyhow::Result<()
         list.push(ShellCmdEntry {
             name: name.to_string(),
             args: args.to_string(),
+            preview_text: None,
+            risk_level: None,
+            icon: None,
             autocomplete: true,
             keep_open: false,
         });
@@ -96,6 +102,9 @@ impl Plugin for ShellPlugin {
                     desc: "Shell".into(),
                     action: "shell:dialog".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -111,6 +120,9 @@ impl Plugin for ShellPlugin {
                     desc: "Shell".into(),
                     action: format!("shell:add:{name}|{args}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -132,6 +144,9 @@ impl Plugin for ShellPlugin {
                         desc: "Shell".into(),
                         action: format!("shell:remove:{}", c.name),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     })
                     .collect();
             }
@@ -155,6 +170,9 @@ impl Plugin for ShellPlugin {
                             desc: "Shell".into(),
                             action: format!("{}{}", prefix, c.args),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         }
                     })
                     .collect();
@@ -188,6 +206,9 @@ impl Plugin for ShellPlugin {
                         desc: "Shell".into(),
                         action: format!("{}{}", prefix, entry.args),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }];
                 }
             }
@@ -196,6 +217,9 @@ impl Plugin for ShellPlugin {
                 desc: "Shell".into(),
                 action: format!("shell:{}", arg),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
         Vec::new()
@@ -220,24 +244,36 @@ impl Plugin for ShellPlugin {
                 desc: "Shell".into(),
                 action: "query:sh".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "sh add".into(),
                 desc: "Shell".into(),
                 action: "query:sh add ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "sh rm".into(),
                 desc: "Shell".into(),
                 action: "query:sh rm ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "sh list".into(),
                 desc: "Shell".into(),
                 action: "query:sh list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

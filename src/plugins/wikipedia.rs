@@ -19,6 +19,9 @@ impl Plugin for WikipediaPlugin {
                         encode(q)
                     ),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -43,6 +46,9 @@ impl Plugin for WikipediaPlugin {
             desc: "Wikipedia".into(),
             action: "query:wiki ".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }]
     }
 }

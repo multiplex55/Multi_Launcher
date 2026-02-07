@@ -351,6 +351,9 @@ impl TodoWidget {
                             desc: "Todo".into(),
                             action: "todo:dialog".into(),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                         query_override: self.cfg.query.clone().or_else(|| Some("todo".into())),
                     });
@@ -427,6 +430,9 @@ impl TodoWidget {
                                     desc: "Todo".into(),
                                     action: format!("todo:edit:{idx}"),
                                     args: None,
+                                    preview_text: None,
+                                    risk_level: None,
+                                    icon: None,
                                 },
                                 query_override: Some(format!("todo edit {}", entry.text)),
                             });

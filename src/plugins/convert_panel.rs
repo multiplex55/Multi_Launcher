@@ -15,6 +15,9 @@ impl Plugin for ConvertPanelPlugin {
                 desc: "Convert".into(),
                 action: "convert:panel".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
         Vec::new()
@@ -39,12 +42,18 @@ impl Plugin for ConvertPanelPlugin {
                 desc: "Convert".into(),
                 action: "query:conv ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "convert".into(),
                 desc: "Convert".into(),
                 action: "query:convert ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

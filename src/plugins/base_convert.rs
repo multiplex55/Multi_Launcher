@@ -131,6 +131,9 @@ impl Plugin for BaseConvertPlugin {
                     desc: "Base Convert".into(),
                     action: format!("clipboard:{res}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -156,12 +159,18 @@ impl Plugin for BaseConvertPlugin {
                 desc: "Base Convert".into(),
                 action: "query:conv ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "convert".into(),
                 desc: "Base Convert".into(),
                 action: "query:convert ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

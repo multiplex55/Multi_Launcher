@@ -173,6 +173,9 @@ impl Plugin for NetworkPlugin {
                     desc: "Network".into(),
                     action: format!("net:{name}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }
             })
             .collect()
@@ -196,6 +199,9 @@ impl Plugin for NetworkPlugin {
             desc: "Network".into(),
             action: "query:net".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }]
     }
 

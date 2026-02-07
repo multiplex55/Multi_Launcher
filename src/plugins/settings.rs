@@ -14,6 +14,9 @@ impl Plugin for SettingsPlugin {
                     desc: "Show settings panel".into(),
                     action: "settings:dialog".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -24,6 +27,9 @@ impl Plugin for SettingsPlugin {
                     desc: "Configure dashboard layout and widgets".into(),
                     action: "dashboard:settings".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -34,6 +40,9 @@ impl Plugin for SettingsPlugin {
                     desc: "Configure launcher theme colors".into(),
                     action: "theme:dialog".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -59,18 +68,27 @@ impl Plugin for SettingsPlugin {
                 desc: "Settings".into(),
                 action: "settings:dialog".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "Dashboard Settings".into(),
                 desc: "Dashboard settings".into(),
                 action: "dashboard:settings".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "Theme settings".into(),
                 desc: "Configure launcher theme colors".into(),
                 action: "theme:dialog".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

@@ -1,4 +1,4 @@
-use crate::actions::Action;
+use crate::actions::{Action, ActionRiskLevel};
 use crate::plugin::Plugin;
 use crate::plugins::layouts_storage::{get_layout, layouts_config_path, load_layouts, LayoutMatch};
 
@@ -172,36 +172,54 @@ impl Plugin for LayoutPlugin {
                     desc: "Layout".into(),
                     action: "query:layout list".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 },
                 Action {
                     label: "layout save <name>".into(),
                     desc: "Layout".into(),
                     action: "query:layout save ".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 },
                 Action {
                     label: "layout load <name>".into(),
                     desc: "Layout".into(),
                     action: "query:layout load ".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 },
                 Action {
                     label: "layout show <name>".into(),
                     desc: "Layout".into(),
                     action: "query:layout show ".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 },
                 Action {
                     label: format!("{config_label} ({config_desc})"),
                     desc: "Layout config".into(),
                     action: "layout:edit".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 },
                 Action {
                     label: "layout rm <name>".into(),
                     desc: "Layout".into(),
                     action: "query:layout rm ".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 },
             ];
         }
@@ -223,6 +241,11 @@ impl Plugin for LayoutPlugin {
                             &LayoutFlags::default(),
                         ),
                         args: None,
+                        preview_text: Some(
+                            "Repositions and resizes windows based on the saved layout.".into(),
+                        ),
+                        risk_level: Some(ActionRiskLevel::High),
+                        icon: Some("layout".into()),
                     })
                     .collect();
             }
@@ -239,6 +262,11 @@ impl Plugin for LayoutPlugin {
                 desc: "Layout".into(),
                 action: build_action(format!("layout:save:{name}"), &flags),
                 args: None,
+                preview_text: Some(
+                    "Captures current window placements into a named layout.".into(),
+                ),
+                risk_level: Some(ActionRiskLevel::Medium),
+                icon: Some("layout".into()),
             }];
         }
 
@@ -252,6 +280,11 @@ impl Plugin for LayoutPlugin {
                 desc: "Layout".into(),
                 action: build_action(format!("layout:load:{name}"), &flags),
                 args: None,
+                preview_text: Some(
+                    "Repositions and resizes windows based on the saved layout.".into(),
+                ),
+                risk_level: Some(ActionRiskLevel::High),
+                icon: Some("layout".into()),
             }];
         }
 
@@ -292,6 +325,12 @@ impl Plugin for LayoutPlugin {
                                     desc: format!("Layout preview: {layout_name}"),
                                     action: action.clone(),
                                     args: None,
+                                    preview_text: Some(
+                                        "Preview entry for this matched window inside the selected layout."
+                                            .into(),
+                                    ),
+                                    risk_level: Some(ActionRiskLevel::Low),
+                                    icon: Some("layout".into()),
                                 }
                             })
                             .collect();
@@ -310,6 +349,9 @@ impl Plugin for LayoutPlugin {
                         desc: "Layout".into(),
                         action: format!("query:layout show {}", layout.name),
                         args: None,
+                        preview_text: Some("Shows window matches for the selected layout.".into()),
+                        risk_level: Some(ActionRiskLevel::Low),
+                        icon: Some("layout".into()),
                     })
                     .collect();
             }
@@ -323,6 +365,9 @@ impl Plugin for LayoutPlugin {
                     desc: "Layout config".into(),
                     action: "layout:edit".into(),
                     args: None,
+                    preview_text: Some("Opens the layouts configuration file for editing.".into()),
+                    risk_level: Some(ActionRiskLevel::Low),
+                    icon: Some("layout".into()),
                 }];
             }
         }
@@ -337,6 +382,9 @@ impl Plugin for LayoutPlugin {
                 desc: "Layout".into(),
                 action: build_action(format!("layout:rm:{name}"), &flags),
                 args: None,
+                preview_text: Some("Deletes the saved layout definition from disk.".into()),
+                risk_level: Some(ActionRiskLevel::High),
+                icon: Some("layout".into()),
             }];
         }
 
@@ -361,6 +409,9 @@ impl Plugin for LayoutPlugin {
             desc: "Layout".into(),
             action: "query:layout ".into(),
             args: None,
+            preview_text: Some("Layout operation".into()),
+            risk_level: Some(ActionRiskLevel::Low),
+            icon: Some("layout".into()),
         }]
     }
 }

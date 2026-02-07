@@ -78,3 +78,12 @@ fn command_returns_immediately_and_cleans() {
         }
     }
 }
+
+#[test]
+fn search_has_metadata() {
+    let plugin = RecyclePlugin;
+    let results = plugin.search("rec");
+    assert!(results[0].preview_text.is_some());
+    assert!(results[0].risk_level.is_some());
+    assert!(results[0].icon.is_some());
+}

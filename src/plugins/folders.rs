@@ -186,6 +186,9 @@ impl FoldersPlugin {
                     desc: f.path.clone(),
                     action: f.path.clone(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }
             })
             .collect()
@@ -209,6 +212,9 @@ impl Plugin for FoldersPlugin {
                     desc: "Folder".into(),
                     action: format!("folder:add:{path}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -235,6 +241,9 @@ impl Plugin for FoldersPlugin {
                     desc: f.path.clone(),
                     action: format!("folder:remove:{}", f.path.clone()),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -272,24 +281,36 @@ impl Plugin for FoldersPlugin {
                 desc: "Folder".into(),
                 action: "query:f ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "f list".into(),
                 desc: "Folder".into(),
                 action: "query:f list ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "f add".into(),
                 desc: "Folder".into(),
                 action: "query:f add ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "f rm".into(),
                 desc: "Folder".into(),
                 action: "query:f rm ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

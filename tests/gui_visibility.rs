@@ -80,3 +80,10 @@ fn queued_visibility_applies_when_context_available() {
         _ => panic!("unexpected command"),
     }
 }
+
+#[test]
+fn settings_default_enable_preview_panel() {
+    let settings = multi_launcher::settings::Settings::default();
+    assert!(settings.preview_enabled);
+    assert!(!settings.preview_compact_mode);
+}

@@ -574,6 +574,9 @@ pub(crate) fn gesture_focus_action(
             desc: "Mouse gestures".into(),
             action: "mg:dialog:focus".into(),
             args: serde_json::to_string(&args).ok(),
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         },
         query_override: None,
     }
@@ -597,6 +600,9 @@ pub(crate) fn gesture_toggle_action(
             desc: "Mouse gestures".into(),
             action: "mg:toggle".into(),
             args: serde_json::to_string(&args).ok(),
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         },
         query_override: None,
     }

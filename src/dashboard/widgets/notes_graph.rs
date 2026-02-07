@@ -115,6 +115,9 @@ impl Widget for NotesGraphWidget {
                         desc: "Note".into(),
                         action: format!("note:open:{slug}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     query_override: Some(format!("note open {slug}")),
                 });

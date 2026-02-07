@@ -396,6 +396,9 @@ impl LayoutsWidget {
                 desc: "Layout".into(),
                 action,
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             query_override: None,
         }

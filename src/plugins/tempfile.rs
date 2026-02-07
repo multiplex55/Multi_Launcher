@@ -143,6 +143,9 @@ impl Plugin for TempfilePlugin {
                     desc: "Tempfile".into(),
                     action: "tempfile:dialog".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -158,6 +161,9 @@ impl Plugin for TempfilePlugin {
                     desc: "Tempfile".into(),
                     action: format!("tempfile:new:{alias}"),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         } else if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp new")
@@ -169,6 +175,9 @@ impl Plugin for TempfilePlugin {
                     desc: "Tempfile".into(),
                     action: "tempfile:new".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -179,6 +188,9 @@ impl Plugin for TempfilePlugin {
                     desc: "Tempfile".into(),
                     action: "tempfile:open".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -189,6 +201,9 @@ impl Plugin for TempfilePlugin {
                     desc: "Tempfile".into(),
                     action: "tempfile:clear".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -215,6 +230,9 @@ impl Plugin for TempfilePlugin {
                         desc: "Tempfile".into(),
                         action: format!("tempfile:remove:{}", p.to_string_lossy()),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }
                 })
                 .collect();
@@ -238,6 +256,9 @@ impl Plugin for TempfilePlugin {
                                 desc: "Tempfile".into(),
                                 action: format!("tempfile:alias:{}|{}", p.to_string_lossy(), alias),
                                 args: None,
+                                preview_text: None,
+                                risk_level: None,
+                                icon: None,
                             }];
                         }
                     }
@@ -267,6 +288,9 @@ impl Plugin for TempfilePlugin {
                         desc: "Tempfile".into(),
                         action: p.to_string_lossy().into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }
                 })
                 .collect();
@@ -293,42 +317,63 @@ impl Plugin for TempfilePlugin {
                 desc: "Tempfile".into(),
                 action: "query:tmp".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "tmp new".into(),
                 desc: "Tempfile".into(),
                 action: "query:tmp new ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "tmp create".into(),
                 desc: "Tempfile".into(),
                 action: "query:tmp create ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "tmp open".into(),
                 desc: "Tempfile".into(),
                 action: "query:tmp open".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "tmp clear".into(),
                 desc: "Tempfile".into(),
                 action: "query:tmp clear".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "tmp list".into(),
                 desc: "Tempfile".into(),
                 action: "query:tmp list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "tmp rm".into(),
                 desc: "Tempfile".into(),
                 action: "query:tmp rm ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

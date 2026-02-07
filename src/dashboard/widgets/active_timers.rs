@@ -110,6 +110,9 @@ impl Widget for ActiveTimersWidget {
                             desc: "Timer".into(),
                             action: format!("timer:pause:{id}"),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                         query_override: Some("timer pause".into()),
                     });
@@ -121,6 +124,9 @@ impl Widget for ActiveTimersWidget {
                             desc: "Timer".into(),
                             action: format!("timer:cancel:{id}"),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         },
                         query_override: Some("timer cancel".into()),
                     });

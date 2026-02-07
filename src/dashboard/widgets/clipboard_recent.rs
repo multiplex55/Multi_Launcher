@@ -108,6 +108,9 @@ impl Widget for ClipboardRecentWidget {
                                 desc: "Clipboard".into(),
                                 action: format!("clipboard:copy:{idx}"),
                                 args: None,
+                                preview_text: None,
+                                risk_level: None,
+                                icon: None,
                             },
                             query_override: Some("cb list".into()),
                         });

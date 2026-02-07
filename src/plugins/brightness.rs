@@ -12,6 +12,9 @@ fn usage_action(usage: &str) -> Action {
         desc: "Brightness".into(),
         action: "query:bright ".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     }
 }
 
@@ -30,6 +33,9 @@ impl Plugin for BrightnessPlugin {
                         desc: "Brightness".into(),
                         action: "brightness:dialog".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     usage_action(BRIGHT_USAGE),
                 ];
@@ -49,6 +55,9 @@ impl Plugin for BrightnessPlugin {
                         desc: "Brightness".into(),
                         action: format!("brightness:set:{val}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }];
                 }
                 ParseArgsResult::Usage(usage) => {
@@ -77,6 +86,9 @@ impl Plugin for BrightnessPlugin {
             desc: "Brightness".into(),
             action: "query:bright ".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }]
     }
 }

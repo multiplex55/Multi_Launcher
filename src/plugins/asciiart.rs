@@ -40,6 +40,9 @@ impl Plugin for AsciiArtPlugin {
                             desc: "AsciiArt".into(),
                             action: format!("clipboard:{}", art),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         }];
                     }
                 }
@@ -66,6 +69,9 @@ impl Plugin for AsciiArtPlugin {
             desc: "AsciiArt".into(),
             action: "query:ascii ".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }]
     }
 }

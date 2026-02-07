@@ -121,6 +121,9 @@ impl CommandHistoryWidget {
         ctx: &DashboardContext<'_>,
         action_id: &str,
         args: Option<&str>,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     ) -> Option<Action> {
         if let Some(action) = ctx.actions_by_id.get(action_id) {
             return Some(action.clone());
@@ -153,6 +156,9 @@ impl CommandHistoryWidget {
                 desc: "Fav".into(),
                 action: fav.action.clone(),
                 args: fav.args.clone(),
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             });
         }
 
@@ -163,6 +169,9 @@ impl CommandHistoryWidget {
                     desc: "Note".into(),
                     action: action_id.to_string(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -177,6 +186,9 @@ impl CommandHistoryWidget {
                     desc: "Clipboard".into(),
                     action: action_id.to_string(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -191,6 +203,9 @@ impl CommandHistoryWidget {
                     desc: "Todo".into(),
                     action: action_id.to_string(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -205,6 +220,9 @@ impl CommandHistoryWidget {
                     desc: "Todo".into(),
                     action: action_id.to_string(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -219,6 +237,9 @@ impl CommandHistoryWidget {
                     desc: "Todo".into(),
                     action: action_id.to_string(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -230,6 +251,9 @@ impl CommandHistoryWidget {
                     desc: "Snippet".into(),
                     action: action_id.to_string(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -241,6 +265,9 @@ impl CommandHistoryWidget {
                     desc: "Snippet".into(),
                     action: action_id.to_string(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -252,6 +279,9 @@ impl CommandHistoryWidget {
                     desc: "Snippet".into(),
                     action: action_id.to_string(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 });
             }
         }
@@ -279,6 +309,9 @@ impl CommandHistoryWidget {
             desc: pin.desc.clone(),
             action: pin.action_id.clone(),
             args: pin.args.clone(),
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         };
         let resolved = Self::resolve_action(ctx, &pin.action_id, pin.args.as_deref());
         let action = resolved.clone().unwrap_or(fallback);
@@ -370,6 +403,9 @@ impl Widget for CommandHistoryWidget {
                         label: entry.action.label.clone(),
                         desc: entry.action.desc.clone(),
                         args: entry.action.args.clone(),
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                         query: entry.query.clone(),
                         timestamp: entry.timestamp,
                     };

@@ -28,6 +28,9 @@ fn bench_omni_search(c: &mut Criterion) {
             desc: format!("Description {i}"),
             action: i.to_string(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         })
         .collect();
     let index = build_index(&actions);

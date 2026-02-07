@@ -63,6 +63,9 @@ mod tests {
             desc: String::new(),
             action: "volume:pid_toggle_mute:42".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         };
         assert_eq!(
             parse_action_kind(&action),
@@ -77,6 +80,9 @@ mod tests {
             desc: String::new(),
             action: "volume:toggle_mute".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         };
         assert_eq!(parse_action_kind(&action), ActionKind::VolumeToggleMute);
     }
@@ -88,6 +94,9 @@ mod tests {
             desc: String::new(),
             action: "power:plan:set:balanced".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         };
         assert_eq!(
             parse_action_kind(&action),
@@ -109,6 +118,9 @@ mod tests {
             desc: String::new(),
             action: format!("todo:add:{encoded}"),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         };
 
         assert_eq!(
@@ -134,6 +146,9 @@ mod tests {
             desc: String::new(),
             action: format!("todo:tag:{encoded}"),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         };
 
         assert_eq!(
@@ -395,6 +410,9 @@ enum ActionKind<'a> {
     ShellAdd {
         name: &'a str,
         args: &'a str,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     },
     ShellRemove(&'a str),
     ClipboardClear,
@@ -459,6 +477,9 @@ enum ActionKind<'a> {
         label: &'a str,
         command: &'a str,
         args: Option<&'a str>,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     },
     FavRemove(&'a str),
     BrightnessSet(u32),
@@ -523,6 +544,9 @@ enum ActionKind<'a> {
     ExecPath {
         path: &'a str,
         args: Option<&'a str>,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     },
     Macro(&'a str),
 }
@@ -807,6 +831,9 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
             _ => ActionKind::ExecPath {
                 path: s,
                 args: action.args.as_deref(),
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         };
     }
@@ -898,6 +925,9 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     ActionKind::ExecPath {
         path: s,
         args: action.args.as_deref(),
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     }
 }
 

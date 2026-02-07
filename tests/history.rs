@@ -40,6 +40,9 @@ fn clear_history_empties_file() {
             desc: "".into(),
             action: "run".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         },
         source: None,
         timestamp: 0,
@@ -80,6 +83,9 @@ fn gesture_activation_increments_history() {
         desc: "".into(),
         action: "history:clear".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     };
 
     app.activate_action(action, None, ActivationSource::Gesture);
@@ -104,6 +110,9 @@ fn gesture_query_action_sets_query_without_execution() {
         desc: "".into(),
         action: "query:hello".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     };
 
     app.activate_action(action, None, ActivationSource::Gesture);

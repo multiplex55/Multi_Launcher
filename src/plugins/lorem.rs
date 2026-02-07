@@ -40,6 +40,9 @@ impl Plugin for LoremPlugin {
                         desc: "Lorem".into(),
                         action: format!("clipboard:{text}"),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }];
                 }
             }
@@ -66,18 +69,27 @@ impl Plugin for LoremPlugin {
                 desc: "Lorem words".into(),
                 action: "query:lorem w ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "lorem s <n>".into(),
                 desc: "Lorem sentences".into(),
                 action: "query:lorem s ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "lorem p <n>".into(),
                 desc: "Lorem paragraphs".into(),
                 action: "query:lorem p ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

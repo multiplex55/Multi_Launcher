@@ -13,6 +13,9 @@ impl Plugin for HelpPlugin {
                     desc: "Display available command prefixes".into(),
                     action: "help:show".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
             }
         }
@@ -37,6 +40,9 @@ impl Plugin for HelpPlugin {
             desc: "Help".into(),
             action: "query:help".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }]
     }
 }

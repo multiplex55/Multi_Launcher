@@ -24,6 +24,9 @@ impl Plugin for KeysPlugin {
                 desc: "Keys".into(),
                 action: "query:keys ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             }];
         }
 
@@ -32,6 +35,9 @@ impl Plugin for KeysPlugin {
             desc: "Keys".into(),
             action: format!("keys:{spec}"),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }]
     }
 
@@ -53,6 +59,9 @@ impl Plugin for KeysPlugin {
             desc: "Keys".into(),
             action: "query:keys ".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }]
     }
 }

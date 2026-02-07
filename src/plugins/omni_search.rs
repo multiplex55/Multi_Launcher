@@ -101,12 +101,18 @@ impl Plugin for OmniSearchPlugin {
                 desc: "Omni".into(),
                 action: "query:o ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "o list".into(),
                 desc: "Omni".into(),
                 action: "query:o list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }

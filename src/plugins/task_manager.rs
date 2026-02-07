@@ -1,4 +1,4 @@
-use crate::actions::Action;
+use crate::actions::{Action, ActionRiskLevel};
 use crate::plugin::Plugin;
 
 pub struct TaskManagerPlugin;
@@ -12,6 +12,11 @@ impl Plugin for TaskManagerPlugin {
                 desc: "Task Manager".into(),
                 action: "shell:taskmgr".into(),
                 args: None,
+                preview_text: Some(
+                    "Opens Windows Task Manager to inspect and end running tasks.".into(),
+                ),
+                risk_level: Some(ActionRiskLevel::Medium),
+                icon: Some("task_manager".into()),
             }];
         }
         Vec::new()
@@ -35,6 +40,9 @@ impl Plugin for TaskManagerPlugin {
             desc: "Task Manager".into(),
             action: "query:tm".into(),
             args: None,
+            preview_text: Some("Query shortcut for Task Manager commands.".into()),
+            risk_level: Some(ActionRiskLevel::Low),
+            icon: Some("task_manager".into()),
         }]
     }
 }

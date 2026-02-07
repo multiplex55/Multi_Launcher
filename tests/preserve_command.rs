@@ -67,6 +67,9 @@ fn bookmark_add_preserves_prefix() {
         desc: "".into(),
         action: format!("bookmark:add:{url}"),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     }];
     let mut app = new_app(&ctx, actions, true);
     app.query = format!("bm add {url}");
@@ -87,6 +90,9 @@ fn bookmark_add_clears_without_setting() {
         desc: "".into(),
         action: format!("bookmark:add:{url}"),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     }];
     let mut app = new_app(&ctx, actions, false);
     app.query = format!("bm add {url}");
@@ -106,6 +112,9 @@ fn timer_add_preserves_prefix() {
         desc: "".into(),
         action: "timer:start:1s".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     }];
     let mut app = new_app(&ctx, actions, true);
     app.query = "timer add 1s".into();
@@ -134,6 +143,9 @@ fn todo_add_preserves_prefix() {
         desc: "".into(),
         action: "todo:add:test|0|".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     }];
     let mut app = new_app(&ctx, actions, true);
     let _cwd_guard = CurrentDirGuard::new();
@@ -157,6 +169,9 @@ fn tmp_new_preserves_prefix() {
         desc: "".into(),
         action: "tempfile:new".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     }];
     let mut app = new_app(&ctx, actions, true);
     let _cwd_guard = CurrentDirGuard::new();

@@ -83,6 +83,9 @@ fn dashboard_settings_action_opens_editor() {
         desc: "Configure dashboard layout and widgets".into(),
         action: "dashboard:settings".into(),
         args: None,
+        preview_text: None,
+        risk_level: None,
+        icon: None,
     };
     assert!(!app.dashboard_editor.open);
     assert!(!app.show_dashboard_editor);
@@ -113,6 +116,9 @@ fn theme_action_is_discoverable_and_opens_dialog() {
             desc: "Configure launcher theme colors".into(),
             action: "theme:dialog".into(),
             args: None,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         },
         None,
         ActivationSource::Enter,

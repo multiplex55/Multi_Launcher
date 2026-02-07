@@ -745,6 +745,9 @@ impl Plugin for NotePlugin {
                     desc: "Note".into(),
                     action: "note:dialog".into(),
                     args: None,
+                    preview_text: None,
+                    risk_level: None,
+                    icon: None,
                 }];
                 actions.extend([
                     Action {
@@ -752,72 +755,108 @@ impl Plugin for NotePlugin {
                         desc: "Note".into(),
                         action: "query:note search ".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "note list".into(),
                         desc: "Note".into(),
                         action: "query:note list".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "note tag".into(),
                         desc: "Note".into(),
                         action: "query:note tag".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "note templates".into(),
                         desc: "Note".into(),
                         action: "query:note templates".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "note new".into(),
                         desc: "Note".into(),
                         action: "query:note new ".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "note add".into(),
                         desc: "Note".into(),
                         action: "query:note add ".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "note open".into(),
                         desc: "Note".into(),
                         action: "query:note open ".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "note today".into(),
                         desc: "Note".into(),
                         action: "query:note today".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "note link".into(),
                         desc: "Note".into(),
                         action: "query:note link ".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "note rm".into(),
                         desc: "Note".into(),
                         action: "query:note rm ".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "note reload".into(),
                         desc: "Note".into(),
                         action: "note:reload".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                     Action {
                         label: "notes unused".into(),
                         desc: "Note".into(),
                         action: "note:unused_assets".into(),
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     },
                 ]);
                 return actions;
@@ -840,6 +879,9 @@ impl Plugin for NotePlugin {
                             desc: "Note".into(),
                             action: "note:reload".into(),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         }];
                     }
                 }
@@ -867,6 +909,9 @@ impl Plugin for NotePlugin {
                                 desc: "Note".into(),
                                 action,
                                 args: None,
+                                preview_text: None,
+                                risk_level: None,
+                                icon: None,
                             }];
                         }
                     }
@@ -888,6 +933,9 @@ impl Plugin for NotePlugin {
                             desc: "Note".into(),
                             action: format!("note:open:{}", n.slug),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         })
                         .collect();
                 }
@@ -942,6 +990,9 @@ impl Plugin for NotePlugin {
                             desc: "Note".into(),
                             action: format!("note:open:{}", n.slug),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         })
                         .collect();
                 }
@@ -957,6 +1008,9 @@ impl Plugin for NotePlugin {
                             desc: "Note".into(),
                             action: format!("note:open:{}", n.slug),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         })
                         .collect();
                 }
@@ -999,6 +1053,9 @@ impl Plugin for NotePlugin {
                             desc: "Note".into(),
                             action: format!("query:note list #{t}"),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         })
                         .collect();
                 }
@@ -1024,6 +1081,9 @@ impl Plugin for NotePlugin {
                         desc: "Note".into(),
                         action,
                         args: None,
+                        preview_text: None,
+                        risk_level: None,
+                        icon: None,
                     }];
                 }
                 "link" => {
@@ -1033,6 +1093,9 @@ impl Plugin for NotePlugin {
                             desc: "Usage".into(),
                             action: "query:note link ".into(),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         }];
                         actions.extend(guard.notes.iter().map(|n| Action {
                             label: format!(
@@ -1045,6 +1108,9 @@ impl Plugin for NotePlugin {
                                 n.alias.as_ref().unwrap_or(&n.title)
                             ),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         }));
                         return actions;
                     }
@@ -1057,6 +1123,9 @@ impl Plugin for NotePlugin {
                                 desc: "Backlinks".into(),
                                 action: "query:note link ".into(),
                                 args: None,
+                                preview_text: None,
+                                risk_level: None,
+                                icon: None,
                             }]
                         }
                     };
@@ -1074,6 +1143,9 @@ impl Plugin for NotePlugin {
                                 desc: format!("Backlinks to {}", note.title),
                                 action: format!("note:open:{}", linked_note.slug),
                                 args: None,
+                                preview_text: None,
+                                risk_level: None,
+                                icon: None,
                             }
                         })
                         .collect();
@@ -1084,6 +1156,9 @@ impl Plugin for NotePlugin {
                             desc: "Backlinks".into(),
                             action: format!("note:open:{}", note.slug),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         });
                     }
 
@@ -1106,6 +1181,9 @@ impl Plugin for NotePlugin {
                             desc: "Note".into(),
                             action: format!("note:remove:{}", n.slug),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         })
                         .collect();
                 }
@@ -1116,6 +1194,9 @@ impl Plugin for NotePlugin {
                             desc: "Note".into(),
                             action: "note:unused_assets".into(),
                             args: None,
+                            preview_text: None,
+                            risk_level: None,
+                            icon: None,
                         }];
                     }
                 }
@@ -1136,6 +1217,9 @@ impl Plugin for NotePlugin {
                                 desc: "Note".into(),
                                 action: format!("query:note new --template {name} "),
                                 args: None,
+                                preview_text: None,
+                                risk_level: None,
+                                icon: None,
                             })
                             .collect();
                     }
@@ -1166,84 +1250,126 @@ impl Plugin for NotePlugin {
                 desc: "Note".into(),
                 action: "query:note".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "note new".into(),
                 desc: "Note".into(),
                 action: "query:note new ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "note add".into(),
                 desc: "Note".into(),
                 action: "query:note add ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "note create".into(),
                 desc: "Note".into(),
                 action: "query:note create ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "note open".into(),
                 desc: "Note".into(),
                 action: "query:note open ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "note list".into(),
                 desc: "Note".into(),
                 action: "query:note list".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "note search".into(),
                 desc: "Note".into(),
                 action: "query:note search ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "note tag".into(),
                 desc: "Note".into(),
                 action: "query:note tag".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "note templates".into(),
                 desc: "Note".into(),
                 action: "query:note templates".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "note today".into(),
                 desc: "Note".into(),
                 action: "query:note today".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "note link".into(),
                 desc: "Note".into(),
                 action: "query:note link ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "note rm".into(),
                 desc: "Note".into(),
                 action: "query:note rm ".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "note reload".into(),
                 desc: "Note".into(),
                 action: "note:reload".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
             Action {
                 label: "notes unused".into(),
                 desc: "Note".into(),
                 action: "note:unused_assets".into(),
                 args: None,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             },
         ]
     }
