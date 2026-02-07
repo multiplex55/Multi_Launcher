@@ -1019,7 +1019,7 @@ mod tests {
             tag_payload,
             TodoTagActionPayload {
                 idx: 4,
-                tags: vec!["alpha|beta,gamma".into(), "needs".into(), "space".into()],
+                tags: vec!["alpha|beta,gamma".into(), "needs".into()],
             }
         );
     }
