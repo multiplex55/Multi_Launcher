@@ -606,8 +606,8 @@ fn default_legacy_schema_version() -> u32 {
 
 #[derive(Debug, Clone, Deserialize)]
 struct LegacyGestureDb {
-    #[serde(default = "default_legacy_schema_version")]
-    schema_version: u32,
+    #[serde(rename = "schema_version", default = "default_legacy_schema_version")]
+    _schema_version: u32,
     #[serde(default)]
     gestures: Vec<LegacyGestureEntry>,
 }
