@@ -194,16 +194,23 @@ impl TodoWidget {
         })
     }
 
-    fn tags_match(&self, entry: &TodoEntry) -> bool {
-        if self.cfg.filter_tags.is_empty() {
+    fn normalized_filter_tags(&self) -> Vec<String> {
+        self.cfg
+            .filter_tags
+            .iter()
+            .map(|tag| tag.to_lowercase())
+            .collect()
+    }
+
+    fn tags_match(&self, entry: &TodoEntry, normalized_filter_tags: &[String]) -> bool {
+        if normalized_filter_tags.is_empty() {
             return true;
         }
-        self.cfg.filter_tags.iter().any(|tag| {
-            let filter = tag.to_lowercase();
+        normalized_filter_tags.iter().any(|filter| {
             entry
                 .tags
                 .iter()
-                .any(|t| t.to_lowercase().contains(&filter))
+                .any(|tag| tag.eq_ignore_ascii_case(filter) || tag.to_lowercase().contains(filter))
         })
     }
 
@@ -219,16 +226,22 @@ impl TodoWidget {
         entry.priority >= self.cfg.min_priority
     }
 
-    fn entry_matches_filters(&self, entry: &TodoEntry) -> bool {
-        self.status_match(entry) && self.priority_match(entry) && self.tags_match(entry)
+    fn entry_matches_filters(&self, entry: &TodoEntry, normalized_filter_tags: &[String]) -> bool {
+        self.status_match(entry)
+            && self.priority_match(entry)
+            && self.tags_match(entry, normalized_filter_tags)
     }
 
-    fn filter_entries(&self, todos: &[TodoEntry]) -> Vec<(usize, TodoEntry)> {
+    fn filter_entries(
+        &self,
+        todos: &[TodoEntry],
+        normalized_filter_tags: &[String],
+    ) -> Vec<(usize, TodoEntry)> {
         todos
             .iter()
             .cloned()
             .enumerate()
-            .filter(|(_, t)| self.entry_matches_filters(t))
+            .filter(|(_, t)| self.entry_matches_filters(t, normalized_filter_tags))
             .collect()
     }
 
@@ -250,19 +263,26 @@ impl TodoWidget {
                 entries.sort_by(|a, b| b.1.priority.cmp(&a.1.priority).then_with(|| a.0.cmp(&b.0)))
             }
             TodoSort::Created => entries.sort_by_key(|(idx, _)| *idx),
-            TodoSort::Alphabetical => entries.sort_by(|a, b| {
-                a.1.text
-                    .to_lowercase()
-                    .cmp(&b.1.text.to_lowercase())
-                    .then_with(|| a.0.cmp(&b.0))
-            }),
+            TodoSort::Alphabetical => {
+                let mut keyed_entries: Vec<(String, usize, TodoEntry)> = entries
+                    .drain(..)
+                    .map(|(idx, entry)| (entry.text.to_lowercase(), idx, entry))
+                    .collect();
+                keyed_entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+                entries.extend(
+                    keyed_entries
+                        .into_iter()
+                        .map(|(_, idx, entry)| (idx, entry)),
+                );
+            }
         }
     }
 
     fn render_summary(&mut self, ui: &mut egui::Ui, todos: &[TodoEntry]) -> Option<WidgetAction> {
+        let normalized_filter_tags = self.normalized_filter_tags();
         let filtered: Vec<&TodoEntry> = todos
             .iter()
-            .filter(|t| self.priority_match(t) && self.tags_match(t))
+            .filter(|t| self.priority_match(t) && self.tags_match(t, &normalized_filter_tags))
             .collect();
         let done = filtered.iter().filter(|t| t.done).count();
         let total = filtered.len();
@@ -353,7 +373,8 @@ impl TodoWidget {
         ctx: &DashboardContext<'_>,
         todos: &[TodoEntry],
     ) -> Option<WidgetAction> {
-        let mut entries = self.filter_entries(todos);
+        let normalized_filter_tags = self.normalized_filter_tags();
+        let mut entries = self.filter_entries(todos, &normalized_filter_tags);
         Self::sort_entries(&mut entries, self.cfg.sort);
         entries.truncate(self.cfg.count);
 
@@ -505,7 +526,8 @@ mod tests {
         cfg.sort = TodoSort::Priority;
         let widget = TodoWidget::new(cfg);
 
-        let mut filtered = widget.filter_entries(&sample_entries());
+        let normalized_filter_tags = widget.normalized_filter_tags();
+        let mut filtered = widget.filter_entries(&sample_entries(), &normalized_filter_tags);
         TodoWidget::sort_entries(&mut filtered, TodoSort::Priority);
         let texts: Vec<String> = filtered.into_iter().map(|(_, entry)| entry.text).collect();
         assert_eq!(texts, vec!["gamma"]);
