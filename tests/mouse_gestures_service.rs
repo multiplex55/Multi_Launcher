@@ -1,14 +1,13 @@
+use multi_launcher::gui::register_event_sender;
 use multi_launcher::mouse_gestures::db::{
     BindingEntry, BindingKind, GestureDb, GestureEntry, SCHEMA_VERSION,
 };
 use multi_launcher::mouse_gestures::engine::DirMode;
 use multi_launcher::mouse_gestures::overlay::OverlayBackend;
 use multi_launcher::mouse_gestures::service::{
-    should_ignore_window_title, CancelBehavior, CursorPositionProvider, HookEvent,
-    MockHookBackend, MouseGestureConfig, MouseGestureService, NoMatchBehavior, OverlayFactory,
-    RightClickBackend,
+    should_ignore_window_title, CancelBehavior, CursorPositionProvider, HookEvent, MockHookBackend,
+    MouseGestureConfig, MouseGestureService, NoMatchBehavior, OverlayFactory, RightClickBackend,
 };
-use multi_launcher::gui::register_event_sender;
 use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -188,7 +187,10 @@ fn should_ignore_window_title_handles_matches() {
     let ignore = vec!["Notepad".to_string(), "  firefox  ".to_string()];
     assert!(should_ignore_window_title(&ignore, "Notepad"));
     assert!(should_ignore_window_title(&ignore, "Mozilla Firefox"));
-    assert!(should_ignore_window_title(&ignore, "FIREFOX - Private Browsing"));
+    assert!(should_ignore_window_title(
+        &ignore,
+        "FIREFOX - Private Browsing"
+    ));
     assert!(!should_ignore_window_title(&ignore, "Terminal"));
 }
 
@@ -616,8 +618,7 @@ fn selection_persists_across_gesture_sessions() {
     cursor_provider.set_position((50.0, 0.0));
     sleep(Duration::from_millis(50));
 
-    let hint_text =
-        wait_for_hint(&hint_state, Duration::from_millis(500)).expect("hint text");
+    let hint_text = wait_for_hint(&hint_state, Duration::from_millis(500)).expect("hint text");
     assert!(hint_text.contains("Secondary"));
 
     service.stop();
