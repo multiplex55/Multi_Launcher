@@ -447,6 +447,7 @@ cargo build --release
 
 * The project uses `rdev` and may require the `unstable_grab` feature for global input capture in some environments.
 * Some plugins depend on Windows-specific APIs (window management, browser tab activation, etc.).
+* Dependency lockfile minimums are enforced by tests. Run `cargo test --test dependency_floor_guard` to validate `time` and `bytes` floor versions in `Cargo.lock`.
 
 ---
 
