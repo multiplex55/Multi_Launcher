@@ -20,9 +20,6 @@ pub struct FavEntry {
     pub action: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<String>,
-    preview_text: None,
-    risk_level: None,
-    icon: None,
 }
 
 pub fn load_favs(path: &str) -> anyhow::Result<Vec<FavEntry>> {
@@ -54,9 +51,6 @@ pub fn set_fav(path: &str, label: &str, action: &str, args: Option<&str>) -> any
             label: label.to_string(),
             action: action.to_string(),
             args: args.map(|s| s.to_string()),
-            preview_text: None,
-            risk_level: None,
-            icon: None,
         });
     }
     save_favs(path, &list)
@@ -91,9 +85,6 @@ pub fn resolve_with_plugin(
     plugin: &dyn Plugin,
     command: &str,
     args: Option<&str>,
-    preview_text: None,
-    risk_level: None,
-    icon: None,
 ) -> (String, Option<String>) {
     let mut query = command.to_string();
     if let Some(a) = args {

@@ -12,9 +12,6 @@ pub const SHELL_CMDS_FILE: &str = "shell_cmds.json";
 pub struct ShellCmdEntry {
     pub name: String,
     pub args: String,
-    preview_text: None,
-    risk_level: None,
-    icon: None,
     /// When false this command will not be suggested when typing `sh <query>`.
     #[serde(default = "default_autocomplete")]
     pub autocomplete: bool,
@@ -69,9 +66,6 @@ pub fn append_shell_cmd(path: &str, name: &str, args: &str) -> anyhow::Result<()
         list.push(ShellCmdEntry {
             name: name.to_string(),
             args: args.to_string(),
-            preview_text: None,
-            risk_level: None,
-            icon: None,
             autocomplete: true,
             keep_open: false,
         });

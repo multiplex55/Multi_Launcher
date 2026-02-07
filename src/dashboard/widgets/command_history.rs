@@ -121,9 +121,6 @@ impl CommandHistoryWidget {
         ctx: &DashboardContext<'_>,
         action_id: &str,
         args: Option<&str>,
-        preview_text: None,
-        risk_level: None,
-        icon: None,
     ) -> Option<Action> {
         if let Some(action) = ctx.actions_by_id.get(action_id) {
             return Some(action.clone());
@@ -403,9 +400,6 @@ impl Widget for CommandHistoryWidget {
                         label: entry.action.label.clone(),
                         desc: entry.action.desc.clone(),
                         args: entry.action.args.clone(),
-                        preview_text: None,
-                        risk_level: None,
-                        icon: None,
                         query: entry.query.clone(),
                         timestamp: entry.timestamp,
                     };

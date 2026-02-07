@@ -410,9 +410,6 @@ enum ActionKind<'a> {
     ShellAdd {
         name: &'a str,
         args: &'a str,
-        preview_text: None,
-        risk_level: None,
-        icon: None,
     },
     ShellRemove(&'a str),
     ClipboardClear,
@@ -477,9 +474,6 @@ enum ActionKind<'a> {
         label: &'a str,
         command: &'a str,
         args: Option<&'a str>,
-        preview_text: None,
-        risk_level: None,
-        icon: None,
     },
     FavRemove(&'a str),
     BrightnessSet(u32),
@@ -544,9 +538,6 @@ enum ActionKind<'a> {
     ExecPath {
         path: &'a str,
         args: Option<&'a str>,
-        preview_text: None,
-        risk_level: None,
-        icon: None,
     },
     Macro(&'a str),
 }
@@ -831,9 +822,6 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
             _ => ActionKind::ExecPath {
                 path: s,
                 args: action.args.as_deref(),
-                preview_text: None,
-                risk_level: None,
-                icon: None,
             },
         };
     }
@@ -925,9 +913,6 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     ActionKind::ExecPath {
         path: s,
         args: action.args.as_deref(),
-        preview_text: None,
-        risk_level: None,
-        icon: None,
     }
 }
 

@@ -32,9 +32,6 @@ pub struct BindingEntry {
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<String>,
-    preview_text: None,
-    risk_level: None,
-    icon: None,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 }
@@ -483,6 +480,9 @@ impl BindingEntry {
             desc: format!("Mouse gesture: {gesture_label}"),
             action,
             args,
+            preview_text: None,
+            risk_level: None,
+            icon: None,
         }
     }
 }
@@ -634,9 +634,6 @@ struct LegacyBindingEntry {
     action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     args: Option<String>,
-    preview_text: None,
-    risk_level: None,
-    icon: None,
     #[serde(default = "default_enabled")]
     enabled: bool,
     #[serde(default)]
@@ -652,9 +649,6 @@ impl LegacyBindingEntry {
                 kind: BindingKind::ToggleLauncher,
                 action: String::new(),
                 args: None,
-                preview_text: None,
-                risk_level: None,
-                icon: None,
                 enabled: self.enabled,
             };
         }
@@ -673,9 +667,6 @@ impl LegacyBindingEntry {
             kind,
             action,
             args: self.args,
-            preview_text: None,
-            risk_level: None,
-            icon: None,
             enabled: self.enabled,
         }
     }

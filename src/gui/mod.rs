@@ -1954,9 +1954,6 @@ impl LauncherApp {
             label: action.label.clone(),
             desc: action.desc.clone(),
             args: action.args.clone(),
-            preview_text: None,
-            risk_level: None,
-            icon: None,
             query: self.query.clone(),
             timestamp: chrono::Utc::now().timestamp(),
         };
@@ -3944,7 +3941,11 @@ impl eframe::App for LauncherApp {
                 let area_height = ui.available_height();
                 ui.horizontal(|ui| {
                     let show_preview_pane = self.preview_enabled && self.selected.is_some();
-                    let list_width = if show_preview_pane { ui.available_width() * 0.62 } else { ui.available_width() };
+                    let list_width = if show_preview_pane {
+                        ui.available_width() * 0.62
+                    } else {
+                        ui.available_width()
+                    };
                     ui.set_width(list_width);
                     ScrollArea::vertical()
                         .max_height(area_height)
@@ -4443,8 +4444,8 @@ impl eframe::App for LauncherApp {
                             {
                                 self.focus_input();
                             }
+                            });
                         });
-                    });
                     if show_preview_pane {
                         ui.separator();
                         ui.vertical(|ui| {
@@ -4458,7 +4459,10 @@ impl eframe::App for LauncherApp {
                                         ui.small(format!("Icon: {icon}"));
                                     }
                                     if let Some(level) = action.risk_level {
-                                        ui.colored_label(egui::Color32::from_rgb(230, 170, 70), format!("Risk: {:?}", level));
+                                        ui.colored_label(
+                                            egui::Color32::from_rgb(230, 170, 70),
+                                            format!("Risk: {:?}", level),
+                                        );
                                     }
                                     ui.separator();
                                     if let Some(text) = &action.preview_text {

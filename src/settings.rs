@@ -296,8 +296,10 @@ pub struct Settings {
     /// Scale factor for the action list. Defaults to `1.0`.
     #[serde(default = "default_scale")]
     pub list_scale: Option<f32>,
+    /// Show preview pane for selected action in launcher results.
     #[serde(default = "default_preview_enabled")]
     pub preview_enabled: bool,
+    /// Use compact preview presentation in the preview pane.
     #[serde(default)]
     pub preview_compact_mode: bool,
     /// Weight of the fuzzy match score when ranking results.
@@ -480,16 +482,16 @@ fn default_log_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("launcher.log"))
 }
 
-fn default_preview_enabled() -> bool {
-    true
-}
-
 fn default_launcher_hotkey() -> Option<String> {
     if std::env::var("ML_DEFAULT_HOTKEY_NONE").is_ok() {
         None
     } else {
         Some("F2".into())
     }
+}
+
+fn default_preview_enabled() -> bool {
+    true
 }
 
 impl Default for Settings {

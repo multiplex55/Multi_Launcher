@@ -18,9 +18,6 @@ fn load_shell_cmds_roundtrip() {
     let entries = vec![ShellCmdEntry {
         name: "test".into(),
         args: "echo hi".into(),
-        preview_text: None,
-        risk_level: None,
-        icon: None,
         autocomplete: true,
         keep_open: false,
     }];
@@ -42,9 +39,6 @@ fn search_named_command_returns_action() {
     let entries = vec![ShellCmdEntry {
         name: "demo".into(),
         args: "dir".into(),
-        preview_text: None,
-        risk_level: None,
-        icon: None,
         autocomplete: true,
         keep_open: false,
     }];
@@ -65,9 +59,6 @@ fn search_respects_autocomplete_flag() {
     let entries = vec![ShellCmdEntry {
         name: "demo".into(),
         args: "dir".into(),
-        preview_text: None,
-        risk_level: None,
-        icon: None,
         autocomplete: false,
         keep_open: false,
     }];
@@ -88,9 +79,6 @@ fn search_keep_open_uses_shell_keep_prefix() {
     let entries = vec![ShellCmdEntry {
         name: "demo".into(),
         args: "dir".into(),
-        preview_text: None,
-        risk_level: None,
-        icon: None,
         autocomplete: true,
         keep_open: true,
     }];
@@ -133,18 +121,12 @@ fn rm_lists_matching_commands() {
         ShellCmdEntry {
             name: "a".into(),
             args: "cmd_a".into(),
-            preview_text: None,
-            risk_level: None,
-            icon: None,
             autocomplete: true,
             keep_open: false,
         },
         ShellCmdEntry {
             name: "b".into(),
             args: "cmd_b".into(),
-            preview_text: None,
-            risk_level: None,
-            icon: None,
             autocomplete: true,
             keep_open: false,
         },
@@ -166,9 +148,6 @@ fn list_returns_saved_commands() {
     let entries = vec![ShellCmdEntry {
         name: "x".into(),
         args: "dir".into(),
-        preview_text: None,
-        risk_level: None,
-        icon: None,
         autocomplete: true,
         keep_open: false,
     }];

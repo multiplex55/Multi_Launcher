@@ -36,9 +36,6 @@ pub struct MacroStep {
     pub command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<String>,
-    preview_text: None,
-    risk_level: None,
-    icon: None,
     /// Delay in milliseconds after this step when using manual delays.
     #[serde(default)]
     pub delay_ms: u64,
@@ -193,6 +190,9 @@ pub fn run_macro(name: &str) -> anyhow::Result<()> {
                 desc: String::new(),
                 action: command,
                 args,
+                preview_text: None,
+                risk_level: None,
+                icon: None,
             };
             if let Err(e) = launch_action(&act) {
                 tracing::error!(?e, "failed to run macro step");

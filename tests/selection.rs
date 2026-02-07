@@ -1,5 +1,5 @@
 use eframe::egui;
-use multi_launcher::actions::Action;
+use multi_launcher::actions::{Action, ActionRiskLevel};
 use multi_launcher::gui::{LauncherApp, APP_PREFIX};
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
@@ -176,7 +176,7 @@ fn selected_action_exposes_preview_metadata() {
         action: "system:shutdown".into(),
         args: None,
         preview_text: Some("Will shutdown".into()),
-        risk_level: Some(multi_launcher::actions::ActionRiskLevel::Critical),
+        risk_level: Some(ActionRiskLevel::Critical),
         icon: Some("power".into()),
     }];
     let mut app = new_app(&ctx, acts);

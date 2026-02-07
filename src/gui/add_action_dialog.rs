@@ -19,14 +19,8 @@ pub struct AddActionDialog {
     path: String,
     /// Whether the arguments field is visible.
     show_args: bool,
-    preview_text: None,
-    risk_level: None,
-    icon: None,
     /// Additional arguments to pass when launching.
     args: String,
-    preview_text: None,
-    risk_level: None,
-    icon: None,
     /// Current dialog mode (add or edit existing command).
     mode: DialogMode,
 }
@@ -53,13 +47,7 @@ impl Default for AddActionDialog {
             desc: String::new(),
             path: String::new(),
             show_args: false,
-            preview_text: None,
-            risk_level: None,
-            icon: None,
             args: String::new(),
-            preview_text: None,
-            risk_level: None,
-            icon: None,
             mode: DialogMode::Add,
         }
     }
@@ -162,6 +150,9 @@ impl AddActionDialog {
                                             } else {
                                                 None
                                             },
+                                            preview_text: None,
+                                            risk_level: None,
+                                            icon: None,
                                         });
                                         app.custom_len += 1;
                                         app.actions = Arc::new(new_actions);

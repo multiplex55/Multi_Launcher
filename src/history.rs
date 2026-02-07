@@ -25,9 +25,6 @@ pub struct HistoryPin {
     pub label: String,
     pub desc: String,
     pub args: Option<String>,
-    preview_text: None,
-    risk_level: None,
-    icon: None,
     pub query: String,
     #[serde(default)]
     pub timestamp: i64,
@@ -40,9 +37,6 @@ impl HistoryPin {
             label: entry.action.label.clone(),
             desc: entry.action.desc.clone(),
             args: entry.action.args.clone(),
-            preview_text: None,
-            risk_level: None,
-            icon: None,
             query: entry.query.clone(),
             timestamp: entry.timestamp,
         }
@@ -271,9 +265,6 @@ mod tests {
             label: "One".into(),
             desc: "Test".into(),
             args: Some("--flag".into()),
-            preview_text: None,
-            risk_level: None,
-            icon: None,
             query: "one".into(),
             timestamp: 123,
         };
@@ -300,9 +291,6 @@ mod tests {
             label: "One".into(),
             desc: "Test".into(),
             args: Some("--flag".into()),
-            preview_text: None,
-            risk_level: None,
-            icon: None,
             query: "one".into(),
             timestamp: 1,
         };
@@ -311,9 +299,6 @@ mod tests {
             label: "One Updated".into(),
             desc: "Other".into(),
             args: Some("--flag".into()),
-            preview_text: None,
-            risk_level: None,
-            icon: None,
             query: "two".into(),
             timestamp: 2,
         };
@@ -322,9 +307,6 @@ mod tests {
             label: "One".into(),
             desc: "Test".into(),
             args: Some("--other".into()),
-            preview_text: None,
-            risk_level: None,
-            icon: None,
             query: "one".into(),
             timestamp: 1,
         };
@@ -341,9 +323,6 @@ mod tests {
             label: "One".into(),
             desc: "Old".into(),
             args: None,
-            preview_text: None,
-            risk_level: None,
-            icon: None,
             query: "one".into(),
             timestamp: 10,
         };
@@ -355,9 +334,6 @@ mod tests {
             label: "One Updated".into(),
             desc: "New".into(),
             args: None,
-            preview_text: None,
-            risk_level: None,
-            icon: None,
             query: "two".into(),
             timestamp: 11,
         };
