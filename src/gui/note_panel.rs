@@ -1187,6 +1187,7 @@ pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui
             resp
         }
         NoteTarget::Broken => {
+            let slug = slugify(target);
             let resp = ui.add(
                 egui::Label::new(
                     egui::RichText::new(format!("{text} (missing)")).color(Color32::RED),
@@ -1195,6 +1196,7 @@ pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui
             );
             if resp.clicked() {
                 app.set_error(format!("Broken note link: [[{target}]]"));
+                app.open_note_panel(&slug, None);
             }
             resp
         }
