@@ -8,6 +8,7 @@ pub mod history;
 pub mod hotkey;
 pub mod indexer;
 pub mod launcher;
+pub mod linking;
 pub mod logging;
 pub mod mouse_gestures;
 pub mod plugin;
