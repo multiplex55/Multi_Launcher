@@ -55,7 +55,7 @@ fn search_add_returns_action() {
             text: "task".into(),
             priority: 0,
             tags: vec![],
-            entity_refs: Vec::new(),
+            refs: Vec::new(),
         }
     );
     assert_eq!(results[0].label, "Add todo task");
@@ -75,6 +75,7 @@ fn search_add_with_priority_and_tags() {
             text: "task".into(),
             priority: 3,
             tags: vec!["a".into(), "b".into()],
+            refs: Vec::new(),
         }
     );
     assert_eq!(results[0].label, "Add todo task Tag: a, b; priority: 3");
@@ -94,6 +95,7 @@ fn search_add_with_at_tags() {
             text: "task".into(),
             priority: 0,
             tags: vec!["a".into(), "b".into()],
+            refs: Vec::new(),
         }
     );
     assert_eq!(results[0].label, "Add todo task Tag: a, b");
@@ -117,8 +119,8 @@ fn list_returns_saved_items() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    append_todo(TODO_FILE, "alpha", 0, &[]).unwrap();
-    append_todo(TODO_FILE, "beta", 0, &[]).unwrap();
+    append_todo(TODO_FILE, "alpha", 0, &[], &[]).unwrap();
+    append_todo(TODO_FILE, "beta", 0, &[], &[]).unwrap();
 
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo list");
@@ -132,8 +134,8 @@ fn remove_action_deletes_entry() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    append_todo(TODO_FILE, "remove me", 0, &[]).unwrap();
-    append_todo(TODO_FILE, "keep", 0, &[]).unwrap();
+    append_todo(TODO_FILE, "remove me", 0, &[], &[]).unwrap();
+    append_todo(TODO_FILE, "keep", 0, &[], &[]).unwrap();
 
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo rm remove");
@@ -194,7 +196,7 @@ fn mark_done_toggles_status() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    append_todo(TODO_FILE, "task", 0, &[]).unwrap();
+    append_todo(TODO_FILE, "task", 0, &[], &[]).unwrap();
 
     mark_done(TODO_FILE, 0).unwrap();
     let todos = load_todos(TODO_FILE).unwrap();
@@ -211,7 +213,7 @@ fn search_reflects_done_state_immediately() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    append_todo(TODO_FILE, "task", 0, &[]).unwrap();
+    append_todo(TODO_FILE, "task", 0, &[], &[]).unwrap();
     let plugin = TodoPlugin::default();
 
     mark_done(TODO_FILE, 0).unwrap();
@@ -229,7 +231,7 @@ fn set_priority_and_tags_update_entry() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    append_todo(TODO_FILE, "task", 0, &[]).unwrap();
+    append_todo(TODO_FILE, "task", 0, &[], &[]).unwrap();
     set_priority(TODO_FILE, 0, 5).unwrap();
     set_tags(TODO_FILE, 0, &["a".into(), "b".into()]).unwrap();
     let todos = load_todos(TODO_FILE).unwrap();
@@ -243,7 +245,7 @@ fn set_priority_persists_to_file() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    append_todo(TODO_FILE, "task", 0, &[]).unwrap();
+    append_todo(TODO_FILE, "task", 0, &[], &[]).unwrap();
     set_priority(TODO_FILE, 0, 7).unwrap();
     let todos = load_todos(TODO_FILE).unwrap();
     assert_eq!(todos[0].priority, 7);
@@ -255,7 +257,7 @@ fn set_tags_persists_to_file() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    append_todo(TODO_FILE, "task", 0, &[]).unwrap();
+    append_todo(TODO_FILE, "task", 0, &[], &[]).unwrap();
     set_tags(TODO_FILE, 0, &["x".into(), "y".into()]).unwrap();
     let todos = load_todos(TODO_FILE).unwrap();
     assert_eq!(todos[0].tags, vec!["x", "y"]);
@@ -287,8 +289,8 @@ fn list_without_filter_sorts_by_priority() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    append_todo(TODO_FILE, "low", 1, &[]).unwrap();
-    append_todo(TODO_FILE, "high", 5, &[]).unwrap();
+    append_todo(TODO_FILE, "low", 1, &[], &[]).unwrap();
+    append_todo(TODO_FILE, "high", 5, &[], &[]).unwrap();
 
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo list");
@@ -303,11 +305,11 @@ fn list_filters_by_tag() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    append_todo(TODO_FILE, "alpha", 1, &["rs3".into()]).unwrap();
-    append_todo(TODO_FILE, "beta", 1, &["work".into()]).unwrap();
-    append_todo(TODO_FILE, "gamma", 1, &["workshop".into()]).unwrap();
-    append_todo(TODO_FILE, "delta", 1, &["ui-kit".into()]).unwrap();
-    append_todo(TODO_FILE, "epsilon", 1, &["backend".into()]).unwrap();
+    append_todo(TODO_FILE, "alpha", 1, &["rs3".into()], &[]).unwrap();
+    append_todo(TODO_FILE, "beta", 1, &["work".into()], &[]).unwrap();
+    append_todo(TODO_FILE, "gamma", 1, &["workshop".into()], &[]).unwrap();
+    append_todo(TODO_FILE, "delta", 1, &["ui-kit".into()], &[]).unwrap();
+    append_todo(TODO_FILE, "epsilon", 1, &["backend".into()], &[]).unwrap();
 
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo list #rs");
@@ -332,9 +334,9 @@ fn list_tag_filter_sorts_by_priority() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    append_todo(TODO_FILE, "low", 1, &["p".into()]).unwrap();
-    append_todo(TODO_FILE, "high", 5, &["p".into()]).unwrap();
-    append_todo(TODO_FILE, "mid", 3, &["p".into()]).unwrap();
+    append_todo(TODO_FILE, "low", 1, &["p".into()], &[]).unwrap();
+    append_todo(TODO_FILE, "high", 5, &["p".into()], &[]).unwrap();
+    append_todo(TODO_FILE, "mid", 3, &["p".into()], &[]).unwrap();
 
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo list #p");
@@ -350,8 +352,8 @@ fn tag_command_filters_by_tag() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    append_todo(TODO_FILE, "urgent task", 1, &["urgent".into()]).unwrap();
-    append_todo(TODO_FILE, "other task", 1, &["other".into()]).unwrap();
+    append_todo(TODO_FILE, "urgent task", 1, &["urgent".into()], &[]).unwrap();
+    append_todo(TODO_FILE, "other task", 1, &["other".into()], &[]).unwrap();
 
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo tag urgent");
@@ -366,13 +368,21 @@ fn tag_command_without_filter_lists_all_tags() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    append_todo(TODO_FILE, "alpha task", 1, &["alpha".into(), "beta".into()]).unwrap();
-    append_todo(TODO_FILE, "beta task", 1, &["beta".into()]).unwrap();
+    append_todo(
+        TODO_FILE,
+        "alpha task",
+        1,
+        &["alpha".into(), "beta".into()],
+        &[],
+    )
+    .unwrap();
+    append_todo(TODO_FILE, "beta task", 1, &["beta".into()], &[]).unwrap();
     append_todo(
         TODO_FILE,
         "gamma task",
         1,
         &["gamma".into(), "alpha".into()],
+        &[],
     )
     .unwrap();
 
@@ -405,8 +415,8 @@ fn list_negative_filters() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
-    append_todo(TODO_FILE, "urgent task", 1, &["urgent".into()]).unwrap();
-    append_todo(TODO_FILE, "other task", 1, &["other".into()]).unwrap();
+    append_todo(TODO_FILE, "urgent task", 1, &["urgent".into()], &[]).unwrap();
+    append_todo(TODO_FILE, "other task", 1, &["other".into()], &[]).unwrap();
     let plugin = TodoPlugin::default();
     let results = plugin.search("todo list !#urgent");
     assert_eq!(results.len(), 1);
@@ -425,7 +435,7 @@ fn dialog_filtered_indices_negation() {
             done: false,
             priority: 0,
             tags: vec!["work".into()],
-            entity_refs: Vec::new(),
+            refs: Vec::new(),
         },
         TodoEntry {
             id: String::new(),
@@ -433,7 +443,7 @@ fn dialog_filtered_indices_negation() {
             done: false,
             priority: 0,
             tags: vec![],
-            entity_refs: Vec::new(),
+            refs: Vec::new(),
         },
     ];
     let idx = TodoDialog::filtered_indices(&entries, "!#work");
