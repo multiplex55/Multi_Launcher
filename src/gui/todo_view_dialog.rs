@@ -3,6 +3,7 @@ use crate::gui::LauncherApp;
 use crate::plugins::note::load_notes;
 use crate::plugins::todo::{load_todos, save_todos, TodoEntry, TODO_FILE};
 use eframe::egui;
+use std::collections::HashMap;
 
 const TODO_VIEW_SIZE: egui::Vec2 = egui::vec2(360.0, 260.0);
 const TODO_VIEW_LIST_HEIGHT: f32 = 170.0;
@@ -124,6 +125,11 @@ impl TodoViewDialog {
                     indices
                         .sort_by(|a, b| self.entries[*b].priority.cmp(&self.entries[*a].priority));
                 }
+                let note_titles: HashMap<String, String> = load_notes()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|n| (n.slug, n.title))
+                    .collect();
                 // Keep horizontal overflow for long todo text without wrapping.
                 egui::ScrollArea::both()
                     .auto_shrink([false, false])
@@ -219,9 +225,26 @@ impl TodoViewDialog {
                                     if ui.checkbox(&mut entry.done, "").changed() {
                                         save_now = true;
                                     }
-                                    let resp = ui.add(
-                                        egui::Label::new(entry.text.replace('\n', " ")).wrap(false),
-                                    );
+                                    let text_for_render = entry.text.replace('\n', " ");
+                                    let resp = ui
+                                        .horizontal_wrapped(|ui| {
+                                            for token in text_for_render.split_whitespace() {
+                                                if let Some(slug) = token.strip_prefix("@note:") {
+                                                    let slug = slug
+                                                        .trim_matches(|c: char| ",.;)".contains(c));
+                                                    let label = note_titles
+                                                        .get(slug)
+                                                        .cloned()
+                                                        .unwrap_or_else(|| slug.to_string());
+                                                    if ui.link(label).clicked() {
+                                                        app.open_note_panel(slug, None);
+                                                    }
+                                                } else {
+                                                    ui.label(token);
+                                                }
+                                            }
+                                        })
+                                        .response;
                                     let idx_copy = idx;
                                     resp.clone().context_menu(|ui: &mut egui::Ui| {
                                         if ui.button("Edit Todo").clicked() {

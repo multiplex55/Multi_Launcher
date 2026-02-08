@@ -27,6 +27,7 @@ use std::{
 use url::Url;
 
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
+static TODO_TOKEN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"@todo:([A-Za-z0-9_-]+)").unwrap());
 
 fn clamp_char_index(s: &str, char_index: usize) -> usize {
     char_index.min(s.chars().count())
@@ -59,7 +60,7 @@ fn char_range_to_byte_range(s: &str, start: usize, end: usize) -> (usize, usize)
 
 fn preprocess_note_links(content: &str, current_slug: &str) -> String {
     static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
-    WIKI_RE
+    let mut out = WIKI_RE
         .replace_all(content, |caps: &regex::Captures| {
             let text = &caps[1];
             let target = text.split('|').next().unwrap_or(text).trim();
@@ -70,7 +71,25 @@ fn preprocess_note_links(content: &str, current_slug: &str) -> String {
                 format!("[{text}](note://{slug})")
             }
         })
-        .to_string()
+        .to_string();
+
+    let todo_labels = load_todos(TODO_FILE)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| !t.id.is_empty())
+        .map(|t| (t.id, t.text))
+        .collect::<HashMap<_, _>>();
+    out = TODO_TOKEN_RE
+        .replace_all(&out, |caps: &regex::Captures| {
+            let id = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let label = todo_labels
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| id.to_string());
+            format!("[{label}](todo://{id})")
+        })
+        .to_string();
+    out
 }
 
 fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
@@ -79,6 +98,16 @@ fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
             if url.scheme() == "note" {
                 if let Some(slug) = url.host_str() {
                     app.open_note_panel(slug, None);
+                }
+            } else if url.scheme() == "todo" {
+                if let Some(todo_id) = url.host_str() {
+                    let todos = load_todos(TODO_FILE).unwrap_or_default();
+                    if let Some((idx, _)) = todos.iter().enumerate().find(|(_, t)| t.id == todo_id)
+                    {
+                        app.todo_view_dialog.open_edit(idx);
+                    } else {
+                        app.todo_view_dialog.open();
+                    }
                 }
             } else {
                 ui.ctx().open_url(open_url);
