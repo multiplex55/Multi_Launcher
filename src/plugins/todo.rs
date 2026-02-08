@@ -489,6 +489,12 @@ impl TodoPlugin {
                         if !tag.is_empty() {
                             tags.push(tag.to_string());
                         }
+                    } else if let Some(tag) = part.strip_prefix('@') {
+                        // Keep `@tag` shorthand behavior for tags, while `@kind:id`
+                        // continues to be parsed as an entity reference above.
+                        if !tag.is_empty() {
+                            tags.push(tag.to_string());
+                        }
                     } else {
                         words.push((*part).to_string());
                     }
