@@ -55,7 +55,7 @@ fn search_add_returns_action() {
             text: "task".into(),
             priority: 0,
             tags: vec![],
-            entity_refs: Vec::new(),
+            refs: Vec::new(),
         }
     );
     assert_eq!(results[0].label, "Add todo task");
@@ -75,7 +75,7 @@ fn search_add_with_priority_and_tags() {
             text: "task".into(),
             priority: 3,
             tags: vec!["a".into(), "b".into()],
-            entity_refs: Vec::new(),
+            refs: Vec::new(),
         }
     );
     assert_eq!(results[0].label, "Add todo task Tag: a, b; priority: 3");
@@ -95,7 +95,7 @@ fn search_add_with_at_tags() {
             text: "task".into(),
             priority: 0,
             tags: vec!["a".into(), "b".into()],
-            entity_refs: Vec::new(),
+            refs: Vec::new(),
         }
     );
     assert_eq!(results[0].label, "Add todo task Tag: a, b");
