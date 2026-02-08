@@ -5,16 +5,20 @@ use multi_launcher::plugins::todo::TodoEntry;
 fn filter_by_text() {
     let entries = vec![
         TodoEntry {
+            id: String::new(),
             text: "alpha".into(),
             done: false,
             priority: 0,
             tags: vec![],
+            entity_refs: Vec::new(),
         },
         TodoEntry {
+            id: String::new(),
             text: "beta".into(),
             done: false,
             priority: 0,
             tags: vec!["x".into()],
+            entity_refs: Vec::new(),
         },
     ];
     let idx = TodoDialog::filtered_indices(&entries, "beta");
@@ -25,16 +29,20 @@ fn filter_by_text() {
 fn filter_by_tag() {
     let entries = vec![
         TodoEntry {
+            id: String::new(),
             text: "alpha".into(),
             done: false,
             priority: 0,
             tags: vec!["rs3".into()],
+            entity_refs: Vec::new(),
         },
         TodoEntry {
+            id: String::new(),
             text: "beta".into(),
             done: false,
             priority: 0,
             tags: vec!["other".into()],
+            entity_refs: Vec::new(),
         },
     ];
     let idx = TodoDialog::filtered_indices(&entries, "#rs3");
@@ -45,16 +53,20 @@ fn filter_by_tag() {
 fn empty_filter_returns_all() {
     let entries = vec![
         TodoEntry {
+            id: String::new(),
             text: "one".into(),
             done: false,
             priority: 0,
             tags: vec![],
+            entity_refs: Vec::new(),
         },
         TodoEntry {
+            id: String::new(),
             text: "two".into(),
             done: false,
             priority: 0,
             tags: vec![],
+            entity_refs: Vec::new(),
         },
     ];
     let idx = TodoDialog::filtered_indices(&entries, "");

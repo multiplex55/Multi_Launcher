@@ -1,6 +1,9 @@
+use crate::common::entity_ref::{EntityKind, EntityRef};
 use crate::gui::LauncherApp;
+use crate::plugins::note::load_notes;
 use crate::plugins::todo::{load_todos, save_todos, TodoEntry, TODO_FILE};
 use eframe::egui;
+use std::collections::HashMap;
 
 const TODO_VIEW_SIZE: egui::Vec2 = egui::vec2(360.0, 260.0);
 const TODO_VIEW_LIST_HEIGHT: f32 = 170.0;
@@ -47,6 +50,27 @@ impl TodoViewDialog {
         self.open = true;
         self.filter.clear();
         self.sort_by_priority = true;
+    }
+
+    fn link_note_to_todo(entry: &mut TodoEntry, note_slug: &str, note_title: &str) {
+        let token = format!("@note:{note_slug}");
+        if !entry.text.contains(&token) {
+            if !entry.text.ends_with(' ') && !entry.text.is_empty() {
+                entry.text.push(' ');
+            }
+            entry.text.push_str(&token);
+        }
+        if !entry
+            .entity_refs
+            .iter()
+            .any(|r| matches!(r.kind, EntityKind::Note) && r.id == note_slug)
+        {
+            entry.entity_refs.push(EntityRef::new(
+                EntityKind::Note,
+                note_slug.to_string(),
+                Some(note_title.to_string()),
+            ));
+        }
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
@@ -101,6 +125,11 @@ impl TodoViewDialog {
                     indices
                         .sort_by(|a, b| self.entries[*b].priority.cmp(&self.entries[*a].priority));
                 }
+                let note_titles: HashMap<String, String> = load_notes()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|n| (n.slug, n.title))
+                    .collect();
                 // Keep horizontal overflow for long todo text without wrapping.
                 egui::ScrollArea::both()
                     .auto_shrink([false, false])
@@ -125,6 +154,38 @@ impl TodoViewDialog {
                                         ui.text_edit_singleline(&mut self.editing_tags);
                                     });
                                     ui.horizontal(|ui| {
+                                        ui.label("Link note:");
+                                        ui.menu_button("Select existing note", |ui| {
+                                            for note in load_notes()
+                                                .unwrap_or_default()
+                                                .into_iter()
+                                                .take(12)
+                                            {
+                                                if ui
+                                                    .button(format!(
+                                                        "{} ({})",
+                                                        note.title, note.slug
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    if !self
+                                                        .editing_text
+                                                        .contains(&format!("@note:{}", note.slug))
+                                                    {
+                                                        if !self.editing_text.is_empty() {
+                                                            self.editing_text.push(' ');
+                                                        }
+                                                        self.editing_text.push_str(&format!(
+                                                            "@note:{}",
+                                                            note.slug
+                                                        ));
+                                                    }
+                                                    ui.close_menu();
+                                                }
+                                            }
+                                        });
+                                    });
+                                    ui.horizontal(|ui| {
                                         if ui.button("Save").clicked() {
                                             let tags: Vec<String> = self
                                                 .editing_tags
@@ -137,6 +198,18 @@ impl TodoViewDialog {
                                                 e.text = self.editing_text.clone();
                                                 e.priority = self.editing_priority;
                                                 e.tags = tags;
+                                                for token in self.editing_text.split_whitespace() {
+                                                    if let Some(slug) = token.strip_prefix("@note:")
+                                                    {
+                                                        if !slug.trim().is_empty() {
+                                                            Self::link_note_to_todo(
+                                                                e,
+                                                                slug.trim(),
+                                                                slug.trim(),
+                                                            );
+                                                        }
+                                                    }
+                                                }
                                             }
                                             self.editing_idx = None;
                                             save_now = true;
@@ -148,36 +221,80 @@ impl TodoViewDialog {
                                 });
                             } else {
                                 let entry = &mut self.entries[idx];
-                                ui.horizontal(|ui| {
-                                    if ui.checkbox(&mut entry.done, "").changed() {
-                                        save_now = true;
-                                    }
-                                    let resp = ui.add(
-                                        egui::Label::new(entry.text.replace('\n', " ")).wrap(false),
-                                    );
-                                    let idx_copy = idx;
-                                    resp.clone().context_menu(|ui: &mut egui::Ui| {
-                                        if ui.button("Edit Todo").clicked() {
-                                            self.editing_idx = Some(idx_copy);
-                                            self.editing_text = entry.text.clone();
-                                            self.editing_priority = entry.priority;
-                                            self.editing_tags = entry.tags.join(", ");
-                                            ui.close_menu();
+                                ui.push_id(("todo_view_row", idx), |ui| {
+                                    ui.horizontal(|ui| {
+                                        if ui.checkbox(&mut entry.done, "").changed() {
+                                            save_now = true;
+                                        }
+                                        let text_for_render = entry.text.replace('\n', " ");
+                                        let resp = ui
+                                            .horizontal_wrapped(|ui| {
+                                                for token in text_for_render.split_whitespace() {
+                                                    if let Some(slug) = token.strip_prefix("@note:")
+                                                    {
+                                                        let slug = slug.trim_matches(|c: char| {
+                                                            ",.;)".contains(c)
+                                                        });
+                                                        let label = note_titles
+                                                            .get(slug)
+                                                            .cloned()
+                                                            .unwrap_or_else(|| slug.to_string());
+                                                        if ui.link(label).clicked() {
+                                                            app.open_note_panel(slug, None);
+                                                        }
+                                                    } else {
+                                                        ui.label(token);
+                                                    }
+                                                }
+                                            })
+                                            .response;
+                                        let idx_copy = idx;
+                                        resp.clone().context_menu(|ui: &mut egui::Ui| {
+                                            if ui.button("Edit Todo").clicked() {
+                                                self.editing_idx = Some(idx_copy);
+                                                self.editing_text = entry.text.clone();
+                                                self.editing_priority = entry.priority;
+                                                self.editing_tags = entry.tags.join(", ");
+                                                ui.close_menu();
+                                            }
+                                            ui.separator();
+                                            ui.label("Link note");
+                                            for note in load_notes()
+                                                .unwrap_or_default()
+                                                .into_iter()
+                                                .take(10)
+                                            {
+                                                if ui
+                                                    .button(format!(
+                                                        "@note:{} {}",
+                                                        note.slug, note.title
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    Self::link_note_to_todo(
+                                                        entry,
+                                                        &note.slug,
+                                                        &note.title,
+                                                    );
+                                                    save_now = true;
+                                                    ui.close_menu();
+                                                }
+                                            }
+                                        });
+                                        ui.add(
+                                            egui::Label::new(format!("p{}", entry.priority))
+                                                .wrap(false),
+                                        );
+                                        if !entry.tags.is_empty() {
+                                            ui.add(
+                                                egui::Label::new(format!(
+                                                    "#{:?}",
+                                                    entry.tags.join(", ")
+                                                ))
+                                                .wrap(false),
+                                            );
                                         }
                                     });
-                                    ui.add(
-                                        egui::Label::new(format!("p{}", entry.priority))
-                                            .wrap(false),
-                                    );
-                                    if !entry.tags.is_empty() {
-                                        ui.add(
-                                            egui::Label::new(format!(
-                                                "#{:?}",
-                                                entry.tags.join(", ")
-                                            ))
-                                            .wrap(false),
-                                        );
-                                    }
                                 });
                             }
                         }

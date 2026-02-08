@@ -15,6 +15,7 @@ mod calendar;
 mod clipboard_recent;
 mod clipboard_snippets;
 mod command_history;
+mod context_links;
 mod diagnostics;
 mod frequent_commands;
 mod gesture_cheat_sheet;
@@ -54,6 +55,7 @@ pub use calendar::CalendarWidget;
 pub use clipboard_recent::ClipboardRecentWidget;
 pub use clipboard_snippets::ClipboardSnippetsWidget;
 pub use command_history::CommandHistoryWidget;
+pub use context_links::ContextLinksWidget;
 pub use diagnostics::DiagnosticsWidget;
 pub use frequent_commands::FrequentCommandsWidget;
 pub use gesture_cheat_sheet::GestureCheatSheetWidget;
@@ -239,6 +241,7 @@ impl WidgetRegistry {
                 .with_settings_ui(CommandHistoryWidget::settings_ui),
         );
         reg.register("diagnostics", WidgetFactory::new(DiagnosticsWidget::new));
+        reg.register("context_links", WidgetFactory::new(ContextLinksWidget::new));
         reg.register(
             "recent_commands",
             WidgetFactory::new(RecentCommandsWidget::new)

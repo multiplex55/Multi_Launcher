@@ -3679,6 +3679,13 @@ impl eframe::App for LauncherApp {
                     if ui.button("Command List").clicked() {
                         self.help_window.open = true;
                     }
+                    if ui.button("Linking Guide (todo/note/cal)").clicked() {
+                        self.help_window.open = true;
+                        self.help_window.filter = "todo note cal @note: @todo:".into();
+                    }
+                    if ui.button("Quick Help Overlay").clicked() {
+                        self.help_window.overlay_open = true;
+                    }
                     if ui.button("Open Toast Log").clicked() {
                         if std::fs::OpenOptions::new()
                             .create(true)
@@ -4638,6 +4645,7 @@ impl LauncherApp {
                     links: Vec::new(),
                     slug: String::new(),
                     alias,
+                    entity_refs: Vec::new(),
                 }
             });
         if let Some(existing_idx) = self
@@ -5187,6 +5195,7 @@ mod tests {
                     links: Vec::new(),
                     slug: "alpha".into(),
                     alias: None,
+                    entity_refs: Vec::new(),
                 }])
             },
             |p| {

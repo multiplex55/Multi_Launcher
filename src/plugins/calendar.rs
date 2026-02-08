@@ -1,5 +1,6 @@
 //! Calendar data models and utilities.
 use crate::actions::Action;
+use crate::common::entity_ref::{EntityKind, EntityRef};
 use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::common::query::parse_query_filters;
 use crate::common::strip_prefix_ci;
@@ -145,6 +146,8 @@ pub struct CalendarEvent {
     pub created_at: NaiveDateTime,
     #[serde(default, with = "option_naive_datetime_serde")]
     pub updated_at: Option<NaiveDateTime>,
+    #[serde(default)]
+    pub entity_refs: Vec<EntityRef>,
 }
 
 fn default_created_at() -> NaiveDateTime {
@@ -824,6 +827,7 @@ pub struct CalendarAddRequest {
     pub all_day: bool,
     pub title: String,
     pub notes: Option<String>,
+    pub refs: Vec<EntityRef>,
 }
 
 #[derive(Debug, Clone)]
@@ -865,9 +869,27 @@ pub fn parse_calendar_add(input: &str, now: NaiveDateTime) -> Result<CalendarAdd
     if left.is_empty() {
         return Err("Expected a date, time, and title".into());
     }
-    let tokens: Vec<&str> = left.split_whitespace().collect();
-    if tokens.is_empty() {
+    let raw_tokens: Vec<&str> = left.split_whitespace().collect();
+    if raw_tokens.is_empty() {
         return Err("Expected a date, time, and title".into());
+    }
+    let mut refs = Vec::new();
+    let mut tokens = Vec::new();
+    for token in raw_tokens {
+        if let Some(stripped) = token.strip_prefix('@') {
+            if let Some((kind, id)) = stripped.split_once(':') {
+                let kind = match kind.to_ascii_lowercase().as_str() {
+                    "todo" => Some(EntityKind::Todo),
+                    "note" => Some(EntityKind::Note),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    refs.push(EntityRef::new(kind, id.trim().to_string(), None));
+                    continue;
+                }
+            }
+        }
+        tokens.push(token);
     }
     let (date, consumed) = parse_date_tokens(&tokens, now.date())
         .ok_or_else(|| "Invalid date (use today, tomorrow, next mon, or YYYY-MM-DD)".to_string())?;
@@ -886,6 +908,7 @@ pub fn parse_calendar_add(input: &str, now: NaiveDateTime) -> Result<CalendarAdd
         all_day: time_spec.all_day,
         title,
         notes,
+        refs,
     })
 }
 
@@ -929,6 +952,7 @@ pub fn add_event(request: CalendarAddRequest, now: NaiveDateTime) -> anyhow::Res
         category: None,
         created_at: now,
         updated_at: None,
+        entity_refs: request.refs,
     };
     let mut events = CALENDAR_DATA.read().map(|d| d.clone()).unwrap_or_default();
     events.push(event.clone());

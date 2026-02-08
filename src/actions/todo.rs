@@ -1,5 +1,10 @@
-pub fn add(text: &str, priority: u8, tags: &[String]) -> anyhow::Result<()> {
-    crate::plugins::todo::append_todo(crate::plugins::todo::TODO_FILE, text, priority, tags)?;
+pub fn add(
+    text: &str,
+    priority: u8,
+    tags: &[String],
+    refs: &[crate::common::entity_ref::EntityRef],
+) -> anyhow::Result<()> {
+    crate::plugins::todo::append_todo(crate::plugins::todo::TODO_FILE, text, priority, tags, refs)?;
     Ok(())
 }
 

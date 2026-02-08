@@ -56,6 +56,7 @@ fn long_note_panel_respects_max_height() {
         links: Vec::new(),
         slug: String::new(),
         alias: None,
+        entity_refs: Vec::new(),
     };
     let mut panel = NotePanel::from_note(note);
 

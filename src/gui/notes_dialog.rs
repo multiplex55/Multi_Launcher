@@ -1,5 +1,6 @@
 use crate::gui::LauncherApp;
 use crate::plugins::note::{load_notes, save_notes, Note};
+use crate::plugins::todo::{load_todos, TODO_FILE};
 use eframe::egui;
 
 #[derive(Default)]
@@ -103,6 +104,7 @@ impl NotesDialog {
                                         links: Vec::new(),
                                         slug: String::new(),
                                         alias: None,
+                                        entity_refs: Vec::new(),
                                     });
                                 } else if let Some(e) = self.entries.get_mut(idx) {
                                     e.content = self.text.clone();
@@ -159,6 +161,33 @@ impl NotesDialog {
                                         if ui.button("Remove Note").clicked() {
                                             remove = Some(idx_copy);
                                             ui.close_menu();
+                                        }
+                                        ui.separator();
+                                        ui.label("Link to todo");
+                                        for todo in load_todos(TODO_FILE)
+                                            .unwrap_or_default()
+                                            .into_iter()
+                                            .take(8)
+                                        {
+                                            let todo_id = if todo.id.is_empty() {
+                                                todo.text.clone()
+                                            } else {
+                                                todo.id.clone()
+                                            };
+                                            if ui
+                                                .button(format!("@todo:{todo_id} {}", todo.text))
+                                                .clicked()
+                                            {
+                                                if let Some(target) = self.entries.get_mut(idx_copy)
+                                                {
+                                                    target.content.push_str(&format!(
+                                                        "
+@todo:{todo_id}"
+                                                    ));
+                                                }
+                                                save_now = true;
+                                                ui.close_menu();
+                                            }
                                         }
                                     });
                                     if ui.button("Edit").clicked() {

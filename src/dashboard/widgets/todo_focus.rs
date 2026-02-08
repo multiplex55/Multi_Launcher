@@ -239,22 +239,28 @@ mod tests {
         });
         let entries = vec![
             TodoEntry {
+                id: String::new(),
                 text: "low".into(),
                 done: false,
                 priority: 1,
                 tags: vec!["urgent".into()],
+                entity_refs: Vec::new(),
             },
             TodoEntry {
+                id: String::new(),
                 text: "done".into(),
                 done: true,
                 priority: 5,
                 tags: vec!["urgent".into()],
+                entity_refs: Vec::new(),
             },
             TodoEntry {
+                id: String::new(),
                 text: "focus".into(),
                 done: false,
                 priority: 4,
                 tags: vec!["urgent".into()],
+                entity_refs: Vec::new(),
             },
         ];
 

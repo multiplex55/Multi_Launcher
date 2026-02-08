@@ -101,6 +101,7 @@ mod tests {
             text: "ship | release, notes now".into(),
             priority: 9,
             tags: vec!["team|alpha,beta".into(), "has space".into()],
+            refs: Vec::new(),
         };
         let encoded = crate::plugins::todo::encode_todo_add_action_payload(&payload)
             .expect("encode todo add payload");
@@ -117,6 +118,7 @@ mod tests {
                 text: "ship | release, notes now".into(),
                 priority: 9,
                 tags: vec!["team|alpha,beta".into(), "has space".into()],
+                refs: Vec::new(),
             }
         );
     }
@@ -436,6 +438,7 @@ enum ActionKind<'a> {
         text: String,
         priority: u8,
         tags: Vec<String>,
+        refs: Vec<crate::common::entity_ref::EntityRef>,
     },
     TodoSetPriority {
         idx: usize,
@@ -684,6 +687,7 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
                 text: payload.text,
                 priority: payload.priority,
                 tags: payload.tags,
+                refs: payload.refs,
             };
         }
     }
@@ -1005,7 +1009,8 @@ pub fn launch_action(action: &Action) -> anyhow::Result<()> {
             text,
             priority,
             tags,
-        } => todo::add(&text, priority, &tags),
+            refs,
+        } => todo::add(&text, priority, &tags, &refs),
         ActionKind::TodoSetPriority { idx, priority } => todo::set_priority(idx, priority),
         ActionKind::TodoSetTags { idx, tags } => todo::set_tags(idx, &tags),
         ActionKind::TodoRemove(i) => todo::remove(i),
