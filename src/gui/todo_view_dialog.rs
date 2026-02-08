@@ -1,4 +1,6 @@
+use crate::common::entity_ref::{EntityKind, EntityRef};
 use crate::gui::LauncherApp;
+use crate::plugins::note::load_notes;
 use crate::plugins::todo::{load_todos, save_todos, TodoEntry, TODO_FILE};
 use eframe::egui;
 
@@ -47,6 +49,27 @@ impl TodoViewDialog {
         self.open = true;
         self.filter.clear();
         self.sort_by_priority = true;
+    }
+
+    fn link_note_to_todo(entry: &mut TodoEntry, note_slug: &str, note_title: &str) {
+        let token = format!("@note:{note_slug}");
+        if !entry.text.contains(&token) {
+            if !entry.text.ends_with(' ') && !entry.text.is_empty() {
+                entry.text.push(' ');
+            }
+            entry.text.push_str(&token);
+        }
+        if !entry
+            .entity_refs
+            .iter()
+            .any(|r| matches!(r.kind, EntityKind::Note) && r.id == note_slug)
+        {
+            entry.entity_refs.push(EntityRef::new(
+                EntityKind::Note,
+                note_slug.to_string(),
+                Some(note_title.to_string()),
+            ));
+        }
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
@@ -125,6 +148,38 @@ impl TodoViewDialog {
                                         ui.text_edit_singleline(&mut self.editing_tags);
                                     });
                                     ui.horizontal(|ui| {
+                                        ui.label("Link note:");
+                                        ui.menu_button("Select existing note", |ui| {
+                                            for note in load_notes()
+                                                .unwrap_or_default()
+                                                .into_iter()
+                                                .take(12)
+                                            {
+                                                if ui
+                                                    .button(format!(
+                                                        "{} ({})",
+                                                        note.title, note.slug
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    if !self
+                                                        .editing_text
+                                                        .contains(&format!("@note:{}", note.slug))
+                                                    {
+                                                        if !self.editing_text.is_empty() {
+                                                            self.editing_text.push(' ');
+                                                        }
+                                                        self.editing_text.push_str(&format!(
+                                                            "@note:{}",
+                                                            note.slug
+                                                        ));
+                                                    }
+                                                    ui.close_menu();
+                                                }
+                                            }
+                                        });
+                                    });
+                                    ui.horizontal(|ui| {
                                         if ui.button("Save").clicked() {
                                             let tags: Vec<String> = self
                                                 .editing_tags
@@ -137,6 +192,18 @@ impl TodoViewDialog {
                                                 e.text = self.editing_text.clone();
                                                 e.priority = self.editing_priority;
                                                 e.tags = tags;
+                                                for token in self.editing_text.split_whitespace() {
+                                                    if let Some(slug) = token.strip_prefix("@note:")
+                                                    {
+                                                        if !slug.trim().is_empty() {
+                                                            Self::link_note_to_todo(
+                                                                e,
+                                                                slug.trim(),
+                                                                slug.trim(),
+                                                            );
+                                                        }
+                                                    }
+                                                }
                                             }
                                             self.editing_idx = None;
                                             save_now = true;
@@ -163,6 +230,27 @@ impl TodoViewDialog {
                                             self.editing_priority = entry.priority;
                                             self.editing_tags = entry.tags.join(", ");
                                             ui.close_menu();
+                                        }
+                                        ui.separator();
+                                        ui.label("Link note");
+                                        for note in
+                                            load_notes().unwrap_or_default().into_iter().take(10)
+                                        {
+                                            if ui
+                                                .button(format!(
+                                                    "@note:{} {}",
+                                                    note.slug, note.title
+                                                ))
+                                                .clicked()
+                                            {
+                                                Self::link_note_to_todo(
+                                                    entry,
+                                                    &note.slug,
+                                                    &note.title,
+                                                );
+                                                save_now = true;
+                                                ui.close_menu();
+                                            }
                                         }
                                     });
                                     ui.add(

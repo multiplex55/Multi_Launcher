@@ -6,6 +6,7 @@ use crate::plugins::note::{
     assets_dir, available_tags, image_files, note_backlinks, resolve_note_query, save_note, Note,
     NoteExternalOpen, NotePlugin, NoteTarget,
 };
+use crate::plugins::todo::{load_todos, TODO_FILE};
 use eframe::egui::{self, popup, Color32, FontId, Key};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
@@ -1041,6 +1042,53 @@ impl NotePanel {
                         }
                     }
                 });
+        });
+
+        ui.menu_button("Link todo", |ui| {
+            ui.label("Select existing todo");
+            for todo in load_todos(TODO_FILE)
+                .unwrap_or_default()
+                .into_iter()
+                .take(12)
+            {
+                let todo_id = if todo.id.is_empty() {
+                    todo.text.clone()
+                } else {
+                    todo.id.clone()
+                };
+                if ui
+                    .button(format!("@todo:{todo_id} {}", todo.text))
+                    .clicked()
+                {
+                    let token = format!("@todo:{todo_id}");
+                    let mut state =
+                        egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+                    let idx = state
+                        .cursor
+                        .char_range()
+                        .map(|r| r.primary.index)
+                        .unwrap_or_else(|| self.note.content.chars().count());
+                    let idx_byte = char_to_byte_index(&self.note.content, idx);
+                    let ends_with_ws = self.note.content[..idx_byte]
+                        .chars()
+                        .last()
+                        .map(|c| c.is_whitespace())
+                        .unwrap_or(true);
+                    let insert = if idx_byte == 0 || ends_with_ws {
+                        token.clone()
+                    } else {
+                        format!(" {token}")
+                    };
+                    self.note.content.insert_str(idx_byte, &insert);
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::one(
+                            egui::text::CCursor::new(idx + insert.chars().count()),
+                        )));
+                    state.store(ctx, id);
+                    ui.close_menu();
+                }
+            }
         });
 
         ui.menu_button("Insert tag", |ui| {
