@@ -497,22 +497,28 @@ mod tests {
     fn sample_entries() -> Vec<TodoEntry> {
         vec![
             TodoEntry {
+                id: String::new(),
                 text: "alpha".into(),
                 done: false,
                 priority: 1,
                 tags: vec!["work".into()],
+                entity_refs: Vec::new(),
             },
             TodoEntry {
+                id: String::new(),
                 text: "beta".into(),
                 done: true,
                 priority: 4,
                 tags: vec!["home".into(), "urgent".into()],
+                entity_refs: Vec::new(),
             },
             TodoEntry {
+                id: String::new(),
                 text: "gamma".into(),
                 done: false,
                 priority: 5,
                 tags: vec!["urgent".into()],
+                entity_refs: Vec::new(),
             },
         ]
     }

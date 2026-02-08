@@ -1409,6 +1409,7 @@ mod tests {
             links: Vec::new(),
             slug: String::new(),
             alias: None,
+            entity_refs: Vec::new(),
         }
     }
 
@@ -1542,6 +1543,7 @@ mod tests {
             links: Vec::new(),
             slug: String::new(),
             alias: None,
+            entity_refs: Vec::new(),
         };
         let mut panel = NotePanel::from_note(note);
         panel.preview_mode = false;
@@ -1676,6 +1678,7 @@ mod tests {
             links: Vec::new(),
             slug: String::new(),
             alias: None,
+            entity_refs: Vec::new(),
         };
         let mut panel = NotePanel::from_note(note);
         let _ = ctx.run(Default::default(), |ctx| {

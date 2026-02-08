@@ -5187,6 +5187,7 @@ mod tests {
                     links: Vec::new(),
                     slug: "alpha".into(),
                     alias: None,
+                    entity_refs: Vec::new(),
                 }])
             },
             |p| {

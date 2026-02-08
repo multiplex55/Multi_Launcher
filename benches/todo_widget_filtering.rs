@@ -4,6 +4,7 @@ use multi_launcher::plugins::todo::TodoEntry;
 fn build_entries(count: usize) -> Vec<TodoEntry> {
     (0..count)
         .map(|i| TodoEntry {
+            id: String::new(),
             text: format!("Todo item {i:05} with mixed CASE"),
             done: i % 3 == 0,
             priority: (i % 10) as u8,
@@ -12,6 +13,7 @@ fn build_entries(count: usize) -> Vec<TodoEntry> {
                 format!("Feature{}", i % 16),
                 "Urgent".into(),
             ],
+            entity_refs: Vec::new(),
         })
         .collect()
 }

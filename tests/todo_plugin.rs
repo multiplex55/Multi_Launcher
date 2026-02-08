@@ -55,6 +55,7 @@ fn search_add_returns_action() {
             text: "task".into(),
             priority: 0,
             tags: vec![],
+            entity_refs: Vec::new(),
         }
     );
     assert_eq!(results[0].label, "Add todo task");
@@ -419,16 +420,20 @@ fn list_negative_filters() {
 fn dialog_filtered_indices_negation() {
     let entries = vec![
         TodoEntry {
+            id: String::new(),
             text: "alpha".into(),
             done: false,
             priority: 0,
             tags: vec!["work".into()],
+            entity_refs: Vec::new(),
         },
         TodoEntry {
+            id: String::new(),
             text: "beta".into(),
             done: false,
             priority: 0,
             tags: vec![],
+            entity_refs: Vec::new(),
         },
     ];
     let idx = TodoDialog::filtered_indices(&entries, "!#work");

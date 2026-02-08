@@ -1,4 +1,5 @@
 use crate::actions::Action;
+use crate::common::entity_ref::{EntityKind, EntityRef};
 use crate::common::query::parse_query_filters;
 use crate::common::slug::{register_slug, reset_slug_lookup, slugify, unique_slug};
 use crate::plugin::Plugin;
@@ -47,6 +48,7 @@ pub struct Note {
     pub links: Vec<String>,
     pub slug: String,
     pub alias: Option<String>,
+    pub entity_refs: Vec<EntityRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,6 +198,28 @@ fn extract_links(content: &str) -> Vec<String> {
     links.sort();
     links.dedup();
     links
+}
+
+fn extract_entity_refs(content: &str) -> Vec<EntityRef> {
+    let mut refs = Vec::new();
+    for token in content.split_whitespace() {
+        let token = token.trim_matches(|c: char| ",.;()[]{}".contains(c));
+        let token = token.strip_prefix('@').unwrap_or(token);
+        if let Some((kind, id)) = token.split_once(':') {
+            let kind = match kind.to_ascii_lowercase().as_str() {
+                "todo" => EntityKind::Todo,
+                "event" => EntityKind::Event,
+                "note" => EntityKind::Note,
+                _ => continue,
+            };
+            if !id.trim().is_empty() {
+                refs.push(EntityRef::new(kind, id.trim().to_string(), None));
+            }
+        }
+    }
+    refs.sort_by(|a, b| a.id.cmp(&b.id));
+    refs.dedup_by(|a, b| a.kind == b.kind && a.id == b.id);
+    refs
 }
 
 fn parse_wiki_references(content: &str) -> Vec<String> {
@@ -525,6 +549,7 @@ pub fn load_notes() -> anyhow::Result<Vec<Note>> {
             .unwrap_or_else(|| slug.replace('-', " "));
         let tags = extract_tags(&content);
         let links = extract_links(&content);
+        let entity_refs = extract_entity_refs(&content);
         notes.push(Note {
             title,
             path,
@@ -533,6 +558,7 @@ pub fn load_notes() -> anyhow::Result<Vec<Note>> {
             links,
             slug,
             alias,
+            entity_refs,
         });
     }
     Ok(notes)
@@ -596,6 +622,7 @@ pub fn save_note(note: &mut Note, overwrite: bool) -> anyhow::Result<bool> {
     }
     note.alias = extract_alias(&content);
     note.tags = extract_tags(&content);
+    note.entity_refs = extract_entity_refs(&content);
     std::fs::write(&path, content)?;
     if !note.path.as_os_str().is_empty() && note.path != path {
         let _ = std::fs::remove_file(&note.path);
@@ -658,6 +685,7 @@ pub fn append_note(title: &str, content: &str) -> anyhow::Result<()> {
         links: extract_links(content),
         slug: String::new(),
         alias: None,
+        entity_refs: extract_entity_refs(content),
     };
     save_note(&mut note, true).map(|_| ())
 }
@@ -1320,6 +1348,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
             Note {
                 title: "Beta".into(),
@@ -1329,6 +1358,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
             Note {
                 title: "Gamma".into(),
@@ -1338,6 +1368,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "gamma".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
         ]);
 
@@ -1380,6 +1411,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
             Note {
                 title: "Beta".into(),
@@ -1389,6 +1421,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
             Note {
                 title: "Gamma".into(),
@@ -1398,6 +1431,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "gamma".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
         ]);
 
@@ -1435,6 +1469,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
             Note {
                 title: "Beta".into(),
@@ -1444,6 +1479,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
             Note {
                 title: "Gamma".into(),
@@ -1453,6 +1489,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "gamma".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
         ]);
 
@@ -1506,6 +1543,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
             Note {
                 title: "Beta".into(),
@@ -1515,6 +1553,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
         ]);
 
@@ -1549,6 +1588,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
             Note {
                 title: "Beta".into(),
@@ -1558,6 +1598,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
         ]);
 
@@ -1589,6 +1630,7 @@ mod tests {
                 links: extract_links(alpha_content),
                 slug: "alpha".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
             Note {
                 title: "Beta Note".into(),
@@ -1598,6 +1640,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "beta-note".into(),
                 alias: Some("Second".into()),
+                entity_refs: Vec::new(),
             },
             Note {
                 title: "Delta".into(),
@@ -1607,6 +1650,7 @@ mod tests {
                 links: extract_links(delta_content),
                 slug: "delta".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
             Note {
                 title: "Gamma Note".into(),
@@ -1616,6 +1660,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "gamma-note".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
         ]);
 
@@ -1645,6 +1690,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "roadmap-alpha".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
             Note {
                 title: "Roadmap".into(),
@@ -1654,6 +1700,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "roadmap-beta".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
         ]);
 
@@ -1684,6 +1731,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "main".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
             Note {
                 title: "Target".into(),
@@ -1693,6 +1741,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "target".into(),
                 alias: None,
+                entity_refs: extract_entity_refs(alpha_content),
             },
         ]);
 

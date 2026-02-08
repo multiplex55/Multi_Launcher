@@ -1,4 +1,6 @@
+use crate::common::entity_ref::EntityRef;
 use crate::gui::LauncherApp;
+use crate::plugins::note::load_notes;
 use crate::plugins::todo::{load_todos, save_todos, TodoEntry, TODO_FILE};
 use eframe::egui;
 
@@ -86,10 +88,12 @@ impl TodoDialog {
             .collect();
         tracing::debug!("Adding todo: '{}' tags={:?}", self.text, tag_list);
         self.entries.push(TodoEntry {
+            id: String::new(),
             text: self.text.clone(),
             done: false,
             priority: self.priority,
             tags: tag_list,
+            entity_refs: Vec::<EntityRef>::new(),
         });
         self.text.clear();
         self.priority = 0;
@@ -250,7 +254,40 @@ impl TodoDialog {
                                             .collect();
                                         save_now = true;
                                     }
-                                    if ui.button("Remove").clicked() {
+                                    let remove_btn = ui.button("Remove");
+                                    remove_btn.context_menu(|ui| {
+                                        ui.label("Link note");
+                                        for note in
+                                            load_notes().unwrap_or_default().into_iter().take(8)
+                                        {
+                                            if ui
+                                                .button(format!(
+                                                    "@note:{} {}",
+                                                    note.slug, note.title
+                                                ))
+                                                .clicked()
+                                            {
+                                                if !entry
+                                                    .text
+                                                    .contains(&format!("@note:{}", note.slug))
+                                                {
+                                                    entry
+                                                        .text
+                                                        .push_str(&format!(" @note:{}", note.slug));
+                                                }
+                                                entry.entity_refs.push(
+                                                    crate::common::entity_ref::EntityRef::new(
+                                                        crate::common::entity_ref::EntityKind::Note,
+                                                        note.slug,
+                                                        Some(note.title),
+                                                    ),
+                                                );
+                                                save_now = true;
+                                                ui.close_menu();
+                                            }
+                                        }
+                                    });
+                                    if remove_btn.clicked() {
                                         remove = Some(idx);
                                     }
                                 });
@@ -384,16 +421,20 @@ mod tests {
         let mut dlg = TodoDialog::default();
         dlg.entries = vec![
             TodoEntry {
+                id: String::new(),
                 text: "done".into(),
                 done: true,
                 priority: 0,
                 tags: Vec::new(),
+                entity_refs: Vec::new(),
             },
             TodoEntry {
+                id: String::new(),
                 text: "pending".into(),
                 done: false,
                 priority: 0,
                 tags: Vec::new(),
+                entity_refs: Vec::new(),
             },
         ];
         dlg.pending_clear_confirm = true;
@@ -413,16 +454,20 @@ mod tests {
         let mut dlg = TodoDialog::default();
         dlg.entries = vec![
             TodoEntry {
+                id: String::new(),
                 text: "done".into(),
                 done: true,
                 priority: 0,
                 tags: Vec::new(),
+                entity_refs: Vec::new(),
             },
             TodoEntry {
+                id: String::new(),
                 text: "pending".into(),
                 done: false,
                 priority: 0,
                 tags: Vec::new(),
+                entity_refs: Vec::new(),
             },
         ];
         dlg.pending_clear_confirm = true;

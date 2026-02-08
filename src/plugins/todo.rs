@@ -7,6 +7,7 @@
 
 use crate::actions::Action;
 use crate::common::command::{parse_args, ParseArgsResult};
+use crate::common::entity_ref::{EntityKind, EntityRef};
 use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::common::lru::LruCache;
 use crate::common::query::parse_query_filters;
@@ -26,14 +27,41 @@ use std::sync::{
 pub const TODO_FILE: &str = "todo.json";
 
 static TODO_VERSION: AtomicU64 = AtomicU64::new(0);
+static NEXT_TODO_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_todo_id() -> String {
+    let next = NEXT_TODO_ID.fetch_add(1, Ordering::SeqCst);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("todo-{ts}-{next}")
+}
 
 const TODO_USAGE: &str = "Usage: todo <add|list|rm|clear|pset|tag|edit|view|export> ...";
-const TODO_ADD_USAGE: &str = "Usage: todo add <text> [p=<priority>] [#tag ...]";
+const TODO_ADD_USAGE: &str =
+    "Usage: todo add <text> [p=<priority>] [#tag ...] [@note:<id>|@event:<id>]";
 const TODO_RM_USAGE: &str = "Usage: todo rm <text>";
 const TODO_PSET_USAGE: &str = "Usage: todo pset <index> <priority>";
 const TODO_CLEAR_USAGE: &str = "Usage: todo clear";
 const TODO_VIEW_USAGE: &str = "Usage: todo view";
 const TODO_EXPORT_USAGE: &str = "Usage: todo export";
+
+fn parse_entity_ref_token(token: &str) -> Option<EntityRef> {
+    let token = token.trim();
+    let token = token.strip_prefix('@').unwrap_or(token);
+    let (kind, id) = token.split_once(':')?;
+    if id.trim().is_empty() {
+        return None;
+    }
+    let kind = match kind.to_ascii_lowercase().as_str() {
+        "note" => EntityKind::Note,
+        "todo" => EntityKind::Todo,
+        "event" => EntityKind::Event,
+        _ => return None,
+    };
+    Some(EntityRef::new(kind, id.trim().to_string(), None))
+}
 
 fn usage_action(usage: &str, query: &str) -> Action {
     Action {
@@ -46,12 +74,16 @@ fn usage_action(usage: &str, query: &str) -> Action {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TodoEntry {
+    #[serde(default)]
+    pub id: String,
     pub text: String,
     pub done: bool,
     #[serde(default)]
     pub priority: u8,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub entity_refs: Vec<EntityRef>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -59,6 +91,7 @@ pub struct TodoAddActionPayload {
     pub text: String,
     pub priority: u8,
     pub tags: Vec<String>,
+    pub refs: Vec<EntityRef>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -127,7 +160,17 @@ pub fn load_todos(path: &str) -> anyhow::Result<Vec<TodoEntry>> {
     if content.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let list: Vec<TodoEntry> = serde_json::from_str(&content)?;
+    let mut list: Vec<TodoEntry> = serde_json::from_str(&content)?;
+    let mut changed = false;
+    for entry in &mut list {
+        if entry.id.is_empty() {
+            entry.id = next_todo_id();
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = save_todos(path, &list);
+    }
     Ok(list)
 }
 
@@ -147,13 +190,21 @@ fn update_cache(list: Vec<TodoEntry>) {
 }
 
 /// Append a new todo entry with `text`, `priority` and `tags`.
-pub fn append_todo(path: &str, text: &str, priority: u8, tags: &[String]) -> anyhow::Result<()> {
+pub fn append_todo(
+    path: &str,
+    text: &str,
+    priority: u8,
+    tags: &[String],
+    refs: &[EntityRef],
+) -> anyhow::Result<()> {
     let mut list = load_todos(path).unwrap_or_default();
     list.push(TodoEntry {
+        id: next_todo_id(),
         text: text.to_string(),
         done: false,
         priority,
         tags: tags.to_vec(),
+        entity_refs: refs.to_vec(),
     });
     save_todos(path, &list)?;
     update_cache(list);
@@ -426,14 +477,15 @@ impl TodoPlugin {
                 let mut priority: u8 = 0;
                 let mut tags: Vec<String> = Vec::new();
                 let mut words: Vec<String> = Vec::new();
+                let mut refs: Vec<EntityRef> = Vec::new();
                 for part in args {
                     if let Some(p) = part.strip_prefix("p=") {
                         if let Ok(n) = p.parse::<u8>() {
                             priority = n;
                         }
-                    } else if let Some(tag) =
-                        part.strip_prefix('#').or_else(|| part.strip_prefix('@'))
-                    {
+                    } else if let Some(r) = parse_entity_ref_token(part) {
+                        refs.push(r);
+                    } else if let Some(tag) = part.strip_prefix('#') {
                         if !tag.is_empty() {
                             tags.push(tag.to_string());
                         }
@@ -445,15 +497,18 @@ impl TodoPlugin {
                 if text.is_empty() {
                     return None;
                 }
-                Some((text, priority, tags))
+                Some((text, priority, tags, refs))
             }) {
-                ParseArgsResult::Parsed((text, priority, tags)) => {
+                ParseArgsResult::Parsed((text, priority, tags, refs)) => {
                     let mut label_suffix_parts: Vec<String> = Vec::new();
                     if !tags.is_empty() {
                         label_suffix_parts.push(format!("Tag: {}", tags.join(", ")));
                     }
                     if priority > 0 {
                         label_suffix_parts.push(format!("priority: {priority}"));
+                    }
+                    if !refs.is_empty() {
+                        label_suffix_parts.push(format!("links: {}", refs.len()));
                     }
                     let label = if label_suffix_parts.is_empty() {
                         format!("Add todo {text}")
@@ -464,6 +519,7 @@ impl TodoPlugin {
                         text,
                         priority,
                         tags,
+                        refs,
                     };
                     let Some(encoded_payload) = encode_todo_add_action_payload(&payload) else {
                         return Vec::new();
@@ -810,24 +866,32 @@ mod tests {
                 done: false,
                 priority: 3,
                 tags: vec!["testing".into(), "ui".into()],
+                entity_refs: Vec::new(),
+                id: "t1".into(),
             },
             TodoEntry {
                 text: "bar beta".into(),
                 done: false,
                 priority: 1,
                 tags: vec!["testing".into()],
+                entity_refs: Vec::new(),
+                id: "t2".into(),
             },
             TodoEntry {
                 text: "foo gamma".into(),
                 done: false,
                 priority: 2,
                 tags: vec!["ui".into()],
+                entity_refs: Vec::new(),
+                id: "t3".into(),
             },
             TodoEntry {
                 text: "urgent delta".into(),
                 done: false,
                 priority: 4,
                 tags: vec!["high priority".into(), "chore".into()],
+                entity_refs: Vec::new(),
+                id: "t4".into(),
             },
         ]);
 
@@ -884,24 +948,32 @@ mod tests {
                 done: false,
                 priority: 3,
                 tags: vec!["testing".into(), "ui".into()],
+                entity_refs: Vec::new(),
+                id: "t1".into(),
             },
             TodoEntry {
                 text: "bar beta".into(),
                 done: false,
                 priority: 1,
                 tags: vec!["testing".into()],
+                entity_refs: Vec::new(),
+                id: "t2".into(),
             },
             TodoEntry {
                 text: "foo gamma".into(),
                 done: false,
                 priority: 2,
                 tags: vec!["ui".into()],
+                entity_refs: Vec::new(),
+                id: "t3".into(),
             },
             TodoEntry {
                 text: "urgent delta".into(),
                 done: false,
                 priority: 4,
                 tags: vec!["high priority".into(), "chore".into()],
+                entity_refs: Vec::new(),
+                id: "t4".into(),
             },
         ]);
 
@@ -991,8 +1063,9 @@ mod tests {
             watcher: None,
         };
 
-        let add_actions =
-            plugin.search_internal("todo add finish|draft, now p=7 #core|team,ops #has space");
+        let add_actions = plugin.search_internal(
+            "todo add finish|draft, now p=7 #core|team,ops #has space @note:alpha",
+        );
         assert_eq!(add_actions.len(), 1);
         let add_encoded = add_actions[0]
             .action
@@ -1005,6 +1078,7 @@ mod tests {
                 text: "finish|draft, now space".into(),
                 priority: 7,
                 tags: vec!["core|team,ops".into(), "has".into()],
+                refs: vec![EntityRef::new(EntityKind::Note, "alpha", None)],
             }
         );
 
