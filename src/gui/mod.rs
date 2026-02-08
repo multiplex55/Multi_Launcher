@@ -4645,6 +4645,7 @@ impl LauncherApp {
                     links: Vec::new(),
                     slug: String::new(),
                     alias,
+                    entity_refs: Vec::new(),
                 }
             });
         if let Some(existing_idx) = self

@@ -101,6 +101,7 @@ mod tests {
             text: "ship | release, notes now".into(),
             priority: 9,
             tags: vec!["team|alpha,beta".into(), "has space".into()],
+            refs: Vec::new(),
         };
         let encoded = crate::plugins::todo::encode_todo_add_action_payload(&payload)
             .expect("encode todo add payload");
@@ -117,6 +118,7 @@ mod tests {
                 text: "ship | release, notes now".into(),
                 priority: 9,
                 tags: vec!["team|alpha,beta".into(), "has space".into()],
+                refs: Vec::new(),
             }
         );
     }
@@ -704,7 +706,6 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
             return ActionKind::TodoSetTags {
                 idx: payload.idx,
                 tags: payload.tags,
-                refs: payload.refs,
             };
         }
     }

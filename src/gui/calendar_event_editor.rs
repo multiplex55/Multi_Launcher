@@ -544,6 +544,7 @@ impl CalendarEventEditor {
             category: None,
             created_at: existing.as_ref().map(|e| e.created_at).unwrap_or(now),
             updated_at: Some(now),
+            entity_refs: existing.map(|e| e.entity_refs).unwrap_or_default(),
         };
 
         if let Some(scope) = self.split_from.take() {

@@ -173,6 +173,7 @@ impl CalendarEventDetails {
                             category: event.category.clone(),
                             created_at: Local::now().naive_local(),
                             updated_at: None,
+                            entity_refs: event.entity_refs.clone(),
                         };
                         events.push(new_event);
                         if let Err(err) = save_events(CALENDAR_EVENTS_FILE, &events) {

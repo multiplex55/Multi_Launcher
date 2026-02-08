@@ -1348,7 +1348,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
             Note {
                 title: "Beta".into(),
@@ -1358,7 +1358,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
             Note {
                 title: "Gamma".into(),
@@ -1368,7 +1368,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "gamma".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
         ]);
 
@@ -1411,7 +1411,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
             Note {
                 title: "Beta".into(),
@@ -1421,7 +1421,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
             Note {
                 title: "Gamma".into(),
@@ -1431,7 +1431,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "gamma".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
         ]);
 
@@ -1469,7 +1469,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
             Note {
                 title: "Beta".into(),
@@ -1479,7 +1479,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
             Note {
                 title: "Gamma".into(),
@@ -1489,7 +1489,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "gamma".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
         ]);
 
@@ -1543,7 +1543,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
             Note {
                 title: "Beta".into(),
@@ -1553,7 +1553,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
         ]);
 
@@ -1588,7 +1588,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
             Note {
                 title: "Beta".into(),
@@ -1598,7 +1598,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
         ]);
 
@@ -1630,7 +1630,7 @@ mod tests {
                 links: extract_links(alpha_content),
                 slug: "alpha".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
             Note {
                 title: "Beta Note".into(),
@@ -1650,7 +1650,7 @@ mod tests {
                 links: extract_links(delta_content),
                 slug: "delta".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
             Note {
                 title: "Gamma Note".into(),
@@ -1660,7 +1660,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "gamma-note".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
         ]);
 
@@ -1690,7 +1690,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "roadmap-alpha".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
             Note {
                 title: "Roadmap".into(),
@@ -1700,7 +1700,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "roadmap-beta".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
         ]);
 
@@ -1731,7 +1731,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "main".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
             Note {
                 title: "Target".into(),
@@ -1741,7 +1741,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "target".into(),
                 alias: None,
-                entity_refs: extract_entity_refs(alpha_content),
+                entity_refs: Vec::new(),
             },
         ]);
 
