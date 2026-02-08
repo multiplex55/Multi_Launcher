@@ -1,5 +1,7 @@
 use crate::gui::LauncherApp;
-use crate::plugins::fav::{load_favs, resolve_with_plugin, save_favs, FavEntry, FAV_FILE};
+use crate::plugins::fav::{
+    join_command_args, load_favs, resolve_with_plugin, save_favs, FavEntry, FAV_FILE,
+};
 use eframe::egui;
 
 #[derive(Default)]
@@ -129,10 +131,7 @@ impl FavDialog {
                                             Some(self.args.clone())
                                         };
                                         if let Some(q) = cmd.strip_prefix("query:") {
-                                            let mut q = q.to_string();
-                                            if let Some(ref a) = args {
-                                                q.push_str(a);
-                                            }
+                                            let q = join_command_args(q, args.as_deref());
                                             if let Some(res) = plugin.search(&q).into_iter().next()
                                             {
                                                 cmd = res.action;
