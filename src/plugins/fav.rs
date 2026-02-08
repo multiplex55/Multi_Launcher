@@ -86,14 +86,25 @@ pub fn resolve_with_plugin(
     command: &str,
     args: Option<&str>,
 ) -> (String, Option<String>) {
-    let mut query = command.to_string();
-    if let Some(a) = args {
-        query.push_str(a);
-    }
+    let query = join_command_args(command, args);
     if let Some(res) = plugin.search(&query).into_iter().next() {
         (res.action, res.args)
     } else {
         (command.to_string(), args.map(|s| s.to_string()))
+    }
+}
+
+pub fn join_command_args(command: &str, args: Option<&str>) -> String {
+    let command = command.trim_end();
+    let Some(args) = args else {
+        return command.to_string();
+    };
+
+    let args = args.trim_start();
+    if args.is_empty() {
+        command.to_string()
+    } else {
+        format!("{command} {args}")
     }
 }
 
@@ -261,5 +272,67 @@ impl Plugin for FavPlugin {
                 args: None,
             },
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{join_command_args, resolve_with_plugin};
+    use crate::{actions::Action, plugin::Plugin};
+
+    struct TestPlugin;
+
+    impl Plugin for TestPlugin {
+        fn search(&self, query: &str) -> Vec<Action> {
+            vec![Action {
+                label: query.to_string(),
+                desc: String::new(),
+                action: query.to_string(),
+                args: None,
+            }]
+        }
+
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn description(&self) -> &str {
+            "test plugin"
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &["search"]
+        }
+
+        fn commands(&self) -> Vec<Action> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn join_command_and_args_for_tokenized_query() {
+        assert_eq!(join_command_args("todo", Some("list")), "todo list");
+    }
+
+    #[test]
+    fn join_keeps_command_when_args_empty() {
+        assert_eq!(join_command_args("todo", None), "todo");
+        assert_eq!(join_command_args("todo", Some("   ")), "todo");
+    }
+
+    #[test]
+    fn join_normalizes_whitespace_between_command_and_args() {
+        assert_eq!(
+            join_command_args("todo   ", Some("   list now")),
+            "todo list now"
+        );
+    }
+
+    #[test]
+    fn resolve_with_plugin_uses_safe_joined_query() {
+        let plugin = TestPlugin;
+        let (action, args) = resolve_with_plugin(&plugin, "todo  ", Some("  list"));
+        assert_eq!(action, "todo list");
+        assert!(args.is_none());
     }
 }
