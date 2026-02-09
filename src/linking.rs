@@ -139,10 +139,11 @@ fn rank_search_result(
 pub fn detect_link_trigger(text: &str, cursor_char_index: usize) -> Option<LinkTrigger> {
     let cursor_byte_index = char_to_byte_index(text, cursor_char_index);
     let prefix = &text[..cursor_byte_index];
-    if inside_fenced_code_block(prefix) || inside_inline_code(prefix) {
+    let at_byte_index = prefix.rfind('@')?;
+
+    if is_code_context_at(prefix, at_byte_index) {
         return None;
     }
-    let at_byte_index = prefix.rfind('@')?;
     if at_byte_index > 0 && prefix.as_bytes()[at_byte_index - 1] == b'\\' {
         return None;
     }
@@ -151,9 +152,13 @@ pub fn detect_link_trigger(text: &str, cursor_char_index: usize) -> Option<LinkT
         return None;
     }
     let query = &prefix[at_byte_index + 1..];
-    if query.chars().any(char::is_whitespace) {
+    if query
+        .chars()
+        .any(|ch| ch.is_whitespace() || matches!(ch, '`' | ']'))
+    {
         return None;
     }
+
     Some(LinkTrigger {
         at_char_index: prefix[..at_byte_index].chars().count(),
         query: query.to_string(),
@@ -164,22 +169,25 @@ pub fn format_inserted_link(link: &LinkRef) -> String {
     format_link_id(link)
 }
 
-fn inside_fenced_code_block(prefix: &str) -> bool {
-    prefix.matches("```").count() % 2 == 1
-}
+fn is_code_context_at(text: &str, at_byte_index: usize) -> bool {
+    let bytes = text.as_bytes();
+    let mut idx = 0;
+    let mut in_fenced = false;
+    let mut in_inline = false;
 
-fn inside_inline_code(prefix: &str) -> bool {
-    let mut count = 0;
-    let mut chars = prefix.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '`' {
-            if chars.peek().is_some_and(|next| *next == '`') {
-                continue;
-            }
-            count += 1;
+    while idx < at_byte_index {
+        if idx + 2 < at_byte_index && &bytes[idx..idx + 3] == b"```" {
+            in_fenced = !in_fenced;
+            idx += 3;
+            continue;
         }
+        if !in_fenced && bytes[idx] == b'`' {
+            in_inline = !in_inline;
+        }
+        idx += 1;
     }
-    count % 2 == 1
+
+    in_fenced || in_inline
 }
 
 fn char_to_byte_index(s: &str, char_index: usize) -> usize {
