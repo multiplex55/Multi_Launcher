@@ -369,6 +369,11 @@ fn format_link_row(
             .unwrap_or_else(|| link.target_id.clone()),
     };
     let anchor = link.anchor.clone().unwrap_or_else(|| "-".into());
+    let action = match link.target_type {
+        LinkTarget::Note => format!("note:open:{}", link.target_id),
+        LinkTarget::Todo => format!("query:todo links id:{}", link.target_id),
+        _ => format!("link:open:{}", format_link_id(link)),
+    };
     Action {
         label: format!(
             "type={} | title={} | target={} | anchor={} | status={}",
@@ -385,7 +390,7 @@ fn format_link_row(
             status
         ),
         desc: "Links".into(),
-        action: format!("link:open:{}", format_link_id(link)),
+        action,
         args: None,
     }
 }

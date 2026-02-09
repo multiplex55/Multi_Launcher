@@ -690,6 +690,26 @@ fn parse_action_kind(action: &Action) -> ActionKind<'_> {
                 refs: payload.refs,
             };
         }
+        // Backward compatibility for legacy wire format: `todo:add:<text>|<priority>|<csv_tags>`.
+        let mut parts = rest.splitn(3, '|');
+        if let (Some(text), Some(priority_raw), Some(tags_raw)) =
+            (parts.next(), parts.next(), parts.next())
+        {
+            if let Ok(priority) = priority_raw.parse::<u8>() {
+                let tags = tags_raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(ToString::to_string)
+                    .collect();
+                return ActionKind::TodoAdd {
+                    text: text.to_string(),
+                    priority,
+                    tags,
+                    refs: Vec::new(),
+                };
+            }
+        }
     }
     if let Some(rest) = s.strip_prefix("todo:pset:") {
         if let Some((idx, p)) = rest.split_once('|') {
