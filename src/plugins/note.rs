@@ -166,6 +166,8 @@ static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwra
 // Matches markdown image syntax `![alt](path)` capturing the path portion.
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[[^\]]*\]\(([^)]+)\)").unwrap());
 static NOTE_VERSION: AtomicU64 = AtomicU64::new(0);
+static LAST_NOTE_REINDEX_MS: AtomicU64 = AtomicU64::new(0);
+const NOTE_REINDEX_DEBOUNCE_MS: u64 = 250;
 
 fn extract_tags(content: &str) -> Vec<String> {
     let mut tags: Vec<String> = Vec::new();
@@ -723,7 +725,15 @@ impl NotePlugin {
                         event.kind,
                         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
                     ) {
-                        let _ = refresh_cache();
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        let last = LAST_NOTE_REINDEX_MS.load(Ordering::SeqCst);
+                        if now.saturating_sub(last) >= NOTE_REINDEX_DEBOUNCE_MS {
+                            LAST_NOTE_REINDEX_MS.store(now, Ordering::SeqCst);
+                            let _ = refresh_cache();
+                        }
                     }
                 }
             },

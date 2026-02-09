@@ -3,7 +3,7 @@ use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::plugin::Plugin;
 use crate::plugins::note::{
-    assets_dir, available_tags, image_files, note_backlinks, resolve_note_query, save_note, Note,
+    assets_dir, available_tags, image_files, load_notes, resolve_note_query, save_note, Note,
     NoteExternalOpen, NotePlugin, NoteTarget,
 };
 use crate::plugins::todo::{load_todos, TODO_FILE};
@@ -25,6 +25,35 @@ use std::{
     path::{Path, PathBuf},
 };
 use url::Url;
+
+const BACKLINK_PAGE_SIZE: usize = 12;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BacklinkTab {
+    LinkedTodos,
+    RelatedNotes,
+    Mentions,
+}
+
+impl BacklinkTab {
+    fn label(self) -> &'static str {
+        match self {
+            BacklinkTab::LinkedTodos => "Linked Todos",
+            BacklinkTab::RelatedNotes => "Related Notes",
+            BacklinkTab::Mentions => "Mentions",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct BacklinkRow {
+    title: String,
+    type_badge: String,
+    updated: String,
+    snippet: String,
+    note_slug: Option<String>,
+    todo_id: Option<String>,
+}
 
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
 static TODO_TOKEN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"@todo:([A-Za-z0-9_-]+)").unwrap());
@@ -134,6 +163,8 @@ pub struct NotePanel {
     show_open_with_menu: bool,
     tags_expanded: bool,
     links_expanded: bool,
+    backlink_tab: BacklinkTab,
+    backlink_page: usize,
     pending_selection: Option<(usize, usize)>,
     link_dialog_open: bool,
     link_text: String,
@@ -161,6 +192,8 @@ impl NotePanel {
             show_open_with_menu: false,
             tags_expanded: false,
             links_expanded: false,
+            backlink_tab: BacklinkTab::LinkedTodos,
+            backlink_page: 0,
             pending_selection: None,
             link_dialog_open: false,
             link_text: String::new(),
@@ -373,37 +406,78 @@ impl NotePanel {
                         }
                     });
                 }
-                let backlinks = note_backlinks(&self.note.slug);
-                if !backlinks.is_empty() {
-                    let was_focused = self
-                        .last_textedit_id
-                        .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
-                        .unwrap_or(false);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("Backlinks:");
-                        let threshold = app.note_more_limit;
-                        let total = backlinks.len();
-                        let show_all = self.links_expanded || total <= threshold;
-                        let limit = if show_all { total } else { threshold };
-                        for linked_note in backlinks.iter().take(limit) {
-                            if ui.link(format!("[[{}]]", linked_note.title)).clicked() {
-                                app.open_note_panel(&linked_note.slug, None);
-                            }
+                let all_notes = load_notes().unwrap_or_default();
+                let all_todos = load_todos(TODO_FILE).unwrap_or_default();
+                ui.separator();
+                ui.label("Backlinks");
+                ui.horizontal(|ui| {
+                    for tab in [
+                        BacklinkTab::LinkedTodos,
+                        BacklinkTab::RelatedNotes,
+                        BacklinkTab::Mentions,
+                    ] {
+                        if ui
+                            .selectable_label(self.backlink_tab == tab, tab.label())
+                            .clicked()
+                        {
+                            self.backlink_tab = tab;
+                            self.backlink_page = 0;
                         }
-                        if total > threshold {
-                            let label = if self.links_expanded {
-                                "collapse"
-                            } else {
-                                "... (more)"
-                            };
-                            if ui.button(label).clicked() {
-                                self.links_expanded = !self.links_expanded;
-                                if was_focused {
-                                    self.focus_textedit_next_frame = true;
+                    }
+                });
+                let rows = backlink_rows_for_note(
+                    &self.note.slug,
+                    self.backlink_tab,
+                    &all_todos,
+                    &all_notes,
+                );
+                let total_pages = (rows.len() + BACKLINK_PAGE_SIZE - 1) / BACKLINK_PAGE_SIZE;
+                let page_start = self.backlink_page * BACKLINK_PAGE_SIZE;
+                let page_end = (page_start + BACKLINK_PAGE_SIZE).min(rows.len());
+                if rows.is_empty() {
+                    ui.small("No backlinks in this category.");
+                } else {
+                    for (idx, row) in rows[page_start..page_end].iter().enumerate() {
+                        ui.push_id(("backlink_row", idx, page_start), |ui| {
+                            let resp = ui.selectable_label(false, &row.title);
+                            if resp.clicked() {
+                                if let Some(slug) = &row.note_slug {
+                                    app.open_note_panel(slug, None);
+                                } else if let Some(todo_id) = &row.todo_id {
+                                    let todos = load_todos(TODO_FILE).unwrap_or_default();
+                                    if let Some((todo_idx, _)) =
+                                        todos.iter().enumerate().find(|(_, t)| &t.id == todo_id)
+                                    {
+                                        app.todo_view_dialog.open_edit(todo_idx);
+                                    } else {
+                                        app.todo_view_dialog.open();
+                                    }
                                 }
                             }
-                        }
-                    });
+                            if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                if let Some(slug) = &row.note_slug {
+                                    app.open_note_panel(slug, None);
+                                }
+                            }
+                            ui.horizontal_wrapped(|ui| {
+                                ui.small(format!("[{}]", row.type_badge));
+                                ui.small(format!("updated {}", row.updated));
+                            });
+                            ui.small(&row.snippet);
+                        });
+                        ui.separator();
+                    }
+                    if total_pages > 1 {
+                        ui.horizontal(|ui| {
+                            if ui.button("Prev").clicked() && self.backlink_page > 0 {
+                                self.backlink_page -= 1;
+                            }
+                            ui.small(format!("Page {}/{}", self.backlink_page + 1, total_pages));
+                            if ui.button("Next").clicked() && self.backlink_page + 1 < total_pages {
+                                self.backlink_page += 1;
+                            }
+                        });
+                    }
                 }
                 ui.separator();
                 let remaining = ui.available_height();
@@ -548,8 +622,9 @@ impl NotePanel {
                     });
                 if !self.preview_mode {
                     if let Some(resp) = resp.inner {
+                        let first_edit_frame = self.last_textedit_id.is_none();
                         self.last_textedit_id = Some(resp.id);
-                        if self.focus_textedit_next_frame {
+                        if self.focus_textedit_next_frame || first_edit_frame {
                             resp.request_focus();
                             self.focus_textedit_next_frame = false;
                         }
@@ -1440,6 +1515,95 @@ pub fn extract_links(content: &str) -> Vec<(String, String)> {
     links
 }
 
+fn extract_snippet_around(content: &str, needle: &str) -> String {
+    const WINDOW: usize = 44;
+    let compact = content.replace('\n', " ");
+    if compact.is_empty() {
+        return String::new();
+    }
+    let lower = compact.to_lowercase();
+    let needle_lower = needle.to_lowercase();
+    if let Some(pos) = lower.find(&needle_lower) {
+        let start = pos.saturating_sub(WINDOW);
+        let end = (pos + needle_lower.len() + WINDOW).min(compact.len());
+        let mut out = compact[start..end].trim().to_string();
+        if start > 0 {
+            out = format!("…{out}");
+        }
+        if end < compact.len() {
+            out.push('…');
+        }
+        out
+    } else {
+        compact.chars().take(90).collect()
+    }
+}
+
+fn format_note_updated(note: &Note) -> String {
+    std::fs::metadata(&note.path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .map(|t| {
+            chrono::DateTime::<chrono::Local>::from(t)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn backlink_rows_for_note(
+    current_slug: &str,
+    tab: BacklinkTab,
+    todos: &[crate::plugins::todo::TodoEntry],
+    notes: &[Note],
+) -> Vec<BacklinkRow> {
+    let mut rows = Vec::new();
+    for todo in todos {
+        let token = format!("@note:{current_slug}");
+        if todo.text.contains(&token) {
+            if matches!(tab, BacklinkTab::LinkedTodos | BacklinkTab::Mentions) {
+                rows.push(BacklinkRow {
+                    title: todo.text.clone(),
+                    type_badge: "Todo".to_string(),
+                    updated: "n/a".to_string(),
+                    snippet: extract_snippet_around(&todo.text, &token),
+                    note_slug: None,
+                    todo_id: Some(todo.id.clone()),
+                });
+            }
+        }
+    }
+    for note in notes {
+        if note.slug == current_slug {
+            continue;
+        }
+        let token = format!("[[{current_slug}");
+        let mention = format!("@note:{current_slug}");
+        if note.links.iter().any(|l| l == current_slug) {
+            if tab == BacklinkTab::RelatedNotes {
+                rows.push(BacklinkRow {
+                    title: note.title.clone(),
+                    type_badge: "Note".to_string(),
+                    updated: format_note_updated(note),
+                    snippet: extract_snippet_around(&note.content, &token),
+                    note_slug: Some(note.slug.clone()),
+                    todo_id: None,
+                });
+            }
+        } else if note.content.contains(&mention) && tab == BacklinkTab::Mentions {
+            rows.push(BacklinkRow {
+                title: note.title.clone(),
+                type_badge: "Note".to_string(),
+                updated: format_note_updated(note),
+                snippet: extract_snippet_around(&note.content, &mention),
+                note_slug: Some(note.slug.clone()),
+                todo_id: None,
+            });
+        }
+    }
+    rows
+}
+
 fn extract_wiki_links(content: &str) -> Vec<String> {
     static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
     let mut links: Vec<String> = WIKI_RE
@@ -1635,20 +1799,9 @@ mod tests {
         });
 
         let mut input = egui::RawInput::default();
-        let pos = egui::pos2(200.0, 100.0);
-        input.events.push(egui::Event::PointerMoved(pos));
-        input.events.push(egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: true,
-            modifiers: egui::Modifiers::default(),
-        });
-        input.events.push(egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: egui::Modifiers::default(),
-        });
+        // Keep this test independent from exact widget Y-positioning. The editor
+        // is auto-focused on first edit frame, so Enter + text should append a
+        // newline even if surrounding UI above the editor changes.
         input.events.push(egui::Event::Key {
             key: egui::Key::Enter,
             physical_key: None,
@@ -1736,6 +1889,64 @@ mod tests {
         assert_eq!(processed, content);
     }
 
+    #[test]
+    fn snippet_extraction_is_deterministic() {
+        let content = "one two three target-fragment four five six seven";
+        let a = extract_snippet_around(content, "target-fragment");
+        let b = extract_snippet_around(content, "target-fragment");
+        assert_eq!(a, b);
+        assert!(a.contains("target-fragment"));
+    }
+
+    #[test]
+    fn backlinks_grouping_splits_categories() {
+        use crate::common::entity_ref::EntityRef;
+        use crate::plugins::todo::TodoEntry;
+
+        let current = "central";
+        let notes = vec![
+            Note {
+                title: "related".into(),
+                path: std::path::PathBuf::new(),
+                content: "[[central]] body".into(),
+                tags: Vec::new(),
+                links: vec!["central".into()],
+                slug: "related".into(),
+                alias: None,
+                entity_refs: Vec::new(),
+            },
+            Note {
+                title: "mention".into(),
+                path: std::path::PathBuf::new(),
+                content: "see @note:central soon".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "mention".into(),
+                alias: None,
+                entity_refs: Vec::new(),
+            },
+        ];
+        let todos = vec![TodoEntry {
+            id: "t1".into(),
+            text: "do thing @note:central".into(),
+            done: false,
+            priority: 1,
+            tags: Vec::new(),
+            entity_refs: vec![EntityRef::new(
+                crate::common::entity_ref::EntityKind::Note,
+                "central",
+                None,
+            )],
+        }];
+
+        let linked = backlink_rows_for_note(current, BacklinkTab::LinkedTodos, &todos, &notes);
+        let related = backlink_rows_for_note(current, BacklinkTab::RelatedNotes, &todos, &notes);
+        let mentions = backlink_rows_for_note(current, BacklinkTab::Mentions, &todos, &notes);
+
+        assert_eq!(linked.len(), 1);
+        assert_eq!(related.len(), 1);
+        assert!(mentions.len() >= 1);
+    }
     #[test]
     fn note_scheme_link_opens_panel() {
         use crate::plugins::note::Note;

@@ -16,6 +16,41 @@ pub fn todo_view_window_constraints() -> (egui::Vec2, egui::Vec2) {
     (TODO_VIEW_SIZE, TODO_VIEW_SIZE)
 }
 
+fn parse_note_token(token: &str) -> Option<(String, Option<String>)> {
+    let slug = token.strip_prefix("@note:")?;
+    let slug = slug.trim_matches(|c: char| ",.;)".contains(c));
+    if slug.is_empty() {
+        return None;
+    }
+    if let Some((base, anchor)) = slug.split_once('#') {
+        if base.trim().is_empty() {
+            None
+        } else {
+            Some((base.trim().to_string(), Some(anchor.trim().to_string())))
+        }
+    } else {
+        Some((slug.to_string(), None))
+    }
+}
+
+fn extract_anchor_snippet(content: &str, anchor: Option<&str>) -> String {
+    let compact = content.replace('\n', " ");
+    if let Some(anchor) = anchor {
+        let low = compact.to_lowercase();
+        let needle = anchor.to_lowercase();
+        if let Some(i) = low.find(&needle) {
+            let start = i.saturating_sub(40);
+            let end = (i + needle.len() + 40).min(compact.len());
+            return compact[start..end].to_string();
+        }
+    }
+    compact.chars().take(100).collect()
+}
+
+fn note_has_anchor(content: &str, anchor: &str) -> bool {
+    content.to_lowercase().contains(&anchor.to_lowercase())
+}
+
 #[derive(Default)]
 pub struct TodoViewDialog {
     pub open: bool,
@@ -230,17 +265,18 @@ impl TodoViewDialog {
                                         let resp = ui
                                             .horizontal_wrapped(|ui| {
                                                 for token in text_for_render.split_whitespace() {
-                                                    if let Some(slug) = token.strip_prefix("@note:")
-                                                    {
-                                                        let slug = slug.trim_matches(|c: char| {
-                                                            ",.;)".contains(c)
-                                                        });
+                                                    if let Some((slug, anchor)) = parse_note_token(token) {
                                                         let label = note_titles
-                                                            .get(slug)
+                                                            .get(&slug)
                                                             .cloned()
                                                             .unwrap_or_else(|| slug.to_string());
-                                                        if ui.link(label).clicked() {
-                                                            app.open_note_panel(slug, None);
+                                                        let link_label = if let Some(anchor) = anchor.as_ref() {
+                                                            format!("{label}#{anchor}")
+                                                        } else {
+                                                            label
+                                                        };
+                                                        if ui.link(link_label).clicked() {
+                                                            app.open_note_panel(&slug, None);
                                                         }
                                                     } else {
                                                         ui.label(token);
@@ -295,6 +331,51 @@ impl TodoViewDialog {
                                             );
                                         }
                                     });
+                                    let linked_tokens: Vec<(String, Option<String>)> = entry
+                                        .text
+                                        .split_whitespace()
+                                        .filter_map(parse_note_token)
+                                        .collect();
+                                    if !linked_tokens.is_empty() {
+                                        ui.group(|ui| {
+                                            ui.label("Attached notes");
+                                            for (slug, anchor) in linked_tokens {
+                                                let note = load_notes()
+                                                    .unwrap_or_default()
+                                                    .into_iter()
+                                                    .find(|n| n.slug == slug);
+                                                let title = note_titles
+                                                    .get(&slug)
+                                                    .cloned()
+                                                    .unwrap_or_else(|| slug.clone());
+                                                let snippet = note
+                                                    .as_ref()
+                                                    .map(|n| extract_anchor_snippet(&n.content, anchor.as_deref()))
+                                                    .unwrap_or_else(|| "note not found".to_string());
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.strong(&title);
+                                                    ui.small(&snippet);
+                                                    if ui
+                                                        .button("Open at anchor")
+                                                        .on_hover_text("Open note at referenced anchor")
+                                                        .clicked()
+                                                    {
+                                                        app.open_note_panel(&slug, None);
+                                                        if let Some(anchor) = anchor.as_deref() {
+                                                            if let Some(n) = note.as_ref() {
+                                                                if !note_has_anchor(&n.content, anchor) {
+                                                                    app.set_error(format!(
+                                                                        "Anchor '{}' not found in note '{}'; opened note top.",
+                                                                        anchor, title
+                                                                    ));
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        });
+                                    }
                                 });
                             }
                         }
@@ -327,5 +408,27 @@ mod tests {
         assert_eq!(min_size, max_size);
         assert_eq!(window_size, min_size);
         assert!(list_height < window_size.y);
+    }
+
+    #[test]
+    fn snippet_extraction_prefers_anchor_context() {
+        let content = "alpha beta gamma important-anchor delta epsilon";
+        let snippet = extract_anchor_snippet(content, Some("important-anchor"));
+        assert!(snippet.contains("important-anchor"));
+    }
+
+    #[test]
+    fn anchor_detection_found_vs_missing() {
+        let content = "# heading-one\nbody";
+        assert!(note_has_anchor(content, "heading-one"));
+        assert!(!note_has_anchor(content, "missing-anchor"));
+    }
+
+    #[test]
+    fn parse_note_token_handles_anchor() {
+        assert_eq!(
+            parse_note_token("@note:plan#phase-1"),
+            Some(("plan".to_string(), Some("phase-1".to_string())))
+        );
     }
 }
