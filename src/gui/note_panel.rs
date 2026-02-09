@@ -1799,20 +1799,9 @@ mod tests {
         });
 
         let mut input = egui::RawInput::default();
-        let pos = egui::pos2(200.0, 100.0);
-        input.events.push(egui::Event::PointerMoved(pos));
-        input.events.push(egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: true,
-            modifiers: egui::Modifiers::default(),
-        });
-        input.events.push(egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: egui::Modifiers::default(),
-        });
+        // Keep this test independent from exact widget Y-positioning. The editor
+        // is auto-focused on first edit frame, so Enter + text should append a
+        // newline even if surrounding UI above the editor changes.
         input.events.push(egui::Event::Key {
             key: egui::Key::Enter,
             physical_key: None,
