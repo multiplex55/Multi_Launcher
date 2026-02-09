@@ -1,6 +1,8 @@
 use crate::common::entity_ref::EntityKind;
 use crate::plugins::note::Note;
 use crate::plugins::todo::TodoEntry;
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use tracing::warn;
@@ -46,6 +48,153 @@ pub struct LinkRef {
     pub anchor: Option<String>,
     #[serde(default)]
     pub display_text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkTrigger {
+    pub at_char_index: usize,
+    pub query: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkSearchResult {
+    pub link: LinkRef,
+    pub title: String,
+    pub subtitle: String,
+    pub type_badge: String,
+    pub recent_hits: u32,
+}
+
+pub trait LinkSearchProvider {
+    fn search_documents(&self) -> Vec<LinkSearchResult>;
+    fn resolve(&self, link: &LinkRef) -> bool;
+}
+
+#[derive(Default)]
+pub struct LinkSearchCatalog {
+    providers: Vec<Box<dyn LinkSearchProvider>>,
+}
+
+impl LinkSearchCatalog {
+    pub fn register(&mut self, provider: Box<dyn LinkSearchProvider>) {
+        self.providers.push(provider);
+    }
+
+    pub fn fuzzy_search(&self, query: &str) -> Vec<LinkSearchResult> {
+        let matcher = SkimMatcherV2::default();
+        let query = query.trim().to_ascii_lowercase();
+        let mut scored: Vec<(u8, i64, i64, LinkSearchResult)> = self
+            .providers
+            .iter()
+            .flat_map(|provider| provider.search_documents())
+            .filter_map(|doc| rank_search_result(&matcher, &query, doc))
+            .collect();
+        scored.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| b.2.cmp(&a.2))
+                .then_with(|| {
+                    a.3.title
+                        .to_ascii_lowercase()
+                        .cmp(&b.3.title.to_ascii_lowercase())
+                })
+                .then_with(|| a.3.link.target_id.cmp(&b.3.link.target_id))
+        });
+        scored.into_iter().map(|(_, _, _, item)| item).collect()
+    }
+
+    pub fn resolve_for_insert(&self, link: &LinkRef) -> Result<String, ResolveLinkError> {
+        if self.providers.iter().any(|provider| provider.resolve(link)) {
+            Ok(format_link_id(link))
+        } else {
+            Err(ResolveLinkError::MissingTarget)
+        }
+    }
+}
+
+fn rank_search_result(
+    matcher: &SkimMatcherV2,
+    query: &str,
+    doc: LinkSearchResult,
+) -> Option<(u8, i64, i64, LinkSearchResult)> {
+    if query.is_empty() {
+        return Some((3, 0, doc.recent_hits as i64, doc));
+    }
+    let title = doc.title.to_ascii_lowercase();
+    if title == query {
+        return Some((0, i64::MAX, doc.recent_hits as i64, doc));
+    }
+    if title.starts_with(query) {
+        return Some((1, i64::MAX / 2, doc.recent_hits as i64, doc));
+    }
+    if let Some(score) = matcher.fuzzy_match(&title, query) {
+        return Some((2, score, doc.recent_hits as i64, doc));
+    }
+    if doc.recent_hits > 0 {
+        return Some((3, 0, doc.recent_hits as i64, doc));
+    }
+    None
+}
+
+pub fn detect_link_trigger(text: &str, cursor_char_index: usize) -> Option<LinkTrigger> {
+    let cursor_byte_index = char_to_byte_index(text, cursor_char_index);
+    let prefix = &text[..cursor_byte_index];
+    let at_byte_index = prefix.rfind('@')?;
+
+    if is_code_context_at(prefix, at_byte_index) {
+        return None;
+    }
+    if at_byte_index > 0 && prefix.as_bytes()[at_byte_index - 1] == b'\\' {
+        return None;
+    }
+    let before = prefix[..at_byte_index].chars().next_back();
+    if before.is_some_and(|ch| ch.is_alphanumeric()) {
+        return None;
+    }
+    let query = &prefix[at_byte_index + 1..];
+    if query
+        .chars()
+        .any(|ch| ch.is_whitespace() || matches!(ch, '`' | ']'))
+    {
+        return None;
+    }
+
+    Some(LinkTrigger {
+        at_char_index: prefix[..at_byte_index].chars().count(),
+        query: query.to_string(),
+    })
+}
+
+pub fn format_inserted_link(link: &LinkRef) -> String {
+    format_link_id(link)
+}
+
+fn is_code_context_at(text: &str, at_byte_index: usize) -> bool {
+    let bytes = text.as_bytes();
+    let mut idx = 0;
+    let mut in_fenced = false;
+    let mut in_inline = false;
+
+    while idx < at_byte_index {
+        if idx + 2 < at_byte_index && &bytes[idx..idx + 3] == b"```" {
+            in_fenced = !in_fenced;
+            idx += 3;
+            continue;
+        }
+        if !in_fenced && bytes[idx] == b'`' {
+            in_inline = !in_inline;
+        }
+        idx += 1;
+    }
+
+    in_fenced || in_inline
+}
+
+fn char_to_byte_index(s: &str, char_index: usize) -> usize {
+    s.char_indices()
+        .nth(char_index)
+        .map(|(idx, _)| idx)
+        .unwrap_or_else(|| s.len())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -461,6 +610,37 @@ mod tests {
     use crate::common::entity_ref::EntityRef;
     use std::path::PathBuf;
 
+    struct ProviderFixture {
+        docs: Vec<LinkSearchResult>,
+    }
+
+    impl LinkSearchProvider for ProviderFixture {
+        fn search_documents(&self) -> Vec<LinkSearchResult> {
+            self.docs.clone()
+        }
+
+        fn resolve(&self, link: &LinkRef) -> bool {
+            self.docs.iter().any(|doc| {
+                doc.link.target_type == link.target_type && doc.link.target_id == link.target_id
+            })
+        }
+    }
+
+    fn fixture_doc(kind: LinkTarget, id: &str, title: &str, recent_hits: u32) -> LinkSearchResult {
+        LinkSearchResult {
+            link: LinkRef {
+                target_type: kind,
+                target_id: id.to_string(),
+                anchor: None,
+                display_text: None,
+            },
+            title: title.to_string(),
+            subtitle: format!("/{id}"),
+            type_badge: format!("{kind:?}"),
+            recent_hits,
+        }
+    }
+
     struct TestTelemetry {
         failures: std::sync::Mutex<Vec<ResolveLinkError>>,
     }
@@ -634,5 +814,80 @@ mod tests {
             },
         );
         assert_eq!(backlinks, vec![EntityKey::new(LinkTarget::Todo, "todo-1")]);
+    }
+
+    #[test]
+    fn trigger_detection_rejects_escaped_or_code_context() {
+        let valid = detect_link_trigger("hello @pla", "hello @pla".chars().count());
+        assert_eq!(
+            valid,
+            Some(LinkTrigger {
+                at_char_index: 6,
+                query: "pla".to_string()
+            })
+        );
+        assert!(detect_link_trigger("hello \\@pla", "hello \\@pla".chars().count()).is_none());
+        assert!(detect_link_trigger("`hello @pla`", "`hello @pla`".chars().count()).is_none());
+        assert!(detect_link_trigger("```\n@pla\n```", "```\n@pla".chars().count()).is_none());
+    }
+
+    #[test]
+    fn ranking_prefers_exact_then_prefix_then_fuzzy_then_recent() {
+        let mut catalog = LinkSearchCatalog::default();
+        catalog.register(Box::new(ProviderFixture {
+            docs: vec![
+                fixture_doc(LinkTarget::Note, "n1", "plan", 0),
+                fixture_doc(LinkTarget::Todo, "t1", "planet", 0),
+                fixture_doc(LinkTarget::Bookmark, "b1", "p-l-a-n board", 0),
+                fixture_doc(LinkTarget::Layout, "l1", "workspace", 5),
+            ],
+        }));
+
+        let ranked = catalog.fuzzy_search("plan");
+        let ids: Vec<String> = ranked.into_iter().map(|r| r.link.target_id).collect();
+        assert_eq!(ids, vec!["n1", "t1", "b1", "l1"]);
+    }
+
+    #[test]
+    fn insertion_formatter_preserves_anchor_and_text() {
+        let base = LinkRef {
+            target_type: LinkTarget::Note,
+            target_id: "alpha".to_string(),
+            anchor: None,
+            display_text: None,
+        };
+        assert_eq!(format_inserted_link(&base), "link://note/alpha");
+
+        let with_anchor = LinkRef {
+            target_type: LinkTarget::Note,
+            target_id: "alpha".to_string(),
+            anchor: Some("section-1".to_string()),
+            display_text: Some("Section 1".to_string()),
+        };
+        assert_eq!(
+            format_inserted_link(&with_anchor),
+            "link://note/alpha#section-1?text=Section%201"
+        );
+    }
+
+    #[test]
+    fn provider_contract_search_and_resolve() {
+        let mut catalog = LinkSearchCatalog::default();
+        catalog.register(Box::new(ProviderFixture {
+            docs: vec![fixture_doc(LinkTarget::File, "Cargo.toml", "Cargo.toml", 1)],
+        }));
+
+        let hits = catalog.fuzzy_search("cargo");
+        assert_eq!(hits.len(), 1);
+        let ok = catalog.resolve_for_insert(&hits[0].link);
+        assert!(ok.is_ok());
+
+        let missing = catalog.resolve_for_insert(&LinkRef {
+            target_type: LinkTarget::File,
+            target_id: "missing.txt".to_string(),
+            anchor: None,
+            display_text: None,
+        });
+        assert_eq!(missing, Err(ResolveLinkError::MissingTarget));
     }
 }
