@@ -622,8 +622,9 @@ impl NotePanel {
                     });
                 if !self.preview_mode {
                     if let Some(resp) = resp.inner {
+                        let first_edit_frame = self.last_textedit_id.is_none();
                         self.last_textedit_id = Some(resp.id);
-                        if self.focus_textedit_next_frame {
+                        if self.focus_textedit_next_frame || first_edit_frame {
                             resp.request_focus();
                             self.focus_textedit_next_frame = false;
                         }
