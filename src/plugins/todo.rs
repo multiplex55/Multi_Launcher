@@ -11,7 +11,12 @@ use crate::common::entity_ref::{EntityKind, EntityRef};
 use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::common::lru::LruCache;
 use crate::common::query::parse_query_filters;
+use crate::linking::{
+    build_index_from_notes_and_todos, format_link_id, resolve_link, EntityKey, LinkRef,
+    LinkResolverCatalog, LinkTarget, TracingLinkTelemetry,
+};
 use crate::plugin::Plugin;
+use crate::plugins::note::load_notes;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -46,6 +51,7 @@ const TODO_PSET_USAGE: &str = "Usage: todo pset <index> <priority>";
 const TODO_CLEAR_USAGE: &str = "Usage: todo clear";
 const TODO_VIEW_USAGE: &str = "Usage: todo view";
 const TODO_EXPORT_USAGE: &str = "Usage: todo export";
+const TODO_LINKS_USAGE: &str = "Usage: todo links <query> [--json]";
 
 fn parse_entity_ref_token(token: &str) -> Option<EntityRef> {
     let token = token.trim();
@@ -68,6 +74,72 @@ fn usage_action(usage: &str, query: &str) -> Action {
         label: usage.into(),
         desc: "Todo".into(),
         action: format!("query:{query}"),
+        args: None,
+    }
+}
+
+fn resolve_todo_matches<'a>(entries: &'a [TodoEntry], query: &str) -> Vec<&'a TodoEntry> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    if let Some(id) = q.strip_prefix("id:") {
+        let id = id.trim();
+        return entries.iter().filter(|t| t.id == id).collect();
+    }
+    let exact: Vec<&TodoEntry> = entries
+        .iter()
+        .filter(|t| t.text.eq_ignore_ascii_case(q))
+        .collect();
+    if !exact.is_empty() {
+        return exact;
+    }
+    let matcher = SkimMatcherV2::default();
+    entries
+        .iter()
+        .filter(|t| matcher.fuzzy_match(&t.text, q).is_some())
+        .collect()
+}
+
+fn format_todo_link_row(
+    notes: &[crate::plugins::note::Note],
+    todos: &[TodoEntry],
+    link: &LinkRef,
+    status: &str,
+) -> Action {
+    let title = match link.target_type {
+        LinkTarget::Note => notes
+            .iter()
+            .find(|n| n.slug == link.target_id)
+            .map(|n| n.alias.as_ref().unwrap_or(&n.title).clone())
+            .unwrap_or_else(|| link.target_id.clone()),
+        LinkTarget::Todo => todos
+            .iter()
+            .find(|t| t.id == link.target_id)
+            .map(|t| t.text.clone())
+            .unwrap_or_else(|| link.target_id.clone()),
+        _ => link
+            .display_text
+            .clone()
+            .unwrap_or_else(|| link.target_id.clone()),
+    };
+    Action {
+        label: format!(
+            "type={} | title={} | target={} | anchor={} | status={}",
+            match link.target_type {
+                LinkTarget::Note => "note",
+                LinkTarget::Todo => "todo",
+                LinkTarget::Bookmark => "bookmark",
+                LinkTarget::Layout => "layout",
+                LinkTarget::File => "file",
+            },
+            title,
+            format_link_id(link),
+            link.anchor.clone().unwrap_or_else(|| "-".into()),
+            status
+        ),
+        desc: "Links".into(),
+        action: format!("link:open:{}", format_link_id(link)),
         args: None,
     }
 }
@@ -656,6 +728,92 @@ impl TodoPlugin {
                 .collect();
         }
 
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "todo links") {
+            let rest = rest.trim();
+            if rest.is_empty() {
+                return vec![usage_action(TODO_LINKS_USAGE, "todo links ")];
+            }
+            let json_mode = rest.contains("--json");
+            let query = rest.replace("--json", "").trim().to_string();
+            let guard = match self.data.read() {
+                Ok(g) => g,
+                Err(_) => return Vec::new(),
+            };
+            let matches = resolve_todo_matches(&guard, &query);
+            if matches.is_empty() {
+                return vec![Action {
+                    label: format!("No todo found for \"{query}\""),
+                    desc: "Links".into(),
+                    action: "query:todo links ".into(),
+                    args: None,
+                }];
+            }
+            if matches.len() > 1 {
+                let mut actions = vec![Action {
+                    label: format!(
+                        "Ambiguous todo query \"{query}\" ({} matches)",
+                        matches.len()
+                    ),
+                    desc: "Links".into(),
+                    action: "query:todo links ".into(),
+                    args: None,
+                }];
+                actions.extend(matches.iter().take(8).map(|t| Action {
+                    label: format!("Candidate: {} [{}]", t.text, t.id),
+                    desc: "Links".into(),
+                    action: format!("query:todo links id:{}", t.id),
+                    args: None,
+                }));
+                return actions;
+            }
+            let Some(todo) = matches.first() else {
+                return Vec::new();
+            };
+            let notes = load_notes().unwrap_or_default();
+            let todos = guard.clone();
+            let index = build_index_from_notes_and_todos(&notes, &todos);
+            let source = EntityKey::new(LinkTarget::Todo, todo.id.clone());
+            let mut actions: Vec<Action> = index
+                .get_forward_links(&source)
+                .into_iter()
+                .map(|link| format_todo_link_row(&notes, &todos, &link, "attached"))
+                .collect();
+            if json_mode {
+                let json_rows: Vec<serde_json::Value> = index
+                    .get_forward_links(&source)
+                    .into_iter()
+                    .map(|link| {
+                        serde_json::json!({
+                            "type": match link.target_type { LinkTarget::Note=>"note", LinkTarget::Todo=>"todo", LinkTarget::Bookmark=>"bookmark", LinkTarget::Layout=>"layout", LinkTarget::File=>"file" },
+                            "title": link.display_text.clone().unwrap_or_else(|| link.target_id.clone()),
+                            "target": format_link_id(&link),
+                            "anchor": link.anchor.clone().unwrap_or_default(),
+                            "status": "attached"
+                        })
+                    })
+                    .collect();
+                actions.insert(
+                    0,
+                    Action {
+                        label: serde_json::to_string_pretty(&json_rows)
+                            .unwrap_or_else(|_| "[]".into()),
+                        desc: "Links JSON".into(),
+                        action: "noop".into(),
+                        args: None,
+                    },
+                );
+            }
+            if actions.is_empty() {
+                actions.push(Action {
+                    label: format!("No links for todo {}", todo.id),
+                    desc: "Links".into(),
+                    action: format!("query:todo links id:{}", todo.id),
+                    args: None,
+                });
+            }
+            return actions;
+        }
+
         const RM_PREFIX: &str = "todo rm ";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, RM_PREFIX) {
             let filter = rest.trim();
@@ -829,6 +987,12 @@ impl Plugin for TodoPlugin {
                 label: "todo tag".into(),
                 desc: "Todo".into(),
                 action: "query:todo tag ".into(),
+                args: None,
+            },
+            Action {
+                label: "todo links".into(),
+                desc: "Todo".into(),
+                action: "query:todo links ".into(),
                 args: None,
             },
             Action {
@@ -1102,5 +1266,61 @@ mod tests {
                 tags: vec!["alpha|beta,gamma".into(), "needs".into()],
             }
         );
+    }
+
+    #[test]
+    fn todo_links_no_match_and_ambiguous_paths() {
+        let original = set_todos(vec![
+            TodoEntry {
+                id: "t-1".into(),
+                text: "ship release".into(),
+                done: false,
+                priority: 1,
+                tags: vec![],
+                entity_refs: vec![],
+            },
+            TodoEntry {
+                id: "t-2".into(),
+                text: "ship release".into(),
+                done: false,
+                priority: 2,
+                tags: vec![],
+                entity_refs: vec![],
+            },
+        ]);
+        let plugin = TodoPlugin::default();
+        let no_match = plugin.search_internal("todo links unknown-task");
+        assert!(no_match[0].label.contains("No todo found"));
+
+        let ambiguous = plugin.search_internal("todo links ship release");
+        assert!(ambiguous[0].label.starts_with("Ambiguous todo query"));
+        assert!(ambiguous
+            .iter()
+            .any(|a| a.action == "query:todo links id:t-1"));
+        assert!(ambiguous
+            .iter()
+            .any(|a| a.action == "query:todo links id:t-2"));
+        if let Ok(mut guard) = TODO_DATA.write() {
+            *guard = original;
+        }
+    }
+
+    #[test]
+    fn todo_links_json_output_prefixes_machine_readable_row() {
+        let original = set_todos(vec![TodoEntry {
+            id: "t-3".into(),
+            text: "write docs".into(),
+            done: false,
+            priority: 1,
+            tags: vec![],
+            entity_refs: vec![EntityRef::new(EntityKind::Note, "alpha", None)],
+        }]);
+        let plugin = TodoPlugin::default();
+        let out = plugin.search_internal("todo links id:t-3 --json");
+        assert!(out[0].desc.contains("JSON"));
+        assert!(out[0].label.starts_with("["));
+        if let Ok(mut guard) = TODO_DATA.write() {
+            *guard = original;
+        }
     }
 }

@@ -2568,6 +2568,23 @@ impl LauncherApp {
             set_focus = true;
         } else if let Some(link) = a.action.strip_prefix("note:link:") {
             self.open_note_link(link);
+        } else if let Some(link_id) = a.action.strip_prefix("link:open:") {
+            if let Ok(parsed) = crate::linking::parse_link_id(link_id) {
+                match parsed.target_type {
+                    crate::linking::LinkTarget::Note => {
+                        self.open_note_panel(&parsed.target_id, None);
+                    }
+                    crate::linking::LinkTarget::Todo => {
+                        self.query = format!("todo links id:{}", parsed.target_id);
+                        self.search();
+                    }
+                    _ => {
+                        self.set_error(format!("Unsupported link target: {}", link_id));
+                    }
+                }
+            } else {
+                self.set_error(format!("Invalid link id: {}", link_id));
+            }
         } else if let Some(slug) = a.action.strip_prefix("note:remove:") {
             self.delete_note(slug);
         } else if a.action == "convert:panel" {

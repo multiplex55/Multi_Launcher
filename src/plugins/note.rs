@@ -2,7 +2,11 @@ use crate::actions::Action;
 use crate::common::entity_ref::{EntityKind, EntityRef};
 use crate::common::query::parse_query_filters;
 use crate::common::slug::{register_slug, reset_slug_lookup, slugify, unique_slug};
+use crate::linking::{
+    build_index_from_notes_and_todos, format_link_id, EntityKey, LinkRef, LinkTarget,
+};
 use crate::plugin::Plugin;
+use crate::plugins::todo::TODO_DATA;
 use chrono::Local;
 use eframe::egui;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -339,6 +343,50 @@ fn resolve_note<'a>(cache: &'a NoteCache, query: &str) -> Option<&'a Note> {
             .first()
             .and_then(|slug| cache.notes.iter().find(|n| n.slug == *slug)),
         NoteTarget::Broken => None,
+    }
+}
+
+fn format_link_row(
+    notes: &[Note],
+    todos: &[crate::plugins::todo::TodoEntry],
+    link: &LinkRef,
+    status: &str,
+) -> Action {
+    let title = match link.target_type {
+        LinkTarget::Note => notes
+            .iter()
+            .find(|n| n.slug == link.target_id)
+            .map(|n| n.alias.as_ref().unwrap_or(&n.title).clone())
+            .unwrap_or_else(|| link.target_id.clone()),
+        LinkTarget::Todo => todos
+            .iter()
+            .find(|t| t.id == link.target_id)
+            .map(|t| t.text.clone())
+            .unwrap_or_else(|| link.target_id.clone()),
+        _ => link
+            .display_text
+            .clone()
+            .unwrap_or_else(|| link.target_id.clone()),
+    };
+    let anchor = link.anchor.clone().unwrap_or_else(|| "-".into());
+    Action {
+        label: format!(
+            "type={} | title={} | target={} | anchor={} | status={}",
+            match link.target_type {
+                LinkTarget::Note => "note",
+                LinkTarget::Todo => "todo",
+                LinkTarget::Bookmark => "bookmark",
+                LinkTarget::Layout => "layout",
+                LinkTarget::File => "file",
+            },
+            title,
+            format_link_id(link),
+            anchor,
+            status
+        ),
+        desc: "Links".into(),
+        action: format!("link:open:{}", format_link_id(link)),
+        args: None,
     }
 }
 
@@ -1064,22 +1112,19 @@ impl Plugin for NotePlugin {
                         args: None,
                     }];
                 }
-                "link" => {
+                "links" | "link" => {
                     if args.is_empty() {
                         let mut actions = vec![Action {
-                            label: "note link <note>".into(),
+                            label: "Usage: note links <query>".into(),
                             desc: "Usage".into(),
-                            action: "query:note link ".into(),
+                            action: "query:note links ".into(),
                             args: None,
                         }];
                         actions.extend(guard.notes.iter().map(|n| Action {
-                            label: format!(
-                                "Backlinks for {}",
-                                n.alias.as_ref().unwrap_or(&n.title)
-                            ),
-                            desc: "Backlinks".into(),
+                            label: format!("Links for {}", n.alias.as_ref().unwrap_or(&n.title)),
+                            desc: "Links".into(),
                             action: format!(
-                                "query:note link {}",
+                                "query:note links {}",
                                 n.alias.as_ref().unwrap_or(&n.title)
                             ),
                             args: None,
@@ -1087,39 +1132,72 @@ impl Plugin for NotePlugin {
                         return actions;
                     }
 
-                    let note = match resolve_note(&guard, args) {
+                    let note = match resolve_target(&guard, args) {
+                        NoteTarget::Resolved(slug) => guard.notes.iter().find(|n| n.slug == slug),
+                        NoteTarget::Ambiguous(slugs) => {
+                            let mut actions = vec![Action {
+                                label: format!(
+                                    "Ambiguous note query \"{args}\" ({} matches)",
+                                    slugs.len()
+                                ),
+                                desc: "Links".into(),
+                                action: "query:note links ".into(),
+                                args: None,
+                            }];
+                            actions.extend(slugs.into_iter().take(8).map(|slug| Action {
+                                label: format!("Candidate: {slug}"),
+                                desc: "Links".into(),
+                                action: format!("query:note links slug:{slug}"),
+                                args: None,
+                            }));
+                            return actions;
+                        }
+                        NoteTarget::Broken => None,
+                    };
+
+                    let note = match note {
                         Some(note) => note,
                         None => {
                             return vec![Action {
                                 label: format!("No note found for \"{args}\""),
-                                desc: "Backlinks".into(),
-                                action: "query:note link ".into(),
+                                desc: "Links".into(),
+                                action: "query:note links ".into(),
                                 args: None,
                             }]
                         }
                     };
 
-                    let mut actions: Vec<Action> = guard
-                        .links
-                        .get(&note.slug)
+                    let todos = TODO_DATA.read().map(|g| g.clone()).unwrap_or_default();
+                    let index = build_index_from_notes_and_todos(&guard.notes, &todos);
+                    let source = EntityKey::new(LinkTarget::Note, note.slug.clone());
+
+                    let mut actions: Vec<Action> = index
+                        .get_forward_links(&source)
                         .into_iter()
-                        .flat_map(|backlinks| backlinks.iter())
-                        .filter_map(|slug| guard.notes.iter().find(|n| n.slug == *slug))
-                        .map(|linked_note| {
-                            let label = linked_note.alias.as_ref().unwrap_or(&linked_note.title);
-                            Action {
-                                label: format!("Backlink: {label}"),
-                                desc: format!("Backlinks to {}", note.title),
-                                action: format!("note:open:{}", linked_note.slug),
-                                args: None,
-                            }
-                        })
+                        .map(|link| format_link_row(&guard.notes, &todos, &link, "linked"))
                         .collect();
+
+                    for backlink in index.get_backlinks(
+                        &source,
+                        crate::linking::BacklinkFilters {
+                            linked_todos: true,
+                            related_notes: true,
+                            mentions: true,
+                        },
+                    ) {
+                        let link = LinkRef {
+                            target_type: backlink.entity_type,
+                            target_id: backlink.entity_id,
+                            anchor: None,
+                            display_text: None,
+                        };
+                        actions.push(format_link_row(&guard.notes, &todos, &link, "mentioned_by"));
+                    }
 
                     if actions.is_empty() {
                         actions.push(Action {
-                            label: format!("No backlinks for {}", note.title),
-                            desc: "Backlinks".into(),
+                            label: format!("No links for {}", note.title),
+                            desc: "Links".into(),
                             action: format!("note:open:{}", note.slug),
                             args: None,
                         });
@@ -1263,6 +1341,12 @@ impl Plugin for NotePlugin {
                 label: "note link".into(),
                 desc: "Note".into(),
                 action: "query:note link ".into(),
+                args: None,
+            },
+            Action {
+                label: "note links".into(),
+                desc: "Note".into(),
+                action: "query:note links ".into(),
                 args: None,
             },
             Action {
@@ -1628,7 +1712,7 @@ mod tests {
     }
 
     #[test]
-    fn note_link_lists_backlinks_for_note() {
+    fn note_links_lists_forward_and_back_links_for_note() {
         let alpha_content = "See [[Beta Note]] and [[Gamma Note]].";
         let delta_content = "Reference [[Beta Note]].";
         let original = set_notes(vec![
@@ -1682,11 +1766,50 @@ mod tests {
             watcher: None,
         };
 
-        let links = plugin.search("note link Second");
-        let labels: Vec<&str> = links.iter().map(|a| a.label.as_str()).collect();
-        assert_eq!(labels, vec!["Backlink: Alpha", "Backlink: Delta"]);
-        assert_eq!(links[0].desc, "Backlinks to Beta Note");
+        let links = plugin.search("note links Second");
+        assert!(links
+            .iter()
+            .any(|a| a.label.contains("status=mentioned_by") && a.label.contains("type=note")));
+        assert!(links
+            .iter()
+            .any(|a| a.action.starts_with("link:open:link://note/")));
 
+        restore_cache(original);
+    }
+
+    #[test]
+    fn note_links_ambiguous_query_returns_candidates() {
+        let original = set_notes(vec![
+            Note {
+                title: "Roadmap".into(),
+                path: PathBuf::new(),
+                content: String::new(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "roadmap-a".into(),
+                alias: None,
+                entity_refs: Vec::new(),
+            },
+            Note {
+                title: "Roadmap".into(),
+                path: PathBuf::new(),
+                content: String::new(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "roadmap-b".into(),
+                alias: None,
+                entity_refs: Vec::new(),
+            },
+        ]);
+        let plugin = NotePlugin::default();
+        let links = plugin.search("note links Roadmap");
+        assert!(links[0].label.starts_with("Ambiguous note query"));
+        assert!(links
+            .iter()
+            .any(|a| a.action == "query:note links slug:roadmap-a"));
+        assert!(links
+            .iter()
+            .any(|a| a.action == "query:note links slug:roadmap-b"));
         restore_cache(original);
     }
     #[test]
