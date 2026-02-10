@@ -842,12 +842,22 @@ impl TodoPlugin {
             let filter = rest.trim();
             // Prefer disk as the source of truth for list views so toggles are reflected
             // immediately even if file-watch events briefly race with writes.
-            let todos = load_todos(TODO_FILE).unwrap_or_else(|_| {
+            //
+            // Unit tests in this module often inject `self.data` directly without creating
+            // `todo.json`, so fall back to in-memory data when the file does not exist.
+            let todos = if std::path::Path::new(TODO_FILE).exists() {
+                load_todos(TODO_FILE).unwrap_or_else(|_| {
+                    self.data
+                        .read()
+                        .map(|g| g.clone())
+                        .unwrap_or_else(|_| Vec::new())
+                })
+            } else {
                 self.data
                     .read()
                     .map(|g| g.clone())
                     .unwrap_or_else(|_| Vec::new())
-            });
+            };
             if let Ok(mut lock) = self.data.write() {
                 *lock = todos.clone();
             }
