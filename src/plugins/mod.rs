@@ -18,6 +18,7 @@ pub mod ip;
 pub mod keys;
 pub mod layout;
 pub mod layouts_storage;
+pub mod link;
 pub mod lorem;
 pub mod macros;
 pub mod media;

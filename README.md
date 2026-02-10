@@ -148,6 +148,9 @@ Multi Launcher is centered around a **single query box**:
   - `note list`
 - Search notes (title/content):
   - `note rustdoc`
+- Inspect links around a note (linked todos/notes/mentions):
+  - `note links roadmap`
+  - `note links slug:roadmap-2026`
 
 > Notes are markdown files stored in `notes/` by default. Set `ML_NOTES_DIR` to override.
 
@@ -160,6 +163,18 @@ Multi Launcher is centered around a **single query box**:
   - `todo p1`
 - Mark complete:
   - `todo done fix mouse gesture stutter` (select matching item)
+- Inspect note attachments/anchors for a todo:
+  - `todo links release checklist`
+  - `todo links id:todo-1730000000-1 --json`
+
+### 5.1) Canonical links (copy/paste workflow)
+- Resolve and open canonical IDs:
+  - `link link://note/roadmap-2026`
+  - `link link://note/roadmap-2026#milestones`
+- Typical workflow:
+  - run `note links roadmap`
+  - copy the `target` value (for example `link://note/roadmap-2026#milestones`)
+  - paste into `link <id>` to jump directly to the target.
 
 ### 6) Favorites (pin “commands you actually use”)
 Favorites are shortcuts that point at an action string (anything the launcher can execute).
@@ -470,4 +485,3 @@ cargo build --release
 * Some browsers / window states may block UIA access; the plugin may fall back to click simulation.
 
 ---
-

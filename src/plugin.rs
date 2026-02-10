@@ -18,6 +18,7 @@ use crate::plugins::history::HistoryPlugin;
 use crate::plugins::ip::IpPlugin;
 use crate::plugins::keys::KeysPlugin;
 use crate::plugins::layout::LayoutPlugin;
+use crate::plugins::link::LinkPlugin;
 use crate::plugins::lorem::LoremPlugin;
 use crate::plugins::macros::MacrosPlugin;
 use crate::plugins::media::MediaPlugin;
@@ -173,6 +174,7 @@ impl PluginManager {
         self.register_with_settings(SettingsPlugin, plugin_settings);
         self.register_with_settings(HelpPlugin, plugin_settings);
         self.register_with_settings(LayoutPlugin, plugin_settings);
+        self.register_with_settings(LinkPlugin, plugin_settings);
         self.register_with_settings(TimerPlugin, plugin_settings);
         self.register_with_settings(StopwatchPlugin::default(), plugin_settings);
         if reset_alarm {
