@@ -131,9 +131,16 @@ fn linking_commands_reflect_at_entity_links_and_canonical_link_resolution() {
     save_todos(TODO_FILE, &todos).expect("save todos");
 
     let note_links = NotePlugin::default().search("note links plan");
-    assert!(note_links
-        .iter()
-        .any(|a| a.label.contains("type=todo") && a.label.contains("id=t-1")));
+    assert!(
+        note_links
+            .iter()
+            .any(|a| a.label.contains("type=todo") && a.action == "query:todo links id:t-1"),
+        "expected note links to include todo backlink action for t-1, got: {:?}",
+        note_links
+            .iter()
+            .map(|a| (&a.label, &a.action))
+            .collect::<Vec<_>>()
+    );
 
     let todo_links = TodoPlugin::default().search("todo links id:t-1");
     assert!(todo_links
