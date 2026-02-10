@@ -840,11 +840,18 @@ impl TodoPlugin {
         const LIST_PREFIX: &str = "todo list";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
             let filter = rest.trim();
-            let guard = match self.data.read() {
-                Ok(g) => g,
-                Err(_) => return Vec::new(),
-            };
-            let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
+            // Prefer disk as the source of truth for list views so toggles are reflected
+            // immediately even if file-watch events briefly race with writes.
+            let todos = load_todos(TODO_FILE).unwrap_or_else(|_| {
+                self.data
+                    .read()
+                    .map(|g| g.clone())
+                    .unwrap_or_else(|_| Vec::new())
+            });
+            if let Ok(mut lock) = self.data.write() {
+                *lock = todos.clone();
+            }
+            let mut entries: Vec<(usize, &TodoEntry)> = todos.iter().enumerate().collect();
 
             let filters = parse_query_filters(filter, &["@", "#", "tag:"]);
             let text_filter = filters.remaining_tokens.join(" ");
