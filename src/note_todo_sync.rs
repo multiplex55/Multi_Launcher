@@ -361,6 +361,13 @@ pub fn sync_note_todos(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::entity_ref::{EntityKind, EntityRef};
+    use crate::linking::{
+        build_index_from_notes_and_todos, BacklinkFilters, EntityKey, LinkTarget,
+    };
+    use crate::plugins::note::Note;
+    use crate::plugins::todo::TodoEntry;
+    use std::path::PathBuf;
 
     #[test]
     fn parser_extracts_checked_unchecked_and_metadata() {
@@ -531,5 +538,127 @@ mod tests {
         let lines: Vec<&str> = result.note_content.lines().collect();
         assert_eq!(lines[0], "# Heading");
         assert_eq!(lines[1], "plain paragraph");
+    }
+
+    #[test]
+    fn fixture_parser_keeps_heading_mentions_links_and_checkbox_metadata() {
+        let note = r#"# Plan
+## Phase 1
+See @note:architecture and [spec](https://example.com/spec).
+- [ ] Ship parser p2 #core @due 2026-03-01 <!-- ml:todo:t-10 -->
+- [x] Publish notes #docs
+"#;
+        let items = parse_checklist_items(note);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].todo_id.as_deref(), Some("t-10"));
+        assert_eq!(items[0].priority, Some(2));
+        assert_eq!(items[0].tags, vec!["core"]);
+        assert_eq!(items[1].text, "Publish notes");
+    }
+
+    #[test]
+    fn integration_checkbox_sync_creates_todo_and_backlink_index_updates() {
+        let note = "# Launch\n- [ ] Ship launch checklist #ops @due 2026-04-02";
+        let result = sync_note_todos(
+            note,
+            &[],
+            SyncConfig {
+                enabled: true,
+                mode: SyncMode::OneWayImportFromNote,
+            },
+            None,
+            RevisionState {
+                note_rev: 1,
+                todo_rev: 0,
+            },
+        );
+
+        assert_eq!(result.todos.len(), 1);
+        assert!(result.note_content.contains("<!-- ml:todo:note-sync-1 -->"));
+
+        let notes = vec![Note {
+            title: "Launch".into(),
+            path: PathBuf::from("launch.md"),
+            content: result.note_content.clone(),
+            tags: vec![],
+            links: vec![],
+            slug: "launch".into(),
+            alias: None,
+            entity_refs: vec![EntityRef::new(EntityKind::Todo, "note-sync-1", None)],
+        }];
+        let todos = vec![TodoEntry {
+            id: "note-sync-1".into(),
+            text: "Ship launch checklist".into(),
+            done: false,
+            priority: 2,
+            tags: vec!["ops".into()],
+            entity_refs: vec![EntityRef::new(EntityKind::Note, "launch", None)],
+        }];
+        let index = build_index_from_notes_and_todos(&notes, &todos);
+
+        let note_backlinks = index.get_backlinks(
+            &EntityKey::new(LinkTarget::Note, "launch"),
+            BacklinkFilters {
+                linked_todos: true,
+                related_notes: false,
+                mentions: false,
+            },
+        );
+        assert_eq!(note_backlinks.len(), 1);
+        assert_eq!(
+            note_backlinks[0],
+            EntityKey::new(LinkTarget::Todo, "note-sync-1")
+        );
+    }
+
+    #[test]
+    fn sync_mode_transition_preserves_data_without_loss() {
+        let initial_note = "- [ ] stabilize API p2 #platform <!-- ml:todo:t-1 -->";
+        let initial_todos = vec![TodoItem {
+            id: "t-1".into(),
+            text: "stabilize API".into(),
+            done: false,
+            tags: vec!["platform".into()],
+            priority: Some(2),
+            due: None,
+        }];
+
+        let note_authoritative = sync_note_todos(
+            initial_note,
+            &initial_todos,
+            SyncConfig {
+                enabled: true,
+                mode: SyncMode::NoteSourceOfTruth,
+            },
+            Some(RevisionState {
+                note_rev: 1,
+                todo_rev: 1,
+            }),
+            RevisionState {
+                note_rev: 2,
+                todo_rev: 1,
+            },
+        );
+
+        let switched = sync_note_todos(
+            &note_authoritative.note_content,
+            &note_authoritative.todos,
+            SyncConfig {
+                enabled: true,
+                mode: SyncMode::TodoSourceOfTruth,
+            },
+            Some(RevisionState {
+                note_rev: 2,
+                todo_rev: 1,
+            }),
+            RevisionState {
+                note_rev: 2,
+                todo_rev: 2,
+            },
+        );
+
+        assert_eq!(switched.todos.len(), 1);
+        assert!(switched.note_content.contains("stabilize API"));
+        assert!(switched.note_content.contains("<!-- ml:todo:t-1 -->"));
     }
 }

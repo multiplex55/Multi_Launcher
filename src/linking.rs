@@ -609,6 +609,10 @@ mod tests {
     use super::*;
     use crate::common::entity_ref::EntityRef;
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    const LARGE_NOTE_LINK_COUNT: usize = 2_000;
+    const LINK_INDEX_LATENCY_BUDGET_MS: u128 = 250;
 
     struct ProviderFixture {
         docs: Vec<LinkSearchResult>,
@@ -889,5 +893,98 @@ mod tests {
             display_text: None,
         });
         assert_eq!(missing, Err(ResolveLinkError::MissingTarget));
+    }
+
+    #[test]
+    fn link_resolver_handles_deleted_and_recreated_targets() {
+        let telemetry = TestTelemetry::new();
+        let link_id = "link://note/incident-log#postmortem";
+
+        let mut created = LinkResolverCatalog::default();
+        created.add_anchor(
+            EntityKey::new(LinkTarget::Note, "incident-log"),
+            "postmortem",
+        );
+        let resolved = resolve_link(link_id, &created, &telemetry);
+        assert!(resolved.is_ok());
+
+        let deleted = LinkResolverCatalog::default();
+        let broken = resolve_link(link_id, &deleted, &telemetry);
+        assert_eq!(broken, Err(ResolveLinkError::MissingTarget));
+
+        let mut recreated = LinkResolverCatalog::default();
+        recreated.add_anchor(
+            EntityKey::new(LinkTarget::Note, "incident-log"),
+            "postmortem",
+        );
+        let restored = resolve_link(link_id, &recreated, &telemetry);
+        assert!(restored.is_ok());
+    }
+
+    #[test]
+    fn link_index_contract_tracks_note_and_todo_backlinks_after_sync_like_update() {
+        let note_key = EntityKey::new(LinkTarget::Note, "release-plan");
+        let todo_key = EntityKey::new(LinkTarget::Todo, "note-sync-7");
+        let mut index = LinkIndex::default();
+
+        index.set_outgoing_links(
+            note_key.clone(),
+            vec![LinkRef {
+                target_type: LinkTarget::Todo,
+                target_id: "note-sync-7".into(),
+                anchor: None,
+                display_text: Some("Ship launch checklist".into()),
+            }],
+        );
+        index.set_outgoing_links(
+            todo_key.clone(),
+            vec![LinkRef {
+                target_type: LinkTarget::Note,
+                target_id: "release-plan".into(),
+                anchor: None,
+                display_text: Some("Release Plan".into()),
+            }],
+        );
+
+        assert_eq!(
+            index.get_backlinks(
+                &note_key,
+                BacklinkFilters {
+                    linked_todos: true,
+                    related_notes: false,
+                    mentions: false,
+                }
+            ),
+            vec![todo_key]
+        );
+    }
+
+    #[test]
+    fn large_link_index_build_stays_within_latency_budget() {
+        let note = Note {
+            title: "Big checklist".into(),
+            path: PathBuf::from("big.md"),
+            content: String::new(),
+            tags: vec![],
+            links: (0..LARGE_NOTE_LINK_COUNT)
+                .map(|idx| format!("target-{idx}"))
+                .collect(),
+            slug: "big".into(),
+            alias: None,
+            entity_refs: vec![],
+        };
+
+        let start = Instant::now();
+        let index = build_index_from_notes_and_todos(&[note], &[]);
+        let elapsed = start.elapsed();
+        let hits = index.search_link_targets("target-19", &[LinkTarget::Note]);
+
+        assert!(!hits.is_empty());
+        assert!(
+            elapsed <= Duration::from_millis(LINK_INDEX_LATENCY_BUDGET_MS as u64),
+            "index build elapsed {:?} exceeded budget of {}ms",
+            elapsed,
+            LINK_INDEX_LATENCY_BUDGET_MS
+        );
     }
 }

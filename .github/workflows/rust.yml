@@ -48,3 +48,6 @@ jobs:
 
       - name: Test (cargo-nextest)
         run: cargo nextest run --locked --workspace --all-features --no-fail-fast --failure-output=immediate-final
+
+      - name: Test (links/sync regression gate)
+        run: cargo test --locked --all-features --test links_sync_integration -- --nocapture
