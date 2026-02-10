@@ -851,7 +851,9 @@ impl TodoPlugin {
                 .read()
                 .map(|g| g.clone())
                 .unwrap_or_else(|_| Vec::new());
-            let todos = if std::path::Path::new(TODO_FILE).exists() {
+            let todos = if self.watcher.is_none() && !mem_todos.is_empty() {
+                mem_todos.clone()
+            } else if std::path::Path::new(TODO_FILE).exists() {
                 let disk_todos = load_todos(TODO_FILE).unwrap_or_else(|_| mem_todos.clone());
                 if disk_todos.is_empty() && !mem_todos.is_empty() {
                     mem_todos.clone()
