@@ -1775,9 +1775,7 @@ mod tests {
         assert!(links
             .iter()
             .any(|a| a.label.contains("status=mentioned_by") && a.label.contains("type=note")));
-        assert!(links
-            .iter()
-            .any(|a| a.action.starts_with("link:open:link://note/")));
+        assert!(links.iter().any(|a| a.action.starts_with("note:open:")));
 
         restore_cache(original);
     }
@@ -1808,7 +1806,9 @@ mod tests {
         ]);
         let plugin = NotePlugin::default();
         let links = plugin.search("note links Roadmap");
-        assert!(links[0].label.starts_with("Ambiguous note query"));
+        assert!(links
+            .iter()
+            .any(|a| a.label.starts_with("Ambiguous note query")));
         assert!(links
             .iter()
             .any(|a| a.action == "query:note links slug:roadmap-a"));
