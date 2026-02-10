@@ -1804,7 +1804,13 @@ mod tests {
                 entity_refs: Vec::new(),
             },
         ]);
-        let plugin = NotePlugin::default();
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: CACHE.clone(),
+            templates: TEMPLATE_CACHE.clone(),
+            external_open: NoteExternalOpen::Wezterm,
+            watcher: None,
+        };
         let links = plugin.search("note links Roadmap");
         assert!(links
             .iter()
