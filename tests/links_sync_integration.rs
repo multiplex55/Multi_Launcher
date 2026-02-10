@@ -143,9 +143,18 @@ fn linking_commands_reflect_at_entity_links_and_canonical_link_resolution() {
     );
 
     let todo_links = TodoPlugin::default().search("todo links id:t-1");
-    assert!(todo_links
-        .iter()
-        .any(|a| a.label.contains("type=note") && a.label.contains("id=plan")));
+    assert!(
+        todo_links.iter().any(|a| {
+            a.label.contains("type=note")
+                && a.label.contains("target=link://note/plan")
+                && a.action == "link:open:link://note/plan"
+        }),
+        "expected todo links to include note attachment row for plan, got: {:?}",
+        todo_links
+            .iter()
+            .map(|a| (&a.label, &a.action))
+            .collect::<Vec<_>>()
+    );
 
     let canonical = LinkPlugin {}.search("link link://note/runbook#phase-1");
     assert_eq!(canonical.len(), 1);
