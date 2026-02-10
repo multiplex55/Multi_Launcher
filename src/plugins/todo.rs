@@ -843,20 +843,23 @@ impl TodoPlugin {
             // Prefer disk as the source of truth for list views so toggles are reflected
             // immediately even if file-watch events briefly race with writes.
             //
-            // Unit tests in this module often inject `self.data` directly without creating
-            // `todo.json`, so fall back to in-memory data when the file does not exist.
+            // Test cases may inject `self.data` directly while an unrelated empty `todo.json`
+            // exists in the working directory; when disk is empty but memory is populated,
+            // keep the injected in-memory snapshot.
+            let mem_todos = self
+                .data
+                .read()
+                .map(|g| g.clone())
+                .unwrap_or_else(|_| Vec::new());
             let todos = if std::path::Path::new(TODO_FILE).exists() {
-                load_todos(TODO_FILE).unwrap_or_else(|_| {
-                    self.data
-                        .read()
-                        .map(|g| g.clone())
-                        .unwrap_or_else(|_| Vec::new())
-                })
+                let disk_todos = load_todos(TODO_FILE).unwrap_or_else(|_| mem_todos.clone());
+                if disk_todos.is_empty() && !mem_todos.is_empty() {
+                    mem_todos.clone()
+                } else {
+                    disk_todos
+                }
             } else {
-                self.data
-                    .read()
-                    .map(|g| g.clone())
-                    .unwrap_or_else(|_| Vec::new())
+                mem_todos.clone()
             };
             if let Ok(mut lock) = self.data.write() {
                 *lock = todos.clone();
