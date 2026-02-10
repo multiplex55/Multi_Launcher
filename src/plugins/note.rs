@@ -857,6 +857,12 @@ impl Plugin for NotePlugin {
                         args: None,
                     },
                     Action {
+                        label: "note graph".into(),
+                        desc: "Note".into(),
+                        action: "query:note graph".into(),
+                        args: None,
+                    },
+                    Action {
                         label: "note templates".into(),
                         desc: "Note".into(),
                         action: "query:note templates".into(),
@@ -1092,6 +1098,25 @@ impl Plugin for NotePlugin {
                             args: None,
                         })
                         .collect();
+                }
+                "graph" => {
+                    let mut filters = parse_query_filters(args, &["@", "#", "tag:"]);
+                    filters.include_tags = filters
+                        .include_tags
+                        .into_iter()
+                        .map(|tag| tag.to_lowercase())
+                        .collect();
+                    let root = filters.remaining_tokens.first().cloned();
+                    let args = serde_json::json!({
+                        "include_tags": filters.include_tags,
+                        "root": root,
+                    });
+                    return vec![Action {
+                        label: "Open note graph".into(),
+                        desc: "Note".into(),
+                        action: "note:graph_dialog".into(),
+                        args: Some(args.to_string()),
+                    }];
                 }
                 "today" => {
                     let slug = Local::now().format("%Y-%m-%d").to_string();
