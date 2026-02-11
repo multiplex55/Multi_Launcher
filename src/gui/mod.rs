@@ -4546,7 +4546,12 @@ impl eframe::App for LauncherApp {
         notes_dlg.ui(ctx, self);
         self.notes_dialog = notes_dlg;
         let mut graph_dlg = std::mem::take(&mut self.note_graph_dialog);
-        graph_dlg.ui(ctx, self);
+        graph_dlg.ui(
+            ctx,
+            self,
+            &self.dashboard_data_cache,
+            crate::plugins::note::note_version(),
+        );
         self.note_graph_dialog = graph_dlg;
         let mut assets_dlg = std::mem::take(&mut self.unused_assets_dialog);
         assets_dlg.ui(ctx, self);
