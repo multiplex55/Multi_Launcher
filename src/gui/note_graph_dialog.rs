@@ -14,6 +14,11 @@ use std::collections::BTreeSet;
 
 const MIN_ZOOM: f32 = 0.2;
 const MAX_ZOOM: f32 = 2.5;
+const MIN_CANVAS_WIDTH: f32 = 300.0;
+const DETAILS_WIDTH_RATIO: f32 = 0.28;
+const DETAILS_MIN: f32 = 180.0;
+const DETAILS_MAX: f32 = 280.0;
+const MIN_CANVAS_HEIGHT: f32 = 300.0;
 
 #[derive(Default, Deserialize)]
 struct NoteGraphDialogArgs {
@@ -227,18 +232,37 @@ impl NoteGraphDialog {
                 persist_requested |= self.filters_top_panel(ui, &notes);
                 ui.separator();
 
-                ui.horizontal(|ui| {
-                    ui.set_min_height(ui.available_height());
-                    let available_width = ui.available_width().max(320.0);
-                    let right_panel_width = (available_width * 0.28).clamp(180.0, 280.0);
-                    ui.vertical(|ui| self.main_canvas(ui, ctx, app));
-                    if self.show_details_panel {
-                        ui.separator();
-                        persist_requested |= ui
-                            .vertical(|ui| self.right_panel(ui, app, &notes, right_panel_width))
-                            .inner;
-                    }
+                let available_rect = ui.available_rect_before_wrap();
+                let total_width = available_rect.width();
+                let total_height = available_rect.height().max(MIN_CANVAS_HEIGHT);
+                let panel_rect = Rect::from_min_size(
+                    available_rect.min,
+                    egui::vec2(total_width.max(MIN_CANVAS_WIDTH), total_height),
+                );
+                ui.allocate_rect(panel_rect, Sense::hover());
+
+                let (canvas_width, details_width) =
+                    compute_graph_layout(panel_rect.width(), self.show_details_panel);
+                let canvas_rect =
+                    Rect::from_min_size(panel_rect.min, egui::vec2(canvas_width, total_height));
+                let details_rect = details_width.map(|width| {
+                    Rect::from_min_size(
+                        Pos2::new(canvas_rect.right(), panel_rect.top()),
+                        egui::vec2(width, total_height),
+                    )
                 });
+
+                ui.allocate_ui_at_rect(canvas_rect, |ui| {
+                    self.main_canvas(ui, ctx, app, canvas_rect.size())
+                });
+
+                if let Some((details_rect, details_width)) = details_rect.zip(details_width) {
+                    persist_requested |= ui
+                        .allocate_ui_at_rect(details_rect, |ui| {
+                            self.right_panel(ui, app, &notes, details_width)
+                        })
+                        .inner;
+                }
             });
         self.open = window_open;
         self.was_open_last_frame = self.open;
@@ -525,10 +549,16 @@ impl NoteGraphDialog {
         changed
     }
 
-    fn main_canvas(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, app: &mut LauncherApp) {
+    fn main_canvas(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        canvas_size: Vec2,
+    ) {
         let desired = egui::vec2(
-            ui.available_width().max(300.0),
-            ui.available_height().max(300.0),
+            canvas_size.x.max(MIN_CANVAS_WIDTH),
+            canvas_size.y.max(MIN_CANVAS_HEIGHT),
         );
         let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
@@ -662,7 +692,7 @@ impl NoteGraphDialog {
         width: f32,
     ) -> bool {
         ui.set_min_width(width);
-        ui.set_max_width(width + 24.0);
+        ui.set_max_width(width);
         ui.label("Details");
         let Some(slug) = self.selected_node_id.as_deref() else {
             ui.label("Select a node");
@@ -741,6 +771,19 @@ impl NoteGraphDialog {
             self.search.selected_idx = 0;
         }
     }
+}
+
+fn compute_graph_layout(total_width: f32, details_visible: bool) -> (f32, Option<f32>) {
+    let total_width = total_width.max(0.0);
+    if !details_visible {
+        return (total_width.max(MIN_CANVAS_WIDTH), None);
+    }
+
+    let details_width = (total_width * DETAILS_WIDTH_RATIO)
+        .clamp(DETAILS_MIN, DETAILS_MAX)
+        .min((total_width - MIN_CANVAS_WIDTH).max(0.0));
+    let canvas_width = (total_width - details_width).max(MIN_CANVAS_WIDTH);
+    (canvas_width, Some(details_width))
 }
 
 fn normalize_tag(tag: &str) -> String {
@@ -865,5 +908,70 @@ mod tests {
         ));
         assert!(dlg.open);
         assert!(dlg.pending_args.is_some());
+    }
+
+    #[test]
+    fn compute_graph_layout_table_driven_cases() {
+        struct Case {
+            total_width: f32,
+            details_visible: bool,
+            expected_canvas: f32,
+            expected_details: Option<f32>,
+        }
+
+        let cases = [
+            Case {
+                total_width: 260.0,
+                details_visible: false,
+                expected_canvas: MIN_CANVAS_WIDTH,
+                expected_details: None,
+            },
+            Case {
+                total_width: 420.0,
+                details_visible: true,
+                expected_canvas: MIN_CANVAS_WIDTH,
+                expected_details: Some(120.0),
+            },
+            Case {
+                total_width: 1000.0,
+                details_visible: true,
+                expected_canvas: 720.0,
+                expected_details: Some(280.0),
+            },
+            Case {
+                total_width: 1000.0,
+                details_visible: false,
+                expected_canvas: 1000.0,
+                expected_details: None,
+            },
+        ];
+
+        for case in cases {
+            let (canvas, details) = compute_graph_layout(case.total_width, case.details_visible);
+            assert!((canvas - case.expected_canvas).abs() < f32::EPSILON);
+            match (details, case.expected_details) {
+                (Some(actual), Some(expected)) => {
+                    assert!((actual - expected).abs() < f32::EPSILON);
+                }
+                (None, None) => {}
+                _ => panic!(
+                    "details width mismatch for total width {}",
+                    case.total_width
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn details_visible_canvas_only_shrinks_by_computed_details_width() {
+        let total_width = 900.0;
+        let (hidden_canvas, hidden_details) = compute_graph_layout(total_width, false);
+        let (visible_canvas, visible_details) = compute_graph_layout(total_width, true);
+
+        assert_eq!(hidden_details, None);
+        let details_width = visible_details.expect("details panel should have a width");
+        assert!((hidden_canvas - total_width).abs() < f32::EPSILON);
+        assert!((visible_canvas - (hidden_canvas - details_width)).abs() < f32::EPSILON);
+        assert!((visible_canvas + details_width - total_width).abs() < f32::EPSILON);
     }
 }
