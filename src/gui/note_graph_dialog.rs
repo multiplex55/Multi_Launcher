@@ -129,6 +129,7 @@ pub struct NoteGraphDialog {
     link_distance: f32,
     dragged_node: Option<String>,
     center_request: Option<String>,
+    show_details_panel: bool,
     hydrated_settings: bool,
     pending_args: Option<NoteGraphDialogArgs>,
     last_saved_settings: Option<NoteGraphSettings>,
@@ -207,18 +208,13 @@ impl NoteGraphDialog {
         let mut persist_requested = false;
         let mut window_open = self.open;
         let screen_size = ctx.screen_rect().size();
-        let app_window_size = egui::vec2(app.window_size.0 as f32, app.window_size.1 as f32);
-        let bounded_viewport = egui::vec2(
-            screen_size.x.min(app_window_size.x.max(320.0)),
-            screen_size.y.min(app_window_size.y.max(260.0)),
-        );
         let max_window_size = egui::vec2(
-            (bounded_viewport.x - 44.0).max(320.0),
-            (bounded_viewport.y - 96.0).max(240.0),
+            (screen_size.x - 48.0).max(320.0),
+            (screen_size.y - 96.0).max(240.0),
         );
         let default_window_size = egui::vec2(
-            1100.0_f32.min(max_window_size.x),
-            720.0_f32.min(max_window_size.y),
+            880.0_f32.min(max_window_size.x),
+            620.0_f32.min(max_window_size.y),
         );
         egui::Window::new("Note Graph")
             .open(&mut window_open)
@@ -236,10 +232,12 @@ impl NoteGraphDialog {
                     let available_width = ui.available_width().max(320.0);
                     let right_panel_width = (available_width * 0.28).clamp(180.0, 280.0);
                     ui.vertical(|ui| self.main_canvas(ui, ctx, app));
-                    ui.separator();
-                    persist_requested |= ui
-                        .vertical(|ui| self.right_panel(ui, app, &notes, right_panel_width))
-                        .inner;
+                    if self.show_details_panel {
+                        ui.separator();
+                        persist_requested |= ui
+                            .vertical(|ui| self.right_panel(ui, app, &notes, right_panel_width))
+                            .inner;
+                    }
                 });
             });
         self.open = window_open;
@@ -389,6 +387,7 @@ impl NoteGraphDialog {
                     app.open_note_panel(&slug, None);
                 }
             }
+            ui.toggle_value(&mut self.show_details_panel, "Details");
         });
 
         if !self.search.query.trim().is_empty() {
@@ -452,54 +451,55 @@ impl NoteGraphDialog {
             changed |= ui
                 .radio_value(&mut self.filter.include_all, true, "All")
                 .changed();
+
+            changed |= ui
+                .checkbox(&mut self.filter.orphan_only, "Orphans only")
+                .changed();
+            changed |= ui
+                .checkbox(&mut self.filter.only_tagged, "Only tagged notes")
+                .changed();
+
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut self.max_nodes)
+                        .clamp_range(20..=1000)
+                        .prefix("Max render "),
+                )
+                .changed();
+            changed |= ui.checkbox(&mut self.show_labels, "Show labels").changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut self.label_zoom_threshold)
+                        .clamp_range(0.2..=1.5)
+                        .speed(0.01)
+                        .prefix("Label zoom >= "),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut self.layout_iterations_per_frame)
+                        .clamp_range(1..=12)
+                        .prefix("Iter/frame "),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut self.repulsion_strength)
+                        .clamp_range(100.0..=10_000.0)
+                        .prefix("Repel "),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut self.link_distance)
+                        .clamp_range(10.0..=300.0)
+                        .prefix("Link dist "),
+                )
+                .changed();
+
+            ui.label(format!("Notes in scope: {}", notes.len()));
+            ui.label(format!("Nodes: {}", self.engine.model.nodes.len()));
         });
-        changed |= ui
-            .checkbox(&mut self.filter.orphan_only, "Orphans only")
-            .changed();
-        changed |= ui
-            .checkbox(&mut self.filter.only_tagged, "Only tagged notes")
-            .changed();
-
-        changed |= ui
-            .add(
-                egui::DragValue::new(&mut self.max_nodes)
-                    .clamp_range(20..=1000)
-                    .prefix("Max render "),
-            )
-            .changed();
-        changed |= ui.checkbox(&mut self.show_labels, "Show labels").changed();
-        changed |= ui
-            .add(
-                egui::DragValue::new(&mut self.label_zoom_threshold)
-                    .clamp_range(0.2..=1.5)
-                    .speed(0.01)
-                    .prefix("Label zoom >= "),
-            )
-            .changed();
-        changed |= ui
-            .add(
-                egui::DragValue::new(&mut self.layout_iterations_per_frame)
-                    .clamp_range(1..=12)
-                    .prefix("Iter/frame "),
-            )
-            .changed();
-        changed |= ui
-            .add(
-                egui::DragValue::new(&mut self.repulsion_strength)
-                    .clamp_range(100.0..=10_000.0)
-                    .prefix("Repel "),
-            )
-            .changed();
-        changed |= ui
-            .add(
-                egui::DragValue::new(&mut self.link_distance)
-                    .clamp_range(10.0..=300.0)
-                    .prefix("Link dist "),
-            )
-            .changed();
-
-        ui.label(format!("Notes in scope: {}", notes.len()));
-        ui.label(format!("Nodes: {}", self.engine.model.nodes.len()));
 
         let mut remove_include = None;
         for tag in &self.filter.include_tags {
