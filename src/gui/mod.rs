@@ -16,6 +16,7 @@ mod image_panel;
 mod macro_dialog;
 mod mouse_gesture_settings_dialog;
 mod mouse_gestures_dialog;
+mod note_graph_dialog;
 mod note_panel;
 mod notes_dialog;
 mod screenshot_editor;
@@ -49,6 +50,7 @@ pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
 pub use mouse_gesture_settings_dialog::MouseGestureSettingsDialog;
 pub use mouse_gestures_dialog::{GestureRecorder, MgGesturesDialog, RecorderConfig};
+pub use note_graph_dialog::NoteGraphDialog;
 pub use note_panel::{
     build_nvim_command, build_wezterm_command, extract_links, show_wiki_link, spawn_external,
     NotePanel,
@@ -312,6 +314,7 @@ pub enum Panel {
     ThemeSettingsDialog,
     FavDialog,
     NotesDialog,
+    NoteGraphDialog,
     UnusedAssetsDialog,
     NotePanel,
     ImagePanel,
@@ -351,6 +354,7 @@ struct PanelStates {
     theme_settings_dialog: bool,
     fav_dialog: bool,
     notes_dialog: bool,
+    note_graph_dialog: bool,
     unused_assets_dialog: bool,
     note_panel: bool,
     image_panel: bool,
@@ -457,6 +461,7 @@ pub struct LauncherApp {
     theme_settings_dialog: ThemeSettingsDialogState,
     fav_dialog: FavDialog,
     notes_dialog: NotesDialog,
+    note_graph_dialog: NoteGraphDialog,
     unused_assets_dialog: UnusedAssetsDialog,
     note_panels: Vec<NotePanel>,
     image_panels: Vec<ImagePanel>,
@@ -1302,6 +1307,7 @@ impl LauncherApp {
             theme_settings_dialog: ThemeSettingsDialogState::default(),
             fav_dialog: FavDialog::default(),
             notes_dialog: NotesDialog::default(),
+            note_graph_dialog: NoteGraphDialog::default(),
             unused_assets_dialog: UnusedAssetsDialog::default(),
             note_panels: Vec::new(),
             image_panels: Vec::new(),
@@ -2490,6 +2496,8 @@ impl LauncherApp {
             self.shell_cmd_dialog.open();
         } else if a.action == "note:dialog" {
             self.notes_dialog.open();
+        } else if a.action == "note:graph_dialog" {
+            self.note_graph_dialog.open_with_args(a.args.as_deref());
         } else if a.action == "note:unused_assets" {
             self.unused_assets_dialog.open();
         } else if a.action == "bookmark:dialog" {
@@ -2971,6 +2979,7 @@ impl LauncherApp {
             || self.theme_settings_dialog_open
             || self.fav_dialog.open
             || self.notes_dialog.open
+            || self.note_graph_dialog.open
             || self.unused_assets_dialog.open
             || !self.note_panels.is_empty()
             || !self.image_panels.is_empty()
@@ -3104,6 +3113,10 @@ impl LauncherApp {
             Panel::NotesDialog => {
                 self.notes_dialog.open = false;
                 self.panel_states.notes_dialog = false;
+            }
+            Panel::NoteGraphDialog => {
+                self.note_graph_dialog.open = false;
+                self.panel_states.note_graph_dialog = false;
             }
             Panel::UnusedAssetsDialog => {
                 self.unused_assets_dialog.open = false;
@@ -3255,6 +3268,10 @@ impl LauncherApp {
                 self.notes_dialog.open = false;
                 self.panel_states.notes_dialog = false;
             }
+            Panel::NoteGraphDialog => {
+                self.note_graph_dialog.open = false;
+                self.panel_states.note_graph_dialog = false;
+            }
             Panel::UnusedAssetsDialog => {
                 self.unused_assets_dialog.open = false;
                 self.panel_states.unused_assets_dialog = false;
@@ -3354,6 +3371,7 @@ impl LauncherApp {
             Panel::ThemeSettingsDialog => self.open_theme_settings_dialog(),
             Panel::FavDialog => self.fav_dialog.open = true,
             Panel::NotesDialog => self.notes_dialog.open = true,
+            Panel::NoteGraphDialog => self.note_graph_dialog.open = true,
             Panel::UnusedAssetsDialog => self.unused_assets_dialog.open = true,
             Panel::NotePanel => {}
             Panel::ImagePanel => {}
@@ -3486,6 +3504,11 @@ impl LauncherApp {
         );
         check!(self.fav_dialog.open, fav_dialog, Panel::FavDialog);
         check!(self.notes_dialog.open, notes_dialog, Panel::NotesDialog);
+        check!(
+            self.note_graph_dialog.open,
+            note_graph_dialog,
+            Panel::NoteGraphDialog
+        );
         check!(
             self.unused_assets_dialog.open,
             unused_assets_dialog,
@@ -4522,6 +4545,9 @@ impl eframe::App for LauncherApp {
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
         notes_dlg.ui(ctx, self);
         self.notes_dialog = notes_dlg;
+        let mut graph_dlg = std::mem::take(&mut self.note_graph_dialog);
+        graph_dlg.ui(ctx, self);
+        self.note_graph_dialog = graph_dlg;
         let mut assets_dlg = std::mem::take(&mut self.unused_assets_dialog);
         assets_dlg.ui(ctx, self);
         self.unused_assets_dialog = assets_dlg;
@@ -5290,6 +5316,26 @@ mod tests {
         assert!(log.contains("Removed note special-name"));
 
         std::env::set_current_dir(orig_dir).unwrap();
+    }
+
+    #[test]
+    fn note_graph_dialog_action_opens_dialog() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        assert!(!app.note_graph_dialog.open);
+
+        app.activate_action(
+            Action {
+                label: "Open note graph".into(),
+                desc: "Note".into(),
+                action: "note:graph_dialog".into(),
+                args: Some(r#"{"include_tags":["foo"],"root":"alpha"}"#.into()),
+            },
+            None,
+            ActivationSource::Enter,
+        );
+
+        assert!(app.note_graph_dialog.open);
     }
 
     #[test]

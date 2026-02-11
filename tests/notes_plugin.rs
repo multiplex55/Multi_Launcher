@@ -55,6 +55,7 @@ fn note_root_query_returns_actions_in_order() {
             "query:note search ",
             "query:note list",
             "query:note tag",
+            "query:note graph",
             "query:note templates",
             "query:note new ",
             "query:note add ",
@@ -66,6 +67,33 @@ fn note_root_query_returns_actions_in_order() {
             "note:unused_assets",
         ]
     );
+}
+
+#[test]
+fn note_graph_returns_dialog_action() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _tmp = setup();
+    let plugin = NotePlugin::default();
+
+    let results = plugin.search("note graph");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "note:graph_dialog");
+}
+
+#[test]
+fn note_graph_tag_prefilter_parses_hash_and_at() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _tmp = setup();
+    let plugin = NotePlugin::default();
+
+    for query in ["note graph #foo", "note graph @foo", "note graph tag:foo"] {
+        let results = plugin.search(query);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].action, "note:graph_dialog");
+        let args: serde_json::Value =
+            serde_json::from_str(results[0].args.as_deref().unwrap()).unwrap();
+        assert_eq!(args["include_tags"], serde_json::json!(["foo"]));
+    }
 }
 
 #[test]

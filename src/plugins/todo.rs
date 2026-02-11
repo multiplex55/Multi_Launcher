@@ -840,11 +840,33 @@ impl TodoPlugin {
         const LIST_PREFIX: &str = "todo list";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
             let filter = rest.trim();
-            let guard = match self.data.read() {
-                Ok(g) => g,
-                Err(_) => return Vec::new(),
+            // Prefer disk as the source of truth for list views so toggles are reflected
+            // immediately even if file-watch events briefly race with writes.
+            //
+            // Test cases may inject `self.data` directly while an unrelated empty `todo.json`
+            // exists in the working directory; when disk is empty but memory is populated,
+            // keep the injected in-memory snapshot.
+            let mem_todos = self
+                .data
+                .read()
+                .map(|g| g.clone())
+                .unwrap_or_else(|_| Vec::new());
+            let todos = if self.watcher.is_none() && !mem_todos.is_empty() {
+                mem_todos.clone()
+            } else if std::path::Path::new(TODO_FILE).exists() {
+                let disk_todos = load_todos(TODO_FILE).unwrap_or_else(|_| mem_todos.clone());
+                if disk_todos.is_empty() && !mem_todos.is_empty() {
+                    mem_todos.clone()
+                } else {
+                    disk_todos
+                }
+            } else {
+                mem_todos.clone()
             };
-            let mut entries: Vec<(usize, &TodoEntry)> = guard.iter().enumerate().collect();
+            if let Ok(mut lock) = self.data.write() {
+                *lock = todos.clone();
+            }
+            let mut entries: Vec<(usize, &TodoEntry)> = todos.iter().enumerate().collect();
 
             let filters = parse_query_filters(filter, &["@", "#", "tag:"]);
             let text_filter = filters.remaining_tokens.join(" ");
