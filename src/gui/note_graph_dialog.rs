@@ -137,13 +137,13 @@ impl NoteGraphDialog {
         self.filter.include_tags = parsed
             .include_tags
             .into_iter()
-            .map(normalize_tag)
+            .map(|tag| normalize_tag(&tag))
             .filter(|t| !t.is_empty())
             .collect();
         self.filter.exclude_tags = parsed
             .exclude_tags
             .into_iter()
-            .map(normalize_tag)
+            .map(|tag| normalize_tag(&tag))
             .filter(|t| !t.is_empty())
             .collect();
         self.selected_node_id = parsed.root.filter(|root| !root.trim().is_empty());
@@ -198,8 +198,9 @@ impl NoteGraphDialog {
             ctx.request_repaint();
         }
 
+        let mut window_open = self.open;
         egui::Window::new("Note Graph")
-            .open(&mut self.open)
+            .open(&mut window_open)
             .resizable(true)
             .default_size((1100.0, 720.0))
             .show(ctx, |ui| {
@@ -215,6 +216,7 @@ impl NoteGraphDialog {
                     ui.vertical(|ui| self.right_panel(ui, app, &notes));
                 });
             });
+        self.open = window_open;
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {

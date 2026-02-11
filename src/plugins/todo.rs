@@ -12,8 +12,7 @@ use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::common::lru::LruCache;
 use crate::common::query::parse_query_filters;
 use crate::linking::{
-    build_index_from_notes_and_todos, format_link_id, resolve_link, EntityKey, LinkRef,
-    LinkResolverCatalog, LinkTarget, TracingLinkTelemetry,
+    build_index_from_notes_and_todos, format_link_id, EntityKey, LinkRef, LinkTarget,
 };
 use crate::plugin::Plugin;
 use crate::plugins::note::load_notes;
