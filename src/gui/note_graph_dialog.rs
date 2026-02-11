@@ -232,30 +232,37 @@ impl NoteGraphDialog {
                 persist_requested |= self.filters_top_panel(ui, &notes);
                 ui.separator();
 
-                ui.horizontal(|ui| {
-                    ui.set_min_height(ui.available_height());
-                    let total_width = ui.available_width();
-                    let total_height = ui.available_height().max(MIN_CANVAS_HEIGHT);
-                    let (canvas_width, details_width) =
-                        compute_graph_layout(total_width, self.show_details_panel);
-                    let canvas_size = egui::vec2(canvas_width, total_height);
+                let available_rect = ui.available_rect_before_wrap();
+                let total_width = available_rect.width();
+                let total_height = available_rect.height().max(MIN_CANVAS_HEIGHT);
+                let panel_rect = Rect::from_min_size(
+                    available_rect.min,
+                    egui::vec2(total_width.max(MIN_CANVAS_WIDTH), total_height),
+                );
+                ui.allocate_rect(panel_rect, Sense::hover());
 
-                    ui.allocate_ui_with_layout(
-                        canvas_size,
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| self.main_canvas(ui, ctx, app, canvas_size),
-                    );
-
-                    if let Some(details_width) = details_width {
-                        persist_requested |= ui
-                            .allocate_ui_with_layout(
-                                egui::vec2(details_width, total_height),
-                                egui::Layout::top_down(egui::Align::Min),
-                                |ui| self.right_panel(ui, app, &notes, details_width),
-                            )
-                            .inner;
-                    }
+                let (canvas_width, details_width) =
+                    compute_graph_layout(panel_rect.width(), self.show_details_panel);
+                let canvas_rect =
+                    Rect::from_min_size(panel_rect.min, egui::vec2(canvas_width, total_height));
+                let details_rect = details_width.map(|width| {
+                    Rect::from_min_size(
+                        Pos2::new(canvas_rect.right(), panel_rect.top()),
+                        egui::vec2(width, total_height),
+                    )
                 });
+
+                ui.allocate_ui_at_rect(canvas_rect, |ui| {
+                    self.main_canvas(ui, ctx, app, canvas_rect.size())
+                });
+
+                if let Some((details_rect, details_width)) = details_rect.zip(details_width) {
+                    persist_requested |= ui
+                        .allocate_ui_at_rect(details_rect, |ui| {
+                            self.right_panel(ui, app, &notes, details_width)
+                        })
+                        .inner;
+                }
             });
         self.open = window_open;
         self.was_open_last_frame = self.open;
