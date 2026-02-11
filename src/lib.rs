@@ -24,6 +24,7 @@ pub mod usage;
 pub mod visibility;
 
 pub mod global_hotkey;
+pub mod graph;
 pub mod gui;
 pub mod window_manager;
 pub mod windows_layout;
