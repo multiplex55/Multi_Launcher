@@ -207,9 +207,14 @@ impl NoteGraphDialog {
         let mut persist_requested = false;
         let mut window_open = self.open;
         let screen_size = ctx.screen_rect().size();
+        let app_window_size = egui::vec2(app.window_size.0 as f32, app.window_size.1 as f32);
+        let bounded_viewport = egui::vec2(
+            screen_size.x.min(app_window_size.x.max(320.0)),
+            screen_size.y.min(app_window_size.y.max(260.0)),
+        );
         let max_window_size = egui::vec2(
-            (screen_size.x - 24.0).max(360.0),
-            (screen_size.y - 24.0).max(280.0),
+            (bounded_viewport.x - 44.0).max(320.0),
+            (bounded_viewport.y - 96.0).max(240.0),
         );
         let default_window_size = egui::vec2(
             1100.0_f32.min(max_window_size.x),
@@ -226,11 +231,18 @@ impl NoteGraphDialog {
 
                 ui.horizontal(|ui| {
                     ui.set_min_height(ui.available_height());
-                    persist_requested |= ui.vertical(|ui| self.left_panel(ui, &notes)).inner;
+                    let available_width = ui.available_width().max(320.0);
+                    let left_panel_width = (available_width * 0.18).clamp(140.0, 190.0);
+                    let right_panel_width = (available_width * 0.2).clamp(150.0, 220.0);
+                    persist_requested |= ui
+                        .vertical(|ui| self.left_panel(ui, &notes, left_panel_width))
+                        .inner;
                     ui.separator();
                     ui.vertical(|ui| self.main_canvas(ui, ctx, app));
                     ui.separator();
-                    persist_requested |= ui.vertical(|ui| self.right_panel(ui, app, &notes)).inner;
+                    persist_requested |= ui
+                        .vertical(|ui| self.right_panel(ui, app, &notes, right_panel_width))
+                        .inner;
                 });
             });
         self.open = window_open;
@@ -407,9 +419,10 @@ impl NoteGraphDialog {
         changed
     }
 
-    fn left_panel(&mut self, ui: &mut egui::Ui, notes: &[Note]) -> bool {
+    fn left_panel(&mut self, ui: &mut egui::Ui, notes: &[Note], width: f32) -> bool {
         let mut changed = false;
-        ui.set_min_width(220.0);
+        ui.set_min_width(width);
+        ui.set_max_width(width + 24.0);
         ui.label("Filters");
         ui.horizontal(|ui| {
             ui.text_edit_singleline(&mut self.filter.include_input);
@@ -640,8 +653,15 @@ impl NoteGraphDialog {
         }
     }
 
-    fn right_panel(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, notes: &[Note]) -> bool {
-        ui.set_min_width(260.0);
+    fn right_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        notes: &[Note],
+        width: f32,
+    ) -> bool {
+        ui.set_min_width(width);
+        ui.set_max_width(width + 24.0);
         ui.label("Details");
         let Some(slug) = self.selected_node_id.as_deref() else {
             ui.label("Select a node");
