@@ -2109,6 +2109,13 @@ Body with [[Other]]"
         std::env::set_var("ML_NOTES_DIR", dir.path());
 
         fs::write(
+            dir.path().join("alpha.md"),
+            "# Alpha
+
+body",
+        )
+        .unwrap();
+        fs::write(
             dir.path().join("other.md"),
             "# Other
 
@@ -2117,19 +2124,10 @@ Body with [[Other]]"
         .unwrap();
         let _ = crate::plugins::note::refresh_cache();
 
-        let note = Note {
-            title: "Alpha".into(),
-            path: std::path::PathBuf::new(),
-            content: "# Alpha
-
-body"
-                .into(),
-            tags: Vec::new(),
-            links: Vec::new(),
-            slug: "alpha".into(),
-            alias: None,
-            entity_refs: Vec::new(),
-        };
+        let note = crate::plugins::note::note_cache_snapshot()
+            .into_iter()
+            .find(|n| n.slug == "alpha")
+            .expect("alpha note should exist in cache");
         let mut panel = NotePanel::from_note(note);
         assert_eq!(panel.derived.backlink_rows_related_notes.len(), 1);
 
