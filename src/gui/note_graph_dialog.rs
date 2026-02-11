@@ -1,7 +1,11 @@
 use crate::dashboard::DashboardDataCache;
-use crate::graph::note_graph::{LayoutConfig, NoteGraphEngine, NoteGraphFilter};
+use crate::graph::note_graph::{
+    build_draw_primitives, project_world_to_screen, DrawNode, LayoutConfig, NoteGraphEngine,
+    NoteGraphFilter, RenderSurface,
+};
 use crate::gui::LauncherApp;
 use crate::plugins::note::Note;
+use crate::settings::{NoteGraphSettings, Settings};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -10,8 +14,6 @@ use std::collections::BTreeSet;
 
 const MIN_ZOOM: f32 = 0.2;
 const MAX_ZOOM: f32 = 2.5;
-const LABEL_ZOOM_THRESHOLD: f32 = 0.55;
-const DEFAULT_MAX_NODES: usize = 220;
 
 #[derive(Default, Deserialize)]
 struct NoteGraphDialogArgs {
@@ -56,10 +58,15 @@ impl Default for CameraTransform {
 
 impl CameraTransform {
     fn world_to_screen(&self, world: [f32; 2], rect: Rect) -> Pos2 {
-        Pos2::new(
-            rect.center().x + self.pan.x + world[0] * self.zoom,
-            rect.center().y + self.pan.y + world[1] * self.zoom,
-        )
+        let point = project_world_to_screen(
+            world,
+            RenderSurface {
+                center: [rect.center().x, rect.center().y],
+                pan: [self.pan.x, self.pan.y],
+                zoom: self.zoom,
+            },
+        );
+        Pos2::new(point[0], point[1])
     }
 
     fn screen_to_world(&self, screen: Pos2, rect: Rect) -> [f32; 2] {
@@ -115,44 +122,32 @@ pub struct NoteGraphDialog {
     local_depth: usize,
     simulation_paused: bool,
     max_nodes: usize,
+    show_labels: bool,
+    label_zoom_threshold: f32,
+    layout_iterations_per_frame: usize,
+    repulsion_strength: f32,
+    link_distance: f32,
     dragged_node: Option<String>,
     center_request: Option<String>,
+    show_details_panel: bool,
+    hydrated_settings: bool,
+    pending_args: Option<NoteGraphDialogArgs>,
+    last_saved_settings: Option<NoteGraphSettings>,
+    was_open_last_frame: bool,
 }
 
 impl NoteGraphDialog {
     pub fn open(&mut self) {
         self.open = true;
-        if self.max_nodes == 0 {
-            self.max_nodes = DEFAULT_MAX_NODES;
-        }
-        if self.local_depth == 0 {
-            self.local_depth = 1;
-        }
+        self.hydrated_settings = false;
     }
 
     pub fn open_with_args(&mut self, raw_args: Option<&str>) {
-        let parsed = raw_args
-            .and_then(|raw| serde_json::from_str::<NoteGraphDialogArgs>(raw).ok())
-            .unwrap_or_default();
-        self.filter.include_tags = parsed
-            .include_tags
-            .into_iter()
-            .map(|tag| normalize_tag(&tag))
-            .filter(|t| !t.is_empty())
-            .collect();
-        self.filter.exclude_tags = parsed
-            .exclude_tags
-            .into_iter()
-            .map(|tag| normalize_tag(&tag))
-            .filter(|t| !t.is_empty())
-            .collect();
-        self.selected_node_id = parsed.root.filter(|root| !root.trim().is_empty());
-        self.graph_mode = if parsed.local_mode || self.selected_node_id.is_some() {
-            GraphMode::Local
-        } else {
-            GraphMode::Global
-        };
-        self.local_depth = parsed.depth.unwrap_or(1).clamp(1, 3);
+        self.pending_args = Some(
+            raw_args
+                .and_then(|raw| serde_json::from_str::<NoteGraphDialogArgs>(raw).ok())
+                .unwrap_or_default(),
+        );
         self.open();
     }
 
@@ -164,8 +159,14 @@ impl NoteGraphDialog {
         notes_version: u64,
     ) {
         if !self.open {
+            self.was_open_last_frame = false;
             return;
         }
+        if !self.was_open_last_frame {
+            self.hydrated_settings = false;
+        }
+
+        self.hydrate_from_settings_if_needed(app);
 
         let mut notes: Vec<Note> = data_cache.snapshot().notes.iter().cloned().collect();
         notes.retain(|n| self.note_passes_ui_filters(n));
@@ -192,34 +193,155 @@ impl NoteGraphDialog {
         self.engine
             .rebuild_if_needed(&notes, notes_version, &filter);
         if !self.simulation_paused {
-            self.engine
-                .layout
-                .step(&self.engine.model, LayoutConfig::default());
+            self.engine.layout.step(
+                &self.engine.model,
+                LayoutConfig {
+                    iterations_per_frame: self.layout_iterations_per_frame.max(1),
+                    repulsion_strength: self.repulsion_strength.max(100.0),
+                    link_distance: self.link_distance.max(10.0),
+                    ..LayoutConfig::default()
+                },
+            );
             ctx.request_repaint();
         }
 
+        let mut persist_requested = false;
         let mut window_open = self.open;
+        let screen_size = ctx.screen_rect().size();
+        let max_window_size = egui::vec2(
+            (screen_size.x - 48.0).max(320.0),
+            (screen_size.y - 96.0).max(240.0),
+        );
+        let default_window_size = egui::vec2(
+            880.0_f32.min(max_window_size.x),
+            620.0_f32.min(max_window_size.y),
+        );
         egui::Window::new("Note Graph")
             .open(&mut window_open)
             .resizable(true)
-            .default_size((1100.0, 720.0))
+            .default_size(default_window_size)
+            .max_size(max_window_size)
             .show(ctx, |ui| {
-                self.top_bar(ui, app);
+                persist_requested |= self.top_bar(ui, app);
+                ui.separator();
+                persist_requested |= self.filters_top_panel(ui, &notes);
                 ui.separator();
 
                 ui.horizontal(|ui| {
                     ui.set_min_height(ui.available_height());
-                    ui.vertical(|ui| self.left_panel(ui, &notes));
-                    ui.separator();
+                    let available_width = ui.available_width().max(320.0);
+                    let right_panel_width = (available_width * 0.28).clamp(180.0, 280.0);
                     ui.vertical(|ui| self.main_canvas(ui, ctx, app));
-                    ui.separator();
-                    ui.vertical(|ui| self.right_panel(ui, app, &notes));
+                    if self.show_details_panel {
+                        ui.separator();
+                        persist_requested |= ui
+                            .vertical(|ui| self.right_panel(ui, app, &notes, right_panel_width))
+                            .inner;
+                    }
                 });
             });
         self.open = window_open;
+        self.was_open_last_frame = self.open;
+
+        if persist_requested || self.last_saved_settings.as_ref() != Some(&self.to_settings()) {
+            self.persist_settings(app);
+        }
     }
 
-    fn top_bar(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
+    fn hydrate_from_settings_if_needed(&mut self, app: &LauncherApp) {
+        if self.hydrated_settings {
+            return;
+        }
+
+        let settings = Settings::load(&app.settings_path)
+            .map(|s| s.note_graph)
+            .unwrap_or_default();
+        self.apply_settings(settings.clone());
+        self.last_saved_settings = Some(settings);
+
+        if let Some(parsed) = self.pending_args.take() {
+            self.filter.include_tags = parsed
+                .include_tags
+                .into_iter()
+                .map(|tag| normalize_tag(&tag))
+                .filter(|t| !t.is_empty())
+                .collect();
+            self.filter.exclude_tags = parsed
+                .exclude_tags
+                .into_iter()
+                .map(|tag| normalize_tag(&tag))
+                .filter(|t| !t.is_empty())
+                .collect();
+            self.selected_node_id = parsed.root.filter(|root| !root.trim().is_empty());
+            self.graph_mode = if parsed.local_mode || self.selected_node_id.is_some() {
+                GraphMode::Local
+            } else {
+                GraphMode::Global
+            };
+            self.local_depth = parsed.depth.unwrap_or(1).clamp(1, 3);
+        }
+
+        self.hydrated_settings = true;
+    }
+
+    fn apply_settings(&mut self, settings: NoteGraphSettings) {
+        self.max_nodes = settings.max_nodes.max(20);
+        self.show_labels = settings.show_labels;
+        self.label_zoom_threshold = settings.label_zoom_threshold.clamp(0.2, 1.5);
+        self.layout_iterations_per_frame = settings.layout_iterations_per_frame.clamp(1, 12);
+        self.repulsion_strength = settings.repulsion_strength.clamp(100.0, 10_000.0);
+        self.link_distance = settings.link_distance.clamp(10.0, 300.0);
+        self.local_depth = settings.local_graph_depth.clamp(1, 3);
+        self.filter.include_tags = settings
+            .include_tags
+            .iter()
+            .map(|tag| normalize_tag(tag))
+            .filter(|tag| !tag.is_empty())
+            .collect();
+        self.filter.exclude_tags = settings
+            .exclude_tags
+            .iter()
+            .map(|tag| normalize_tag(tag))
+            .filter(|tag| !tag.is_empty())
+            .collect();
+    }
+
+    fn to_settings(&self) -> NoteGraphSettings {
+        NoteGraphSettings {
+            max_nodes: self.max_nodes.max(20),
+            show_labels: self.show_labels,
+            label_zoom_threshold: self.label_zoom_threshold,
+            layout_iterations_per_frame: self.layout_iterations_per_frame.max(1),
+            repulsion_strength: self.repulsion_strength,
+            link_distance: self.link_distance,
+            local_graph_depth: self.local_depth,
+            include_tags: self.filter.include_tags.iter().cloned().collect(),
+            exclude_tags: self.filter.exclude_tags.iter().cloned().collect(),
+        }
+    }
+
+    fn persist_settings(&mut self, app: &mut LauncherApp) {
+        let value = self.to_settings();
+        if self.last_saved_settings.as_ref() == Some(&value) {
+            return;
+        }
+        match Settings::load(&app.settings_path) {
+            Ok(mut settings) => {
+                settings.note_graph = value.clone();
+                if let Err(err) = settings.save(&app.settings_path) {
+                    app.set_error(format!("Failed to save note graph settings: {err}"));
+                    return;
+                }
+                self.last_saved_settings = Some(value);
+            }
+            Err(err) => {
+                app.set_error(format!("Failed to load settings for note graph: {err}"));
+            }
+        }
+    }
+
+    fn top_bar(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) -> bool {
+        let mut changed = false;
         ui.horizontal(|ui| {
             ui.label("Search");
             let response = ui.add(
@@ -238,11 +360,17 @@ impl NoteGraphDialog {
             }
 
             ui.separator();
-            ui.selectable_value(&mut self.graph_mode, GraphMode::Global, "Global");
-            ui.selectable_value(&mut self.graph_mode, GraphMode::Local, "Local");
+            changed |= ui
+                .selectable_value(&mut self.graph_mode, GraphMode::Global, "Global")
+                .changed();
+            changed |= ui
+                .selectable_value(&mut self.graph_mode, GraphMode::Local, "Local")
+                .changed();
             if self.graph_mode == GraphMode::Local {
                 ui.label("Depth");
-                ui.add(egui::DragValue::new(&mut self.local_depth).clamp_range(1..=3));
+                changed |= ui
+                    .add(egui::DragValue::new(&mut self.local_depth).clamp_range(1..=3))
+                    .changed();
             }
 
             ui.separator();
@@ -259,6 +387,7 @@ impl NoteGraphDialog {
                     app.open_note_panel(&slug, None);
                 }
             }
+            ui.toggle_value(&mut self.show_details_panel, "Details");
         });
 
         if !self.search.query.trim().is_empty() {
@@ -283,46 +412,94 @@ impl NoteGraphDialog {
                 });
             });
         }
+        changed
     }
 
-    fn left_panel(&mut self, ui: &mut egui::Ui, notes: &[Note]) {
-        ui.set_min_width(220.0);
+    fn filters_top_panel(&mut self, ui: &mut egui::Ui, notes: &[Note]) -> bool {
+        let mut changed = false;
         ui.label("Filters");
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.filter.include_input);
+        ui.horizontal_wrapped(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.filter.include_input)
+                    .desired_width(140.0)
+                    .hint_text("include tag"),
+            );
             if ui.button("+ include").clicked() {
                 let normalized = normalize_tag(&self.filter.include_input);
                 if !normalized.is_empty() {
-                    let _ = self.filter.include_tags.insert(normalized);
+                    changed |= self.filter.include_tags.insert(normalized);
                 }
                 self.filter.include_input.clear();
             }
-        });
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.filter.exclude_input);
+
+            ui.add(
+                egui::TextEdit::singleline(&mut self.filter.exclude_input)
+                    .desired_width(140.0)
+                    .hint_text("exclude tag"),
+            );
             if ui.button("+ exclude").clicked() {
                 let normalized = normalize_tag(&self.filter.exclude_input);
                 if !normalized.is_empty() {
-                    let _ = self.filter.exclude_tags.insert(normalized);
+                    changed |= self.filter.exclude_tags.insert(normalized);
                 }
                 self.filter.exclude_input.clear();
             }
-        });
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut self.filter.include_all, false, "Any");
-            ui.radio_value(&mut self.filter.include_all, true, "All");
-        });
-        ui.checkbox(&mut self.filter.orphan_only, "Orphans only");
-        ui.checkbox(&mut self.filter.only_tagged, "Only tagged notes");
-        ui.add(
-            egui::DragValue::new(&mut self.max_nodes)
-                .clamp_range(20..=1000)
-                .prefix("Max render "),
-        );
 
-        ui.separator();
-        ui.label(format!("Notes in scope: {}", notes.len()));
-        ui.label(format!("Nodes: {}", self.engine.model.nodes.len()));
+            changed |= ui
+                .radio_value(&mut self.filter.include_all, false, "Any")
+                .changed();
+            changed |= ui
+                .radio_value(&mut self.filter.include_all, true, "All")
+                .changed();
+
+            changed |= ui
+                .checkbox(&mut self.filter.orphan_only, "Orphans only")
+                .changed();
+            changed |= ui
+                .checkbox(&mut self.filter.only_tagged, "Only tagged notes")
+                .changed();
+
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut self.max_nodes)
+                        .clamp_range(20..=1000)
+                        .prefix("Max render "),
+                )
+                .changed();
+            changed |= ui.checkbox(&mut self.show_labels, "Show labels").changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut self.label_zoom_threshold)
+                        .clamp_range(0.2..=1.5)
+                        .speed(0.01)
+                        .prefix("Label zoom >= "),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut self.layout_iterations_per_frame)
+                        .clamp_range(1..=12)
+                        .prefix("Iter/frame "),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut self.repulsion_strength)
+                        .clamp_range(100.0..=10_000.0)
+                        .prefix("Repel "),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut self.link_distance)
+                        .clamp_range(10.0..=300.0)
+                        .prefix("Link dist "),
+                )
+                .changed();
+
+            ui.label(format!("Notes in scope: {}", notes.len()));
+            ui.label(format!("Nodes: {}", self.engine.model.nodes.len()));
+        });
 
         let mut remove_include = None;
         for tag in &self.filter.include_tags {
@@ -331,6 +508,7 @@ impl NoteGraphDialog {
             }
         }
         if let Some(tag) = remove_include {
+            changed = true;
             self.filter.include_tags.remove(&tag);
         }
 
@@ -341,8 +519,10 @@ impl NoteGraphDialog {
             }
         }
         if let Some(tag) = remove_exclude {
+            changed = true;
             self.filter.exclude_tags.remove(&tag);
         }
+        changed
     }
 
     fn main_canvas(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, app: &mut LauncherApp) {
@@ -354,21 +534,22 @@ impl NoteGraphDialog {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
 
-        let mut ordered_nodes = self.engine.model.nodes.clone();
-        ordered_nodes.sort_by(|a, b| b.degree.cmp(&a.degree).then_with(|| a.id.cmp(&b.id)));
-        let total_nodes = ordered_nodes.len();
-        let max_nodes = self.max_nodes.max(20);
-        ordered_nodes.truncate(max_nodes);
+        let draw = build_draw_primitives(
+            &self.engine.model,
+            &self.engine.layout,
+            RenderSurface {
+                center: [rect.center().x, rect.center().y],
+                pan: [self.camera.pan.x, self.camera.pan.y],
+                zoom: self.camera.zoom,
+            },
+            self.max_nodes.max(20),
+        );
 
-        let mut screen_positions = Vec::new();
-        for node in &ordered_nodes {
-            if let Some(state) = self.engine.layout.nodes.get(&node.id) {
-                screen_positions.push((
-                    node.id.clone(),
-                    self.camera.world_to_screen(state.position, rect),
-                ));
-            }
-        }
+        let screen_positions: Vec<(String, Pos2)> = draw
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), Pos2::new(node.screen[0], node.screen[1])))
+            .collect();
 
         if response.hovered() {
             let scroll = ctx.input(|i| i.raw_scroll_delta.y);
@@ -423,69 +604,73 @@ impl NoteGraphDialog {
             }
         }
 
-        for edge in &self.engine.model.edges {
-            let from = screen_positions
-                .iter()
-                .find(|(id, _)| id == &edge.from)
-                .map(|(_, p)| *p);
-            let to = screen_positions
-                .iter()
-                .find(|(id, _)| id == &edge.to)
-                .map(|(_, p)| *p);
-            if let (Some(a), Some(b)) = (from, to) {
-                if edge_is_visible(a, b, rect) {
-                    painter.line_segment([a, b], Stroke::new(1.0, Color32::from_gray(90)));
-                }
+        for edge in &draw.edges {
+            let a = Pos2::new(edge.from[0], edge.from[1]);
+            let b = Pos2::new(edge.to[0], edge.to[1]);
+            if edge_is_visible(a, b, rect) {
+                painter.line_segment([a, b], Stroke::new(1.0, Color32::from_gray(90)));
             }
         }
 
-        for node in &ordered_nodes {
-            let Some(state) = self.engine.layout.nodes.get(&node.id) else {
-                continue;
-            };
-            let p = self.camera.world_to_screen(state.position, rect);
-            let selected = self.selected_node_id.as_deref() == Some(node.id.as_str());
-            painter.circle_filled(
-                p,
-                if selected { 9.0 } else { 7.0 },
-                if selected {
-                    Color32::from_rgb(250, 200, 70)
-                } else {
-                    Color32::from_rgb(110, 185, 130)
-                },
-            );
-            if self.camera.zoom >= LABEL_ZOOM_THRESHOLD {
-                painter.text(
-                    p + egui::vec2(10.0, 0.0),
-                    egui::Align2::LEFT_CENTER,
-                    &node.label,
-                    egui::TextStyle::Body.resolve(ui.style()),
-                    ui.visuals().text_color(),
-                );
-            }
+        for node in &draw.nodes {
+            self.paint_node(painter.clone(), ui, node);
         }
 
-        if total_nodes > max_nodes {
+        if draw.is_truncated() {
             painter.text(
                 rect.left_top() + egui::vec2(8.0, 8.0),
                 egui::Align2::LEFT_TOP,
-                format!("Truncated: rendering {max_nodes}/{total_nodes}"),
+                format!(
+                    "Truncated: rendering {}/{}",
+                    draw.nodes.len(),
+                    draw.total_nodes
+                ),
                 egui::TextStyle::Small.resolve(ui.style()),
                 Color32::YELLOW,
             );
         }
     }
 
-    fn right_panel(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, notes: &[Note]) {
-        ui.set_min_width(260.0);
+    fn paint_node(&self, painter: egui::Painter, ui: &egui::Ui, node: &DrawNode) {
+        let p = Pos2::new(node.screen[0], node.screen[1]);
+        let selected = self.selected_node_id.as_deref() == Some(node.id.as_str());
+        painter.circle_filled(
+            p,
+            if selected { 9.0 } else { 7.0 },
+            if selected {
+                Color32::from_rgb(250, 200, 70)
+            } else {
+                Color32::from_rgb(110, 185, 130)
+            },
+        );
+        if self.show_labels && self.camera.zoom >= self.label_zoom_threshold {
+            painter.text(
+                p + egui::vec2(10.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                &node.label,
+                egui::TextStyle::Body.resolve(ui.style()),
+                ui.visuals().text_color(),
+            );
+        }
+    }
+
+    fn right_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        notes: &[Note],
+        width: f32,
+    ) -> bool {
+        ui.set_min_width(width);
+        ui.set_max_width(width + 24.0);
         ui.label("Details");
         let Some(slug) = self.selected_node_id.as_deref() else {
             ui.label("Select a node");
-            return;
+            return false;
         };
         let Some(note) = notes.iter().find(|n| n.slug == slug) else {
             ui.label("Selected node not in filtered set.");
-            return;
+            return false;
         };
 
         ui.label(format!("Title: {}", note.title));
@@ -526,6 +711,7 @@ impl NoteGraphDialog {
         if ui.button("Open note").clicked() {
             app.open_note_panel(&note.slug, None);
         }
+        false
     }
 
     fn note_passes_ui_filters(&self, note: &Note) -> bool {
@@ -672,16 +858,12 @@ mod tests {
     }
 
     #[test]
-    fn open_with_args_initializes_prefilter_and_root_mode() {
+    fn open_with_args_queues_prefilter_and_root_mode() {
         let mut dlg = NoteGraphDialog::default();
         dlg.open_with_args(Some(
             r##"{"include_tags":["#work"],"exclude_tags":["@old"],"root":"alpha","depth":4,"local_mode":true}"##,
         ));
         assert!(dlg.open);
-        assert_eq!(dlg.selected_node_id.as_deref(), Some("alpha"));
-        assert_eq!(dlg.graph_mode, GraphMode::Local);
-        assert_eq!(dlg.local_depth, 3);
-        assert!(dlg.filter.include_tags.contains("work"));
-        assert!(dlg.filter.exclude_tags.contains("old"));
+        assert!(dlg.pending_args.is_some());
     }
 }

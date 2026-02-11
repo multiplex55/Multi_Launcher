@@ -321,6 +321,7 @@ impl SettingsEditor {
                 show_when_query_empty: self.dashboard_show_when_empty,
             },
             theme: current.theme.clone(),
+            note_graph: current.note_graph.clone(),
         }
     }
 
