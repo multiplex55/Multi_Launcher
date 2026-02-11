@@ -206,10 +206,20 @@ impl NoteGraphDialog {
 
         let mut persist_requested = false;
         let mut window_open = self.open;
+        let screen_size = ctx.screen_rect().size();
+        let max_window_size = egui::vec2(
+            (screen_size.x - 24.0).max(360.0),
+            (screen_size.y - 24.0).max(280.0),
+        );
+        let default_window_size = egui::vec2(
+            1100.0_f32.min(max_window_size.x),
+            720.0_f32.min(max_window_size.y),
+        );
         egui::Window::new("Note Graph")
             .open(&mut window_open)
             .resizable(true)
-            .default_size((1100.0, 720.0))
+            .default_size(default_window_size)
+            .max_size(max_window_size)
             .show(ctx, |ui| {
                 persist_requested |= self.top_bar(ui, app);
                 ui.separator();
