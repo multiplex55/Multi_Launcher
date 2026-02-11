@@ -3,8 +3,8 @@ use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::plugin::Plugin;
 use crate::plugins::note::{
-    assets_dir, available_tags, image_files, load_notes, resolve_note_query, save_note, Note,
-    NoteExternalOpen, NotePlugin, NoteTarget,
+    assets_dir, available_tags, image_files, note_cache_snapshot, resolve_note_query, save_note,
+    Note, NoteExternalOpen, NotePlugin, NoteTarget,
 };
 use crate::plugins::todo::{load_todos, TODO_FILE};
 use eframe::egui::{self, popup, Color32, FontId, Key};
@@ -87,7 +87,11 @@ fn char_range_to_byte_range(s: &str, start: usize, end: usize) -> (usize, usize)
     (char_to_byte_index(s, start), char_to_byte_index(s, end))
 }
 
-fn preprocess_note_links(content: &str, current_slug: &str) -> String {
+fn preprocess_note_links(
+    content: &str,
+    current_slug: &str,
+    todo_labels: &HashMap<String, String>,
+) -> String {
     static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
     let mut out = WIKI_RE
         .replace_all(content, |caps: &regex::Captures| {
@@ -102,12 +106,6 @@ fn preprocess_note_links(content: &str, current_slug: &str) -> String {
         })
         .to_string();
 
-    let todo_labels = load_todos(TODO_FILE)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|t| !t.id.is_empty())
-        .map(|t| (t.id, t.text))
-        .collect::<HashMap<_, _>>();
     out = TODO_TOKEN_RE
         .replace_all(&out, |caps: &regex::Captures| {
             let id = caps.get(1).map(|m| m.as_str()).unwrap_or("");
@@ -175,11 +173,26 @@ pub struct NotePanel {
     // a focused node that is not present in the accessibility tree.
     focus_textedit_next_frame: bool,
     last_textedit_id: Option<egui::Id>,
+    derived: NoteDerivedView,
+    derived_dirty: bool,
+    #[cfg(test)]
+    derived_recompute_count: usize,
+}
+
+#[derive(Default, Clone)]
+struct NoteDerivedView {
+    tags: Vec<String>,
+    wiki_links: Vec<String>,
+    external_links: Vec<(String, String)>,
+    backlink_rows_linked_todos: Vec<BacklinkRow>,
+    backlink_rows_related_notes: Vec<BacklinkRow>,
+    backlink_rows_mentions: Vec<BacklinkRow>,
+    todo_label_map: HashMap<String, String>,
 }
 
 impl NotePanel {
     pub fn from_note(note: Note) -> Self {
-        Self {
+        let mut panel = Self {
             open: true,
             note,
             link_search: String::new(),
@@ -200,6 +213,63 @@ impl NotePanel {
             link_url: String::new(),
             focus_textedit_next_frame: false,
             last_textedit_id: None,
+            derived: NoteDerivedView::default(),
+            derived_dirty: true,
+            #[cfg(test)]
+            derived_recompute_count: 0,
+        };
+        panel.refresh_derived();
+        panel
+    }
+
+    fn backlink_rows_for_active_tab(&self) -> &[BacklinkRow] {
+        match self.backlink_tab {
+            BacklinkTab::LinkedTodos => &self.derived.backlink_rows_linked_todos,
+            BacklinkTab::RelatedNotes => &self.derived.backlink_rows_related_notes,
+            BacklinkTab::Mentions => &self.derived.backlink_rows_mentions,
+        }
+    }
+
+    fn refresh_derived(&mut self) {
+        let todos = load_todos(TODO_FILE).unwrap_or_default();
+        let todo_label_map = todos
+            .iter()
+            .filter(|t| !t.id.is_empty())
+            .map(|t| (t.id.clone(), t.text.clone()))
+            .collect::<HashMap<_, _>>();
+        let notes = note_cache_snapshot();
+
+        self.derived = NoteDerivedView {
+            tags: extract_tags(&self.note.content),
+            wiki_links: extract_wiki_links(&self.note.content)
+                .into_iter()
+                .filter(|l| slugify(l) != self.note.slug)
+                .collect(),
+            external_links: extract_links(&self.note.content),
+            backlink_rows_linked_todos: backlink_rows_for_note(
+                &self.note.slug,
+                BacklinkTab::LinkedTodos,
+                &todos,
+                &notes,
+            ),
+            backlink_rows_related_notes: backlink_rows_for_note(
+                &self.note.slug,
+                BacklinkTab::RelatedNotes,
+                &todos,
+                &notes,
+            ),
+            backlink_rows_mentions: backlink_rows_for_note(
+                &self.note.slug,
+                BacklinkTab::Mentions,
+                &todos,
+                &notes,
+            ),
+            todo_label_map,
+        };
+        self.derived_dirty = false;
+        #[cfg(test)]
+        {
+            self.derived_recompute_count += 1;
         }
     }
 
@@ -322,19 +392,21 @@ impl NotePanel {
                         app.note_font_size += 1.0;
                     }
                 });
-                let tags = extract_tags(&self.note.content);
-                if !tags.is_empty() {
+                if self.derived_dirty {
+                    self.refresh_derived();
+                }
+                if !self.derived.tags.is_empty() {
                     let was_focused = self
                         .last_textedit_id
                         .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
                         .unwrap_or(false);
-                    let tag_count = tags.len();
+                    let tag_count = self.derived.tags.len();
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Tags:");
                         let threshold = app.note_more_limit;
                         let show_all = self.tags_expanded || tag_count <= threshold;
                         let limit = if show_all { tag_count } else { threshold };
-                        for t in tags.iter().take(limit) {
+                        for t in self.derived.tags.iter().take(limit) {
                             if ui.link(format!("#{t}")).clicked() {
                                 app.filter_notes_by_tag(t);
                             }
@@ -354,19 +426,17 @@ impl NotePanel {
                         }
                     });
                 }
-                let wiki = extract_wiki_links(&self.note.content)
-                    .into_iter()
-                    .filter(|l| slugify(l) != self.note.slug)
-                    .collect::<Vec<_>>();
-                let links = extract_links(&self.note.content);
                 enum LinkKind {
                     Wiki(String),
                     Url(String, String),
                 }
                 let mut all_links: Vec<LinkKind> = Vec::new();
-                all_links.extend(wiki.into_iter().map(LinkKind::Wiki));
+                all_links.extend(self.derived.wiki_links.iter().cloned().map(LinkKind::Wiki));
                 all_links.extend(
-                    links
+                    self.derived
+                        .external_links
+                        .iter()
+                        .cloned()
                         .into_iter()
                         .map(|(label, url)| LinkKind::Url(label, url)),
                 );
@@ -406,8 +476,6 @@ impl NotePanel {
                         }
                     });
                 }
-                let all_notes = load_notes().unwrap_or_default();
-                let all_todos = load_todos(TODO_FILE).unwrap_or_default();
                 ui.separator();
                 ui.label("Backlinks");
                 ui.horizontal(|ui| {
@@ -425,12 +493,7 @@ impl NotePanel {
                         }
                     }
                 });
-                let rows = backlink_rows_for_note(
-                    &self.note.slug,
-                    self.backlink_tab,
-                    &all_todos,
-                    &all_notes,
-                );
+                let rows = self.backlink_rows_for_active_tab();
                 let total_pages = (rows.len() + BACKLINK_PAGE_SIZE - 1) / BACKLINK_PAGE_SIZE;
                 let page_start = self.backlink_page * BACKLINK_PAGE_SIZE;
                 let page_end = (page_start + BACKLINK_PAGE_SIZE).min(rows.len());
@@ -604,6 +667,7 @@ impl NotePanel {
                             }
                             if modified {
                                 self.markdown_cache.clear_scrollable();
+                                self.derived_dirty = true;
                             }
                             None
                         } else {
@@ -622,6 +686,9 @@ impl NotePanel {
                     });
                 if !self.preview_mode {
                     if let Some(resp) = resp.inner {
+                        if resp.changed() {
+                            self.derived_dirty = true;
+                        }
                         let first_edit_frame = self.last_textedit_id.is_none();
                         self.last_textedit_id = Some(resp.id);
                         if self.focus_textedit_next_frame || first_edit_frame {
@@ -807,6 +874,7 @@ impl NotePanel {
                             if let Err(e) = save_note(&mut self.note, true) {
                                 app.set_error(format!("Failed to save note: {e}"));
                             } else {
+                                self.refresh_derived();
                                 self.finish_save(app);
                                 self.overwrite_prompt = false;
                             }
@@ -817,6 +885,7 @@ impl NotePanel {
                             if let Err(e) = save_note(&mut self.note, true) {
                                 app.set_error(format!("Failed to save note: {e}"));
                             } else {
+                                self.refresh_derived();
                                 self.finish_save(app);
                                 self.overwrite_prompt = false;
                             }
@@ -839,6 +908,7 @@ impl NotePanel {
             .map(|l| slugify(&l))
             .filter(|l| l != &self.note.slug)
             .collect();
+        self.derived_dirty = true;
         if let Some(first) = self.note.content.lines().next() {
             if let Some(t) = first.strip_prefix("# ") {
                 self.note.title = t.to_string();
@@ -846,6 +916,7 @@ impl NotePanel {
         }
         match save_note(&mut self.note, app.note_always_overwrite) {
             Ok(true) => {
+                self.refresh_derived();
                 self.finish_save(app);
             }
             Ok(false) => {
@@ -888,7 +959,11 @@ impl NotePanel {
                     ui.scope(|ui| {
                         ui.style_mut().override_font_id =
                             Some(FontId::proportional(app.note_font_size));
-                        let processed = preprocess_note_links(&buffer, &self.note.slug);
+                        let processed = preprocess_note_links(
+                            &buffer,
+                            &self.note.slug,
+                            &self.derived.todo_label_map,
+                        );
                         CommonMarkViewer::new(format!("note_seg_{}", buf_offset)).show(
                             ui,
                             &mut self.markdown_cache,
@@ -911,8 +986,11 @@ impl NotePanel {
                     ui.scope(|ui| {
                         ui.style_mut().override_font_id =
                             Some(FontId::proportional(app.note_font_size));
-                        let rest =
-                            preprocess_note_links(line.get(6..).unwrap_or(""), &self.note.slug);
+                        let rest = preprocess_note_links(
+                            line.get(6..).unwrap_or(""),
+                            &self.note.slug,
+                            &self.derived.todo_label_map,
+                        );
                         CommonMarkViewer::new(format!("note_seg_{}", offset)).show(
                             ui,
                             &mut self.markdown_cache,
@@ -934,7 +1012,8 @@ impl NotePanel {
         if !buffer.is_empty() {
             ui.scope(|ui| {
                 ui.style_mut().override_font_id = Some(FontId::proportional(app.note_font_size));
-                let processed = preprocess_note_links(&buffer, &self.note.slug);
+                let processed =
+                    preprocess_note_links(&buffer, &self.note.slug, &self.derived.todo_label_map);
                 CommonMarkViewer::new(format!("note_seg_{}", buf_offset)).show(
                     ui,
                     &mut self.markdown_cache,
@@ -1878,14 +1957,14 @@ mod tests {
     #[test]
     fn preprocess_wiki_links_rewrites() {
         let content = "See [[Target Note]]";
-        let processed = preprocess_note_links(content, "current-note");
+        let processed = preprocess_note_links(content, "current-note", &HashMap::new());
         assert_eq!(processed, "See [Target Note](note://target-note)");
     }
 
     #[test]
     fn preprocess_wiki_links_skips_self() {
         let content = "See [[Target Note]]";
-        let processed = preprocess_note_links(content, "target-note");
+        let processed = preprocess_note_links(content, "target-note", &HashMap::new());
         assert_eq!(processed, content);
     }
 
@@ -1947,6 +2026,136 @@ mod tests {
         assert_eq!(related.len(), 1);
         assert!(mentions.len() >= 1);
     }
+
+    #[test]
+    fn derived_metadata_is_reused_without_save() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let note = Note {
+            title: "Title".into(),
+            path: std::path::PathBuf::new(),
+            content: "# Title
+
+Body with [[Other]]"
+                .into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "title".into(),
+            alias: None,
+            entity_refs: Vec::new(),
+        };
+        let mut panel = NotePanel::from_note(note);
+        let initial = panel.derived_recompute_count;
+        let _ = ctx.run(Default::default(), |ctx| {
+            panel.ui(ctx, &mut app);
+        });
+        let _ = ctx.run(Default::default(), |ctx| {
+            panel.ui(ctx, &mut app);
+        });
+        assert_eq!(panel.derived_recompute_count, initial);
+    }
+
+    #[test]
+    fn save_recomputes_derived_and_updates_links() {
+        use tempfile::tempdir;
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let dir = tempdir().unwrap();
+        let prev = std::env::var("ML_NOTES_DIR").ok();
+        std::env::set_var("ML_NOTES_DIR", dir.path());
+
+        let note = Note {
+            title: "Source".into(),
+            path: std::path::PathBuf::new(),
+            content: "# Source
+
+[[alpha]]"
+                .into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: String::new(),
+            alias: None,
+            entity_refs: Vec::new(),
+        };
+        let mut panel = NotePanel::from_note(note);
+        let before = panel.derived_recompute_count;
+        panel.note.content = "# Source
+
+[[beta]]"
+            .into();
+        panel.derived_dirty = true;
+        panel.save(&mut app);
+
+        assert!(panel.derived_recompute_count > before);
+        assert_eq!(panel.note.links, vec!["beta".to_string()]);
+
+        if let Some(p) = prev {
+            std::env::set_var("ML_NOTES_DIR", p);
+        } else {
+            std::env::remove_var("ML_NOTES_DIR");
+        }
+    }
+
+    #[test]
+    fn save_invalidates_backlink_rows_when_slug_changes() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let dir = tempdir().unwrap();
+        let prev = std::env::var("ML_NOTES_DIR").ok();
+        std::env::set_var("ML_NOTES_DIR", dir.path());
+
+        fs::write(
+            dir.path().join("alpha.md"),
+            "# Alpha
+
+body",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("other.md"),
+            "# Other
+
+[[alpha]]",
+        )
+        .unwrap();
+        let _ = crate::plugins::note::refresh_cache();
+
+        let note = crate::plugins::note::note_cache_snapshot()
+            .into_iter()
+            .find(|n| n.slug == "alpha")
+            .expect("alpha note should exist in cache");
+        let mut panel = NotePanel::from_note(note);
+        assert_eq!(panel.derived.backlink_rows_related_notes.len(), 1);
+
+        panel.note.slug.clear();
+        panel.note.content = "# Beta
+
+body"
+            .into();
+        panel.save(&mut app);
+
+        assert_eq!(panel.note.slug, "beta");
+        assert!(panel.derived.backlink_rows_related_notes.is_empty());
+
+        if let Some(p) = prev {
+            std::env::set_var("ML_NOTES_DIR", p);
+        } else {
+            std::env::remove_var("ML_NOTES_DIR");
+        }
+    }
+
+    #[test]
+    fn preprocess_uses_injected_todo_label_map() {
+        let mut labels = HashMap::new();
+        labels.insert("abc".to_string(), "Readable Label".to_string());
+        let processed = preprocess_note_links("ref @todo:abc", "current", &labels);
+        assert_eq!(processed, "ref [Readable Label](todo://abc)");
+    }
+
     #[test]
     fn note_scheme_link_opens_panel() {
         use crate::plugins::note::Note;

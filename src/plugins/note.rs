@@ -637,6 +637,11 @@ pub fn note_version() -> u64 {
     NOTE_VERSION.load(Ordering::SeqCst)
 }
 
+/// Return a snapshot of notes from the in-memory cache without hitting disk.
+pub fn note_cache_snapshot() -> Vec<Note> {
+    CACHE.lock().map(|c| c.notes.clone()).unwrap_or_default()
+}
+
 /// Return a list of all unique tags from the cached notes.
 pub fn available_tags() -> Vec<String> {
     CACHE.lock().map(|c| c.tags.clone()).unwrap_or_default()
@@ -1452,6 +1457,67 @@ mod tests {
     fn restore_cache(original: NoteCache) {
         let mut guard = CACHE.lock().expect("note cache lock poisoned");
         *guard = original;
+    }
+
+    #[test]
+    fn note_cache_snapshot_is_read_only_copy() {
+        let original = set_notes(vec![Note {
+            title: "Alpha".into(),
+            path: PathBuf::new(),
+            content: "# Alpha".into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "alpha".into(),
+            alias: None,
+            entity_refs: Vec::new(),
+        }]);
+
+        let mut snapshot = note_cache_snapshot();
+        snapshot[0].title = "Mutated".into();
+        let fresh = note_cache_snapshot();
+        assert_eq!(fresh[0].title, "Alpha");
+
+        restore_cache(original);
+    }
+
+    #[test]
+    fn note_cache_snapshot_reflects_refresh_cache() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let prev = std::env::var("ML_NOTES_DIR").ok();
+        std::env::set_var("ML_NOTES_DIR", dir.path());
+
+        fs::write(
+            dir.path().join("one.md"),
+            "# One
+
+Body",
+        )
+        .unwrap();
+        refresh_cache().unwrap();
+        let first = note_cache_snapshot();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].slug, "one");
+
+        fs::write(
+            dir.path().join("two.md"),
+            "# Two
+
+Body",
+        )
+        .unwrap();
+        refresh_cache().unwrap();
+        let second = note_cache_snapshot();
+        assert_eq!(second.len(), 2);
+        assert!(second.iter().any(|n| n.slug == "two"));
+
+        if let Some(p) = prev {
+            std::env::set_var("ML_NOTES_DIR", p);
+        } else {
+            std::env::remove_var("ML_NOTES_DIR");
+        }
     }
 
     #[test]
