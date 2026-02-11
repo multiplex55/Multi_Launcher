@@ -228,16 +228,13 @@ impl NoteGraphDialog {
             .show(ctx, |ui| {
                 persist_requested |= self.top_bar(ui, app);
                 ui.separator();
+                persist_requested |= self.filters_top_panel(ui, &notes);
+                ui.separator();
 
                 ui.horizontal(|ui| {
                     ui.set_min_height(ui.available_height());
                     let available_width = ui.available_width().max(320.0);
-                    let left_panel_width = (available_width * 0.18).clamp(140.0, 190.0);
-                    let right_panel_width = (available_width * 0.2).clamp(150.0, 220.0);
-                    persist_requested |= ui
-                        .vertical(|ui| self.left_panel(ui, &notes, left_panel_width))
-                        .inner;
-                    ui.separator();
+                    let right_panel_width = (available_width * 0.28).clamp(180.0, 280.0);
                     ui.vertical(|ui| self.main_canvas(ui, ctx, app));
                     ui.separator();
                     persist_requested |= ui
@@ -419,13 +416,15 @@ impl NoteGraphDialog {
         changed
     }
 
-    fn left_panel(&mut self, ui: &mut egui::Ui, notes: &[Note], width: f32) -> bool {
+    fn filters_top_panel(&mut self, ui: &mut egui::Ui, notes: &[Note]) -> bool {
         let mut changed = false;
-        ui.set_min_width(width);
-        ui.set_max_width(width + 24.0);
         ui.label("Filters");
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.filter.include_input);
+        ui.horizontal_wrapped(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.filter.include_input)
+                    .desired_width(140.0)
+                    .hint_text("include tag"),
+            );
             if ui.button("+ include").clicked() {
                 let normalized = normalize_tag(&self.filter.include_input);
                 if !normalized.is_empty() {
@@ -433,9 +432,12 @@ impl NoteGraphDialog {
                 }
                 self.filter.include_input.clear();
             }
-        });
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.filter.exclude_input);
+
+            ui.add(
+                egui::TextEdit::singleline(&mut self.filter.exclude_input)
+                    .desired_width(140.0)
+                    .hint_text("exclude tag"),
+            );
             if ui.button("+ exclude").clicked() {
                 let normalized = normalize_tag(&self.filter.exclude_input);
                 if !normalized.is_empty() {
@@ -443,8 +445,7 @@ impl NoteGraphDialog {
                 }
                 self.filter.exclude_input.clear();
             }
-        });
-        ui.horizontal(|ui| {
+
             changed |= ui
                 .radio_value(&mut self.filter.include_all, false, "Any")
                 .changed();
@@ -458,6 +459,7 @@ impl NoteGraphDialog {
         changed |= ui
             .checkbox(&mut self.filter.only_tagged, "Only tagged notes")
             .changed();
+
         changed |= ui
             .add(
                 egui::DragValue::new(&mut self.max_nodes)
@@ -496,7 +498,6 @@ impl NoteGraphDialog {
             )
             .changed();
 
-        ui.separator();
         ui.label(format!("Notes in scope: {}", notes.len()));
         ui.label(format!("Nodes: {}", self.engine.model.nodes.len()));
 
