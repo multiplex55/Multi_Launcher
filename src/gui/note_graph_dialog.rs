@@ -646,7 +646,8 @@ mod tests {
 
         t.zoom_about(Pos2::new(50.0, 50.0), 1.5, rect);
         let screen2 = t.world_to_screen(world, rect);
-        assert!((screen2.x - 62.0).abs() > 0.001);
+        assert!((screen2.x - 62.0).abs() < 0.001);
+        assert!((screen2.y - 45.5).abs() < 0.001);
     }
 
     #[test]
