@@ -97,6 +97,50 @@ pub struct LayoutConfig {
     pub damping: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RenderSurface {
+    pub center: [f32; 2],
+    pub pan: [f32; 2],
+    pub zoom: f32,
+}
+
+impl Default for RenderSurface {
+    fn default() -> Self {
+        Self {
+            center: [0.0, 0.0],
+            pan: [0.0, 0.0],
+            zoom: 1.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrawNode {
+    pub id: String,
+    pub label: String,
+    pub world: [f32; 2],
+    pub screen: [f32; 2],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrawEdge {
+    pub from: [f32; 2],
+    pub to: [f32; 2],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NoteGraphDrawPrimitives {
+    pub nodes: Vec<DrawNode>,
+    pub edges: Vec<DrawEdge>,
+    pub total_nodes: usize,
+}
+
+impl NoteGraphDrawPrimitives {
+    pub fn is_truncated(&self) -> bool {
+        self.nodes.len() < self.total_nodes
+    }
+}
+
 impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
@@ -137,6 +181,63 @@ impl NoteGraphEngine {
         self.last_note_version = Some(note_version);
         self.last_filter_hash = Some(filter_hash);
         true
+    }
+}
+
+pub fn project_world_to_screen(world: [f32; 2], surface: RenderSurface) -> [f32; 2] {
+    [
+        surface.center[0] + surface.pan[0] + world[0] * surface.zoom,
+        surface.center[1] + surface.pan[1] + world[1] * surface.zoom,
+    ]
+}
+
+pub fn build_draw_primitives(
+    model: &NoteGraphModel,
+    layout: &LayoutState,
+    surface: RenderSurface,
+    max_nodes: usize,
+) -> NoteGraphDrawPrimitives {
+    let mut ordered_nodes = model.nodes.clone();
+    ordered_nodes.sort_by(|a, b| b.degree.cmp(&a.degree).then_with(|| a.id.cmp(&b.id)));
+    let total_nodes = ordered_nodes.len();
+    ordered_nodes.truncate(max_nodes.max(1));
+
+    let mut nodes = Vec::new();
+    let mut kept_ids = HashSet::new();
+    for node in &ordered_nodes {
+        let Some(state) = layout.nodes.get(&node.id) else {
+            continue;
+        };
+        let _ = kept_ids.insert(node.id.clone());
+        nodes.push(DrawNode {
+            id: node.id.clone(),
+            label: node.label.clone(),
+            world: state.position,
+            screen: project_world_to_screen(state.position, surface),
+        });
+    }
+
+    let screen_by_id: HashMap<&str, [f32; 2]> = nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node.screen))
+        .collect();
+
+    let mut edges: Vec<_> = model
+        .edges
+        .iter()
+        .filter(|edge| kept_ids.contains(&edge.from) && kept_ids.contains(&edge.to))
+        .filter_map(|edge| {
+            let from = screen_by_id.get(edge.from.as_str()).copied()?;
+            let to = screen_by_id.get(edge.to.as_str()).copied()?;
+            Some((edge.from.as_str(), edge.to.as_str(), DrawEdge { from, to }))
+        })
+        .collect();
+    edges.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));
+
+    NoteGraphDrawPrimitives {
+        nodes,
+        edges: edges.into_iter().map(|(_, _, edge)| edge).collect(),
+        total_nodes,
     }
 }
 
@@ -600,6 +701,43 @@ mod tests {
             .expect("node a should still exist after rebuild");
 
         assert_eq!(a_before, a_after);
+    }
+
+    #[test]
+    fn draw_primitives_are_deterministic_for_fixed_input() {
+        let notes = vec![
+            note("alpha", "Alpha", &[], &["beta"]),
+            note("beta", "Beta", &[], &["gamma"]),
+            note("gamma", "Gamma", &[], &[]),
+        ];
+        let model = build_note_graph(&notes, &NoteGraphFilter::default());
+        let mut layout = LayoutState::default();
+        layout.sync_model(&model);
+
+        let first = build_draw_primitives(
+            &model,
+            &layout,
+            RenderSurface {
+                center: [100.0, 80.0],
+                pan: [5.0, -3.0],
+                zoom: 1.25,
+            },
+            16,
+        );
+        let second = build_draw_primitives(
+            &model,
+            &layout,
+            RenderSurface {
+                center: [100.0, 80.0],
+                pan: [5.0, -3.0],
+                zoom: 1.25,
+            },
+            16,
+        );
+
+        assert_eq!(first, second);
+        assert_eq!(first.nodes.len(), 3);
+        assert!(!first.edges.is_empty());
     }
 
     #[test]

@@ -53,6 +53,68 @@ pub struct DashboardSettings {
     pub show_when_query_empty: bool,
 }
 
+fn default_note_graph_max_nodes() -> usize {
+    220
+}
+
+fn default_note_graph_label_zoom_threshold() -> f32 {
+    0.55
+}
+
+fn default_note_graph_layout_iterations_per_frame() -> usize {
+    2
+}
+
+fn default_note_graph_repulsion_strength() -> f32 {
+    3000.0
+}
+
+fn default_note_graph_link_distance() -> f32 {
+    60.0
+}
+
+fn default_note_graph_local_graph_depth() -> usize {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NoteGraphSettings {
+    #[serde(default = "default_note_graph_max_nodes")]
+    pub max_nodes: usize,
+    #[serde(default = "default_true")]
+    pub show_labels: bool,
+    #[serde(default = "default_note_graph_label_zoom_threshold")]
+    pub label_zoom_threshold: f32,
+    #[serde(default = "default_note_graph_layout_iterations_per_frame")]
+    pub layout_iterations_per_frame: usize,
+    #[serde(default = "default_note_graph_repulsion_strength")]
+    pub repulsion_strength: f32,
+    #[serde(default = "default_note_graph_link_distance")]
+    pub link_distance: f32,
+    #[serde(default = "default_note_graph_local_graph_depth")]
+    pub local_graph_depth: usize,
+    #[serde(default)]
+    pub include_tags: Vec<String>,
+    #[serde(default)]
+    pub exclude_tags: Vec<String>,
+}
+
+impl Default for NoteGraphSettings {
+    fn default() -> Self {
+        Self {
+            max_nodes: default_note_graph_max_nodes(),
+            show_labels: true,
+            label_zoom_threshold: default_note_graph_label_zoom_threshold(),
+            layout_iterations_per_frame: default_note_graph_layout_iterations_per_frame(),
+            repulsion_strength: default_note_graph_repulsion_strength(),
+            link_distance: default_note_graph_link_distance(),
+            local_graph_depth: default_note_graph_local_graph_depth(),
+            include_tags: Vec::new(),
+            exclude_tags: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeMode {
@@ -378,6 +440,8 @@ pub struct Settings {
     pub dashboard: DashboardSettings,
     #[serde(default)]
     pub theme: ThemeSettings,
+    #[serde(default)]
+    pub note_graph: NoteGraphSettings,
 }
 
 static SETTINGS_PATH: OnceCell<PathBuf> = OnceCell::new();
@@ -543,6 +607,7 @@ impl Default for Settings {
             show_dashboard_diagnostics: false,
             dashboard: DashboardSettings::default(),
             theme: ThemeSettings::default(),
+            note_graph: NoteGraphSettings::default(),
         }
     }
 }
