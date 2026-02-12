@@ -5324,6 +5324,78 @@ mod tests {
     }
 
     #[test]
+    fn destructive_note_delete_is_queued_when_confirmation_required() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let notes_dir = dir.path().join("notes");
+        std::fs::create_dir_all(&notes_dir).unwrap();
+        std::env::set_var("ML_NOTES_DIR", &notes_dir);
+        std::env::set_var("HOME", dir.path());
+        let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        std::env::set_current_dir(dir.path()).unwrap();
+        save_notes(&[]).unwrap();
+        reset_slug_lookup();
+        append_note("alpha", "# alpha\n\ncontent").unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.require_confirm_destructive = true;
+
+        app.activate_action(
+            Action {
+                label: "Delete note".into(),
+                desc: "Notes".into(),
+                action: "note:remove:alpha".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Enter,
+        );
+
+        assert!(app.pending_confirm.is_some());
+        assert_eq!(load_notes().unwrap().len(), 1);
+
+        std::env::set_current_dir(orig_dir).unwrap();
+    }
+
+    #[test]
+    fn destructive_note_delete_executes_only_after_confirmation() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let notes_dir = dir.path().join("notes");
+        std::fs::create_dir_all(&notes_dir).unwrap();
+        std::env::set_var("ML_NOTES_DIR", &notes_dir);
+        std::env::set_var("HOME", dir.path());
+        let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        std::env::set_current_dir(dir.path()).unwrap();
+        save_notes(&[]).unwrap();
+        reset_slug_lookup();
+        append_note("alpha", "# alpha\n\ncontent").unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.require_confirm_destructive = true;
+
+        app.activate_action(
+            Action {
+                label: "Delete note".into(),
+                desc: "Notes".into(),
+                action: "note:remove:alpha".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Enter,
+        );
+
+        assert_eq!(load_notes().unwrap().len(), 1);
+        let pending = app.pending_confirm.take().expect("pending confirm action");
+        app.activate_action_confirmed(pending.action, pending.query_override, pending.source);
+        assert!(load_notes().unwrap().is_empty());
+
+        std::env::set_current_dir(orig_dir).unwrap();
+    }
+
+    #[test]
     fn note_graph_dialog_action_opens_dialog() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
