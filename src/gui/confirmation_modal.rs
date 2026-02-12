@@ -15,6 +15,8 @@ pub enum DestructiveAction {
     ClearHistory,
     ClearTodos,
     DeleteTodo,
+    DeleteNote,
+    DeleteGesture,
     ClearTempfiles,
     ClearBrowserTabCache,
     EmptyRecycleBin,
@@ -31,6 +33,7 @@ impl DestructiveAction {
             "tab:clear" => Some(Self::ClearBrowserTabCache),
             "recycle:clean" => Some(Self::EmptyRecycleBin),
             _ if action.action.starts_with("todo:remove:") => Some(Self::DeleteTodo),
+            _ if action.action.starts_with("note:remove:") => Some(Self::DeleteNote),
             _ => None,
         }
     }
@@ -41,6 +44,8 @@ impl DestructiveAction {
             Self::ClearHistory => "Clear search history",
             Self::ClearTodos => "Clear completed todos",
             Self::DeleteTodo => "Delete todo",
+            Self::DeleteNote => "Delete note",
+            Self::DeleteGesture => "Delete gesture",
             Self::ClearTempfiles => "Clear temp files",
             Self::ClearBrowserTabCache => "Clear browser tab cache",
             Self::EmptyRecycleBin => "Empty recycle bin",
@@ -50,6 +55,27 @@ impl DestructiveAction {
 
     pub fn warning(self) -> &'static str {
         "This action cannot be undone."
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DestructiveAction;
+    use crate::actions::Action;
+
+    #[test]
+    fn from_action_maps_note_remove() {
+        let action = Action {
+            label: "Delete note".into(),
+            desc: "Notes".into(),
+            action: "note:remove:project-idea".into(),
+            args: None,
+        };
+
+        assert_eq!(
+            DestructiveAction::from_action(&action),
+            Some(DestructiveAction::DeleteNote)
+        );
     }
 }
 

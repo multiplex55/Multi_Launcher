@@ -1,3 +1,4 @@
+use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use crate::gui::LauncherApp;
 use crate::mouse_gestures::db::{
     format_gesture_label, load_gestures, save_gestures, BindingEntry, BindingKind, GestureDb,
@@ -284,6 +285,15 @@ pub struct MgGesturesDialog {
     recorder: GestureRecorder,
     token_buffer: String,
     binding_dialog: BindingDialog,
+    delete_confirm_modal: ConfirmationModal,
+    pending_delete: Option<PendingGestureDelete>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingGestureDelete {
+    idx: usize,
+    label: String,
+    tokens: String,
 }
 
 impl Default for MgGesturesDialog {
@@ -298,6 +308,8 @@ impl Default for MgGesturesDialog {
             recorder: GestureRecorder::new(DirMode::Four, config),
             token_buffer: String::new(),
             binding_dialog: BindingDialog::default(),
+            delete_confirm_modal: ConfirmationModal::default(),
+            pending_delete: None,
         }
     }
 }
@@ -379,6 +391,73 @@ impl MgGesturesDialog {
         self.rename_label = self.db.gestures[idx].label.clone();
         self.recorder.set_dir_mode(DirMode::Four);
         self.binding_dialog.open = false;
+    }
+
+    fn queue_gesture_delete(&mut self, idx: usize) -> bool {
+        let Some(entry) = self.db.gestures.get(idx) else {
+            return false;
+        };
+        self.pending_delete = Some(PendingGestureDelete {
+            idx,
+            label: entry.label.clone(),
+            tokens: entry.tokens.clone(),
+        });
+        self.delete_confirm_modal
+            .open_for(DestructiveAction::DeleteGesture);
+        true
+    }
+
+    fn resolve_pending_delete_index(&self, pending: &PendingGestureDelete) -> Option<usize> {
+        if self
+            .db
+            .gestures
+            .get(pending.idx)
+            .is_some_and(|g| g.label == pending.label && g.tokens == pending.tokens)
+        {
+            return Some(pending.idx);
+        }
+        self.db
+            .gestures
+            .iter()
+            .position(|g| g.label == pending.label && g.tokens == pending.tokens)
+    }
+
+    fn adjust_indices_after_delete(&mut self, idx: usize) {
+        if let Some(selected) = self.selected_idx {
+            if selected == idx {
+                self.selected_idx = None;
+            } else if selected > idx {
+                self.selected_idx = Some(selected - 1);
+            }
+        }
+
+        if let Some(rename) = self.rename_idx {
+            if rename == idx {
+                self.rename_idx = None;
+            } else if rename > idx {
+                self.rename_idx = Some(rename - 1);
+            }
+        }
+
+        self.ensure_selection();
+        self.binding_dialog.editor.reset();
+        self.binding_dialog.open = false;
+    }
+
+    fn apply_pending_gesture_delete(&mut self) -> bool {
+        let Some(pending) = self.pending_delete.take() else {
+            return false;
+        };
+        let Some(idx) = self.resolve_pending_delete_index(&pending) else {
+            return false;
+        };
+        self.db.gestures.remove(idx);
+        self.adjust_indices_after_delete(idx);
+        true
+    }
+
+    fn cancel_pending_gesture_delete(&mut self) {
+        self.pending_delete = None;
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
@@ -821,7 +900,7 @@ impl MgGesturesDialog {
                             // ScrollArea creates its own child Ui; re-apply the left clip
                             // so horizontally-wide rows can't paint into the right panel.
                             ui.set_clip_rect(left_clip);
-                            let mut remove_idx: Option<usize> = None;
+                            let mut request_delete_idx: Option<usize> = None;
                             let gesture_order = self.sorted_gesture_indices();
                             for idx in gesture_order {
                                 let selected = self.selected_idx == Some(idx);
@@ -845,7 +924,7 @@ impl MgGesturesDialog {
                                         self.rename_label = entry.label.clone();
                                     }
                                     if ui.button("Delete").clicked() {
-                                        remove_idx = Some(idx);
+                                        request_delete_idx = Some(idx);
                                     }
                                 });
                                 if self.rename_idx == Some(idx) {
@@ -873,29 +952,8 @@ impl MgGesturesDialog {
                                     });
                                 }
                             }
-                            if let Some(idx) = remove_idx {
-                                self.db.gestures.remove(idx);
-
-                                if let Some(selected) = self.selected_idx {
-                                    if selected == idx {
-                                        self.selected_idx = None;
-                                    } else if selected > idx {
-                                        self.selected_idx = Some(selected - 1);
-                                    }
-                                }
-
-                                if let Some(rename) = self.rename_idx {
-                                    if rename == idx {
-                                        self.rename_idx = None;
-                                    } else if rename > idx {
-                                        self.rename_idx = Some(rename - 1);
-                                    }
-                                }
-
-                                self.ensure_selection();
-                                self.binding_dialog.editor.reset();
-                                self.binding_dialog.open = false;
-                                save_now = true;
+                            if let Some(idx) = request_delete_idx {
+                                let _ = self.queue_gesture_delete(idx);
                             }
                         });
                     ui.separator();
@@ -1074,6 +1132,15 @@ impl MgGesturesDialog {
                 });
             });
         self.binding_dialog_ui(ctx, app, &mut save_now);
+        match self.delete_confirm_modal.ui(ctx) {
+            ConfirmationResult::Confirmed => {
+                if self.apply_pending_gesture_delete() {
+                    save_now = true;
+                }
+            }
+            ConfirmationResult::Cancelled => self.cancel_pending_gesture_delete(),
+            ConfirmationResult::None => {}
+        }
         if save_now {
             self.save(app);
         }
@@ -1082,5 +1149,62 @@ impl MgGesturesDialog {
         } else {
             self.open = open;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gesture(label: &str, tokens: &str) -> GestureEntry {
+        GestureEntry {
+            label: label.into(),
+            tokens: tokens.into(),
+            dir_mode: DirMode::Four,
+            stroke: Vec::new(),
+            enabled: true,
+            bindings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn gesture_delete_is_queued_until_confirmed() {
+        let mut dlg = MgGesturesDialog::default();
+        dlg.db.gestures = vec![gesture("A", "R")];
+        dlg.selected_idx = Some(0);
+
+        assert!(dlg.queue_gesture_delete(0));
+        assert_eq!(dlg.db.gestures.len(), 1);
+        assert!(dlg.pending_delete.is_some());
+    }
+
+    #[test]
+    fn cancelling_gesture_delete_keeps_db_and_selection() {
+        let mut dlg = MgGesturesDialog::default();
+        dlg.db.gestures = vec![gesture("A", "R"), gesture("B", "L")];
+        dlg.selected_idx = Some(1);
+        dlg.rename_idx = Some(1);
+
+        assert!(dlg.queue_gesture_delete(1));
+        dlg.cancel_pending_gesture_delete();
+
+        assert_eq!(dlg.db.gestures.len(), 2);
+        assert_eq!(dlg.selected_idx, Some(1));
+        assert_eq!(dlg.rename_idx, Some(1));
+    }
+
+    #[test]
+    fn confirmed_gesture_delete_adjusts_indices() {
+        let mut dlg = MgGesturesDialog::default();
+        dlg.db.gestures = vec![gesture("A", "R"), gesture("B", "L"), gesture("C", "U")];
+        dlg.selected_idx = Some(2);
+        dlg.rename_idx = Some(2);
+
+        assert!(dlg.queue_gesture_delete(1));
+        assert!(dlg.apply_pending_gesture_delete());
+
+        assert_eq!(dlg.db.gestures.len(), 2);
+        assert_eq!(dlg.selected_idx, Some(1));
+        assert_eq!(dlg.rename_idx, Some(1));
     }
 }
