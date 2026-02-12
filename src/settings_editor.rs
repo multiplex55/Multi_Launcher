@@ -73,6 +73,19 @@ pub struct SettingsEditor {
 }
 
 impl SettingsEditor {
+    fn normalized_static_settings(
+        follow_mouse: bool,
+        static_enabled: bool,
+        static_pos: (i32, i32),
+        static_size: (i32, i32),
+    ) -> (bool, Option<(i32, i32)>, Option<(i32, i32)>) {
+        if follow_mouse {
+            (false, None, None)
+        } else {
+            (static_enabled, Some(static_pos), Some(static_size))
+        }
+    }
+
     pub fn new(settings: &Settings) -> Self {
         let hotkey = settings.hotkey.clone().unwrap_or_default();
         let hotkey_valid = parse_hotkey(&hotkey).is_some();
@@ -106,6 +119,13 @@ impl SettingsEditor {
         } else {
             String::new()
         };
+        let follow_mouse = settings.follow_mouse;
+        let (static_enabled, _, _) = Self::normalized_static_settings(
+            follow_mouse,
+            settings.static_location_enabled,
+            settings.static_pos.unwrap_or((0, 0)),
+            settings.static_size.unwrap_or((400, 220)),
+        );
         let mut s = Self {
             hotkey,
             hotkey_valid,
@@ -138,8 +158,8 @@ impl SettingsEditor {
             fuzzy_weight: settings.fuzzy_weight,
             usage_weight: settings.usage_weight,
             page_jump: settings.page_jump,
-            follow_mouse: settings.follow_mouse,
-            static_enabled: settings.static_location_enabled,
+            follow_mouse,
+            static_enabled,
             static_x: settings.static_pos.unwrap_or((0, 0)).0,
             static_y: settings.static_pos.unwrap_or((0, 0)).1,
             static_w: settings.static_size.unwrap_or((400, 220)).0,
@@ -241,6 +261,12 @@ impl SettingsEditor {
     }
 
     pub fn to_settings(&self, current: &Settings) -> Settings {
+        let (static_location_enabled, static_pos, static_size) = Self::normalized_static_settings(
+            self.follow_mouse,
+            self.static_enabled,
+            (self.static_x, self.static_y),
+            (self.static_w, self.static_h),
+        );
         Settings {
             hotkey: if self.hotkey.trim().is_empty() {
                 None
@@ -280,9 +306,9 @@ impl SettingsEditor {
             usage_weight: self.usage_weight,
             page_jump: self.page_jump,
             follow_mouse: self.follow_mouse,
-            static_location_enabled: self.static_enabled,
-            static_pos: Some((self.static_x, self.static_y)),
-            static_size: Some((self.static_w, self.static_h)),
+            static_location_enabled,
+            static_pos,
+            static_size,
             hide_after_run: self.hide_after_run,
             always_on_top: self.always_on_top,
             timer_refresh: self.timer_refresh,
@@ -485,11 +511,14 @@ impl SettingsEditor {
                             ui.add(egui::DragValue::new(&mut self.note_panel_h));
                         });
 
-                        ui.checkbox(&mut self.follow_mouse, "Follow mouse");
+                        let follow_mouse_resp = ui.checkbox(&mut self.follow_mouse, "Follow mouse");
+                        if follow_mouse_resp.changed() && self.follow_mouse {
+                            self.static_enabled = false;
+                        }
                         ui.add_enabled_ui(!self.follow_mouse, |ui| {
                             ui.checkbox(&mut self.static_enabled, "Use static position");
                         });
-                        if self.static_enabled {
+                        if !self.follow_mouse && self.static_enabled {
                             ui.horizontal(|ui| {
                                 ui.label("X");
                                 ui.add(egui::DragValue::new(&mut self.static_x));
@@ -892,5 +921,33 @@ impl SettingsEditor {
                     });
             });
         app.show_settings = open;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SettingsEditor;
+    use crate::settings::Settings;
+
+    #[test]
+    fn to_settings_disables_static_when_follow_mouse_enabled() {
+        let mut initial = Settings::default();
+        initial.static_location_enabled = true;
+        initial.static_pos = Some((100, 200));
+        initial.static_size = Some((900, 700));
+
+        let mut editor = SettingsEditor::new(&initial);
+        editor.follow_mouse = true;
+        editor.static_enabled = true;
+        editor.static_x = 1;
+        editor.static_y = 2;
+        editor.static_w = 3;
+        editor.static_h = 4;
+
+        let saved = editor.to_settings(&initial);
+        assert!(saved.follow_mouse);
+        assert!(!saved.static_location_enabled);
+        assert_eq!(saved.static_pos, None);
+        assert_eq!(saved.static_size, None);
     }
 }

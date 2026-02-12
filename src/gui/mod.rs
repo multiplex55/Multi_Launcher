@@ -243,6 +243,19 @@ fn push_toast(toasts: &mut Toasts, toast: Toast) {
     toasts.add(toast);
 }
 
+fn normalize_static_window_config(
+    follow_mouse: bool,
+    static_location_enabled: bool,
+    static_pos: Option<(i32, i32)>,
+    static_size: Option<(i32, i32)>,
+) -> (bool, Option<(i32, i32)>, Option<(i32, i32)>) {
+    if follow_mouse {
+        (false, None, None)
+    } else {
+        (static_location_enabled, static_pos, static_size)
+    }
+}
+
 static APP_EVENT_TXS: Lazy<Mutex<Vec<Sender<WatchEvent>>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 pub fn register_event_sender(tx: Sender<WatchEvent>) {
@@ -887,15 +900,19 @@ impl LauncherApp {
         if let Some(v) = follow_mouse {
             self.follow_mouse = v;
         }
-        if let Some(v) = static_enabled {
-            self.static_location_enabled = v;
-        }
-        if static_pos.is_some() {
-            self.static_pos = static_pos;
-        }
-        if static_size.is_some() {
-            self.static_size = static_size;
-        }
+        let requested_static_enabled = static_enabled.unwrap_or(self.static_location_enabled);
+        let requested_static_pos = static_pos.or(self.static_pos);
+        let requested_static_size = static_size.or(self.static_size);
+        let (normalized_static_enabled, normalized_static_pos, normalized_static_size) =
+            normalize_static_window_config(
+                self.follow_mouse,
+                requested_static_enabled,
+                requested_static_pos,
+                requested_static_size,
+            );
+        self.static_location_enabled = normalized_static_enabled;
+        self.static_pos = normalized_static_pos;
+        self.static_size = normalized_static_size;
         if let Some(v) = hide_after_run {
             self.hide_after_run = v;
         }
@@ -1222,7 +1239,12 @@ impl LauncherApp {
         let static_pos = settings.static_pos;
         let static_size = settings.static_size;
         let follow_mouse = settings.follow_mouse;
-        let static_enabled = settings.static_location_enabled;
+        let (static_enabled, static_pos, static_size) = normalize_static_window_config(
+            follow_mouse,
+            settings.static_location_enabled,
+            static_pos,
+            static_size,
+        );
 
         let note_external_open = settings
             .plugin_settings
@@ -5433,5 +5455,36 @@ mod tests {
             start + NOTE_SEARCH_DEBOUNCE,
             NOTE_SEARCH_DEBOUNCE,
         ));
+    }
+    #[test]
+    fn launcher_new_normalizes_conflicting_follow_mouse_static_config() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.follow_mouse = true;
+        settings.static_location_enabled = true;
+        settings.static_pos = Some((10, 20));
+        settings.static_size = Some((500, 400));
+
+        let app = LauncherApp::new(
+            &ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new(),
+            "actions.json".into(),
+            "settings.json".into(),
+            settings,
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert!(app.follow_mouse);
+        assert!(!app.static_location_enabled);
+        assert_eq!(app.static_pos, None);
+        assert_eq!(app.static_size, None);
     }
 }
