@@ -199,6 +199,23 @@ fn append_query_args(query: &str, add_args: &str) -> String {
     }
 }
 
+fn apply_recording_to_entry(
+    entry: &mut GestureEntry,
+    token_buffer: &mut String,
+    recorded_tokens: &str,
+    normalized_stroke: Vec<[i16; 2]>,
+) {
+    entry.tokens = recorded_tokens.to_string();
+    *token_buffer = entry.tokens.clone();
+    entry.stroke = normalized_stroke;
+
+    if is_default_generated_label(&entry.label) {
+        if let Some(auto_label) = label_from_recorded_tokens(recorded_tokens) {
+            entry.label = auto_label;
+        }
+    }
+}
+
 fn apply_action_pick(editor: &mut BindingEditor, act: &crate::actions::Action, add_args: &str) {
     if let Some(query) = act.action.strip_prefix("query:") {
         editor.kind = match editor.kind {
@@ -418,23 +435,6 @@ impl Default for MgGesturesDialog {
 }
 
 impl MgGesturesDialog {
-    fn apply_recording_to_entry(
-        &mut self,
-        entry: &mut GestureEntry,
-        recorded_tokens: &str,
-    ) -> bool {
-        entry.tokens = recorded_tokens.to_string();
-        self.token_buffer = entry.tokens.clone();
-        entry.stroke = self.recorder.normalized_stroke();
-
-        if is_default_generated_label(&entry.label)
-            && let Some(auto_label) = label_from_recorded_tokens(recorded_tokens)
-        {
-            entry.label = auto_label;
-        }
-        true
-    }
-
     /// Returns gesture indices sorted by label (case-insensitive) for display purposes.
     fn sorted_gesture_indices(&self) -> Vec<usize> {
         let mut indices: Vec<usize> = (0..self.db.gestures.len()).collect();
@@ -1082,7 +1082,14 @@ impl MgGesturesDialog {
                                     ));
                                     ui.horizontal(|ui| {
                                         if ui.button("Use Recording").clicked() {
-                                            self.apply_recording_to_entry(entry, &recorded_tokens);
+                                            let normalized_stroke =
+                                                self.recorder.normalized_stroke();
+                                            apply_recording_to_entry(
+                                                entry,
+                                                &mut self.token_buffer,
+                                                &recorded_tokens,
+                                                normalized_stroke,
+                                            );
                                             self.recorder.reset();
                                             save_now = true;
                                         }
@@ -1125,7 +1132,14 @@ impl MgGesturesDialog {
                                     if response.drag_stopped() {
                                         let recorded_tokens = self.recorder.tokens_string();
                                         if !recorded_tokens.is_empty() {
-                                            self.apply_recording_to_entry(entry, &recorded_tokens);
+                                            let normalized_stroke =
+                                                self.recorder.normalized_stroke();
+                                            apply_recording_to_entry(
+                                                entry,
+                                                &mut self.token_buffer,
+                                                &recorded_tokens,
+                                                normalized_stroke,
+                                            );
                                             save_now = true;
                                         }
                                         //Clear the live drawing so the saved preview is shown
@@ -1295,10 +1309,10 @@ mod tests {
 
     #[test]
     fn auto_label_is_applied_only_for_default_generated_labels() {
-        let mut dlg = MgGesturesDialog::default();
         let mut entry = gesture("Gesture 3", "");
 
-        dlg.apply_recording_to_entry(&mut entry, "udlr");
+        let mut token_buffer = String::new();
+        apply_recording_to_entry(&mut entry, &mut token_buffer, "udlr", Vec::new());
 
         assert_eq!(entry.tokens, "udlr");
         assert_eq!(entry.label, "Gesture UDLR");
@@ -1306,10 +1320,10 @@ mod tests {
 
     #[test]
     fn customized_label_is_preserved_when_new_recording_is_applied() {
-        let mut dlg = MgGesturesDialog::default();
         let mut entry = gesture("My Favorite Gesture", "UD");
 
-        dlg.apply_recording_to_entry(&mut entry, "LR");
+        let mut token_buffer = String::new();
+        apply_recording_to_entry(&mut entry, &mut token_buffer, "LR", Vec::new());
 
         assert_eq!(entry.tokens, "LR");
         assert_eq!(entry.label, "My Favorite Gesture");
