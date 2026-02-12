@@ -6,6 +6,7 @@ use crate::mouse_gestures::db::{
 };
 use crate::mouse_gestures::engine::{DirMode, GestureTracker};
 use crate::mouse_gestures::service::MouseGestureConfig;
+use crate::plugin::Plugin;
 use eframe::egui;
 
 #[derive(Debug, Clone, Copy)]
@@ -120,6 +121,108 @@ fn stroke_points_in_rect(stroke: &[[i16; 2]], rect: egui::Rect) -> Vec<egui::Pos
             egui::pos2(center.x + nx * scale, center.y + ny * scale)
         })
         .collect()
+}
+
+const AUTO_LABEL_PREFIX: &str = "Gesture";
+const AUTO_LABEL_TOKEN_MAX: usize = 24;
+
+fn normalize_recorded_tokens_for_label(tokens: &str) -> String {
+    tokens
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .take(AUTO_LABEL_TOKEN_MAX)
+        .collect()
+}
+
+fn label_from_recorded_tokens(tokens: &str) -> Option<String> {
+    let normalized = normalize_recorded_tokens_for_label(tokens);
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(format!("{AUTO_LABEL_PREFIX} {normalized}"))
+    }
+}
+
+fn is_default_generated_label(label: &str) -> bool {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    let Some(rest) = trimmed.strip_prefix(AUTO_LABEL_PREFIX) else {
+        return false;
+    };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return true;
+    }
+
+    rest.chars().all(|c| c.is_ascii_digit()) || rest == normalize_recorded_tokens_for_label(rest)
+}
+
+fn list_query_prefix_for_plugin(plugin_name: &str) -> Option<&'static str> {
+    match plugin_name {
+        "folders" => Some("f list"),
+        "bookmarks" => Some("bm list"),
+        "clipboard" => Some("cb list"),
+        "emoji" => Some("emoji list"),
+        "notes" => Some("note list"),
+        _ => None,
+    }
+}
+
+fn resolve_action_source(plugin: &dyn Plugin, filter: &str) -> Vec<crate::actions::Action> {
+    if let Some(prefix) = list_query_prefix_for_plugin(plugin.name()) {
+        let query = if filter.trim().is_empty() {
+            prefix.to_string()
+        } else {
+            format!("{prefix} {}", filter.trim())
+        };
+        let actions = plugin.search(&query);
+        if !actions.is_empty() {
+            return actions;
+        }
+    }
+    plugin.commands()
+}
+
+fn append_query_args(query: &str, add_args: &str) -> String {
+    let extra = add_args.trim();
+    if extra.is_empty() {
+        return query.to_string();
+    }
+    if query.ends_with(' ') {
+        format!("{query}{extra}")
+    } else {
+        format!("{query} {extra}")
+    }
+}
+
+fn apply_action_pick(editor: &mut BindingEditor, act: &crate::actions::Action, add_args: &str) {
+    if let Some(query) = act.action.strip_prefix("query:") {
+        editor.kind = match editor.kind {
+            BindingKind::SetQueryAndShow => BindingKind::SetQueryAndShow,
+            BindingKind::SetQueryAndExecute => BindingKind::SetQueryAndExecute,
+            _ => BindingKind::SetQuery,
+        };
+        editor.action = append_query_args(query, add_args);
+        editor.args.clear();
+    } else if act.action == "launcher:toggle" {
+        editor.kind = BindingKind::ToggleLauncher;
+        editor.action.clear();
+        editor.args.clear();
+    } else {
+        editor.kind = BindingKind::Execute;
+        editor.action = act.action.clone();
+        editor.args = if add_args.trim().is_empty() {
+            act.args.clone().unwrap_or_default()
+        } else {
+            add_args.trim().to_string()
+        };
+    }
+    editor.label = act.label.clone();
+    editor.add_args.clear();
 }
 
 pub struct GestureRecorder {
@@ -315,6 +418,23 @@ impl Default for MgGesturesDialog {
 }
 
 impl MgGesturesDialog {
+    fn apply_recording_to_entry(
+        &mut self,
+        entry: &mut GestureEntry,
+        recorded_tokens: &str,
+    ) -> bool {
+        entry.tokens = recorded_tokens.to_string();
+        self.token_buffer = entry.tokens.clone();
+        entry.stroke = self.recorder.normalized_stroke();
+
+        if is_default_generated_label(&entry.label)
+            && let Some(auto_label) = label_from_recorded_tokens(recorded_tokens)
+        {
+            entry.label = auto_label;
+        }
+        true
+    }
+
     /// Returns gesture indices sorted by label (case-insensitive) for display purposes.
     fn sorted_gesture_indices(&self) -> Vec<usize> {
         let mut indices: Vec<usize> = (0..self.db.gestures.len()).collect();
@@ -691,29 +811,7 @@ impl MgGesturesDialog {
                                     }
                                     if ui.button(format!("{} - {}", act.label, act.desc)).clicked()
                                     {
-                                        editor.label = act.label.clone();
-                                        if let Some(query) = act.action.strip_prefix("query:") {
-                                            editor.kind = match editor.kind {
-                                                BindingKind::SetQueryAndShow => {
-                                                    BindingKind::SetQueryAndShow
-                                                }
-                                                BindingKind::SetQueryAndExecute => {
-                                                    BindingKind::SetQueryAndExecute
-                                                }
-                                                _ => BindingKind::SetQuery,
-                                            };
-                                            editor.action = query.to_string();
-                                            editor.args.clear();
-                                        } else if act.action == "launcher:toggle" {
-                                            editor.kind = BindingKind::ToggleLauncher;
-                                            editor.action.clear();
-                                            editor.args.clear();
-                                        } else {
-                                            editor.kind = BindingKind::Execute;
-                                            editor.action = act.action.clone();
-                                            editor.args = act.args.clone().unwrap_or_default();
-                                        }
-                                        editor.add_args.clear();
+                                        apply_action_pick(editor, act, "");
                                     }
                                 }
                             });
@@ -721,13 +819,8 @@ impl MgGesturesDialog {
                         app.plugins.iter().find(|p| p.name() == editor.add_plugin)
                     {
                         let filter = editor.add_filter.trim().to_lowercase();
-                        let mut actions = if plugin.name() == "folders" {
-                            plugin.search(&format!("f list {}", editor.add_filter))
-                        } else if plugin.name() == "bookmarks" {
-                            plugin.search(&format!("bm list {}", editor.add_filter))
-                        } else {
-                            plugin.commands()
-                        };
+                        let mut actions =
+                            resolve_action_source(plugin.as_ref(), &editor.add_filter);
                         egui::ScrollArea::vertical()
                             .id_source("mg_binding_action_list")
                             .max_height(160.0)
@@ -742,41 +835,8 @@ impl MgGesturesDialog {
                                     }
                                     if ui.button(format!("{} - {}", act.label, act.desc)).clicked()
                                     {
-                                        let args = if editor.add_args.trim().is_empty() {
-                                            None
-                                        } else {
-                                            Some(editor.add_args.clone())
-                                        };
-
-                                        if let Some(query) = act.action.strip_prefix("query:") {
-                                            let mut query = query.to_string();
-                                            if let Some(ref a) = args {
-                                                query.push_str(a);
-                                            }
-                                            editor.kind = match editor.kind {
-                                                BindingKind::SetQueryAndShow => {
-                                                    BindingKind::SetQueryAndShow
-                                                }
-                                                BindingKind::SetQueryAndExecute => {
-                                                    BindingKind::SetQueryAndExecute
-                                                }
-                                                _ => BindingKind::SetQuery,
-                                            };
-                                            editor.action = query;
-                                            editor.args.clear();
-                                        } else if act.action == "launcher:toggle" {
-                                            editor.kind = BindingKind::ToggleLauncher;
-                                            editor.action.clear();
-                                            editor.args.clear();
-                                        } else {
-                                            editor.kind = BindingKind::Execute;
-                                            editor.action = act.action.clone();
-                                            editor.args = args.unwrap_or_else(|| {
-                                                act.args.clone().unwrap_or_default()
-                                            });
-                                        }
-                                        editor.label = act.label.clone();
-                                        editor.add_args.clear();
+                                        let add_args = editor.add_args.clone();
+                                        apply_action_pick(editor, &act, &add_args);
                                     }
                                 }
                             });
@@ -1022,9 +1082,7 @@ impl MgGesturesDialog {
                                     ));
                                     ui.horizontal(|ui| {
                                         if ui.button("Use Recording").clicked() {
-                                            entry.tokens = recorded_tokens.clone();
-                                            self.token_buffer = entry.tokens.clone();
-                                            entry.stroke = self.recorder.normalized_stroke();
+                                            self.apply_recording_to_entry(entry, &recorded_tokens);
                                             self.recorder.reset();
                                             save_now = true;
                                         }
@@ -1067,9 +1125,7 @@ impl MgGesturesDialog {
                                     if response.drag_stopped() {
                                         let recorded_tokens = self.recorder.tokens_string();
                                         if !recorded_tokens.is_empty() {
-                                            entry.tokens = recorded_tokens.clone();
-                                            self.token_buffer = entry.tokens.clone();
-                                            entry.stroke = self.recorder.normalized_stroke();
+                                            self.apply_recording_to_entry(entry, &recorded_tokens);
                                             save_now = true;
                                         }
                                         //Clear the live drawing so the saved preview is shown
@@ -1206,5 +1262,90 @@ mod tests {
         assert_eq!(dlg.db.gestures.len(), 2);
         assert_eq!(dlg.selected_idx, Some(1));
         assert_eq!(dlg.rename_idx, Some(1));
+    }
+
+    #[derive(Clone)]
+    struct MockPlugin {
+        name: String,
+        search_results: Vec<crate::actions::Action>,
+        command_results: Vec<crate::actions::Action>,
+    }
+
+    impl crate::plugin::Plugin for MockPlugin {
+        fn search(&self, _query: &str) -> Vec<crate::actions::Action> {
+            self.search_results.clone()
+        }
+
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            "mock"
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &[]
+        }
+
+        fn commands(&self) -> Vec<crate::actions::Action> {
+            self.command_results.clone()
+        }
+    }
+
+    #[test]
+    fn auto_label_is_applied_only_for_default_generated_labels() {
+        let mut dlg = MgGesturesDialog::default();
+        let mut entry = gesture("Gesture 3", "");
+
+        dlg.apply_recording_to_entry(&mut entry, "udlr");
+
+        assert_eq!(entry.tokens, "udlr");
+        assert_eq!(entry.label, "Gesture UDLR");
+    }
+
+    #[test]
+    fn customized_label_is_preserved_when_new_recording_is_applied() {
+        let mut dlg = MgGesturesDialog::default();
+        let mut entry = gesture("My Favorite Gesture", "UD");
+
+        dlg.apply_recording_to_entry(&mut entry, "LR");
+
+        assert_eq!(entry.tokens, "LR");
+        assert_eq!(entry.label, "My Favorite Gesture");
+    }
+
+    #[test]
+    fn resolve_action_source_prefers_mapped_list_search_and_falls_back_to_commands() {
+        let list_action = crate::actions::Action {
+            label: "Clipboard Entry".into(),
+            desc: "Clipboard".into(),
+            action: "clipboard:copy:1".into(),
+            args: None,
+        };
+        let command_action = crate::actions::Action {
+            label: "cb list".into(),
+            desc: "Clipboard".into(),
+            action: "query:cb list".into(),
+            args: None,
+        };
+
+        let mapped_plugin = MockPlugin {
+            name: "clipboard".into(),
+            search_results: vec![list_action.clone()],
+            command_results: vec![command_action.clone()],
+        };
+        let mapped_actions = resolve_action_source(&mapped_plugin, "abc");
+        assert_eq!(mapped_actions.len(), 1);
+        assert_eq!(mapped_actions[0].action, "clipboard:copy:1");
+
+        let fallback_plugin = MockPlugin {
+            name: "custom".into(),
+            search_results: vec![list_action],
+            command_results: vec![command_action.clone()],
+        };
+        let fallback_actions = resolve_action_source(&fallback_plugin, "abc");
+        assert_eq!(fallback_actions.len(), 1);
+        assert_eq!(fallback_actions[0].action, command_action.action);
     }
 }
