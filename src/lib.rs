@@ -3,6 +3,7 @@ pub mod actions_editor;
 
 pub mod common;
 pub mod dashboard;
+#[path = "draw/mod.rs"]
 pub mod draw;
 pub mod help_window;
 pub mod history;

@@ -1,0 +1,360 @@
+use crate::draw::messages::{ExitReason, MainToOverlay};
+use crate::draw::model::CanvasModel;
+use crate::draw::state::{can_transition, DrawLifecycle};
+use crate::plugins::draw::DrawSettings;
+use anyhow::{anyhow, Result};
+use once_cell::sync::Lazy;
+use std::sync::mpsc::{channel, Sender};
+use std::sync::Mutex;
+use std::thread::JoinHandle;
+use std::time::Instant;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartOutcome {
+    Started,
+    AlreadyActive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MonitorRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryContext {
+    pub monitor_rect: MonitorRect,
+    pub launcher_offscreen_context: Option<String>,
+    pub mouse_gestures_prior_effective_state: bool,
+    pub timeout_deadline: Option<Instant>,
+}
+
+impl Default for EntryContext {
+    fn default() -> Self {
+        Self {
+            monitor_rect: MonitorRect::default(),
+            launcher_offscreen_context: None,
+            mouse_gestures_prior_effective_state: true,
+            timeout_deadline: None,
+        }
+    }
+}
+
+struct DrawRuntimeState {
+    lifecycle: DrawLifecycle,
+    settings: DrawSettings,
+    canvas: CanvasModel,
+    overlay_thread_handle: Option<JoinHandle<()>>,
+    main_to_overlay_tx: Option<Sender<MainToOverlay>>,
+    entry_context: Option<EntryContext>,
+}
+
+impl Default for DrawRuntimeState {
+    fn default() -> Self {
+        Self {
+            lifecycle: DrawLifecycle::Idle,
+            settings: DrawSettings::default(),
+            canvas: CanvasModel::default(),
+            overlay_thread_handle: None,
+            main_to_overlay_tx: None,
+            entry_context: None,
+        }
+    }
+}
+
+pub struct DrawRuntime {
+    state: Mutex<DrawRuntimeState>,
+}
+
+impl Default for DrawRuntime {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(DrawRuntimeState {
+                lifecycle: DrawLifecycle::Idle,
+                ..DrawRuntimeState::default()
+            }),
+        }
+    }
+}
+
+static DRAW_RUNTIME: Lazy<DrawRuntime> = Lazy::new(DrawRuntime::default);
+
+type Hook = Box<dyn Fn() -> Result<()> + Send + Sync>;
+static DRAW_START_HOOK: Lazy<Mutex<Option<Hook>>> = Lazy::new(|| Mutex::new(None));
+static DRAW_RESTORE_HOOK: Lazy<Mutex<Option<Hook>>> = Lazy::new(|| Mutex::new(None));
+
+pub fn runtime() -> &'static DrawRuntime {
+    &DRAW_RUNTIME
+}
+
+pub fn set_runtime_start_hook(hook: Option<Hook>) {
+    if let Ok(mut guard) = DRAW_START_HOOK.lock() {
+        *guard = hook;
+    }
+}
+
+pub fn set_runtime_restore_hook(hook: Option<Hook>) {
+    if let Ok(mut guard) = DRAW_RESTORE_HOOK.lock() {
+        *guard = hook;
+    }
+}
+
+impl DrawRuntime {
+    pub fn start(&self) -> Result<StartOutcome> {
+        self.start_with_context(EntryContext::default())
+    }
+
+    pub fn lifecycle(&self) -> DrawLifecycle {
+        self.state
+            .lock()
+            .map(|s| s.lifecycle)
+            .unwrap_or(DrawLifecycle::Idle)
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.lifecycle().is_active()
+    }
+
+    pub fn start_with_context(&self, entry_context: EntryContext) -> Result<StartOutcome> {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
+            if state.lifecycle != DrawLifecycle::Idle {
+                return Ok(StartOutcome::AlreadyActive);
+            }
+            self.transition_locked(&mut state, DrawLifecycle::Starting)?;
+            state.entry_context = Some(entry_context.clone());
+            let (tx, _rx) = channel::<MainToOverlay>();
+            state.main_to_overlay_tx = Some(tx);
+            state.overlay_thread_handle = None;
+        }
+
+        let started = self.call_hook(&DRAW_START_HOOK);
+        if let Err(err) = started {
+            let _ = self.rollback_after_start_failure();
+            return Err(err);
+        }
+
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
+        self.transition_locked(&mut state, DrawLifecycle::Active)?;
+        Ok(StartOutcome::Started)
+    }
+
+    pub fn request_exit(&self, reason: ExitReason) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
+
+        if state.lifecycle == DrawLifecycle::Idle {
+            return Ok(());
+        }
+
+        if state.lifecycle == DrawLifecycle::Starting || state.lifecycle == DrawLifecycle::Active {
+            self.transition_locked(&mut state, DrawLifecycle::Exiting)?;
+            if let Some(tx) = &state.main_to_overlay_tx {
+                let _ = tx.send(MainToOverlay::RequestExit { reason });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn tick(&self, now: Instant) -> Result<()> {
+        let timed_out = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
+            if state.lifecycle != DrawLifecycle::Active {
+                false
+            } else {
+                state
+                    .entry_context
+                    .as_ref()
+                    .and_then(|ctx| ctx.timeout_deadline)
+                    .is_some_and(|deadline| now >= deadline)
+            }
+        };
+
+        if timed_out {
+            self.request_exit(ExitReason::Timeout)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn force_lifecycle_for_test(&self, lifecycle: DrawLifecycle) {
+        if let Ok(mut state) = self.state.lock() {
+            state.lifecycle = lifecycle;
+        }
+    }
+
+    pub fn reset_for_test(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            *state = DrawRuntimeState {
+                lifecycle: DrawLifecycle::Idle,
+                ..DrawRuntimeState::default()
+            };
+        }
+    }
+
+    fn rollback_after_start_failure(&self) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
+        if can_transition(state.lifecycle, DrawLifecycle::Restoring) {
+            state.lifecycle = DrawLifecycle::Restoring;
+        }
+        drop(state);
+
+        let _ = self.call_hook(&DRAW_RESTORE_HOOK);
+
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
+        state.overlay_thread_handle = None;
+        state.main_to_overlay_tx = None;
+        state.entry_context = None;
+        state.lifecycle = DrawLifecycle::Idle;
+        Ok(())
+    }
+
+    fn call_hook(&self, hook_slot: &Lazy<Mutex<Option<Hook>>>) -> Result<()> {
+        let guard = hook_slot
+            .lock()
+            .map_err(|_| anyhow!("draw hook lock poisoned"))?;
+        if let Some(ref hook) = *guard {
+            hook()?;
+        }
+        Ok(())
+    }
+
+    fn transition_locked(&self, state: &mut DrawRuntimeState, next: DrawLifecycle) -> Result<()> {
+        if !can_transition(state.lifecycle, next) {
+            return Err(anyhow!(
+                "invalid draw lifecycle transition: {:?} -> {:?}",
+                state.lifecycle,
+                next
+            ));
+        }
+        state.lifecycle = next;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        runtime, set_runtime_restore_hook, set_runtime_start_hook, DrawRuntime, EntryContext,
+        StartOutcome,
+    };
+    use crate::draw::messages::ExitReason;
+    use crate::draw::state::{can_transition, DrawLifecycle};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn reset_runtime(rt: &DrawRuntime) {
+        set_runtime_start_hook(None);
+        set_runtime_restore_hook(None);
+        rt.reset_for_test();
+    }
+
+    #[test]
+    fn start_from_idle_transitions_to_starting_or_active() {
+        let rt = runtime();
+        reset_runtime(rt);
+        let outcome = rt.start().expect("start should succeed");
+        assert_eq!(outcome, StartOutcome::Started);
+        assert!(matches!(
+            rt.lifecycle(),
+            DrawLifecycle::Starting | DrawLifecycle::Active
+        ));
+        rt.reset_for_test();
+    }
+
+    #[test]
+    fn start_when_active_is_idempotent() {
+        let rt = runtime();
+        reset_runtime(rt);
+        rt.force_lifecycle_for_test(DrawLifecycle::Active);
+        let outcome = rt.start().expect("idempotent start should succeed");
+        assert_eq!(outcome, StartOutcome::AlreadyActive);
+        rt.reset_for_test();
+    }
+
+    #[test]
+    fn request_exit_transitions_to_exiting() {
+        let rt = runtime();
+        reset_runtime(rt);
+        rt.force_lifecycle_for_test(DrawLifecycle::Active);
+        rt.request_exit(ExitReason::UserRequest)
+            .expect("request_exit should succeed");
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Exiting);
+        rt.reset_for_test();
+    }
+
+    #[test]
+    fn overlay_start_failure_rolls_back_context() {
+        let rt = runtime();
+        reset_runtime(rt);
+        let restored = Arc::new(AtomicBool::new(false));
+        let restored_clone = Arc::clone(&restored);
+        set_runtime_start_hook(Some(Box::new(|| anyhow::bail!("overlay start failed"))));
+        set_runtime_restore_hook(Some(Box::new(move || {
+            restored_clone.store(true, Ordering::SeqCst);
+            Ok(())
+        })));
+
+        let res = rt.start();
+        assert!(res.is_err());
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
+        assert!(restored.load(Ordering::SeqCst));
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn timeout_forces_exit_reason_timeout() {
+        let rt = runtime();
+        reset_runtime(rt);
+        let timeout_ctx = EntryContext {
+            timeout_deadline: Some(Instant::now() - Duration::from_secs(1)),
+            ..EntryContext::default()
+        };
+
+        let outcome = rt
+            .start_with_context(timeout_ctx)
+            .expect("start with context should be idempotent/started");
+        assert_eq!(outcome, StartOutcome::Started);
+        rt.tick(Instant::now()).expect("tick should succeed");
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Exiting);
+        rt.reset_for_test();
+    }
+
+    #[test]
+    fn state_machine_rejects_invalid_transitions() {
+        let cases = [
+            (DrawLifecycle::Idle, DrawLifecycle::Active),
+            (DrawLifecycle::Idle, DrawLifecycle::Exiting),
+            (DrawLifecycle::Active, DrawLifecycle::Starting),
+            (DrawLifecycle::Exiting, DrawLifecycle::Active),
+            (DrawLifecycle::Restoring, DrawLifecycle::Active),
+        ];
+
+        for (from, to) in cases {
+            assert!(
+                !can_transition(from, to),
+                "unexpected transition {from:?} -> {to:?}"
+            );
+        }
+    }
+}
