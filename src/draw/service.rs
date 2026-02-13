@@ -1,5 +1,6 @@
 use crate::draw::messages::{ExitReason, MainToOverlay};
 use crate::draw::model::CanvasModel;
+use crate::draw::save::ExitPromptState;
 use crate::draw::state::{can_transition, DrawLifecycle};
 use crate::plugins::draw::DrawSettings;
 use anyhow::{anyhow, Result};
@@ -49,6 +50,7 @@ struct DrawRuntimeState {
     overlay_thread_handle: Option<JoinHandle<()>>,
     main_to_overlay_tx: Option<Sender<MainToOverlay>>,
     entry_context: Option<EntryContext>,
+    exit_prompt: Option<ExitPromptState>,
 }
 
 impl Default for DrawRuntimeState {
@@ -60,6 +62,7 @@ impl Default for DrawRuntimeState {
             overlay_thread_handle: None,
             main_to_overlay_tx: None,
             entry_context: None,
+            exit_prompt: None,
         }
     }
 }
@@ -128,6 +131,7 @@ impl DrawRuntime {
             }
             self.transition_locked(&mut state, DrawLifecycle::Starting)?;
             state.entry_context = Some(entry_context.clone());
+            state.exit_prompt = None;
             let (tx, _rx) = channel::<MainToOverlay>();
             state.main_to_overlay_tx = Some(tx);
             state.overlay_thread_handle = None;
@@ -159,11 +163,33 @@ impl DrawRuntime {
 
         if state.lifecycle == DrawLifecycle::Starting || state.lifecycle == DrawLifecycle::Active {
             self.transition_locked(&mut state, DrawLifecycle::Exiting)?;
+            state.exit_prompt = Some(ExitPromptState::from_exit_reason(reason.clone()));
             if let Some(tx) = &state.main_to_overlay_tx {
                 let _ = tx.send(MainToOverlay::RequestExit { reason });
             }
         }
         Ok(())
+    }
+
+    pub fn exit_prompt_state(&self) -> Option<ExitPromptState> {
+        self.state.lock().ok().and_then(|s| s.exit_prompt.clone())
+    }
+
+    pub fn set_exit_prompt_error(&self, error: impl Into<String>) {
+        if let Ok(mut state) = self.state.lock() {
+            if let Some(prompt) = state.exit_prompt.as_mut() {
+                prompt.last_error = Some(error.into());
+                prompt.overlay_hidden_for_capture = false;
+            }
+        }
+    }
+
+    pub fn mark_overlay_hidden_for_capture(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            if let Some(prompt) = state.exit_prompt.as_mut() {
+                prompt.overlay_hidden_for_capture = true;
+            }
+        }
     }
 
     pub fn tick(&self, now: Instant) -> Result<()> {
@@ -224,6 +250,7 @@ impl DrawRuntime {
         state.overlay_thread_handle = None;
         state.main_to_overlay_tx = None;
         state.entry_context = None;
+        state.exit_prompt = None;
         state.lifecycle = DrawLifecycle::Idle;
         Ok(())
     }
@@ -300,6 +327,11 @@ mod tests {
         rt.request_exit(ExitReason::UserRequest)
             .expect("request_exit should succeed");
         assert_eq!(rt.lifecycle(), DrawLifecycle::Exiting);
+        let prompt = rt
+            .exit_prompt_state()
+            .expect("prompt state should be present");
+        assert!(prompt.frozen_input);
+        assert_eq!(prompt.reason, ExitReason::UserRequest);
         rt.reset_for_test();
     }
 

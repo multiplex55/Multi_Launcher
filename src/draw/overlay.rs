@@ -1,5 +1,19 @@
 use crate::draw::service::MonitorRect;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitDialogState {
+    Hidden,
+    PromptVisible,
+    Saving,
+    ErrorVisible,
+}
+
+impl ExitDialogState {
+    pub fn blocks_drawing_input(self) -> bool {
+        !matches!(self, Self::Hidden)
+    }
+}
+
 pub fn monitor_contains_point(rect: MonitorRect, point: (i32, i32)) -> bool {
     point.0 >= rect.x
         && point.0 < rect.x + rect.width
