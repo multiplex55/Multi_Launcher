@@ -246,6 +246,29 @@ impl MouseGestureRuntime {
         self.settings.enabled && self.plugin_enabled && self.draw_suspend_count == 0
     }
 
+    fn base_enabled_without_draw_suspend(&self) -> bool {
+        self.settings.enabled && self.plugin_enabled
+    }
+
+    fn draw_effective_enabled(&self) -> bool {
+        self.effective_enabled()
+    }
+
+    fn set_draw_mode_active(&mut self, active: bool) {
+        self.draw_suspend_count = usize::from(active);
+        self.apply();
+    }
+
+    fn restore_draw_prior_effective_state(&mut self, prior_effective_state: bool) {
+        let base_enabled = self.base_enabled_without_draw_suspend();
+        self.draw_suspend_count = if prior_effective_state || !base_enabled {
+            0
+        } else {
+            1
+        };
+        self.apply();
+    }
+
     fn apply(&self) {
         let mut config = MouseGestureConfig::default();
         config.enabled = self.effective_enabled();
@@ -290,6 +313,22 @@ pub fn sync_enabled_plugins(enabled_plugins: Option<&HashSet<String>>) {
         .map(|set| set.contains(PLUGIN_NAME))
         .unwrap_or(true);
     with_service(|svc| svc.set_plugin_enabled(enabled));
+}
+
+pub fn draw_effective_enabled() -> bool {
+    let mut enabled = false;
+    with_service(|svc| {
+        enabled = svc.draw_effective_enabled();
+    });
+    enabled
+}
+
+pub fn set_draw_mode_active(active: bool) {
+    with_service(|svc| svc.set_draw_mode_active(active));
+}
+
+pub fn restore_draw_prior_effective_state(prior_effective_state: bool) {
+    with_service(|svc| svc.restore_draw_prior_effective_state(prior_effective_state));
 }
 
 pub struct SuspendToken {

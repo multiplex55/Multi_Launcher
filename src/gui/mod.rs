@@ -2565,7 +2565,25 @@ impl LauncherApp {
         } else if a.action == "draw:dialog:settings" {
             self.open_draw_settings_dialog();
         } else if a.action == "draw:enter" {
-            match crate::draw::runtime().start() {
+            let entry_context = crate::draw::EntryContext {
+                monitor_rect: crate::draw::MonitorRect {
+                    x: self.window_pos.0,
+                    y: self.window_pos.1,
+                    width: self.window_size.0,
+                    height: self.window_size.1,
+                },
+                launcher_offscreen_context: Some(format!(
+                    "visible={},offscreen=({:.1},{:.1})",
+                    self.visible_flag.load(Ordering::SeqCst),
+                    self.offscreen_pos.0,
+                    self.offscreen_pos.1,
+                )),
+                mouse_gestures_prior_effective_state:
+                    crate::plugins::mouse_gestures::draw_effective_enabled(),
+                timeout_deadline: None,
+            };
+
+            match crate::draw::runtime().start_with_context(entry_context) {
                 Err(e) => {
                     self.visible_flag.store(true, Ordering::SeqCst);
                     self.set_error(format!("Failed: {e}"));

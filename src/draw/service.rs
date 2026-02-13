@@ -120,7 +120,7 @@ impl DrawRuntime {
         self.lifecycle().is_active()
     }
 
-    pub fn start_with_context(&self, entry_context: EntryContext) -> Result<StartOutcome> {
+    pub fn start_with_context(&self, mut entry_context: EntryContext) -> Result<StartOutcome> {
         {
             let mut state = self
                 .state
@@ -129,6 +129,11 @@ impl DrawRuntime {
             if state.lifecycle != DrawLifecycle::Idle {
                 return Ok(StartOutcome::AlreadyActive);
             }
+
+            entry_context.mouse_gestures_prior_effective_state =
+                crate::plugins::mouse_gestures::draw_effective_enabled();
+            crate::plugins::mouse_gestures::set_draw_mode_active(true);
+
             self.transition_locked(&mut state, DrawLifecycle::Starting)?;
             state.entry_context = Some(entry_context.clone());
             state.exit_prompt = None;
@@ -218,6 +223,11 @@ impl DrawRuntime {
         } else {
             Vec::new()
         }
+    }
+
+    #[cfg(test)]
+    pub fn entry_context_for_test(&self) -> Option<EntryContext> {
+        self.state.lock().ok().and_then(|s| s.entry_context.clone())
     }
 
     pub fn exit_prompt_state(&self) -> Option<ExitPromptState> {
@@ -313,6 +323,14 @@ impl DrawRuntime {
             .state
             .lock()
             .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
+        let prior_mouse_gesture_state = state
+            .entry_context
+            .as_ref()
+            .map(|ctx| ctx.mouse_gestures_prior_effective_state)
+            .unwrap_or_else(crate::plugins::mouse_gestures::draw_effective_enabled);
+        crate::plugins::mouse_gestures::restore_draw_prior_effective_state(
+            prior_mouse_gesture_state,
+        );
         state.overlay_thread_handle = None;
         state.main_to_overlay_tx = None;
         state.entry_context = None;
@@ -360,6 +378,10 @@ mod tests {
     use crate::draw::messages::{ExitReason, MainToOverlay};
     use crate::draw::settings::DrawSettings;
     use crate::draw::state::{can_transition, DrawLifecycle};
+    use crate::plugins::mouse_gestures::{
+        apply_runtime_settings, draw_effective_enabled, restore_draw_prior_effective_state,
+        set_draw_mode_active, sync_enabled_plugins, MouseGestureSettings,
+    };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::thread;
@@ -369,6 +391,13 @@ mod tests {
         set_runtime_start_hook(None);
         set_runtime_restore_hook(None);
         rt.reset_for_test();
+        restore_draw_prior_effective_state(true);
+        sync_enabled_plugins(None);
+        apply_runtime_settings(MouseGestureSettings {
+            enabled: true,
+            ..MouseGestureSettings::default()
+        });
+        set_draw_mode_active(false);
     }
 
     #[test]
@@ -547,6 +576,93 @@ mod tests {
             rt.take_dispatched_messages_for_test(),
             vec![MainToOverlay::UpdateSettings]
         );
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn draw_start_disables_mouse_gestures_when_previously_enabled() {
+        let rt = runtime();
+        reset_runtime(rt);
+
+        assert!(draw_effective_enabled());
+        let outcome = rt.start().expect("start should succeed");
+
+        assert_eq!(outcome, StartOutcome::Started);
+        assert!(!draw_effective_enabled());
+        assert_eq!(
+            rt.entry_context_for_test()
+                .expect("entry context should be stored")
+                .mouse_gestures_prior_effective_state,
+            true
+        );
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn draw_exit_restores_previous_mouse_gesture_state() {
+        let rt = runtime();
+        reset_runtime(rt);
+        apply_runtime_settings(MouseGestureSettings {
+            enabled: false,
+            ..MouseGestureSettings::default()
+        });
+
+        assert!(!draw_effective_enabled());
+        rt.start().expect("start should succeed");
+        rt.notify_overlay_exit(ExitReason::UserRequest)
+            .expect("exit should restore state");
+
+        assert!(!draw_effective_enabled());
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn start_failure_and_timeout_restore_previous_mouse_gesture_state() {
+        let rt = runtime();
+        reset_runtime(rt);
+
+        set_runtime_start_hook(Some(Box::new(|| anyhow::bail!("overlay start failed"))));
+        let start_res = rt.start();
+        assert!(start_res.is_err());
+        assert!(draw_effective_enabled());
+
+        set_runtime_start_hook(None);
+        let timeout_ctx = EntryContext {
+            timeout_deadline: Some(Instant::now() - Duration::from_secs(1)),
+            ..EntryContext::default()
+        };
+        rt.start_with_context(timeout_ctx)
+            .expect("start with timeout should succeed");
+        assert!(!draw_effective_enabled());
+
+        rt.tick(Instant::now()).expect("tick should restore state");
+        assert!(draw_effective_enabled());
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn already_active_start_does_not_clobber_prior_state_snapshot() {
+        let rt = runtime();
+        reset_runtime(rt);
+
+        rt.start().expect("first start should succeed");
+        let initial_ctx = rt
+            .entry_context_for_test()
+            .expect("entry context should be present");
+
+        apply_runtime_settings(MouseGestureSettings {
+            enabled: false,
+            ..MouseGestureSettings::default()
+        });
+        assert_eq!(
+            rt.start().expect("already active should not fail"),
+            StartOutcome::AlreadyActive
+        );
+
+        let after_ctx = rt
+            .entry_context_for_test()
+            .expect("entry context should remain present");
+        assert_eq!(after_ctx, initial_ctx);
         reset_runtime(rt);
     }
 
