@@ -187,6 +187,7 @@ pub fn collect_visible_window_titles() -> anyhow::Result<Vec<String>> {
 struct MouseGestureRuntime {
     settings: MouseGestureSettings,
     plugin_enabled: bool,
+    draw_suspend_count: usize,
     db: SharedGestureDb,
     #[allow(dead_code)]
     watcher: Option<crate::common::json_watch::JsonWatcher>,
@@ -209,6 +210,7 @@ impl Default for MouseGestureRuntime {
         Self {
             settings: MouseGestureSettings::default(),
             plugin_enabled: true,
+            draw_suspend_count: 0,
             db,
             watcher,
         }
@@ -226,9 +228,27 @@ impl MouseGestureRuntime {
         self.apply();
     }
 
+    fn suspend_for_draw(&mut self) -> SuspendToken {
+        self.draw_suspend_count = self.draw_suspend_count.saturating_add(1);
+        self.apply();
+        SuspendToken { _private: () }
+    }
+
+    fn resume_from_draw(&mut self, _token: SuspendToken) {
+        if self.draw_suspend_count == 0 {
+            return;
+        }
+        self.draw_suspend_count -= 1;
+        self.apply();
+    }
+
+    fn effective_enabled(&self) -> bool {
+        self.settings.enabled && self.plugin_enabled && self.draw_suspend_count == 0
+    }
+
     fn apply(&self) {
         let mut config = MouseGestureConfig::default();
-        config.enabled = self.settings.enabled && self.plugin_enabled;
+        config.enabled = self.effective_enabled();
         config.debug_logging = self.settings.debug_logging;
         config.trail_start_move_px = self.settings.trail_start_move_px;
         config.show_trail = self.settings.show_trail;
@@ -270,6 +290,22 @@ pub fn sync_enabled_plugins(enabled_plugins: Option<&HashSet<String>>) {
         .map(|set| set.contains(PLUGIN_NAME))
         .unwrap_or(true);
     with_service(|svc| svc.set_plugin_enabled(enabled));
+}
+
+pub struct SuspendToken {
+    _private: (),
+}
+
+pub fn suspend_for_draw() -> SuspendToken {
+    let mut token = None;
+    with_service(|svc| {
+        token = Some(svc.suspend_for_draw());
+    });
+    token.unwrap_or(SuspendToken { _private: () })
+}
+
+pub fn resume_from_draw(token: SuspendToken) {
+    with_service(|svc| svc.resume_from_draw(token));
 }
 
 pub struct MouseGesturesPlugin {
@@ -756,5 +792,70 @@ fn no_match_behavior_label(value: NoMatchBehavior) -> &'static str {
         NoMatchBehavior::DoNothing => "Do nothing",
         NoMatchBehavior::PassThroughClick => "Pass through right-click",
         NoMatchBehavior::ShowNoMatchHint => "Show no-match hint",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suspend_disables_effective_runtime_without_changing_saved_settings() {
+        let mut runtime = MouseGestureRuntime::default();
+        runtime.update_settings(MouseGestureSettings {
+            enabled: true,
+            ..MouseGestureSettings::default()
+        });
+
+        let _token = runtime.suspend_for_draw();
+
+        assert!(runtime.settings.enabled);
+        assert!(!runtime.effective_enabled());
+    }
+
+    #[test]
+    fn resume_restores_exact_prior_effective_state() {
+        let mut runtime = MouseGestureRuntime::default();
+        runtime.update_settings(MouseGestureSettings {
+            enabled: true,
+            ..MouseGestureSettings::default()
+        });
+        runtime.set_plugin_enabled(false);
+        let before = runtime.effective_enabled();
+
+        let token = runtime.suspend_for_draw();
+        runtime.resume_from_draw(token);
+
+        assert_eq!(before, runtime.effective_enabled());
+    }
+
+    #[test]
+    fn double_suspend_single_resume_remains_suspended() {
+        let mut runtime = MouseGestureRuntime::default();
+        runtime.update_settings(MouseGestureSettings {
+            enabled: true,
+            ..MouseGestureSettings::default()
+        });
+
+        let _token1 = runtime.suspend_for_draw();
+        let token2 = runtime.suspend_for_draw();
+        runtime.resume_from_draw(token2);
+
+        assert!(!runtime.effective_enabled());
+        assert_eq!(runtime.draw_suspend_count, 1);
+    }
+
+    #[test]
+    fn resume_without_prior_suspend_is_noop() {
+        let mut runtime = MouseGestureRuntime::default();
+        runtime.update_settings(MouseGestureSettings {
+            enabled: true,
+            ..MouseGestureSettings::default()
+        });
+
+        runtime.resume_from_draw(SuspendToken { _private: () });
+
+        assert!(runtime.effective_enabled());
+        assert_eq!(runtime.draw_suspend_count, 0);
     }
 }
