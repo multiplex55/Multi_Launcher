@@ -2560,18 +2560,34 @@ impl LauncherApp {
         } else if a.action == "draw:dialog:settings" {
             self.open_draw_settings_dialog();
         } else if a.action == "draw:enter" {
-            if let Err(e) = crate::draw::runtime().start() {
-                self.set_error(format!("Failed: {e}"));
-                if self.enable_toasts {
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: format!("Failed: {e}").into(),
-                            kind: ToastKind::Error,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
+            match crate::draw::runtime().start() {
+                Err(e) => {
+                    self.set_error(format!("Failed: {e}"));
+                    if self.enable_toasts {
+                        push_toast(
+                            &mut self.toasts,
+                            Toast {
+                                text: format!("Failed: {e}").into(),
+                                kind: ToastKind::Error,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(self.toast_duration as f64),
+                            },
+                        );
+                    }
+                }
+                Ok(_) => {
+                    self.visible_flag.store(false, Ordering::SeqCst);
+                    if self.enable_toasts {
+                        push_toast(
+                            &mut self.toasts,
+                            Toast {
+                                text: "Entered drawing mode".into(),
+                                kind: ToastKind::Success,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(self.toast_duration as f64),
+                            },
+                        );
+                    }
                 }
             }
         } else if a.action == "mg:toggle" {
@@ -5530,6 +5546,7 @@ mod tests {
 
         crate::draw::set_runtime_start_hook(None);
         assert!(called.load(Ordering::SeqCst));
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -5548,6 +5565,7 @@ mod tests {
 
         crate::draw::set_runtime_start_hook(None);
         assert_eq!(app.error.as_deref(), Some("Failed: draw failed"));
+        assert!(app.visible_flag.load(Ordering::SeqCst));
     }
 
     #[test]
