@@ -8,6 +8,7 @@ pub mod calendar;
 pub mod clipboard;
 pub mod color_picker;
 pub mod convert_panel;
+pub mod draw;
 pub mod dropcalc;
 pub mod emoji;
 pub mod fav;
