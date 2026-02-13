@@ -74,13 +74,13 @@ impl Plugin for DrawPlugin {
             Action {
                 label: "draw".into(),
                 desc: "Draw".into(),
-                action: "query:draw".into(),
+                action: "draw:enter".into(),
                 args: None,
             },
             Action {
                 label: "draw settings".into(),
                 desc: "Draw".into(),
-                action: "query:draw settings".into(),
+                action: "draw:dialog:settings".into(),
                 args: None,
             },
         ]
@@ -231,7 +231,9 @@ mod tests {
         let commands = plugin.commands();
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0].label, "draw");
+        assert_eq!(commands[0].action, "draw:enter");
         assert_eq!(commands[1].label, "draw settings");
+        assert_eq!(commands[1].action, "draw:dialog:settings");
     }
 
     #[test]
