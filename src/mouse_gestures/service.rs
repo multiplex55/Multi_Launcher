@@ -380,7 +380,12 @@ fn worker_loop(
         config.show_hint,
         config.hint_offset,
     );
-    let poll_interval = Duration::from_millis(config.trail_interval_ms.max(1));
+    let poll_interval = Duration::from_millis(
+        config
+            .trail_interval_ms
+            .max(1)
+            .min(config.recognition_interval_ms.max(1)),
+    );
     let recognition_interval = Duration::from_millis(config.recognition_interval_ms.max(1));
     let mut active = false;
     let mut exceeded_deadzone = false;
@@ -473,11 +478,49 @@ fn worker_loop(
                         // If we produced any tokens, treat it as a gesture (swallow right click).
                         if !tokens.is_empty() {
                             // Execute the currently selected binding (wheel-cycled) if there are multiple.
-                            if let Some((gesture_label, actions)) =
+                            if let Some(prepared) = prepare_release_execution(
+                                &tokens,
+                                selected_binding_idx,
+                                &cached_actions_tokens,
+                                &cached_actions,
+                                &cached_candidates,
+                            ) {
+                                let key = selection_key(&prepared.gesture_label, &tokens);
+                                if selection_state
+                                    .selections
+                                    .get(&key)
+                                    .copied()
+                                    .unwrap_or(usize::MAX)
+                                    != prepared.binding_idx
+                                {
+                                    selection_state.selections.insert(key, prepared.binding_idx);
+                                    save_selection_state(GESTURES_STATE_FILE, &selection_state);
+                                }
+                                record_usage(
+                                    GESTURES_USAGE_FILE,
+                                    GestureUsageEntry {
+                                        timestamp: Local::now().timestamp(),
+                                        gesture_label: prepared.gesture_label,
+                                        tokens: tokens.clone(),
+                                        dir_mode: config.dir_mode,
+                                        binding_idx: prepared.binding_idx,
+                                    },
+                                );
+                                if config.practice_mode {
+                                    tracing::info!(
+                                        tokens = %tokens,
+                                        action = %prepared.action.action,
+                                        "mouse gesture practice match"
+                                    );
+                                } else {
+                                    send_event(WatchEvent::ExecuteAction(prepared.action));
+                                }
+                            } else if let Some((gesture_label, actions)) =
                                 match_binding_actions(&db, &tokens, config.dir_mode)
                             {
-                                if !actions.is_empty() {
-                                    let idx = selected_binding_idx % actions.len();
+                                if let Some((idx, action)) =
+                                    selected_action(selected_binding_idx, &actions)
+                                {
                                     let key = selection_key(&gesture_label, &tokens);
                                     if selection_state
                                         .selections
@@ -489,26 +532,24 @@ fn worker_loop(
                                         selection_state.selections.insert(key, idx);
                                         save_selection_state(GESTURES_STATE_FILE, &selection_state);
                                     }
-                                    if let Some(action) = actions.get(idx).cloned() {
-                                        record_usage(
-                                            GESTURES_USAGE_FILE,
-                                            GestureUsageEntry {
-                                                timestamp: Local::now().timestamp(),
-                                                gesture_label: gesture_label.clone(),
-                                                tokens: tokens.clone(),
-                                                dir_mode: config.dir_mode,
-                                                binding_idx: idx,
-                                            },
+                                    record_usage(
+                                        GESTURES_USAGE_FILE,
+                                        GestureUsageEntry {
+                                            timestamp: Local::now().timestamp(),
+                                            gesture_label: gesture_label.clone(),
+                                            tokens: tokens.clone(),
+                                            dir_mode: config.dir_mode,
+                                            binding_idx: idx,
+                                        },
+                                    );
+                                    if config.practice_mode {
+                                        tracing::info!(
+                                            tokens = %tokens,
+                                            action = %action.action,
+                                            "mouse gesture practice match"
                                         );
-                                        if config.practice_mode {
-                                            tracing::info!(
-                                                tokens = %tokens,
-                                                action = %action.action,
-                                                "mouse gesture practice match"
-                                            );
-                                        } else {
-                                            send_event(WatchEvent::ExecuteAction(action));
-                                        }
+                                    } else {
+                                        send_event(WatchEvent::ExecuteAction(action));
                                     }
                                 }
                             } else {
@@ -523,17 +564,20 @@ fn worker_loop(
                                         "mouse gesture practice miss"
                                     );
                                 }
-                                match config.no_match_behavior {
-                                    NoMatchBehavior::DoNothing => {}
-                                    NoMatchBehavior::PassThroughClick => {
+                                match release_fallback_outcome(false, config.no_match_behavior) {
+                                    ReleaseFallbackOutcome::DoNothing => {}
+                                    ReleaseFallbackOutcome::PassThroughClick => {
                                         right_click_backend.send_right_click();
                                     }
-                                    NoMatchBehavior::ShowNoMatchHint => {
+                                    ReleaseFallbackOutcome::ShowNoMatchHint => {
                                         hint_overlay.update("No match", cursor_pos);
                                     }
                                 }
                             }
-                        } else {
+                        } else if matches!(
+                            release_fallback_outcome(true, config.no_match_behavior),
+                            ReleaseFallbackOutcome::PassThroughClick
+                        ) {
                             // No tokens => normal right click
                             right_click_backend.send_right_click();
                         }
@@ -603,10 +647,8 @@ fn worker_loop(
                     }
                 }
                 HookEvent::CycleNext | HookEvent::CyclePrev => {
-                    let allow_cycle = match config.wheel_cycle_gate {
-                        WheelCycleGate::Deadzone => exceeded_deadzone,
-                        WheelCycleGate::Shift => true,
-                    };
+                    let allow_cycle =
+                        should_allow_wheel_cycle(config.wheel_cycle_gate, exceeded_deadzone);
                     if active && allow_cycle && !cached_actions.is_empty() {
                         let len = cached_actions.len();
                         match event {
@@ -651,7 +693,7 @@ fn worker_loop(
 
                 HookEvent::Cancel => {
                     if active {
-                        if config.cancel_behavior == CancelBehavior::PassThroughClick {
+                        if cancel_should_pass_through(config.cancel_behavior) {
                             right_click_backend.send_right_click();
                         }
                         trail_overlay.clear();
@@ -685,7 +727,7 @@ fn worker_loop(
                 let dx = pos.0 - start_pos.0;
                 let dy = pos.1 - start_pos.1;
                 let dist_sq = dx * dx + dy * dy;
-                if !exceeded_deadzone && dist_sq >= config.deadzone_px * config.deadzone_px {
+                if crossed_deadzone(exceeded_deadzone, dist_sq, config.deadzone_px) {
                     exceeded_deadzone = true;
                     #[cfg(windows)]
                     hook_dispatch().set_tracking(true);
@@ -721,21 +763,33 @@ fn worker_loop(
                             }
                         }
                     }
-                    if tokens != cached_tokens {
+                    if should_recompute_candidates(&tokens, &cached_tokens) {
                         cached_tokens = tokens.to_string();
                         selected_binding_idx = 0;
                         pending_selection_idx = None;
                         cached_candidates =
                             candidate_matches(&db, &tokens, config.dir_mode, MAX_HINT_CANDIDATES);
-                        if let Some(candidate) = cached_candidates
-                            .iter()
-                            .find(|candidate| candidate.match_type == GestureMatchType::Exact)
-                        {
-                            cached_actions_tokens = candidate.tokens.clone();
+                        let exact_tokens =
+                            exact_candidate_tokens(&cached_candidates).unwrap_or_default();
+                        if !exact_tokens.is_empty() {
+                            if exact_tokens != cached_actions_tokens {
+                                cached_actions_tokens = exact_tokens;
+                                if let Some((_gesture_label, actions)) = match_binding_actions(
+                                    &db,
+                                    &cached_actions_tokens,
+                                    config.dir_mode,
+                                ) {
+                                    cached_actions = actions;
+                                } else {
+                                    cached_actions.clear();
+                                    cached_actions_tokens.clear();
+                                }
+                            }
                         } else {
                             cached_actions_tokens.clear();
+                            cached_actions.clear();
                         }
-                        if !cached_actions_tokens.is_empty() {
+                        if !cached_actions_tokens.is_empty() && cached_actions.is_empty() {
                             if let Some((_gesture_label, actions)) =
                                 match_binding_actions(&db, &cached_actions_tokens, config.dir_mode)
                             {
@@ -744,8 +798,6 @@ fn worker_loop(
                                 cached_actions.clear();
                                 cached_actions_tokens.clear();
                             }
-                        } else {
-                            cached_actions.clear();
                         }
                     }
 
@@ -836,6 +888,101 @@ fn match_binding_actions(
         .map(|binding| binding.to_action(&gesture_label))
         .collect::<Vec<_>>();
     Some((gesture_label, actions))
+}
+
+#[derive(Debug, Clone)]
+struct PreparedReleaseExecution {
+    gesture_label: String,
+    binding_idx: usize,
+    action: crate::actions::Action,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReleaseFallbackOutcome {
+    DoNothing,
+    PassThroughClick,
+    ShowNoMatchHint,
+}
+
+fn should_recompute_candidates(tokens: &str, cached_tokens: &str) -> bool {
+    tokens != cached_tokens
+}
+
+fn should_allow_wheel_cycle(gate: WheelCycleGate, exceeded_deadzone: bool) -> bool {
+    match gate {
+        WheelCycleGate::Deadzone => exceeded_deadzone,
+        WheelCycleGate::Shift => true,
+    }
+}
+
+fn crossed_deadzone(exceeded_deadzone: bool, dist_sq: f32, deadzone_px: f32) -> bool {
+    !exceeded_deadzone && dist_sq >= deadzone_px * deadzone_px
+}
+
+fn exact_candidate<'a>(
+    candidates: &'a [GestureCandidate],
+    tokens: &str,
+) -> Option<&'a GestureCandidate> {
+    candidates.iter().find(|candidate| {
+        candidate.match_type == GestureMatchType::Exact && candidate.tokens == tokens
+    })
+}
+
+fn exact_candidate_tokens(candidates: &[GestureCandidate]) -> Option<String> {
+    candidates
+        .iter()
+        .find(|candidate| candidate.match_type == GestureMatchType::Exact)
+        .map(|candidate| candidate.tokens.clone())
+}
+
+fn selected_action(
+    selected_binding_idx: usize,
+    actions: &[crate::actions::Action],
+) -> Option<(usize, crate::actions::Action)> {
+    if actions.is_empty() {
+        return None;
+    }
+    let idx = selected_binding_idx % actions.len();
+    actions.get(idx).cloned().map(|action| (idx, action))
+}
+
+fn prepare_release_execution(
+    tokens: &str,
+    selected_binding_idx: usize,
+    cached_actions_tokens: &str,
+    cached_actions: &[crate::actions::Action],
+    cached_candidates: &[GestureCandidate],
+) -> Option<PreparedReleaseExecution> {
+    if tokens.is_empty() || tokens != cached_actions_tokens {
+        return None;
+    }
+    let (binding_idx, action) = selected_action(selected_binding_idx, cached_actions)?;
+    let gesture_label = exact_candidate(cached_candidates, tokens)?
+        .gesture_label
+        .clone();
+    Some(PreparedReleaseExecution {
+        gesture_label,
+        binding_idx,
+        action,
+    })
+}
+
+fn release_fallback_outcome(
+    tokens_empty: bool,
+    no_match_behavior: NoMatchBehavior,
+) -> ReleaseFallbackOutcome {
+    if tokens_empty {
+        return ReleaseFallbackOutcome::PassThroughClick;
+    }
+    match no_match_behavior {
+        NoMatchBehavior::DoNothing => ReleaseFallbackOutcome::DoNothing,
+        NoMatchBehavior::PassThroughClick => ReleaseFallbackOutcome::PassThroughClick,
+        NoMatchBehavior::ShowNoMatchHint => ReleaseFallbackOutcome::ShowNoMatchHint,
+    }
+}
+
+fn cancel_should_pass_through(cancel_behavior: CancelBehavior) -> bool {
+    cancel_behavior == CancelBehavior::PassThroughClick
 }
 
 const MAX_HINT_CANDIDATES: usize = 5;
@@ -994,6 +1141,101 @@ fn save_selection_state(path: &str, state: &GestureSelectionState) {
             }
         }
         Err(err) => tracing::error!(?err, "failed to serialize mouse gesture selection state"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mouse_gestures::db::BindingEntry;
+
+    fn action(label: &str) -> crate::actions::Action {
+        crate::actions::Action {
+            label: label.to_string(),
+            desc: String::new(),
+            action: format!("cmd:{label}"),
+            args: None,
+        }
+    }
+
+    fn binding(label: &str) -> BindingEntry {
+        BindingEntry {
+            label: label.to_string(),
+            kind: Default::default(),
+            action: format!("cmd:{label}"),
+            args: None,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn exact_match_release_uses_fast_path() {
+        let candidates = vec![GestureCandidate {
+            gesture_label: "Open".to_string(),
+            tokens: "R".to_string(),
+            bindings: vec![binding("One")],
+            match_type: GestureMatchType::Exact,
+            score: 1.0,
+        }];
+        let actions = vec![action("One")];
+
+        let prepared = prepare_release_execution("R", 0, "R", &actions, &candidates)
+            .expect("exact gesture should be executable on release");
+
+        assert_eq!(prepared.gesture_label, "Open");
+        assert_eq!(prepared.binding_idx, 0);
+        assert_eq!(prepared.action.label, "One");
+    }
+
+    #[test]
+    fn multi_binding_selection_idx_is_respected() {
+        let candidates = vec![GestureCandidate {
+            gesture_label: "Tabs".to_string(),
+            tokens: "LR".to_string(),
+            bindings: vec![binding("One"), binding("Two"), binding("Three")],
+            match_type: GestureMatchType::Exact,
+            score: 1.0,
+        }];
+        let actions = vec![action("One"), action("Two"), action("Three")];
+
+        let prepared = prepare_release_execution("LR", 5, "LR", &actions, &candidates)
+            .expect("should resolve with modulo indexing");
+
+        assert_eq!(prepared.binding_idx, 2);
+        assert_eq!(prepared.action.label, "Three");
+    }
+
+    #[test]
+    fn no_match_and_cancel_behaviors_are_unchanged() {
+        assert_eq!(
+            release_fallback_outcome(false, NoMatchBehavior::DoNothing),
+            ReleaseFallbackOutcome::DoNothing
+        );
+        assert_eq!(
+            release_fallback_outcome(false, NoMatchBehavior::PassThroughClick),
+            ReleaseFallbackOutcome::PassThroughClick
+        );
+        assert_eq!(
+            release_fallback_outcome(false, NoMatchBehavior::ShowNoMatchHint),
+            ReleaseFallbackOutcome::ShowNoMatchHint
+        );
+        assert_eq!(
+            release_fallback_outcome(true, NoMatchBehavior::DoNothing),
+            ReleaseFallbackOutcome::PassThroughClick
+        );
+        assert!(cancel_should_pass_through(CancelBehavior::PassThroughClick));
+        assert!(!cancel_should_pass_through(CancelBehavior::DoNothing));
+    }
+
+    #[test]
+    fn deadzone_and_wheel_gate_semantics_are_unchanged() {
+        assert!(!crossed_deadzone(false, 80.0, 10.0));
+        assert!(crossed_deadzone(false, 100.0, 10.0));
+        assert!(!crossed_deadzone(true, 1000.0, 10.0));
+
+        assert!(!should_allow_wheel_cycle(WheelCycleGate::Deadzone, false));
+        assert!(should_allow_wheel_cycle(WheelCycleGate::Deadzone, true));
+        assert!(should_allow_wheel_cycle(WheelCycleGate::Shift, false));
     }
 }
 
