@@ -1,6 +1,8 @@
 use crate::draw::history::DrawHistory;
 use crate::draw::keyboard_hook::{should_consume_key_event, KeyCode, KeyEvent, KeyModifiers};
+use crate::draw::messages::ExitReason;
 use crate::draw::model::{DrawObject, Geometry, ObjectStyle, Tool};
+use crate::draw::runtime;
 
 const MIN_POINT_DIST_SQ: i64 = 9;
 
@@ -126,6 +128,38 @@ impl DrawInputState {
     }
 }
 
+pub fn route_command_to_runtime(command: Option<InputCommand>, exit_reason: ExitReason) {
+    route_command(command, exit_reason, |reason| {
+        if let Err(err) = runtime().request_exit(reason) {
+            tracing::warn!(?err, "failed to request draw exit from input command");
+        }
+    });
+}
+
+fn route_command<F>(command: Option<InputCommand>, exit_reason: ExitReason, mut request_exit: F)
+where
+    F: FnMut(ExitReason),
+{
+    if matches!(command, Some(InputCommand::RequestExit)) {
+        request_exit(exit_reason);
+    }
+}
+
+pub fn bridge_left_down_to_runtime(
+    state: &mut DrawInputState,
+    point: (i32, i32),
+    modifiers: PointerModifiers,
+) {
+    route_command_to_runtime(
+        state.handle_left_down(point, modifiers),
+        ExitReason::UserRequest,
+    );
+}
+
+pub fn bridge_key_event_to_runtime(state: &mut DrawInputState, event: KeyEvent) {
+    route_command_to_runtime(state.handle_key_event(event), ExitReason::UserRequest);
+}
+
 fn should_append_point(last: Option<(i32, i32)>, point: (i32, i32)) -> bool {
     let Some((last_x, last_y)) = last else {
         return true;
@@ -224,5 +258,53 @@ mod tests {
         assert_eq!(redo_command, Some(InputCommand::Redo));
         assert_eq!(state.history().undo_len(), 1);
         assert_eq!(state.history().redo_len(), 0);
+    }
+
+    #[test]
+    fn cancel_gestures_route_request_exit_via_same_runtime_path() {
+        let mut state = draw_state(Tool::Pen);
+        let mut reasons = Vec::new();
+
+        route_command(
+            state.handle_key_event(KeyEvent {
+                key: KeyCode::Escape,
+                modifiers: KeyModifiers::default(),
+            }),
+            ExitReason::UserRequest,
+            |reason| reasons.push(reason),
+        );
+
+        route_command(
+            state.handle_left_down(
+                (10, 10),
+                PointerModifiers {
+                    shift: true,
+                    ctrl: false,
+                },
+            ),
+            ExitReason::UserRequest,
+            |reason| reasons.push(reason),
+        );
+
+        route_command(
+            state.handle_left_down(
+                (10, 10),
+                PointerModifiers {
+                    shift: false,
+                    ctrl: true,
+                },
+            ),
+            ExitReason::UserRequest,
+            |reason| reasons.push(reason),
+        );
+
+        assert_eq!(
+            reasons,
+            vec![
+                ExitReason::UserRequest,
+                ExitReason::UserRequest,
+                ExitReason::UserRequest,
+            ]
+        );
     }
 }
