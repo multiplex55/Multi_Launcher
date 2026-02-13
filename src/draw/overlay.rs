@@ -29,20 +29,21 @@ mod platform {
     use std::ptr;
     use std::sync::Once;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+    use windows::Win32::Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
         BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EndPaint,
-        EnumDisplayMonitors, InvalidateRect, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-        DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, MONITORINFOEXW, PAINTSTRUCT, SRCCOPY,
+        EnumDisplayMonitors, GetMonitorInfoW, InvalidateRect, SelectObject, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, MONITORINFOEXW,
+        PAINTSTRUCT, SRCCOPY,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetMonitorInfoW,
-        GetWindowLongPtrW, RegisterClassW, SetLayeredWindowAttributes, SetWindowLongPtrW,
-        SetWindowPos, GWLP_USERDATA, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOSIZE, SWP_SHOWWINDOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_ERASEBKGND,
-        WM_PAINT, WM_SHOWWINDOW, WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW,
+        RegisterClassW, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, GWLP_USERDATA,
+        HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+        WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_ERASEBKGND, WM_PAINT, WM_SHOWWINDOW,
+        WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST, WS_POPUP,
     };
 
     pub fn compose_overlay_window_ex_style() -> WINDOW_EX_STYLE {
@@ -60,7 +61,7 @@ mod platform {
     fn resolve_cursor_position() -> Option<(i32, i32)> {
         let mut point = POINT::default();
         unsafe {
-            if GetCursorPos(&mut point).as_bool() {
+            if GetCursorPos(&mut point).is_ok() {
                 Some((point.x, point.y))
             } else {
                 None
@@ -96,7 +97,7 @@ mod platform {
         unsafe {
             let _ = EnumDisplayMonitors(
                 HDC::default(),
-                ptr::null(),
+                None,
                 Some(enum_proc),
                 LPARAM(&mut monitors as *mut Vec<MonitorRect> as isize),
             );
@@ -212,7 +213,7 @@ mod platform {
             };
 
             unsafe {
-                let _ = SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+                let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
             }
 
             let mem_dc = unsafe { CreateCompatibleDC(HDC::default()) };
@@ -244,8 +245,9 @@ mod platform {
                     windows::Win32::Foundation::HANDLE::default(),
                     0,
                 )
+                .ok()?
             };
-            if dib.0.is_null() || bits.is_null() {
+            if bits.is_null() {
                 unsafe {
                     let _ = DeleteDC(mem_dc);
                     let _ = DestroyWindow(hwnd);

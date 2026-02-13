@@ -21,27 +21,27 @@ impl Color {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StrokeStyle {
-    pub width: f32,
+    pub width: u32,
     pub color: Color,
 }
 
 impl Default for StrokeStyle {
     fn default() -> Self {
         Self {
-            width: 2.0,
+            width: 2,
             color: Color::rgba(255, 255, 255, 255),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FillStyle {
     pub color: Color,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ObjectStyle {
     pub stroke: StrokeStyle,
     pub fill: Option<FillStyle>,
@@ -56,14 +56,14 @@ pub enum Geometry {
     Eraser { points: Vec<(i32, i32)> },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrawObject {
     pub tool: Tool,
     pub style: ObjectStyle,
     pub geometry: Geometry,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CanvasModel {
     pub objects: Vec<DrawObject>,
 }
