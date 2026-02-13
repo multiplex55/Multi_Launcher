@@ -9,6 +9,7 @@ use crate::plugins::calendar::CalendarPlugin;
 use crate::plugins::clipboard::ClipboardPlugin;
 use crate::plugins::color_picker::ColorPickerPlugin;
 use crate::plugins::convert_panel::ConvertPanelPlugin;
+use crate::plugins::draw::DrawPlugin;
 use crate::plugins::dropcalc::DropCalcPlugin;
 use crate::plugins::emoji::EmojiPlugin;
 use crate::plugins::fav::FavPlugin;
@@ -160,6 +161,7 @@ impl PluginManager {
         self.register_with_settings(EmojiPlugin::default(), plugin_settings);
         self.register_with_settings(TextCasePlugin, plugin_settings);
         self.register_with_settings(ScreenshotPlugin, plugin_settings);
+        self.register_with_settings(DrawPlugin::default(), plugin_settings);
         self.register_with_settings(TimestampPlugin, plugin_settings);
         self.register_with_settings(IpPlugin, plugin_settings);
         self.register_with_settings(RandomPlugin::default(), plugin_settings);
@@ -321,5 +323,35 @@ impl PluginManager {
         } else {
             apply_action_filters(actions, &filters)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PluginManager;
+    use crate::actions::Action;
+    use crate::settings::NetUnit;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+
+    #[test]
+    fn commands_filtered_includes_draw_when_enabled() {
+        let mut manager = PluginManager::new();
+        manager.reload_from_dirs(
+            &[],
+            20,
+            NetUnit::Mb,
+            false,
+            &HashMap::new(),
+            Arc::new(Vec::<Action>::new()),
+        );
+
+        let enabled = HashSet::from(["draw".to_string()]);
+        let commands = manager.commands_filtered(Some(&enabled));
+
+        assert!(commands.iter().any(|action| action.label == "draw"));
+        assert!(commands
+            .iter()
+            .any(|action| action.label == "draw settings"));
     }
 }
