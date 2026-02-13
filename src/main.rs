@@ -5,7 +5,7 @@ use multi_launcher::gui::LauncherApp;
 use multi_launcher::hotkey::HotkeyTrigger;
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
-use multi_launcher::visibility::handle_visibility_trigger;
+use multi_launcher::visibility::handle_visibility_trigger_with_draw_guard;
 use multi_launcher::{indexer, logging};
 
 use eframe::{egui, icon_data};
@@ -273,12 +273,20 @@ fn main() -> anyhow::Result<()> {
             listener = HotkeyTrigger::start_listener(watched, "main", event_tx.clone());
         }
 
-        if handle_visibility_trigger(
+        if handle_visibility_trigger_with_draw_guard(
             trigger.as_ref(),
             &visibility,
             &restore_flag,
             &ctx,
             &mut queued_visibility,
+            || multi_launcher::draw::runtime().is_active(),
+            || {
+                if let Err(err) = multi_launcher::draw::runtime()
+                    .request_exit(multi_launcher::draw::messages::ExitReason::LauncherHotkey)
+                {
+                    tracing::warn!(?err, "failed to request draw exit from launcher hotkey");
+                }
+            },
             {
                 let (x, y) = settings.offscreen_pos.unwrap_or((2000, 2000));
                 (x as f32, y as f32)

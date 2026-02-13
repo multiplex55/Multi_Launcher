@@ -6,6 +6,7 @@ pub enum ExitReason {
     Timeout,
     StartFailure,
     OverlayFailure,
+    LauncherHotkey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
