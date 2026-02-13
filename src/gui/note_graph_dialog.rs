@@ -13,7 +13,7 @@ use serde::Deserialize;
 use std::collections::BTreeSet;
 
 const MIN_ZOOM: f32 = 0.2;
-const MAX_ZOOM: f32 = 2.5;
+const MAX_ZOOM: f32 = 4.0;
 const MIN_CANVAS_WIDTH: f32 = 300.0;
 const DETAILS_WIDTH_RATIO: f32 = 0.28;
 const DETAILS_MIN: f32 = 180.0;
@@ -311,7 +311,7 @@ impl NoteGraphDialog {
     fn apply_settings(&mut self, settings: NoteGraphSettings) {
         self.max_nodes = settings.max_nodes.max(20);
         self.show_labels = settings.show_labels;
-        self.label_zoom_threshold = settings.label_zoom_threshold.clamp(0.2, 1.5);
+        self.label_zoom_threshold = settings.label_zoom_threshold.clamp(0.2, MAX_ZOOM);
         self.layout_iterations_per_frame = settings.layout_iterations_per_frame.clamp(1, 12);
         self.repulsion_strength = settings.repulsion_strength.clamp(100.0, 10_000.0);
         self.link_distance = settings.link_distance.clamp(10.0, 300.0);
@@ -494,7 +494,7 @@ impl NoteGraphDialog {
             changed |= ui
                 .add(
                     egui::DragValue::new(&mut self.label_zoom_threshold)
-                        .clamp_range(0.2..=1.5)
+                        .clamp_range(0.2..=MAX_ZOOM)
                         .speed(0.01)
                         .prefix("Label zoom >= "),
                 )
@@ -877,6 +877,51 @@ mod tests {
         let screen2 = t.world_to_screen(world, rect);
         assert!((screen2.x - 62.0).abs() < 0.001);
         assert!((screen2.y - 45.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn zoom_clamps_to_new_max_bound() {
+        let mut t = CameraTransform::default();
+        let rect = Rect::from_min_size(Pos2::new(0.0, 0.0), egui::vec2(320.0, 240.0));
+
+        t.zoom_about(rect.center(), 100.0, rect);
+
+        assert_eq!(t.zoom, MAX_ZOOM);
+    }
+
+    #[test]
+    fn zoom_about_preserves_anchor_near_min_and_max_bounds() {
+        let mut t = CameraTransform {
+            pan: egui::vec2(37.0, -22.0),
+            zoom: 1.0,
+        };
+        let rect = Rect::from_min_size(Pos2::new(20.0, 30.0), egui::vec2(640.0, 480.0));
+        let pointer = Pos2::new(211.0, 189.0);
+
+        let anchor_world = t.screen_to_world(pointer, rect);
+
+        t.zoom_about(pointer, 100.0, rect);
+        assert_eq!(t.zoom, MAX_ZOOM);
+        let anchored_at_max = t.world_to_screen(anchor_world, rect);
+        assert!((anchored_at_max.x - pointer.x).abs() < 1e-3);
+        assert!((anchored_at_max.y - pointer.y).abs() < 1e-3);
+
+        t.zoom_about(pointer, 0.0001, rect);
+        assert_eq!(t.zoom, MIN_ZOOM);
+        let anchored_at_min = t.world_to_screen(anchor_world, rect);
+        assert!((anchored_at_min.x - pointer.x).abs() < 1e-3);
+        assert!((anchored_at_min.y - pointer.y).abs() < 1e-3);
+    }
+
+    #[test]
+    fn label_zoom_threshold_accepts_values_up_to_max_zoom() {
+        let mut dialog = NoteGraphDialog::default();
+        dialog.apply_settings(NoteGraphSettings {
+            label_zoom_threshold: MAX_ZOOM * 2.0,
+            ..NoteGraphSettings::default()
+        });
+
+        assert_eq!(dialog.label_zoom_threshold, MAX_ZOOM);
     }
 
     #[test]
