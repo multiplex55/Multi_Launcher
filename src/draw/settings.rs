@@ -171,6 +171,19 @@ mod tests {
     }
 
     #[test]
+    fn defaults_cover_toolbar_pressure_and_save_behavior() {
+        let settings = DrawSettings::default();
+        assert!(settings.enable_pressure);
+        assert_eq!(settings.toolbar_position, super::ToolbarPosition::Top);
+        assert_eq!(settings.toolbar_toggle_hotkey, "Ctrl+Shift+D");
+        assert!(settings.offer_save_without_desktop);
+        assert_eq!(
+            settings.fixed_save_folder_display,
+            "Pictures/Multi Launcher/Draw"
+        );
+    }
+
+    #[test]
     fn defaults_include_expected_timeout_background_and_quick_colors() {
         let settings = DrawSettings::default();
         assert_eq!(settings.exit_timeout_seconds, 120);
