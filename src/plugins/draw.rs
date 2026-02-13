@@ -117,7 +117,7 @@ impl Plugin for DrawPlugin {
 mod tests {
     use super::DrawPlugin;
     use crate::draw::service::runtime;
-    use crate::draw::settings::DrawSettings;
+    use crate::draw::settings::{DrawColor, DrawSettings};
     use crate::plugin::Plugin;
 
     #[test]
