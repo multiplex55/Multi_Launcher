@@ -293,7 +293,10 @@ impl DrawRuntime {
             .lock()
             .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
 
-        if matches!(state.lifecycle, DrawLifecycle::Idle | DrawLifecycle::Restoring) {
+        if matches!(
+            state.lifecycle,
+            DrawLifecycle::Idle | DrawLifecycle::Restoring
+        ) {
             return Ok(());
         }
 

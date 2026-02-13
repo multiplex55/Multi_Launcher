@@ -20,6 +20,7 @@ pub fn can_transition(from: DrawLifecycle, to: DrawLifecycle) -> bool {
             | (DrawLifecycle::Starting, DrawLifecycle::Active)
             | (DrawLifecycle::Starting, DrawLifecycle::Restoring)
             | (DrawLifecycle::Active, DrawLifecycle::Exiting)
+            | (DrawLifecycle::Active, DrawLifecycle::Restoring)
             | (DrawLifecycle::Exiting, DrawLifecycle::Restoring)
             | (DrawLifecycle::Restoring, DrawLifecycle::Idle)
             | (DrawLifecycle::Starting, DrawLifecycle::Idle)
