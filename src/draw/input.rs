@@ -195,6 +195,61 @@ mod tests {
     }
 
     #[test]
+    fn every_tool_commits_single_object_on_left_down_move_up() {
+        for tool in [
+            Tool::Pen,
+            Tool::Line,
+            Tool::Rect,
+            Tool::Ellipse,
+            Tool::Eraser,
+        ] {
+            let mut state = draw_state(tool);
+            assert_eq!(
+                state.handle_left_down((3, 4), PointerModifiers::default()),
+                None
+            );
+            state.handle_move((9, 10));
+            state.handle_left_up((12, 14));
+
+            assert_eq!(
+                state.history().undo_len(),
+                1,
+                "unexpected undo count for {tool:?}"
+            );
+            assert_eq!(
+                state.history().canvas().objects.len(),
+                1,
+                "unexpected object count for {tool:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pen_and_eraser_respect_movement_threshold() {
+        for tool in [Tool::Pen, Tool::Eraser] {
+            let mut state = draw_state(tool);
+            let _ = state.handle_left_down((0, 0), PointerModifiers::default());
+            state.handle_move((1, 1));
+            state.handle_move((2, 2));
+            state.handle_left_up((3, 0));
+
+            let history = state.history();
+            let canvas = history.canvas();
+            let object = canvas.objects.first().expect("single committed object");
+            match &object.geometry {
+                Geometry::Pen { points } | Geometry::Eraser { points } => {
+                    assert_eq!(
+                        points,
+                        &vec![(0, 0), (3, 0)],
+                        "unexpected points for {tool:?}"
+                    );
+                }
+                other => panic!("unexpected geometry for {tool:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn shift_click_requests_exit() {
         let mut state = draw_state(Tool::Line);
         let command = state.handle_left_down(
