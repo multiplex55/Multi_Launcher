@@ -1,8 +1,8 @@
 use crate::draw::messages::{ExitReason, MainToOverlay};
 use crate::draw::model::CanvasModel;
 use crate::draw::save::ExitPromptState;
+use crate::draw::settings::DrawSettings;
 use crate::draw::state::{can_transition, DrawLifecycle};
-use crate::plugins::draw::DrawSettings;
 use anyhow::{anyhow, Result};
 use once_cell::sync::Lazy;
 use std::sync::mpsc::{channel, Sender};
@@ -51,6 +51,7 @@ struct DrawRuntimeState {
     main_to_overlay_tx: Option<Sender<MainToOverlay>>,
     entry_context: Option<EntryContext>,
     exit_prompt: Option<ExitPromptState>,
+    dispatched_messages: Vec<MainToOverlay>,
 }
 
 impl Default for DrawRuntimeState {
@@ -63,6 +64,7 @@ impl Default for DrawRuntimeState {
             main_to_overlay_tx: None,
             entry_context: None,
             exit_prompt: None,
+            dispatched_messages: Vec::new(),
         }
     }
 }
@@ -164,11 +166,32 @@ impl DrawRuntime {
         if state.lifecycle == DrawLifecycle::Starting || state.lifecycle == DrawLifecycle::Active {
             self.transition_locked(&mut state, DrawLifecycle::Exiting)?;
             state.exit_prompt = Some(ExitPromptState::from_exit_reason(reason.clone()));
-            if let Some(tx) = &state.main_to_overlay_tx {
-                let _ = tx.send(MainToOverlay::RequestExit { reason });
-            }
+            Self::send_overlay_message_locked(&mut state, MainToOverlay::RequestExit { reason });
         }
         Ok(())
+    }
+
+    pub fn apply_settings(&self, settings: DrawSettings) {
+        if let Ok(mut state) = self.state.lock() {
+            state.settings = settings;
+            if state.lifecycle.is_active() {
+                Self::send_overlay_message_locked(&mut state, MainToOverlay::UpdateSettings);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn settings_for_test(&self) -> Option<DrawSettings> {
+        self.state.lock().ok().map(|s| s.settings.clone())
+    }
+
+    #[cfg(test)]
+    pub fn take_dispatched_messages_for_test(&self) -> Vec<MainToOverlay> {
+        if let Ok(mut state) = self.state.lock() {
+            std::mem::take(&mut state.dispatched_messages)
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn exit_prompt_state(&self) -> Option<ExitPromptState> {
@@ -276,6 +299,13 @@ impl DrawRuntime {
         state.lifecycle = next;
         Ok(())
     }
+
+    fn send_overlay_message_locked(state: &mut DrawRuntimeState, message: MainToOverlay) {
+        state.dispatched_messages.push(message.clone());
+        if let Some(tx) = &state.main_to_overlay_tx {
+            let _ = tx.send(message);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -284,7 +314,8 @@ mod tests {
         runtime, set_runtime_restore_hook, set_runtime_start_hook, DrawRuntime, EntryContext,
         StartOutcome,
     };
-    use crate::draw::messages::ExitReason;
+    use crate::draw::messages::{ExitReason, MainToOverlay};
+    use crate::draw::settings::DrawSettings;
     use crate::draw::state::{can_transition, DrawLifecycle};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -370,6 +401,24 @@ mod tests {
         rt.tick(Instant::now()).expect("tick should succeed");
         assert_eq!(rt.lifecycle(), DrawLifecycle::Exiting);
         rt.reset_for_test();
+    }
+
+    #[test]
+    fn apply_settings_while_active_emits_update_message() {
+        let rt = runtime();
+        reset_runtime(rt);
+        rt.force_lifecycle_for_test(DrawLifecycle::Active);
+
+        let mut updated = DrawSettings::default();
+        updated.exit_timeout_seconds = 7;
+        rt.apply_settings(updated.clone());
+
+        assert_eq!(rt.settings_for_test(), Some(updated));
+        assert_eq!(
+            rt.take_dispatched_messages_for_test(),
+            vec![MainToOverlay::UpdateSettings]
+        );
+        reset_runtime(rt);
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub mod model;
 pub mod overlay;
 pub mod save;
 pub mod service;
+pub mod settings;
 pub mod state;
 
 pub use service::{
