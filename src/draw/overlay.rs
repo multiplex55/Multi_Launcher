@@ -151,7 +151,7 @@ mod platform {
                     }
                 }
                 unsafe {
-                    EndPaint(hwnd, &ps);
+                    let _ = EndPaint(hwnd, &ps);
                 }
                 LRESULT(0)
             }
