@@ -2567,6 +2567,7 @@ impl LauncherApp {
         } else if a.action == "draw:enter" {
             match crate::draw::runtime().start() {
                 Err(e) => {
+                    self.visible_flag.store(true, Ordering::SeqCst);
                     self.set_error(format!("Failed: {e}"));
                     if self.enable_toasts {
                         push_toast(
@@ -2580,7 +2581,7 @@ impl LauncherApp {
                         );
                     }
                 }
-                Ok(_) => {
+                Ok(crate::draw::StartOutcome::Started) => {
                     self.visible_flag.store(false, Ordering::SeqCst);
                     if self.enable_toasts {
                         push_toast(
@@ -2594,6 +2595,7 @@ impl LauncherApp {
                         );
                     }
                 }
+                Ok(crate::draw::StartOutcome::AlreadyActive) => {}
             }
         } else if a.action == "mg:toggle" {
             if let Some(args) = a
