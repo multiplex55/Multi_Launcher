@@ -1,5 +1,4 @@
 use crate::draw::messages::{ExitReason, MainToOverlay};
-use crate::draw::model::CanvasModel;
 use crate::draw::save::ExitPromptState;
 use crate::draw::settings::DrawSettings;
 use crate::draw::state::{can_transition, DrawLifecycle};
@@ -47,7 +46,6 @@ impl Default for EntryContext {
 struct DrawRuntimeState {
     lifecycle: DrawLifecycle,
     settings: DrawSettings,
-    canvas: CanvasModel,
     overlay_thread_handle: Option<JoinHandle<()>>,
     main_to_overlay_tx: Option<Sender<MainToOverlay>>,
     entry_context: Option<EntryContext>,
@@ -60,7 +58,6 @@ impl Default for DrawRuntimeState {
         Self {
             lifecycle: DrawLifecycle::Idle,
             settings: DrawSettings::default(),
-            canvas: CanvasModel::default(),
             overlay_thread_handle: None,
             main_to_overlay_tx: None,
             entry_context: None,
