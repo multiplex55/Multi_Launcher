@@ -11,6 +11,7 @@ mod confirmation_modal;
 mod convert_panel;
 mod cpu_list_dialog;
 mod dashboard_editor_dialog;
+mod draw_settings_dialog;
 mod fav_dialog;
 mod image_panel;
 mod macro_dialog;
@@ -45,6 +46,7 @@ pub use calendar_popover::CalendarPopover;
 pub use clipboard_dialog::ClipboardDialog;
 pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
+pub use draw_settings_dialog::DrawSettingsDialog;
 pub use fav_dialog::FavDialog;
 pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
@@ -472,6 +474,7 @@ pub struct LauncherApp {
     macro_dialog: MacroDialog,
     mouse_gestures_dialog: MgGesturesDialog,
     mouse_gesture_settings_dialog: MouseGestureSettingsDialog,
+    draw_settings_dialog: DrawSettingsDialog,
     draw_settings_dialog_open: bool,
     theme_settings_dialog_open: bool,
     theme_settings_dialog: ThemeSettingsDialogState,
@@ -826,6 +829,7 @@ impl LauncherApp {
     }
 
     pub fn open_draw_settings_dialog(&mut self) {
+        self.draw_settings_dialog.open(&self.settings_path);
         self.draw_settings_dialog_open = true;
     }
 
@@ -1332,6 +1336,7 @@ impl LauncherApp {
             macro_dialog: MacroDialog::default(),
             mouse_gestures_dialog: MgGesturesDialog::default(),
             mouse_gesture_settings_dialog: MouseGestureSettingsDialog::default(),
+            draw_settings_dialog: DrawSettingsDialog::default(),
             draw_settings_dialog_open: false,
             theme_settings_dialog_open: false,
             theme_settings_dialog: ThemeSettingsDialogState::default(),
@@ -2562,6 +2567,7 @@ impl LauncherApp {
         } else if a.action == "draw:enter" {
             match crate::draw::runtime().start() {
                 Err(e) => {
+                    self.visible_flag.store(true, Ordering::SeqCst);
                     self.set_error(format!("Failed: {e}"));
                     if self.enable_toasts {
                         push_toast(
@@ -2575,7 +2581,7 @@ impl LauncherApp {
                         );
                     }
                 }
-                Ok(_) => {
+                Ok(crate::draw::StartOutcome::Started) => {
                     self.visible_flag.store(false, Ordering::SeqCst);
                     if self.enable_toasts {
                         push_toast(
@@ -2589,6 +2595,7 @@ impl LauncherApp {
                         );
                     }
                 }
+                Ok(crate::draw::StartOutcome::AlreadyActive) => {}
             }
         } else if a.action == "mg:toggle" {
             if let Some(args) = a
@@ -4612,17 +4619,11 @@ impl eframe::App for LauncherApp {
         let mut mg_settings_dlg = std::mem::take(&mut self.mouse_gesture_settings_dialog);
         mg_settings_dlg.ui(ctx, self);
         self.mouse_gesture_settings_dialog = mg_settings_dlg;
-        let mut draw_open = self.draw_settings_dialog_open;
-        egui::Window::new("Draw Settings")
-            .open(&mut draw_open)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.label("Open plugin settings and edit the Draw plugin configuration.");
-                if ui.button("Open Plugin Settings").clicked() {
-                    self.show_plugins = true;
-                }
-            });
-        self.draw_settings_dialog_open = draw_open;
+        let mut draw_settings_dialog = std::mem::take(&mut self.draw_settings_dialog);
+        draw_settings_dialog.open = self.draw_settings_dialog_open;
+        draw_settings_dialog.ui(ctx, self);
+        self.draw_settings_dialog_open = draw_settings_dialog.open;
+        self.draw_settings_dialog = draw_settings_dialog;
         let mut theme_state = std::mem::take(&mut self.theme_settings_dialog);
         let mut theme_open = self.theme_settings_dialog_open;
         crate::gui::theme_settings_dialog::ui(ctx, self, &mut theme_open, &mut theme_state);
@@ -4742,6 +4743,30 @@ impl eframe::App for LauncherApp {
 impl LauncherApp {
     pub fn watch_receiver(&self) -> &Receiver<WatchEvent> {
         &self.rx
+    }
+
+    #[cfg(test)]
+    fn draw_dialog_settings_for_test(&self) -> crate::draw::settings::DrawSettings {
+        self.draw_settings_dialog.settings_for_test().clone()
+    }
+
+    #[cfg(test)]
+    fn draw_dialog_set_settings_for_test(&mut self, settings: crate::draw::settings::DrawSettings) {
+        self.draw_settings_dialog.set_settings_for_test(settings);
+    }
+
+    #[cfg(test)]
+    fn draw_dialog_save_for_test(&mut self) {
+        let mut dialog = std::mem::take(&mut self.draw_settings_dialog);
+        dialog.save_for_test(self);
+        self.draw_settings_dialog = dialog;
+    }
+
+    #[cfg(test)]
+    fn draw_dialog_reset_for_test(&mut self) {
+        let mut dialog = std::mem::take(&mut self.draw_settings_dialog);
+        dialog.reset_for_test(self);
+        self.draw_settings_dialog = dialog;
     }
 
     /// Open a note panel for the given slug, optionally using a template for new notes.
@@ -5079,6 +5104,7 @@ mod tests {
         common::slug::reset_slug_lookup,
         dashboard::config::OverflowMode,
         dashboard::layout::NormalizedSlot,
+        draw::{service::runtime, settings::DrawSettings},
         plugin::{Plugin, PluginManager},
         plugins::draw::DrawPlugin,
         plugins::note::{append_note, load_notes, save_notes, NotePlugin},
@@ -5507,6 +5533,12 @@ mod tests {
 
     #[test]
     fn draw_dialog_settings_action_opens_dialog() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        std::env::set_current_dir(dir.path()).unwrap();
+        Settings::default().save("settings.json").unwrap();
+
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         assert!(!app.draw_settings_dialog_open);
@@ -5523,6 +5555,86 @@ mod tests {
         );
 
         assert!(app.draw_settings_dialog_open);
+        assert_eq!(app.draw_dialog_settings_for_test(), DrawSettings::default());
+
+        std::env::set_current_dir(orig_dir).unwrap();
+    }
+
+    #[test]
+    fn draw_dialog_save_persists_plugin_settings_and_applies_runtime() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let rt = runtime();
+        rt.reset_for_test();
+
+        let dir = tempdir().unwrap();
+        let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        std::env::set_current_dir(dir.path()).unwrap();
+        Settings::default().save("settings.json").unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.open_draw_settings_dialog();
+
+        let mut edited = app.draw_dialog_settings_for_test();
+        edited.last_width = 37;
+        edited.exit_timeout_seconds = 222;
+        app.draw_dialog_set_settings_for_test(edited.clone());
+        app.draw_dialog_save_for_test();
+
+        let persisted = Settings::load("settings.json").unwrap();
+        let payload = persisted
+            .plugin_settings
+            .get("draw")
+            .cloned()
+            .expect("draw settings payload");
+        let saved: DrawSettings = serde_json::from_value(payload.clone()).unwrap();
+
+        assert_eq!(saved, edited);
+        assert_eq!(rt.settings_for_test(), Some(edited.clone()));
+        assert_eq!(
+            app.settings_editor.get_plugin_setting_value("draw"),
+            Some(&payload)
+        );
+
+        rt.reset_for_test();
+        std::env::set_current_dir(orig_dir).unwrap();
+    }
+
+    #[test]
+    fn draw_dialog_reset_restores_defaults_and_persists() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let rt = runtime();
+        rt.reset_for_test();
+
+        let dir = tempdir().unwrap();
+        let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        std::env::set_current_dir(dir.path()).unwrap();
+        Settings::default().save("settings.json").unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.open_draw_settings_dialog();
+
+        let mut edited = app.draw_dialog_settings_for_test();
+        edited.enable_pressure = false;
+        edited.last_width = 99;
+        app.draw_dialog_set_settings_for_test(edited);
+        app.draw_dialog_save_for_test();
+        app.draw_dialog_reset_for_test();
+
+        let persisted = Settings::load("settings.json").unwrap();
+        let payload = persisted
+            .plugin_settings
+            .get("draw")
+            .cloned()
+            .expect("draw settings payload");
+        let saved: DrawSettings = serde_json::from_value(payload).unwrap();
+
+        assert_eq!(saved, DrawSettings::default());
+        assert_eq!(rt.settings_for_test(), Some(DrawSettings::default()));
+
+        rt.reset_for_test();
+        std::env::set_current_dir(orig_dir).unwrap();
     }
 
     #[test]

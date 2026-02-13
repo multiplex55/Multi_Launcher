@@ -8,6 +8,7 @@ pub mod overlay;
 pub mod save;
 pub mod service;
 pub mod settings;
+pub mod settings_ui;
 pub mod state;
 
 pub use service::{
