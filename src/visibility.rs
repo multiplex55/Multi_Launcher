@@ -6,6 +6,12 @@ use std::sync::{
 
 use crate::hotkey::HotkeyTrigger;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisibilityIntent {
+    Toggle,
+    Show,
+}
+
 /// Trait abstracting over an `egui::Context` for viewport commands.
 pub trait ViewportCtx {
     fn send_viewport_cmd(&self, cmd: egui::ViewportCommand);
@@ -60,6 +66,7 @@ pub fn handle_visibility_trigger_with_draw_guard<C, A, E>(
     restore_flag: &Arc<AtomicBool>,
     ctx_handle: &Arc<Mutex<Option<C>>>,
     queued_visibility: &mut Option<bool>,
+    intent: VisibilityIntent,
     is_draw_active: A,
     mut request_draw_exit: E,
     offscreen: (f32, f32),
@@ -76,6 +83,12 @@ where
 {
     let trigger_fired = trigger.take();
     if trigger_fired && is_draw_active() {
+        let visible = visibility.load(Ordering::SeqCst);
+        let next = resolve_visibility_intent(intent, visible);
+        *queued_visibility = Some(next);
+        if next {
+            restore_flag.store(true, Ordering::SeqCst);
+        }
         request_draw_exit();
         return false;
     }
@@ -93,6 +106,13 @@ where
         static_size,
         window_size,
     )
+}
+
+fn resolve_visibility_intent(intent: VisibilityIntent, current_visible: bool) -> bool {
+    match intent {
+        VisibilityIntent::Toggle => !current_visible,
+        VisibilityIntent::Show => true,
+    }
 }
 
 fn process_visibility_trigger<C: ViewportCtx>(
@@ -215,7 +235,7 @@ pub fn apply_visibility<C: ViewportCtx>(
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_visibility_trigger_with_draw_guard, ViewportCtx};
+    use super::{handle_visibility_trigger_with_draw_guard, ViewportCtx, VisibilityIntent};
     use eframe::egui;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -256,6 +276,7 @@ mod tests {
             &restore_flag,
             &ctx_handle,
             &mut queued_visibility,
+            VisibilityIntent::Show,
             || true,
             move || exit_requested_clone.store(true, Ordering::SeqCst),
             (2000.0, 2000.0),
@@ -269,6 +290,57 @@ mod tests {
         assert!(!changed);
         assert!(visibility.load(Ordering::SeqCst));
         assert!(exit_requested.load(Ordering::SeqCst));
+        assert_eq!(queued_visibility, Some(true));
+    }
+
+    #[test]
+    fn queued_show_intent_applies_after_draw_exit() {
+        let trigger = trigger_fire_once();
+        let visibility = Arc::new(AtomicBool::new(false));
+        let restore_flag = Arc::new(AtomicBool::new(false));
+        let ctx_handle = Arc::new(Mutex::new(Some(FakeViewportCtx)));
+        let mut queued_visibility = None;
+
+        let changed = handle_visibility_trigger_with_draw_guard(
+            &trigger,
+            &visibility,
+            &restore_flag,
+            &ctx_handle,
+            &mut queued_visibility,
+            VisibilityIntent::Show,
+            || true,
+            || {},
+            (2000.0, 2000.0),
+            false,
+            false,
+            None,
+            None,
+            (400.0, 220.0),
+        );
+
+        assert!(!changed);
+        assert_eq!(queued_visibility, Some(true));
+        assert!(!visibility.load(Ordering::SeqCst));
+
+        let changed = handle_visibility_trigger_with_draw_guard(
+            &trigger,
+            &visibility,
+            &restore_flag,
+            &ctx_handle,
+            &mut queued_visibility,
+            VisibilityIntent::Show,
+            || false,
+            || {},
+            (2000.0, 2000.0),
+            false,
+            false,
+            None,
+            None,
+            (400.0, 220.0),
+        );
+
+        assert!(changed);
+        assert!(visibility.load(Ordering::SeqCst));
         assert_eq!(queued_visibility, None);
     }
 
@@ -288,6 +360,7 @@ mod tests {
             &restore_flag,
             &ctx_handle,
             &mut queued_visibility,
+            VisibilityIntent::Toggle,
             || false,
             move || exit_requested_clone.store(true, Ordering::SeqCst),
             (2000.0, 2000.0),

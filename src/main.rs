@@ -5,7 +5,7 @@ use multi_launcher::gui::LauncherApp;
 use multi_launcher::hotkey::HotkeyTrigger;
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
-use multi_launcher::visibility::handle_visibility_trigger_with_draw_guard;
+use multi_launcher::visibility::{handle_visibility_trigger_with_draw_guard, VisibilityIntent};
 use multi_launcher::{indexer, logging};
 
 use eframe::{egui, icon_data};
@@ -279,6 +279,7 @@ fn main() -> anyhow::Result<()> {
             &restore_flag,
             &ctx,
             &mut queued_visibility,
+            VisibilityIntent::Toggle,
             || multi_launcher::draw::runtime().is_active(),
             || {
                 if let Err(err) = multi_launcher::draw::runtime()
