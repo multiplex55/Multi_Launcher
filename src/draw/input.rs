@@ -233,12 +233,9 @@ mod tests {
             state.handle_move((2, 2));
             state.handle_left_up((3, 0));
 
-            let object = state
-                .history()
-                .canvas()
-                .objects
-                .first()
-                .expect("single committed object");
+            let history = state.history();
+            let canvas = history.canvas();
+            let object = canvas.objects.first().expect("single committed object");
             match &object.geometry {
                 Geometry::Pen { points } | Geometry::Eraser { points } => {
                     assert_eq!(
