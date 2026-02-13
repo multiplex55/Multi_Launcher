@@ -1,3 +1,4 @@
+use crate::draw::input::{bridge_left_down_to_runtime, DrawInputState, PointerModifiers};
 use crate::draw::service::MonitorRect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,6 +13,13 @@ impl ExitDialogState {
     pub fn blocks_drawing_input(self) -> bool {
         !matches!(self, Self::Hidden)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayPointerEvent {
+    LeftDown { modifiers: PointerModifiers },
+    Move,
+    LeftUp,
 }
 
 pub fn monitor_contains_point(rect: MonitorRect, point: (i32, i32)) -> bool {
@@ -33,6 +41,41 @@ pub fn select_monitor_for_point(
 
 pub fn global_to_local(point: (i32, i32), origin: (i32, i32)) -> (i32, i32) {
     (point.0 - origin.0, point.1 - origin.1)
+}
+
+pub fn monitor_local_point_for_global(
+    monitors: &[MonitorRect],
+    point: (i32, i32),
+) -> Option<(MonitorRect, (i32, i32))> {
+    let monitor =
+        select_monitor_for_point(monitors, point).or_else(|| monitors.first().copied())?;
+    Some((monitor, global_to_local(point, (monitor.x, monitor.y))))
+}
+
+pub fn forward_pointer_event_to_draw_input(
+    draw_input: &mut DrawInputState,
+    exit_dialog_state: ExitDialogState,
+    tool_monitor_rect: MonitorRect,
+    global_point: (i32, i32),
+    event: OverlayPointerEvent,
+) -> bool {
+    if exit_dialog_state.blocks_drawing_input() {
+        return false;
+    }
+
+    let (_, local_point) = monitor_local_point_for_global(&[tool_monitor_rect], global_point)
+        .unwrap_or((
+            tool_monitor_rect,
+            global_to_local(global_point, (tool_monitor_rect.x, tool_monitor_rect.y)),
+        ));
+    match event {
+        OverlayPointerEvent::LeftDown { modifiers } => {
+            bridge_left_down_to_runtime(draw_input, local_point, modifiers);
+        }
+        OverlayPointerEvent::Move => draw_input.handle_move(local_point),
+        OverlayPointerEvent::LeftUp => draw_input.handle_left_up(local_point),
+    }
+    true
 }
 
 #[cfg(windows)]
@@ -394,8 +437,133 @@ impl OverlayWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{global_to_local, monitor_contains_point, select_monitor_for_point};
-    use crate::draw::service::MonitorRect;
+    use super::{
+        forward_pointer_event_to_draw_input, global_to_local, monitor_contains_point,
+        monitor_local_point_for_global, select_monitor_for_point, ExitDialogState,
+        OverlayPointerEvent,
+    };
+    use crate::draw::{
+        input::DrawInputState,
+        model::{ObjectStyle, Tool},
+        service::MonitorRect,
+    };
+
+    fn draw_state(tool: Tool) -> DrawInputState {
+        DrawInputState::new(tool, ObjectStyle::default())
+    }
+
+    #[test]
+    fn monitor_local_resolution_uses_selected_monitor_origin() {
+        let monitors = [
+            MonitorRect {
+                x: -1920,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            MonitorRect {
+                x: 0,
+                y: 0,
+                width: 2560,
+                height: 1440,
+            },
+        ];
+
+        let (monitor, local) =
+            monitor_local_point_for_global(&monitors, (100, 100)).expect("monitor and local point");
+        assert_eq!(monitor, monitors[1]);
+        assert_eq!(local, (100, 100));
+
+        let (monitor2, local2) =
+            monitor_local_point_for_global(&monitors, (-100, 30)).expect("monitor and local point");
+        assert_eq!(monitor2, monitors[0]);
+        assert_eq!(local2, (1820, 30));
+    }
+
+    #[test]
+    fn hidden_dialog_allows_pointer_events_to_commit() {
+        let mut input = draw_state(Tool::Line);
+        let monitor = MonitorRect {
+            x: 1920,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        };
+
+        assert!(forward_pointer_event_to_draw_input(
+            &mut input,
+            ExitDialogState::Hidden,
+            monitor,
+            (2000, 200),
+            OverlayPointerEvent::LeftDown {
+                modifiers: Default::default()
+            }
+        ));
+        assert!(forward_pointer_event_to_draw_input(
+            &mut input,
+            ExitDialogState::Hidden,
+            monitor,
+            (2100, 260),
+            OverlayPointerEvent::Move,
+        ));
+        assert!(forward_pointer_event_to_draw_input(
+            &mut input,
+            ExitDialogState::Hidden,
+            monitor,
+            (2200, 300),
+            OverlayPointerEvent::LeftUp,
+        ));
+
+        assert_eq!(input.history().undo_len(), 1);
+        assert_eq!(input.history().canvas().objects.len(), 1);
+    }
+
+    #[test]
+    fn non_hidden_dialog_blocks_pointer_events_and_prevents_commits() {
+        for state in [
+            ExitDialogState::PromptVisible,
+            ExitDialogState::Saving,
+            ExitDialogState::ErrorVisible,
+        ] {
+            let mut input = draw_state(Tool::Rect);
+            let monitor = MonitorRect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            };
+
+            assert!(!forward_pointer_event_to_draw_input(
+                &mut input,
+                state,
+                monitor,
+                (100, 100),
+                OverlayPointerEvent::LeftDown {
+                    modifiers: Default::default()
+                }
+            ));
+            assert!(!forward_pointer_event_to_draw_input(
+                &mut input,
+                state,
+                monitor,
+                (120, 120),
+                OverlayPointerEvent::Move,
+            ));
+            assert!(!forward_pointer_event_to_draw_input(
+                &mut input,
+                state,
+                monitor,
+                (140, 140),
+                OverlayPointerEvent::LeftUp,
+            ));
+
+            assert_eq!(
+                input.history().undo_len(),
+                0,
+                "unexpected commit with state {state:?}"
+            );
+        }
+    }
 
     #[test]
     fn select_monitor_by_containment() {
