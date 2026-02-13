@@ -5,6 +5,7 @@ use crate::draw::settings::DrawSettings;
 use crate::draw::state::{can_transition, DrawLifecycle};
 use anyhow::{anyhow, Result};
 use once_cell::sync::Lazy;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
@@ -171,6 +172,34 @@ impl DrawRuntime {
         Ok(())
     }
 
+    pub fn notify_overlay_exit(&self, reason: ExitReason) -> Result<()> {
+        self.restore_pipeline(reason, "overlay exit notification")
+    }
+
+    pub fn run_overlay_thread_entrypoint<F>(&self, entrypoint: F) -> Result<()>
+    where
+        F: FnOnce() -> Result<()> + panic::UnwindSafe,
+    {
+        match panic::catch_unwind(AssertUnwindSafe(entrypoint)) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => {
+                tracing::error!(?err, "draw overlay thread failed");
+                self.restore_pipeline(ExitReason::OverlayFailure, "overlay thread failure")
+            }
+            Err(payload) => {
+                let panic_message = if let Some(message) = payload.downcast_ref::<&str>() {
+                    (*message).to_string()
+                } else if let Some(message) = payload.downcast_ref::<String>() {
+                    message.clone()
+                } else {
+                    "unknown panic payload".to_string()
+                };
+                tracing::error!(panic_message, "draw overlay thread panicked");
+                self.restore_pipeline(ExitReason::OverlayFailure, "overlay thread panic")
+            }
+        }
+    }
+
     pub fn apply_settings(&self, settings: DrawSettings) {
         if let Ok(mut state) = self.state.lock() {
             state.settings = settings;
@@ -233,7 +262,7 @@ impl DrawRuntime {
         };
 
         if timed_out {
-            self.request_exit(ExitReason::Timeout)?;
+            self.restore_pipeline(ExitReason::Timeout, "overlay timeout failsafe")?;
         }
 
         Ok(())
@@ -255,16 +284,30 @@ impl DrawRuntime {
     }
 
     fn rollback_after_start_failure(&self) -> Result<()> {
+        self.restore_pipeline(ExitReason::StartFailure, "draw start failure rollback")
+    }
+
+    fn restore_pipeline(&self, reason: ExitReason, source: &str) -> Result<()> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
+
+        if matches!(state.lifecycle, DrawLifecycle::Idle | DrawLifecycle::Restoring) {
+            return Ok(());
+        }
+
         if can_transition(state.lifecycle, DrawLifecycle::Restoring) {
             state.lifecycle = DrawLifecycle::Restoring;
+        } else {
+            return Ok(());
         }
         drop(state);
 
-        let _ = self.call_hook(&DRAW_RESTORE_HOOK);
+        if let Err(err) = self.call_hook(&DRAW_RESTORE_HOOK) {
+            tracing::error!(?err, "draw restore hook failed after {source}");
+        }
+        tracing::warn!(?reason, "draw runtime restore executed from {source}");
 
         let mut state = self
             .state
@@ -319,6 +362,7 @@ mod tests {
     use crate::draw::state::{can_transition, DrawLifecycle};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::thread;
     use std::time::{Duration, Instant};
 
     fn reset_runtime(rt: &DrawRuntime) {
@@ -386,9 +430,15 @@ mod tests {
     }
 
     #[test]
-    fn timeout_forces_exit_reason_timeout() {
+    fn timeout_forces_restore_pipeline() {
         let rt = runtime();
         reset_runtime(rt);
+        let restored = Arc::new(AtomicBool::new(false));
+        let restored_clone = Arc::clone(&restored);
+        set_runtime_restore_hook(Some(Box::new(move || {
+            restored_clone.store(true, Ordering::SeqCst);
+            Ok(())
+        })));
         let timeout_ctx = EntryContext {
             timeout_deadline: Some(Instant::now() - Duration::from_secs(1)),
             ..EntryContext::default()
@@ -399,8 +449,87 @@ mod tests {
             .expect("start with context should be idempotent/started");
         assert_eq!(outcome, StartOutcome::Started);
         rt.tick(Instant::now()).expect("tick should succeed");
-        assert_eq!(rt.lifecycle(), DrawLifecycle::Exiting);
-        rt.reset_for_test();
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
+        assert!(restored.load(Ordering::SeqCst));
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn overlay_panic_triggers_restore_callback() {
+        let rt = runtime();
+        reset_runtime(rt);
+        let restored = Arc::new(AtomicBool::new(false));
+        let restored_clone = Arc::clone(&restored);
+        set_runtime_restore_hook(Some(Box::new(move || {
+            restored_clone.store(true, Ordering::SeqCst);
+            Ok(())
+        })));
+        rt.force_lifecycle_for_test(DrawLifecycle::Active);
+
+        let result = rt.run_overlay_thread_entrypoint(|| -> anyhow::Result<()> {
+            panic!("simulated panic");
+        });
+
+        assert!(result.is_ok());
+        assert!(restored.load(Ordering::SeqCst));
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn duplicate_terminal_notifications_restore_once() {
+        let rt = runtime();
+        reset_runtime(rt);
+        let restore_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let restore_count_clone = Arc::clone(&restore_count);
+        set_runtime_restore_hook(Some(Box::new(move || {
+            restore_count_clone.fetch_add(1, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(10));
+            Ok(())
+        })));
+        rt.force_lifecycle_for_test(DrawLifecycle::Exiting);
+
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                let _ = rt.notify_overlay_exit(ExitReason::UserRequest);
+            });
+            scope.spawn(|| {
+                let _ = rt.notify_overlay_exit(ExitReason::OverlayFailure);
+            });
+        });
+
+        assert_eq!(restore_count.load(Ordering::SeqCst), 1);
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn timeout_path_uses_same_restore_pipeline_as_manual_exit() {
+        let rt = runtime();
+        reset_runtime(rt);
+        let restore_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let restore_count_clone = Arc::clone(&restore_count);
+        set_runtime_restore_hook(Some(Box::new(move || {
+            restore_count_clone.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })));
+
+        rt.force_lifecycle_for_test(DrawLifecycle::Exiting);
+        rt.notify_overlay_exit(ExitReason::UserRequest)
+            .expect("manual exit restore should succeed");
+        assert_eq!(restore_count.load(Ordering::SeqCst), 1);
+
+        let timeout_ctx = EntryContext {
+            timeout_deadline: Some(Instant::now() - Duration::from_secs(1)),
+            ..EntryContext::default()
+        };
+        rt.start_with_context(timeout_ctx)
+            .expect("start with timeout should succeed");
+        rt.tick(Instant::now()).expect("tick should restore");
+
+        assert_eq!(restore_count.load(Ordering::SeqCst), 2);
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
+        reset_runtime(rt);
     }
 
     #[test]

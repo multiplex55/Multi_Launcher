@@ -100,12 +100,15 @@ impl DrawInputState {
     }
 
     pub fn handle_key_event(&mut self, event: KeyEvent) -> Option<InputCommand> {
+        if matches!(event.key, KeyCode::Escape) {
+            return Some(InputCommand::RequestExit);
+        }
+
         if !should_consume_key_event(true, event) {
             return None;
         }
 
         match (event.key, event.modifiers) {
-            (KeyCode::Escape, _) => Some(InputCommand::RequestExit),
             (KeyCode::U, KeyModifiers { ctrl: false, .. }) => {
                 let _ = self.history.undo();
                 Some(InputCommand::Undo)
