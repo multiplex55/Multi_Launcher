@@ -324,6 +324,7 @@ pub enum Panel {
     MacroDialog,
     MouseGesturesDialog,
     MouseGestureSettingsDialog,
+    DrawSettingsDialog,
     ThemeSettingsDialog,
     FavDialog,
     NotesDialog,
@@ -364,6 +365,7 @@ struct PanelStates {
     macro_dialog: bool,
     mouse_gestures_dialog: bool,
     mouse_gesture_settings_dialog: bool,
+    draw_settings_dialog: bool,
     theme_settings_dialog: bool,
     fav_dialog: bool,
     notes_dialog: bool,
@@ -470,6 +472,7 @@ pub struct LauncherApp {
     macro_dialog: MacroDialog,
     mouse_gestures_dialog: MgGesturesDialog,
     mouse_gesture_settings_dialog: MouseGestureSettingsDialog,
+    draw_settings_dialog_open: bool,
     theme_settings_dialog_open: bool,
     theme_settings_dialog: ThemeSettingsDialogState,
     fav_dialog: FavDialog,
@@ -820,6 +823,10 @@ impl LauncherApp {
     /// trigger it without reaching into private `LauncherApp` fields.
     pub fn open_mouse_gesture_settings_dialog(&mut self) {
         self.mouse_gesture_settings_dialog.open();
+    }
+
+    pub fn open_draw_settings_dialog(&mut self) {
+        self.draw_settings_dialog_open = true;
     }
 
     pub fn open_theme_settings_dialog(&mut self) {
@@ -1325,6 +1332,7 @@ impl LauncherApp {
             macro_dialog: MacroDialog::default(),
             mouse_gestures_dialog: MgGesturesDialog::default(),
             mouse_gesture_settings_dialog: MouseGestureSettingsDialog::default(),
+            draw_settings_dialog_open: false,
             theme_settings_dialog_open: false,
             theme_settings_dialog: ThemeSettingsDialogState::default(),
             fav_dialog: FavDialog::default(),
@@ -2549,6 +2557,23 @@ impl LauncherApp {
             }
         } else if a.action == "mg:dialog:settings" {
             self.open_mouse_gesture_settings_dialog();
+        } else if a.action == "draw:dialog:settings" {
+            self.open_draw_settings_dialog();
+        } else if a.action == "draw:enter" {
+            if let Err(e) = crate::draw::runtime().start() {
+                self.set_error(format!("Failed: {e}"));
+                if self.enable_toasts {
+                    push_toast(
+                        &mut self.toasts,
+                        Toast {
+                            text: format!("Failed: {e}").into(),
+                            kind: ToastKind::Error,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(self.toast_duration as f64),
+                        },
+                    );
+                }
+            }
         } else if a.action == "mg:toggle" {
             if let Some(args) = a
                 .args
@@ -2998,6 +3023,7 @@ impl LauncherApp {
             || self.macro_dialog.open
             || self.mouse_gestures_dialog.open
             || self.mouse_gesture_settings_dialog.open
+            || self.draw_settings_dialog_open
             || self.theme_settings_dialog_open
             || self.fav_dialog.open
             || self.notes_dialog.open
@@ -3123,6 +3149,10 @@ impl LauncherApp {
             Panel::MouseGestureSettingsDialog => {
                 self.mouse_gesture_settings_dialog.open = false;
                 self.panel_states.mouse_gesture_settings_dialog = false;
+            }
+            Panel::DrawSettingsDialog => {
+                self.draw_settings_dialog_open = false;
+                self.panel_states.draw_settings_dialog = false;
             }
             Panel::ThemeSettingsDialog => {
                 self.theme_settings_dialog_open = false;
@@ -3278,6 +3308,10 @@ impl LauncherApp {
                 self.mouse_gesture_settings_dialog.open = false;
                 self.panel_states.mouse_gesture_settings_dialog = false;
             }
+            Panel::DrawSettingsDialog => {
+                self.draw_settings_dialog_open = false;
+                self.panel_states.draw_settings_dialog = false;
+            }
             Panel::ThemeSettingsDialog => {
                 self.theme_settings_dialog_open = false;
                 self.panel_states.theme_settings_dialog = false;
@@ -3390,6 +3424,7 @@ impl LauncherApp {
             Panel::MacroDialog => self.macro_dialog.open = true,
             Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open = true,
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_dialog.open(),
+            Panel::DrawSettingsDialog => self.open_draw_settings_dialog(),
             Panel::ThemeSettingsDialog => self.open_theme_settings_dialog(),
             Panel::FavDialog => self.fav_dialog.open = true,
             Panel::NotesDialog => self.notes_dialog.open = true,
@@ -3518,6 +3553,11 @@ impl LauncherApp {
             self.mouse_gesture_settings_dialog.open,
             mouse_gesture_settings_dialog,
             Panel::MouseGestureSettingsDialog
+        );
+        check!(
+            self.draw_settings_dialog_open,
+            draw_settings_dialog,
+            Panel::DrawSettingsDialog
         );
         check!(
             self.theme_settings_dialog_open,
@@ -4556,6 +4596,17 @@ impl eframe::App for LauncherApp {
         let mut mg_settings_dlg = std::mem::take(&mut self.mouse_gesture_settings_dialog);
         mg_settings_dlg.ui(ctx, self);
         self.mouse_gesture_settings_dialog = mg_settings_dlg;
+        let mut draw_open = self.draw_settings_dialog_open;
+        egui::Window::new("Draw Settings")
+            .open(&mut draw_open)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Open plugin settings and edit the Draw plugin configuration.");
+                if ui.button("Open Plugin Settings").clicked() {
+                    self.show_plugins = true;
+                }
+            });
+        self.draw_settings_dialog_open = draw_open;
         let mut theme_state = std::mem::take(&mut self.theme_settings_dialog);
         let mut theme_open = self.theme_settings_dialog_open;
         crate::gui::theme_settings_dialog::ui(ctx, self, &mut theme_open, &mut theme_state);
@@ -5435,6 +5486,75 @@ mod tests {
         );
 
         assert!(app.note_graph_dialog.open);
+    }
+
+    #[test]
+    fn draw_dialog_settings_action_opens_dialog() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        assert!(!app.draw_settings_dialog_open);
+
+        app.activate_action(
+            Action {
+                label: "Draw settings".into(),
+                desc: "Draw".into(),
+                action: "draw:dialog:settings".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Enter,
+        );
+
+        assert!(app.draw_settings_dialog_open);
+    }
+
+    #[test]
+    fn draw_enter_action_invokes_runtime_start_hook() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let called = Arc::new(AtomicBool::new(false));
+        let called_clone = Arc::clone(&called);
+        crate::draw::set_runtime_start_hook(Some(Box::new(move || {
+            called_clone.store(true, Ordering::SeqCst);
+            Ok(())
+        })));
+
+        app.activate_action(
+            Action {
+                label: "Draw".into(),
+                desc: "Draw".into(),
+                action: "draw:enter".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Enter,
+        );
+
+        crate::draw::set_runtime_start_hook(None);
+        assert!(called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn draw_enter_action_sets_error_when_runtime_start_fails() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        crate::draw::set_runtime_start_hook(Some(Box::new(|| anyhow::bail!("draw failed"))));
+
+        app.activate_action(
+            Action {
+                label: "Draw".into(),
+                desc: "Draw".into(),
+                action: "draw:enter".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Enter,
+        );
+
+        crate::draw::set_runtime_start_hook(None);
+        assert_eq!(app.error.as_deref(), Some("Failed: draw failed"));
     }
 
     #[test]
