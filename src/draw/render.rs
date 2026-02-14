@@ -315,6 +315,20 @@ mod tests {
         }
     }
 
+    fn object_with_width(tool: Tool, geometry: Geometry, width: u32) -> DrawObject {
+        DrawObject {
+            tool,
+            style: ObjectStyle {
+                stroke: StrokeStyle {
+                    width,
+                    color: Color::rgba(255, 255, 255, 255),
+                },
+                fill: None,
+            },
+            geometry,
+        }
+    }
+
     fn changed_pixels(canvas: CanvasModel) -> usize {
         let pixels = render_canvas_to_rgba(&canvas, super::RenderSettings::default(), (64, 64));
         pixels
@@ -485,26 +499,29 @@ mod tests {
     fn deterministic_snapshot_mixed_scene_matches_expected_pixels() {
         let canvas = CanvasModel {
             objects: vec![
-                object(
+                object_with_width(
                     Tool::Line,
                     Geometry::Line {
                         start: (0, 0),
                         end: (0, 0),
                     },
+                    1,
                 ),
-                object(
+                object_with_width(
                     Tool::Rect,
                     Geometry::Rect {
                         start: (1, 1),
                         end: (1, 1),
                     },
+                    1,
                 ),
-                object(
+                object_with_width(
                     Tool::Ellipse,
                     Geometry::Ellipse {
                         start: (2, 2),
                         end: (2, 2),
                     },
+                    1,
                 ),
             ],
         };
