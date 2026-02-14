@@ -5656,7 +5656,7 @@ mod tests {
     }
 
     #[test]
-    fn draw_enter_action_invokes_runtime_start_hook() {
+    fn draw_enter_success_hides_launcher() {
         let _lock = TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
@@ -5667,20 +5667,27 @@ mod tests {
             .expect("draw command");
         let called = Arc::new(AtomicBool::new(false));
         let called_clone = Arc::clone(&called);
-        crate::draw::set_runtime_start_hook(Some(Box::new(move || {
+        crate::draw::set_runtime_spawn_hook(Some(Box::new(move || {
             called_clone.store(true, Ordering::SeqCst);
-            Ok(())
+            let (main_to_overlay_tx, _main_to_overlay_rx) = std::sync::mpsc::channel();
+            let (_overlay_to_main_tx, overlay_to_main_rx) = std::sync::mpsc::channel();
+            let overlay_thread_handle = std::thread::spawn(|| {});
+            Ok(crate::draw::service::OverlayStartupHandshake {
+                overlay_thread_handle,
+                main_to_overlay_tx,
+                overlay_to_main_rx,
+            })
         })));
 
         app.activate_action(draw_command, None, ActivationSource::Enter);
 
-        crate::draw::set_runtime_start_hook(None);
+        crate::draw::set_runtime_spawn_hook(None);
         assert!(called.load(Ordering::SeqCst));
         assert!(!app.visible_flag.load(Ordering::SeqCst));
     }
 
     #[test]
-    fn draw_enter_action_sets_error_when_runtime_start_fails() {
+    fn draw_enter_spawn_failure_leaves_launcher_visible_and_sets_error() {
         let _lock = TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
@@ -5689,11 +5696,11 @@ mod tests {
             .into_iter()
             .find(|command| command.label == "draw")
             .expect("draw command");
-        crate::draw::set_runtime_start_hook(Some(Box::new(|| anyhow::bail!("draw failed"))));
+        crate::draw::set_runtime_spawn_hook(Some(Box::new(|| anyhow::bail!("draw failed"))));
 
         app.activate_action(draw_command, None, ActivationSource::Enter);
 
-        crate::draw::set_runtime_start_hook(None);
+        crate::draw::set_runtime_spawn_hook(None);
         assert_eq!(app.error.as_deref(), Some("Failed: draw failed"));
         assert!(app.visible_flag.load(Ordering::SeqCst));
     }

@@ -1,11 +1,11 @@
-use crate::draw::messages::{ExitReason, MainToOverlay};
+use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain};
 use crate::draw::save::ExitPromptState;
 use crate::draw::settings::DrawSettings;
 use crate::draw::state::{can_transition, DrawLifecycle};
 use anyhow::{anyhow, Result};
 use once_cell::sync::Lazy;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -48,6 +48,7 @@ struct DrawRuntimeState {
     settings: DrawSettings,
     overlay_thread_handle: Option<JoinHandle<()>>,
     main_to_overlay_tx: Option<Sender<MainToOverlay>>,
+    overlay_to_main_rx: Option<Receiver<OverlayToMain>>,
     entry_context: Option<EntryContext>,
     exit_prompt: Option<ExitPromptState>,
     dispatched_messages: Vec<MainToOverlay>,
@@ -60,6 +61,7 @@ impl Default for DrawRuntimeState {
             settings: DrawSettings::default(),
             overlay_thread_handle: None,
             main_to_overlay_tx: None,
+            overlay_to_main_rx: None,
             entry_context: None,
             exit_prompt: None,
             dispatched_messages: Vec::new(),
@@ -85,15 +87,22 @@ impl Default for DrawRuntime {
 static DRAW_RUNTIME: Lazy<DrawRuntime> = Lazy::new(DrawRuntime::default);
 
 type Hook = Box<dyn Fn() -> Result<()> + Send + Sync>;
-static DRAW_START_HOOK: Lazy<Mutex<Option<Hook>>> = Lazy::new(|| Mutex::new(None));
+type SpawnHook = Box<dyn Fn() -> Result<OverlayStartupHandshake> + Send + Sync>;
+static DRAW_SPAWN_HOOK: Lazy<Mutex<Option<SpawnHook>>> = Lazy::new(|| Mutex::new(None));
 static DRAW_RESTORE_HOOK: Lazy<Mutex<Option<Hook>>> = Lazy::new(|| Mutex::new(None));
+
+pub struct OverlayStartupHandshake {
+    pub overlay_thread_handle: JoinHandle<()>,
+    pub main_to_overlay_tx: Sender<MainToOverlay>,
+    pub overlay_to_main_rx: Receiver<OverlayToMain>,
+}
 
 pub fn runtime() -> &'static DrawRuntime {
     &DRAW_RUNTIME
 }
 
-pub fn set_runtime_start_hook(hook: Option<Hook>) {
-    if let Ok(mut guard) = DRAW_START_HOOK.lock() {
+pub fn set_runtime_spawn_hook(hook: Option<SpawnHook>) {
+    if let Ok(mut guard) = DRAW_SPAWN_HOOK.lock() {
         *guard = hook;
     }
 }
@@ -137,21 +146,26 @@ impl DrawRuntime {
             self.transition_locked(&mut state, DrawLifecycle::Starting)?;
             state.entry_context = Some(entry_context.clone());
             state.exit_prompt = None;
-            let (tx, _rx) = channel::<MainToOverlay>();
-            state.main_to_overlay_tx = Some(tx);
+            state.main_to_overlay_tx = None;
+            state.overlay_to_main_rx = None;
             state.overlay_thread_handle = None;
         }
 
-        let started = self.call_hook(&DRAW_START_HOOK);
-        if let Err(err) = started {
-            let _ = self.rollback_after_start_failure();
-            return Err(err);
-        }
+        let startup = match self.spawn_overlay_runtime() {
+            Ok(startup) => startup,
+            Err(err) => {
+                let _ = self.rollback_after_start_failure();
+                return Err(err);
+            }
+        };
 
         let mut state = self
             .state
             .lock()
             .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
+        state.overlay_thread_handle = Some(startup.overlay_thread_handle);
+        state.main_to_overlay_tx = Some(startup.main_to_overlay_tx);
+        state.overlay_to_main_rx = Some(startup.overlay_to_main_rx);
         self.transition_locked(&mut state, DrawLifecycle::Active)?;
         Ok(StartOutcome::Started)
     }
@@ -228,6 +242,19 @@ impl DrawRuntime {
     #[cfg(test)]
     pub fn entry_context_for_test(&self) -> Option<EntryContext> {
         self.state.lock().ok().and_then(|s| s.entry_context.clone())
+    }
+
+    #[cfg(test)]
+    pub fn startup_handles_present_for_test(&self) -> bool {
+        self.state
+            .lock()
+            .ok()
+            .map(|state| {
+                state.overlay_thread_handle.is_some()
+                    && state.main_to_overlay_tx.is_some()
+                    && state.overlay_to_main_rx.is_some()
+            })
+            .unwrap_or(false)
     }
 
     pub fn exit_prompt_state(&self) -> Option<ExitPromptState> {
@@ -333,6 +360,7 @@ impl DrawRuntime {
         );
         state.overlay_thread_handle = None;
         state.main_to_overlay_tx = None;
+        state.overlay_to_main_rx = None;
         state.entry_context = None;
         state.exit_prompt = None;
         state.lifecycle = DrawLifecycle::Idle;
@@ -347,6 +375,27 @@ impl DrawRuntime {
             hook()?;
         }
         Ok(())
+    }
+
+    fn spawn_overlay_runtime(&self) -> Result<OverlayStartupHandshake> {
+        if let Ok(guard) = DRAW_SPAWN_HOOK.lock() {
+            if let Some(ref hook) = *guard {
+                return hook();
+            }
+        }
+
+        let (main_to_overlay_tx, _main_to_overlay_rx) = channel::<MainToOverlay>();
+        let (_overlay_to_main_tx, overlay_to_main_rx) = channel::<OverlayToMain>();
+        let overlay_thread_handle = std::thread::Builder::new()
+            .name("draw-overlay".to_string())
+            .spawn(|| {})
+            .map_err(|err| anyhow!("failed to spawn draw overlay thread: {err}"))?;
+
+        Ok(OverlayStartupHandshake {
+            overlay_thread_handle,
+            main_to_overlay_tx,
+            overlay_to_main_rx,
+        })
     }
 
     fn transition_locked(&self, state: &mut DrawRuntimeState, next: DrawLifecycle) -> Result<()> {
@@ -372,7 +421,7 @@ impl DrawRuntime {
 #[cfg(test)]
 mod tests {
     use super::{
-        runtime, set_runtime_restore_hook, set_runtime_start_hook, DrawRuntime, EntryContext,
+        runtime, set_runtime_restore_hook, set_runtime_spawn_hook, DrawRuntime, EntryContext,
         StartOutcome,
     };
     use crate::draw::messages::{ExitReason, MainToOverlay};
@@ -388,7 +437,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn reset_runtime(rt: &DrawRuntime) {
-        set_runtime_start_hook(None);
+        set_runtime_spawn_hook(None);
         set_runtime_restore_hook(None);
         rt.reset_for_test();
         restore_draw_prior_effective_state(true);
@@ -401,15 +450,13 @@ mod tests {
     }
 
     #[test]
-    fn start_from_idle_transitions_to_starting_or_active() {
+    fn start_from_idle_succeeds_only_after_handles_are_populated() {
         let rt = runtime();
         reset_runtime(rt);
         let outcome = rt.start().expect("start should succeed");
         assert_eq!(outcome, StartOutcome::Started);
-        assert!(matches!(
-            rt.lifecycle(),
-            DrawLifecycle::Starting | DrawLifecycle::Active
-        ));
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Active);
+        assert!(rt.startup_handles_present_for_test());
         rt.reset_for_test();
     }
 
@@ -440,21 +487,24 @@ mod tests {
     }
 
     #[test]
-    fn overlay_start_failure_rolls_back_context() {
+    fn overlay_spawn_failure_rolls_back_context_and_mouse_state() {
         let rt = runtime();
         reset_runtime(rt);
         let restored = Arc::new(AtomicBool::new(false));
         let restored_clone = Arc::clone(&restored);
-        set_runtime_start_hook(Some(Box::new(|| anyhow::bail!("overlay start failed"))));
+        set_runtime_spawn_hook(Some(Box::new(|| anyhow::bail!("overlay spawn failed"))));
         set_runtime_restore_hook(Some(Box::new(move || {
             restored_clone.store(true, Ordering::SeqCst);
             Ok(())
         })));
 
+        let prior_mouse_state = draw_effective_enabled();
         let res = rt.start();
         assert!(res.is_err());
         assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
+        assert_eq!(draw_effective_enabled(), prior_mouse_state);
         assert!(restored.load(Ordering::SeqCst));
+        assert!(!rt.startup_handles_present_for_test());
         reset_runtime(rt);
     }
 
@@ -621,12 +671,12 @@ mod tests {
         let rt = runtime();
         reset_runtime(rt);
 
-        set_runtime_start_hook(Some(Box::new(|| anyhow::bail!("overlay start failed"))));
+        set_runtime_spawn_hook(Some(Box::new(|| anyhow::bail!("overlay spawn failed"))));
         let start_res = rt.start();
         assert!(start_res.is_err());
         assert!(draw_effective_enabled());
 
-        set_runtime_start_hook(None);
+        set_runtime_spawn_hook(None);
         let timeout_ctx = EntryContext {
             timeout_deadline: Some(Instant::now() - Duration::from_secs(1)),
             ..EntryContext::default()
