@@ -203,7 +203,7 @@ impl DrawSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::DrawSettings;
+    use super::{DrawColor, DrawSettings};
 
     #[test]
     fn serde_roundtrip_draw_settings() {
