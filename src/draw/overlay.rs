@@ -1,4 +1,8 @@
-use crate::draw::input::{bridge_left_down_to_runtime, DrawInputState, PointerModifiers};
+use crate::draw::input::{
+    bridge_key_event_to_runtime, bridge_left_down_to_runtime, bridge_left_up_to_runtime,
+    bridge_mouse_move_to_runtime, DrawInputState, PointerModifiers,
+};
+use crate::draw::keyboard_hook::KeyEvent;
 use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain, SaveResult};
 use crate::draw::service::MonitorRect;
 use anyhow::{anyhow, Result};
@@ -166,9 +170,22 @@ pub fn forward_pointer_event_to_draw_input(
         OverlayPointerEvent::LeftDown { modifiers } => {
             bridge_left_down_to_runtime(draw_input, local_point, modifiers);
         }
-        OverlayPointerEvent::Move => draw_input.handle_move(local_point),
-        OverlayPointerEvent::LeftUp => draw_input.handle_left_up(local_point),
+        OverlayPointerEvent::Move => bridge_mouse_move_to_runtime(draw_input, local_point),
+        OverlayPointerEvent::LeftUp => bridge_left_up_to_runtime(draw_input, local_point),
     }
+    true
+}
+
+pub fn forward_key_event_to_draw_input(
+    draw_input: &mut DrawInputState,
+    exit_dialog_state: ExitDialogState,
+    event: KeyEvent,
+) -> bool {
+    if exit_dialog_state.blocks_drawing_input() {
+        return false;
+    }
+
+    bridge_key_event_to_runtime(draw_input, event);
     true
 }
 

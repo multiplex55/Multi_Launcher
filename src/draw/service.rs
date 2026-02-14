@@ -31,6 +31,7 @@ pub struct EntryContext {
     pub launcher_offscreen_context: Option<String>,
     pub mouse_gestures_prior_effective_state: bool,
     pub timeout_deadline: Option<Instant>,
+    pub mouse_gestures_suspend_token: Option<crate::plugins::mouse_gestures::SuspendToken>,
 }
 
 impl Default for EntryContext {
@@ -40,6 +41,7 @@ impl Default for EntryContext {
             launcher_offscreen_context: None,
             mouse_gestures_prior_effective_state: true,
             timeout_deadline: None,
+            mouse_gestures_suspend_token: None,
         }
     }
 }
@@ -143,7 +145,8 @@ impl DrawRuntime {
 
             entry_context.mouse_gestures_prior_effective_state =
                 crate::plugins::mouse_gestures::draw_effective_enabled();
-            crate::plugins::mouse_gestures::set_draw_mode_active(true);
+            entry_context.mouse_gestures_suspend_token =
+                Some(crate::plugins::mouse_gestures::suspend_for_draw());
 
             self.transition_locked(&mut state, DrawLifecycle::Starting)?;
             state.entry_context = Some(entry_context.clone());
@@ -398,7 +401,7 @@ impl DrawRuntime {
         }
         tracing::warn!(?reason, "draw runtime restore executed from {source}");
 
-        let (overlay_thread_handle, prior_mouse_gesture_state) = {
+        let (overlay_thread_handle, prior_mouse_gesture_state, suspend_token) = {
             let mut state = self
                 .state
                 .lock()
@@ -412,12 +415,20 @@ impl DrawRuntime {
             let handle = state.overlay_thread_handle.take();
             state.main_to_overlay_tx = None;
             state.overlay_to_main_rx = None;
+            let suspend_token = state
+                .entry_context
+                .as_mut()
+                .and_then(|ctx| ctx.mouse_gestures_suspend_token.take());
             state.entry_context = None;
             state.exit_prompt = None;
             state.lifecycle = DrawLifecycle::Idle;
-            (handle, prior_mouse_gesture_state)
+
+            (handle, prior_mouse_gesture_state, suspend_token)
         };
 
+        if let Some(token) = suspend_token {
+            crate::plugins::mouse_gestures::resume_from_draw(token);
+        }
         crate::plugins::mouse_gestures::restore_draw_prior_effective_state(
             prior_mouse_gesture_state,
         );
@@ -507,7 +518,7 @@ mod tests {
     use crate::draw::state::{can_transition, DrawLifecycle};
     use crate::plugins::mouse_gestures::{
         apply_runtime_settings, draw_effective_enabled, restore_draw_prior_effective_state,
-        set_draw_mode_active, sync_enabled_plugins, MouseGestureSettings,
+        sync_enabled_plugins, MouseGestureSettings,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -524,7 +535,6 @@ mod tests {
             enabled: true,
             ..MouseGestureSettings::default()
         });
-        set_draw_mode_active(false);
     }
 
     #[test]

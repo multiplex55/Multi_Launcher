@@ -331,6 +331,7 @@ pub fn restore_draw_prior_effective_state(prior_effective_state: bool) {
     with_service(|svc| svc.restore_draw_prior_effective_state(prior_effective_state));
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SuspendToken {
     _private: (),
 }
