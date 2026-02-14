@@ -9,7 +9,10 @@ use crate::draw::render::{
     convert_rgba_to_dib_bgra, render_canvas_to_rgba, BackgroundClearMode, RenderSettings,
 };
 use crate::draw::service::MonitorRect;
-use crate::draw::settings::{DrawColor, DrawSettings, DrawTool, LiveBackgroundMode};
+use crate::draw::settings::{
+    default_toolbar_toggle_hotkey_value, DrawColor, DrawSettings, DrawTool, LiveBackgroundMode,
+};
+use crate::hotkey::{parse_hotkey, Hotkey, Key};
 use anyhow::{anyhow, Result};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
@@ -42,6 +45,64 @@ pub struct OverlayHandles {
     pub overlay_to_main_rx: Receiver<OverlayToMain>,
 }
 
+#[derive(Debug, Clone)]
+struct OverlayThreadState {
+    toolbar_visible: bool,
+    toolbar_toggle_hotkey: Hotkey,
+}
+
+impl OverlayThreadState {
+    fn from_settings(settings: &DrawSettings) -> Self {
+        Self {
+            toolbar_visible: !settings.toolbar_collapsed,
+            toolbar_toggle_hotkey: parse_toolbar_hotkey_with_fallback(
+                &settings.toolbar_toggle_hotkey,
+            ),
+        }
+    }
+
+    fn update_from_settings(&mut self, settings: &DrawSettings) {
+        self.toolbar_toggle_hotkey =
+            parse_toolbar_hotkey_with_fallback(&settings.toolbar_toggle_hotkey);
+    }
+}
+
+fn parse_toolbar_hotkey_with_fallback(raw: &str) -> Hotkey {
+    parse_hotkey(raw)
+        .or_else(|| parse_hotkey(&default_toolbar_toggle_hotkey_value()))
+        .unwrap_or_default()
+}
+
+fn key_event_matches_hotkey(event: KeyEvent, hotkey: Hotkey) -> bool {
+    let Some(key) = map_overlay_key_to_hotkey_key(event.key) else {
+        return false;
+    };
+    key == hotkey.key
+        && event.modifiers.ctrl == hotkey.ctrl
+        && event.modifiers.shift == hotkey.shift
+        && !hotkey.alt
+        && !hotkey.win
+}
+
+fn handle_toolbar_toggle_hotkey_event(state: &mut OverlayThreadState, event: KeyEvent) -> bool {
+    if !key_event_matches_hotkey(event, state.toolbar_toggle_hotkey) {
+        return false;
+    }
+    state.toolbar_visible = !state.toolbar_visible;
+    true
+}
+
+fn map_overlay_key_to_hotkey_key(key: crate::draw::keyboard_hook::KeyCode) -> Option<Key> {
+    use crate::draw::keyboard_hook::KeyCode;
+    match key {
+        KeyCode::U => Some(Key::KeyU),
+        KeyCode::R => Some(Key::KeyR),
+        KeyCode::Escape => Some(Key::Escape),
+        KeyCode::D => Some(Key::KeyD),
+        KeyCode::Other => None,
+    }
+}
+
 fn map_draw_tool(tool: DrawTool) -> Tool {
     match tool {
         DrawTool::Pen => Tool::Pen,
@@ -72,13 +133,17 @@ fn rerender_and_repaint(
     window: &mut OverlayWindow,
     draw_input: &DrawInputState,
     settings: &DrawSettings,
+    toolbar_visible: bool,
 ) {
     let canvas = draw_input.canvas_with_active();
-    let rgba = render_canvas_to_rgba(
+    let mut rgba = render_canvas_to_rgba(
         &canvas,
         live_render_settings(settings),
         window.bitmap_size(),
     );
+    if toolbar_visible {
+        draw_compact_toolbar_panel(&mut rgba, window.bitmap_size(), draw_input);
+    }
     window.with_bitmap_mut(|dib, width, height| {
         if width == 0 || height == 0 || dib.len() != rgba.len() {
             return;
@@ -92,6 +157,105 @@ fn rerender_and_repaint(
 pub struct OverlayPointerSample {
     pub global_point: (i32, i32),
     pub event: OverlayPointerEvent,
+}
+
+fn draw_compact_toolbar_panel(rgba: &mut [u8], size: (u32, u32), draw_input: &DrawInputState) {
+    let (width, height) = size;
+    if width < 160 || height < 60 {
+        return;
+    }
+
+    let panel_x = 16;
+    let panel_y = 16;
+    fill_rect(
+        rgba,
+        width,
+        height,
+        panel_x,
+        panel_y,
+        220,
+        46,
+        [24, 24, 24, 200],
+    );
+
+    let style = draw_input.current_style();
+    fill_rect(
+        rgba,
+        width,
+        height,
+        panel_x + 8,
+        panel_y + 8,
+        28,
+        28,
+        [
+            style.stroke.color.r,
+            style.stroke.color.g,
+            style.stroke.color.b,
+            255,
+        ],
+    );
+
+    let width_px = draw_input.current_style().stroke.width.clamp(1, 64) as i32;
+    fill_rect(
+        rgba,
+        width,
+        height,
+        panel_x + 46,
+        panel_y + 18,
+        width_px,
+        8,
+        [220, 220, 220, 255],
+    );
+
+    let tool_color = match draw_input.current_tool() {
+        Tool::Pen => [80, 220, 120, 255],
+        Tool::Line => [80, 170, 255, 255],
+        Tool::Rect => [255, 220, 80, 255],
+        Tool::Ellipse => [255, 120, 210, 255],
+        Tool::Eraser => [255, 120, 120, 255],
+    };
+    fill_rect(
+        rgba,
+        width,
+        height,
+        panel_x + 120,
+        panel_y + 8,
+        18,
+        18,
+        tool_color,
+    );
+
+    // actionable control indicator: hotkey toggle glyph area
+    fill_rect(
+        rgba,
+        width,
+        height,
+        panel_x + 190,
+        panel_y + 8,
+        22,
+        22,
+        [70, 70, 70, 255],
+    );
+}
+
+fn fill_rect(
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    color: [u8; 4],
+) {
+    for py in y.max(0)..(y + h).min(height as i32) {
+        for px in x.max(0)..(x + w).min(width as i32) {
+            let idx = ((py as u32 * width + px as u32) * 4) as usize;
+            if idx + 3 < rgba.len() {
+                rgba[idx..idx + 4].copy_from_slice(&color);
+            }
+        }
+    }
 }
 
 fn send_exit_after_cleanup<F>(
@@ -133,6 +297,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
             };
 
             let mut active_settings = crate::draw::runtime().settings_snapshot();
+            let mut overlay_state = OverlayThreadState::from_settings(&active_settings);
             let mut keyboard_hook = KeyboardHook::default();
             let mut draw_input = DrawInputState::new(
                 map_draw_tool(active_settings.last_tool),
@@ -149,13 +314,28 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                 pump_overlay_messages();
 
                 for key_event in keyboard_hook.drain_events() {
+                    if handle_toolbar_toggle_hotkey_event(&mut overlay_state, key_event) {
+                        rerender_and_repaint(
+                            &mut window,
+                            &draw_input,
+                            &active_settings,
+                            overlay_state.toolbar_visible,
+                        );
+                        continue;
+                    }
+
                     let dispatch = forward_key_event_to_draw_input(
                         &mut draw_input,
                         ExitDialogState::Hidden,
                         key_event,
                     );
                     if dispatch.should_repaint {
-                        rerender_and_repaint(&mut window, &draw_input, &active_settings);
+                        rerender_and_repaint(
+                            &mut window,
+                            &draw_input,
+                            &active_settings,
+                            overlay_state.toolbar_visible,
+                        );
                     }
                 }
 
@@ -168,7 +348,12 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                         pointer_event.event,
                     );
                     if handled {
-                        rerender_and_repaint(&mut window, &draw_input, &active_settings);
+                        rerender_and_repaint(
+                            &mut window,
+                            &draw_input,
+                            &active_settings,
+                            overlay_state.toolbar_visible,
+                        );
                     }
                 }
 
@@ -179,10 +364,16 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                             tracing::warn!(?err, "failed to activate draw keyboard hook");
                         }
                         window.show();
-                        rerender_and_repaint(&mut window, &draw_input, &active_settings);
+                        rerender_and_repaint(
+                            &mut window,
+                            &draw_input,
+                            &active_settings,
+                            overlay_state.toolbar_visible,
+                        );
                     }
                     Ok(MainToOverlay::UpdateSettings) => {
                         active_settings = crate::draw::runtime().settings_snapshot();
+                        overlay_state.update_from_settings(&active_settings);
                         draw_input.set_tool(map_draw_tool(active_settings.last_tool));
                         draw_input.set_style(ObjectStyle {
                             stroke: StrokeStyle {
@@ -191,7 +382,12 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                             },
                             fill: None,
                         });
-                        rerender_and_repaint(&mut window, &draw_input, &active_settings);
+                        rerender_and_repaint(
+                            &mut window,
+                            &draw_input,
+                            &active_settings,
+                            overlay_state.toolbar_visible,
+                        );
                         let _ = overlay_to_main_tx.send(OverlayToMain::SaveProgress {
                             canvas: draw_input.history().canvas(),
                         });
@@ -905,9 +1101,12 @@ impl OverlayWindow {
 mod tests {
     use super::{
         command_requests_repaint, forward_pointer_event_to_draw_input, global_to_local,
-        live_render_settings, monitor_contains_point, monitor_local_point_for_global,
+        handle_toolbar_toggle_hotkey_event, live_render_settings, monitor_contains_point,
+        monitor_local_point_for_global, parse_toolbar_hotkey_with_fallback,
         select_monitor_for_point, send_exit_after_cleanup, ExitDialogState, OverlayPointerEvent,
+        OverlayThreadState,
     };
+    use crate::draw::keyboard_hook::{KeyCode, KeyEvent, KeyModifiers};
     use crate::draw::messages::{ExitReason, OverlayToMain, SaveResult};
     use crate::draw::{
         input::DrawInputState,
@@ -1118,6 +1317,38 @@ mod tests {
                 save_result: SaveResult::Skipped,
             }
         );
+    }
+
+    #[test]
+    fn toolbar_toggle_hotkey_flips_visibility_and_requests_repaint() {
+        let mut state = OverlayThreadState {
+            toolbar_visible: true,
+            toolbar_toggle_hotkey: parse_toolbar_hotkey_with_fallback("Ctrl+Shift+D"),
+        };
+
+        let toggled = handle_toolbar_toggle_hotkey_event(
+            &mut state,
+            KeyEvent {
+                key: KeyCode::D,
+                modifiers: KeyModifiers {
+                    ctrl: true,
+                    shift: true,
+                },
+            },
+        );
+
+        assert!(toggled);
+        assert!(!state.toolbar_visible);
+    }
+
+    #[test]
+    fn initial_toolbar_state_respects_toolbar_collapsed_setting() {
+        let mut settings = DrawSettings::default();
+        settings.toolbar_collapsed = true;
+        assert!(!OverlayThreadState::from_settings(&settings).toolbar_visible);
+
+        settings.toolbar_collapsed = false;
+        assert!(OverlayThreadState::from_settings(&settings).toolbar_visible);
     }
 
     #[test]

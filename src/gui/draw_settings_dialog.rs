@@ -10,6 +10,7 @@ pub struct DrawSettingsDialog {
     settings: DrawSettings,
     dirty: bool,
     last_error: Option<String>,
+    hotkey_validation_error: Option<String>,
 }
 
 impl DrawSettingsDialog {
@@ -20,6 +21,7 @@ impl DrawSettingsDialog {
 
     fn reload(&mut self, settings_path: &str) {
         self.last_error = None;
+        self.hotkey_validation_error = None;
         match Settings::load(settings_path) {
             Ok(settings) => {
                 self.settings = settings
@@ -40,6 +42,15 @@ impl DrawSettingsDialog {
     fn persist(&mut self, app: &mut crate::gui::LauncherApp) {
         self.last_error = None;
         self.settings.sanitize_for_first_pass_transparency();
+
+        if !self.settings.toolbar_hotkey_valid() {
+            self.hotkey_validation_error =
+                Some("Invalid hotkey format (example: Ctrl+Shift+D).".to_string());
+            self.last_error =
+                Some("Cannot save draw settings until toolbar hotkey is valid.".to_string());
+            return;
+        }
+        self.hotkey_validation_error = None;
 
         let mut settings = match Settings::load(&app.settings_path) {
             Ok(settings) => settings,
@@ -100,12 +111,21 @@ impl DrawSettingsDialog {
                     ui.separator();
                 }
 
-                self.dirty |= render_draw_settings_form(ui, &mut self.settings, "draw_dialog");
+                let form_result = render_draw_settings_form(ui, &mut self.settings, "draw_dialog");
+                self.dirty |= form_result.changed;
+                self.hotkey_validation_error = form_result.toolbar_hotkey_error;
+
+                if let Some(err) = self.hotkey_validation_error.as_ref() {
+                    ui.colored_label(egui::Color32::RED, err);
+                }
 
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(self.dirty, egui::Button::new("Save"))
+                        .add_enabled(
+                            self.dirty && self.hotkey_validation_error.is_none(),
+                            egui::Button::new("Save"),
+                        )
                         .clicked()
                     {
                         self.persist(app);
@@ -139,5 +159,12 @@ impl DrawSettingsDialog {
     #[cfg(test)]
     pub fn reset_for_test(&mut self, app: &mut crate::gui::LauncherApp) {
         self.reset(app);
+    }
+}
+
+#[cfg(test)]
+impl DrawSettingsDialog {
+    pub fn hotkey_validation_error_for_test(&self) -> Option<&str> {
+        self.hotkey_validation_error.as_deref()
     }
 }

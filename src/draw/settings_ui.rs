@@ -3,11 +3,16 @@ use crate::draw::settings::{
 };
 use eframe::egui;
 
+pub struct DrawSettingsFormResult {
+    pub changed: bool,
+    pub toolbar_hotkey_error: Option<String>,
+}
+
 pub fn render_draw_settings_form(
     ui: &mut egui::Ui,
     settings: &mut DrawSettings,
     id_source: &str,
-) -> bool {
+) -> DrawSettingsFormResult {
     let mut changed = false;
 
     changed |= ui
@@ -52,12 +57,20 @@ pub fn render_draw_settings_form(
             });
     });
 
+    let mut toolbar_hotkey_error = None;
     ui.horizontal(|ui| {
         ui.label("Toolbar toggle hotkey");
         changed |= ui
             .text_edit_singleline(&mut settings.toolbar_toggle_hotkey)
             .changed();
     });
+    if !settings.toolbar_hotkey_valid() {
+        toolbar_hotkey_error = Some("Invalid hotkey format (example: Ctrl+Shift+D).".to_string());
+        ui.colored_label(
+            egui::Color32::RED,
+            "Invalid hotkey format (example: Ctrl+Shift+D)",
+        );
+    }
 
     ui.horizontal(|ui| {
         ui.label("Last tool");
@@ -166,5 +179,8 @@ pub fn render_draw_settings_form(
         changed |= edit_color(ui, &format!("Quick #{index}"), color);
     }
 
-    changed
+    DrawSettingsFormResult {
+        changed,
+        toolbar_hotkey_error,
+    }
 }

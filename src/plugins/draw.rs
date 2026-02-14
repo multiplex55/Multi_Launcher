@@ -104,14 +104,19 @@ impl Plugin for DrawPlugin {
         let mut settings: DrawSettings =
             serde_json::from_value(value.clone()).unwrap_or_else(|_| self.settings.clone());
 
-        render_draw_settings_form(ui, &mut settings, "draw_plugin");
+        let form_result = render_draw_settings_form(ui, &mut settings, "draw_plugin");
+        if let Some(error) = form_result.toolbar_hotkey_error.as_ref() {
+            ui.colored_label(egui::Color32::RED, error);
+        }
 
         if ui.button("Reset Draw Settings").clicked() {
             self.reset_settings(value);
             return;
         }
 
-        self.persist_settings(value, settings);
+        if form_result.toolbar_hotkey_error.is_none() {
+            self.persist_settings(value, settings);
+        }
     }
 }
 

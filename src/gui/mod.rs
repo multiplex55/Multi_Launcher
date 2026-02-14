@@ -3689,6 +3689,19 @@ impl eframe::App for LauncherApp {
         if self.enable_toasts {
             self.toasts.show(ctx);
         }
+        for warning in crate::draw::runtime().take_runtime_warnings() {
+            if self.enable_toasts {
+                push_toast(
+                    &mut self.toasts,
+                    Toast {
+                        text: warning.into(),
+                        kind: ToastKind::Warning,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(self.toast_duration as f64),
+                    },
+                );
+            }
+        }
         let frame_time = Duration::from_secs_f32(ctx.input(|i| i.unstable_dt).max(0.0));
         self.dashboard.update_frame_timing(frame_time);
         if let Some(pending) = self.pending_query.take() {
@@ -4778,6 +4791,11 @@ impl LauncherApp {
     }
 
     #[cfg(test)]
+    fn draw_dialog_hotkey_error_for_test(&self) -> Option<&str> {
+        self.draw_settings_dialog.hotkey_validation_error_for_test()
+    }
+
+    #[cfg(test)]
     fn draw_dialog_save_for_test(&mut self) {
         let mut dialog = std::mem::take(&mut self.draw_settings_dialog);
         dialog.save_for_test(self);
@@ -5617,6 +5635,41 @@ mod tests {
             app.settings_editor.get_plugin_setting_value("draw"),
             Some(&payload)
         );
+
+        rt.reset_for_test();
+        std::env::set_current_dir(orig_dir).unwrap();
+    }
+
+    #[test]
+    fn settings_dialog_shows_error_and_blocks_save_on_invalid_hotkey() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let rt = runtime();
+        rt.reset_for_test();
+
+        let dir = tempdir().unwrap();
+        let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        std::env::set_current_dir(dir.path()).unwrap();
+        Settings::default().save("settings.json").unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.open_draw_settings_dialog();
+
+        let mut edited = app.draw_dialog_settings_for_test();
+        edited.toolbar_toggle_hotkey = "Ctrl+Shift+NotAKey".to_string();
+        edited.last_width = 51;
+        app.draw_dialog_set_settings_for_test(edited);
+        app.draw_dialog_save_for_test();
+
+        assert_eq!(
+            app.draw_dialog_hotkey_error_for_test(),
+            Some("Invalid hotkey format (example: Ctrl+Shift+D).")
+        );
+        assert!(app.error.as_ref().is_none());
+
+        let persisted = Settings::load("settings.json").unwrap();
+        assert!(!persisted.plugin_settings.contains_key("draw"));
+        assert_eq!(rt.settings_for_test(), Some(DrawSettings::default()));
 
         rt.reset_for_test();
         std::env::set_current_dir(orig_dir).unwrap();

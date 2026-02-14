@@ -55,6 +55,7 @@ struct DrawRuntimeState {
     entry_context: Option<EntryContext>,
     exit_prompt: Option<ExitPromptState>,
     dispatched_messages: Vec<MainToOverlay>,
+    runtime_warnings: Vec<String>,
 }
 
 impl Default for DrawRuntimeState {
@@ -68,6 +69,7 @@ impl Default for DrawRuntimeState {
             entry_context: None,
             exit_prompt: None,
             dispatched_messages: Vec::new(),
+            runtime_warnings: Vec::new(),
         }
     }
 }
@@ -240,7 +242,13 @@ impl DrawRuntime {
 
     pub fn apply_settings(&self, mut settings: DrawSettings) {
         settings.sanitize_for_first_pass_transparency();
+        let invalid_hotkey = settings.sanitize_toolbar_hotkey_or_default();
         if let Ok(mut state) = self.state.lock() {
+            if invalid_hotkey {
+                let warning = "Invalid toolbar hotkey; reverted to default".to_string();
+                tracing::warn!("{warning}");
+                state.runtime_warnings.push(warning);
+            }
             state.settings = settings;
             if state.lifecycle.is_active() {
                 Self::send_overlay_message_locked(&mut state, MainToOverlay::UpdateSettings);
@@ -253,6 +261,14 @@ impl DrawRuntime {
             .lock()
             .map(|state| state.settings.clone())
             .unwrap_or_default()
+    }
+
+    pub fn take_runtime_warnings(&self) -> Vec<String> {
+        if let Ok(mut state) = self.state.lock() {
+            std::mem::take(&mut state.runtime_warnings)
+        } else {
+            Vec::new()
+        }
     }
 
     #[cfg(test)]
@@ -1035,6 +1051,25 @@ mod tests {
 
         rt.tick(Instant::now()).expect("tick should restore state");
         assert!(draw_effective_enabled());
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn runtime_invalid_hotkey_falls_back_to_default_and_emits_warning() {
+        let rt = runtime();
+        reset_runtime(rt);
+
+        let mut settings = DrawSettings::default();
+        settings.toolbar_toggle_hotkey = "Ctrl+Shift+NotAKey".to_string();
+
+        rt.apply_settings(settings);
+
+        let snapshot = rt.settings_snapshot();
+        assert_eq!(snapshot.toolbar_toggle_hotkey, "Ctrl+Shift+D");
+        assert!(rt
+            .take_runtime_warnings()
+            .iter()
+            .any(|warning| warning.contains("Invalid toolbar hotkey; reverted to default")));
         reset_runtime(rt);
     }
 
