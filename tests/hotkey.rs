@@ -51,6 +51,12 @@ fn parse_invalid_hotkey() {
 }
 
 #[test]
+fn hotkey_parser_rejects_invalid_toolbar_toggle_string() {
+    assert!(parse_hotkey("Ctrl+Shift+NotAKey").is_none());
+    assert!(parse_hotkey("Ctrl++D").is_none());
+}
+
+#[test]
 fn trigger_take() {
     let hk = Hotkey::default();
     let trigger = HotkeyTrigger::new(hk);

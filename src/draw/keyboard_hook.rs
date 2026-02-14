@@ -5,6 +5,7 @@ pub enum KeyCode {
     U,
     R,
     Escape,
+    D,
     Other,
 }
 
@@ -116,7 +117,7 @@ mod platform {
     use std::thread::JoinHandle;
     use std::time::Duration;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_R, VK_SHIFT, VK_U,
+        GetAsyncKeyState, VK_CONTROL, VK_D, VK_ESCAPE, VK_R, VK_SHIFT, VK_U,
     };
 
     static KEY_EVENT_SENDER: Lazy<Mutex<Option<Sender<KeyEvent>>>> = Lazy::new(|| Mutex::new(None));
@@ -255,6 +256,7 @@ mod platform {
             code if code == VK_U.0 as u32 => KeyCode::U,
             code if code == VK_R.0 as u32 => KeyCode::R,
             code if code == VK_ESCAPE.0 as u32 => KeyCode::Escape,
+            code if code == VK_D.0 as u32 => KeyCode::D,
             _ => KeyCode::Other,
         }
     }

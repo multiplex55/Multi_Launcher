@@ -41,6 +41,14 @@ impl DrawInputState {
         &self.history
     }
 
+    pub fn current_tool(&self) -> Tool {
+        self.tool
+    }
+
+    pub fn current_style(&self) -> ObjectStyle {
+        self.style
+    }
+
     pub fn set_tool(&mut self, tool: Tool) {
         self.tool = tool;
     }

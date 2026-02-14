@@ -50,7 +50,7 @@ pub fn parse_hotkey(s: &str) -> Option<Hotkey> {
             "SHIFT" => shift = true,
             "ALT" => alt = true,
             "WIN" | "SUPER" => win = true,
-            "" => {}
+            "" => return None,
             _ => {
                 if let Some(k) = parse_key(&upper) {
                     key = Some(k);

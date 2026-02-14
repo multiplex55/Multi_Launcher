@@ -193,6 +193,10 @@ fn default_toolbar_toggle_hotkey() -> String {
     "Ctrl+Shift+D".to_owned()
 }
 
+pub fn default_toolbar_toggle_hotkey_value() -> String {
+    default_toolbar_toggle_hotkey()
+}
+
 fn default_last_tool() -> DrawTool {
     DrawTool::Pen
 }
@@ -297,6 +301,18 @@ impl DrawSettings {
         }
 
         changed
+    }
+
+    pub fn toolbar_hotkey_valid(&self) -> bool {
+        crate::hotkey::parse_hotkey(&self.toolbar_toggle_hotkey).is_some()
+    }
+
+    pub fn sanitize_toolbar_hotkey_or_default(&mut self) -> bool {
+        if self.toolbar_hotkey_valid() {
+            return false;
+        }
+        self.toolbar_toggle_hotkey = default_toolbar_toggle_hotkey();
+        true
     }
 }
 
