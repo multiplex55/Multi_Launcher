@@ -177,8 +177,13 @@ pub fn bridge_left_up_to_runtime(state: &mut DrawInputState, point: (i32, i32)) 
     state.handle_left_up(point);
 }
 
-pub fn bridge_key_event_to_runtime(state: &mut DrawInputState, event: KeyEvent) {
-    route_command_to_runtime(state.handle_key_event(event), ExitReason::UserRequest);
+pub fn bridge_key_event_to_runtime(
+    state: &mut DrawInputState,
+    event: KeyEvent,
+) -> Option<InputCommand> {
+    let command = state.handle_key_event(event);
+    route_command_to_runtime(command.clone(), ExitReason::UserRequest);
+    command
 }
 
 fn should_append_point(last: Option<(i32, i32)>, point: (i32, i32)) -> bool {
@@ -300,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn esc_requests_exit() {
+    fn esc_dispatches_exit() {
         let mut state = draw_state(Tool::Ellipse);
         let command = state.handle_key_event(KeyEvent {
             key: KeyCode::Escape,
@@ -310,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn u_undo_and_ctrl_r_redo_shortcuts_dispatch_correct_commands() {
+    fn key_u_dispatches_undo() {
         let mut state = draw_state(Tool::Line);
 
         let _ = state.handle_left_down((0, 0), PointerModifiers::default());
@@ -324,6 +329,18 @@ mod tests {
         assert_eq!(undo_command, Some(InputCommand::Undo));
         assert_eq!(state.history().undo_len(), 0);
         assert_eq!(state.history().redo_len(), 1);
+    }
+
+    #[test]
+    fn ctrl_r_dispatches_redo() {
+        let mut state = draw_state(Tool::Line);
+
+        let _ = state.handle_left_down((0, 0), PointerModifiers::default());
+        state.handle_left_up((10, 10));
+        let _ = state.handle_key_event(KeyEvent {
+            key: KeyCode::U,
+            modifiers: KeyModifiers::default(),
+        });
 
         let redo_command = state.handle_key_event(KeyEvent {
             key: KeyCode::R,
