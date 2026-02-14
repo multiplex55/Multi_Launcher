@@ -294,19 +294,24 @@ mod platform {
         PAINTSTRUCT, SRCCOPY,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW,
-        RegisterClassW, ReleaseCapture, SetCapture, SetLayeredWindowAttributes, SetWindowLongPtrW,
-        SetWindowPos, GWLP_USERDATA, HWND_TOPMOST, LWA_COLORKEY, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOSIZE, SWP_SHOWWINDOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_ERASEBKGND,
-        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SHOWWINDOW, WM_WINDOWPOSCHANGED,
-        WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+        RegisterClassW, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, GWLP_USERDATA,
+        HWND_TOPMOST, LWA_COLORKEY, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+        WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        WM_MOUSEMOVE, WM_PAINT, WM_SHOWWINDOW, WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_LAYERED,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
 
     static POINTER_SENDERS: Lazy<Mutex<HashMap<isize, Sender<OverlayPointerSample>>>> =
         Lazy::new(|| Mutex::new(HashMap::new()));
     static WINDOW_ORIGINS: Lazy<Mutex<HashMap<isize, (i32, i32)>>> =
         Lazy::new(|| Mutex::new(HashMap::new()));
+
+    fn hwnd_key(hwnd: HWND) -> isize {
+        hwnd.0 as isize
+    }
 
     pub fn compose_overlay_window_ex_style() -> WINDOW_EX_STYLE {
         WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
@@ -455,7 +460,9 @@ mod platform {
                 let local_y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
                 if let (Ok(origins), Ok(senders)) = (WINDOW_ORIGINS.lock(), POINTER_SENDERS.lock())
                 {
-                    if let (Some(origin), Some(tx)) = (origins.get(&hwnd.0), senders.get(&hwnd.0)) {
+                    if let (Some(origin), Some(tx)) =
+                        (origins.get(&hwnd_key(hwnd)), senders.get(&hwnd_key(hwnd)))
+                    {
                         let event = match msg {
                             WM_LBUTTONDOWN => OverlayPointerEvent::LeftDown {
                                 modifiers: Default::default(),
@@ -591,10 +598,10 @@ mod platform {
 
             let (pointer_tx, pointer_rx) = channel::<OverlayPointerSample>();
             if let Ok(mut senders) = POINTER_SENDERS.lock() {
-                senders.insert(hwnd.0, pointer_tx);
+                senders.insert(hwnd_key(hwnd), pointer_tx);
             }
             if let Ok(mut origins) = WINDOW_ORIGINS.lock() {
-                origins.insert(hwnd.0, (monitor_rect.x, monitor_rect.y));
+                origins.insert(hwnd_key(hwnd), (monitor_rect.x, monitor_rect.y));
             }
 
             let size_bytes = (monitor_rect.width as usize)
@@ -684,10 +691,10 @@ mod platform {
                 }
                 if !self.hwnd.0.is_null() {
                     if let Ok(mut senders) = POINTER_SENDERS.lock() {
-                        senders.remove(&self.hwnd.0);
+                        senders.remove(&hwnd_key(self.hwnd));
                     }
                     if let Ok(mut origins) = WINDOW_ORIGINS.lock() {
-                        origins.remove(&self.hwnd.0);
+                        origins.remove(&hwnd_key(self.hwnd));
                     }
                     let _ = DestroyWindow(self.hwnd);
                     self.hwnd = HWND::default();
