@@ -1,14 +1,15 @@
 use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain};
+use crate::draw::overlay::spawn_overlay;
 use crate::draw::save::ExitPromptState;
 use crate::draw::settings::DrawSettings;
 use crate::draw::state::{can_transition, DrawLifecycle};
 use anyhow::{anyhow, Result};
 use once_cell::sync::Lazy;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartOutcome {
@@ -90,6 +91,7 @@ type Hook = Box<dyn Fn() -> Result<()> + Send + Sync>;
 type SpawnHook = Box<dyn Fn() -> Result<OverlayStartupHandshake> + Send + Sync>;
 static DRAW_SPAWN_HOOK: Lazy<Mutex<Option<SpawnHook>>> = Lazy::new(|| Mutex::new(None));
 static DRAW_RESTORE_HOOK: Lazy<Mutex<Option<Hook>>> = Lazy::new(|| Mutex::new(None));
+const OVERLAY_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct OverlayStartupHandshake {
     pub overlay_thread_handle: JoinHandle<()>,
@@ -167,6 +169,7 @@ impl DrawRuntime {
         state.main_to_overlay_tx = Some(startup.main_to_overlay_tx);
         state.overlay_to_main_rx = Some(startup.overlay_to_main_rx);
         self.transition_locked(&mut state, DrawLifecycle::Active)?;
+        Self::send_overlay_message_locked(&mut state, MainToOverlay::Start);
         Ok(StartOutcome::Started)
     }
 
@@ -299,6 +302,7 @@ impl DrawRuntime {
             self.restore_pipeline(ExitReason::Timeout, "overlay timeout failsafe")?;
         }
 
+        self.process_overlay_notifications()?;
         Ok(())
     }
 
@@ -315,6 +319,54 @@ impl DrawRuntime {
                 ..DrawRuntimeState::default()
             };
         }
+    }
+
+    fn process_overlay_notifications(&self) -> Result<()> {
+        let mut terminal_reason = None;
+        let mut save_error = None;
+
+        {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
+            if !state.lifecycle.is_active() && state.lifecycle != DrawLifecycle::Exiting {
+                return Ok(());
+            }
+            if let Some(rx) = &state.overlay_to_main_rx {
+                loop {
+                    match rx.try_recv() {
+                        Ok(OverlayToMain::Exited { reason, .. }) => {
+                            terminal_reason = Some(reason);
+                        }
+                        Ok(OverlayToMain::SaveProgress { canvas }) => {
+                            tracing::debug!(
+                                objects = canvas.objects.len(),
+                                "draw overlay save progress update"
+                            );
+                        }
+                        Ok(OverlayToMain::SaveError { error }) => {
+                            tracing::error!(error = %error, "draw overlay save error");
+                            save_error = Some(error);
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            terminal_reason = Some(ExitReason::OverlayFailure);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(error) = save_error {
+            self.set_exit_prompt_error(error);
+        }
+        if let Some(reason) = terminal_reason {
+            self.restore_pipeline(reason, "overlay exited notification")?;
+        }
+
+        Ok(())
     }
 
     fn rollback_after_start_failure(&self) -> Result<()> {
@@ -346,25 +398,57 @@ impl DrawRuntime {
         }
         tracing::warn!(?reason, "draw runtime restore executed from {source}");
 
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
-        let prior_mouse_gesture_state = state
-            .entry_context
-            .as_ref()
-            .map(|ctx| ctx.mouse_gestures_prior_effective_state)
-            .unwrap_or_else(crate::plugins::mouse_gestures::draw_effective_enabled);
+        let (overlay_thread_handle, prior_mouse_gesture_state) = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
+            let prior_mouse_gesture_state = state
+                .entry_context
+                .as_ref()
+                .map(|ctx| ctx.mouse_gestures_prior_effective_state)
+                .unwrap_or_else(crate::plugins::mouse_gestures::draw_effective_enabled);
+
+            let handle = state.overlay_thread_handle.take();
+            state.main_to_overlay_tx = None;
+            state.overlay_to_main_rx = None;
+            state.entry_context = None;
+            state.exit_prompt = None;
+            state.lifecycle = DrawLifecycle::Idle;
+            (handle, prior_mouse_gesture_state)
+        };
+
         crate::plugins::mouse_gestures::restore_draw_prior_effective_state(
             prior_mouse_gesture_state,
         );
-        state.overlay_thread_handle = None;
-        state.main_to_overlay_tx = None;
-        state.overlay_to_main_rx = None;
-        state.entry_context = None;
-        state.exit_prompt = None;
-        state.lifecycle = DrawLifecycle::Idle;
+
+        self.join_overlay_thread_with_timeout(overlay_thread_handle, source);
         Ok(())
+    }
+
+    fn join_overlay_thread_with_timeout(&self, handle: Option<JoinHandle<()>>, source: &str) {
+        let Some(handle) = handle else {
+            return;
+        };
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let join_result = handle.join();
+            let _ = done_tx.send(join_result);
+        });
+
+        match done_rx.recv_timeout(OVERLAY_JOIN_TIMEOUT) {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                tracing::error!("draw overlay thread panicked while joining during {source}");
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                tracing::error!("draw overlay thread join timed out during {source}");
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                tracing::error!("draw overlay thread join channel disconnected during {source}");
+            }
+        }
     }
 
     fn call_hook(&self, hook_slot: &Lazy<Mutex<Option<Hook>>>) -> Result<()> {
@@ -384,17 +468,11 @@ impl DrawRuntime {
             }
         }
 
-        let (main_to_overlay_tx, _main_to_overlay_rx) = channel::<MainToOverlay>();
-        let (_overlay_to_main_tx, overlay_to_main_rx) = channel::<OverlayToMain>();
-        let overlay_thread_handle = std::thread::Builder::new()
-            .name("draw-overlay".to_string())
-            .spawn(|| {})
-            .map_err(|err| anyhow!("failed to spawn draw overlay thread: {err}"))?;
-
+        let startup = spawn_overlay()?;
         Ok(OverlayStartupHandshake {
-            overlay_thread_handle,
-            main_to_overlay_tx,
-            overlay_to_main_rx,
+            overlay_thread_handle: startup.overlay_thread_handle,
+            main_to_overlay_tx: startup.main_to_overlay_tx,
+            overlay_to_main_rx: startup.overlay_to_main_rx,
         })
     }
 
@@ -424,7 +502,7 @@ mod tests {
         runtime, set_runtime_restore_hook, set_runtime_spawn_hook, DrawRuntime, EntryContext,
         StartOutcome,
     };
-    use crate::draw::messages::{ExitReason, MainToOverlay};
+    use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain, SaveResult};
     use crate::draw::settings::DrawSettings;
     use crate::draw::state::{can_transition, DrawLifecycle};
     use crate::plugins::mouse_gestures::{
@@ -483,6 +561,12 @@ mod tests {
             .expect("prompt state should be present");
         assert!(prompt.frozen_input);
         assert_eq!(prompt.reason, ExitReason::UserRequest);
+        assert_eq!(
+            rt.take_dispatched_messages_for_test(),
+            vec![MainToOverlay::RequestExit {
+                reason: ExitReason::UserRequest
+            }]
+        );
         rt.reset_for_test();
     }
 
@@ -504,6 +588,46 @@ mod tests {
         assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
         assert_eq!(draw_effective_enabled(), prior_mouse_state);
         assert!(restored.load(Ordering::SeqCst));
+        assert!(!rt.startup_handles_present_for_test());
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn overlay_exited_notification_from_channel_restores_once() {
+        let rt = runtime();
+        reset_runtime(rt);
+
+        let (tx, rx) = std::sync::mpsc::channel::<OverlayToMain>();
+        set_runtime_spawn_hook(Some(Box::new(move || {
+            let (main_tx, main_rx) = std::sync::mpsc::channel::<MainToOverlay>();
+            let handle = std::thread::spawn(move || {
+                while let Ok(message) = main_rx.recv() {
+                    if matches!(message, MainToOverlay::RequestExit { .. }) {
+                        break;
+                    }
+                }
+            });
+            Ok(super::OverlayStartupHandshake {
+                overlay_thread_handle: handle,
+                main_to_overlay_tx: main_tx,
+                overlay_to_main_rx: rx,
+            })
+        })));
+
+        rt.start().expect("start should succeed");
+        tx.send(OverlayToMain::Exited {
+            reason: ExitReason::UserRequest,
+            save_result: SaveResult::Skipped,
+        })
+        .expect("exit event should send");
+        tx.send(OverlayToMain::Exited {
+            reason: ExitReason::OverlayFailure,
+            save_result: SaveResult::Skipped,
+        })
+        .expect("duplicate exit event should send");
+
+        rt.tick(Instant::now()).expect("tick should process exits");
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
         assert!(!rt.startup_handles_present_for_test());
         reset_runtime(rt);
     }
@@ -579,6 +703,7 @@ mod tests {
 
         assert_eq!(restore_count.load(Ordering::SeqCst), 1);
         assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
+        assert!(!rt.startup_handles_present_for_test());
         reset_runtime(rt);
     }
 

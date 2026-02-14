@@ -1,5 +1,9 @@
 use crate::draw::input::{bridge_left_down_to_runtime, DrawInputState, PointerModifiers};
+use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain, SaveResult};
 use crate::draw::service::MonitorRect;
+use anyhow::{anyhow, Result};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::thread::{self, JoinHandle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitDialogState {
@@ -20,6 +24,97 @@ pub enum OverlayPointerEvent {
     LeftDown { modifiers: PointerModifiers },
     Move,
     LeftUp,
+}
+
+pub struct OverlayHandles {
+    pub overlay_thread_handle: JoinHandle<()>,
+    pub main_to_overlay_tx: Sender<MainToOverlay>,
+    pub overlay_to_main_rx: Receiver<OverlayToMain>,
+}
+
+pub fn spawn_overlay() -> Result<OverlayHandles> {
+    let (main_to_overlay_tx, main_to_overlay_rx) = channel::<MainToOverlay>();
+    let (overlay_to_main_tx, overlay_to_main_rx) = channel::<OverlayToMain>();
+
+    let overlay_thread_handle = thread::Builder::new()
+        .name("draw-overlay".to_string())
+        .spawn(move || {
+            let mut exit_reason = ExitReason::OverlayFailure;
+            let mut did_start = false;
+            let mut window = match OverlayWindow::create_for_cursor() {
+                Some(window) => window,
+                None => {
+                    let _ = overlay_to_main_tx.send(OverlayToMain::SaveError {
+                        error: "unable to initialize draw overlay window".to_string(),
+                    });
+                    let _ = overlay_to_main_tx.send(OverlayToMain::Exited {
+                        reason: ExitReason::StartFailure,
+                        save_result: SaveResult::Skipped,
+                    });
+                    return;
+                }
+            };
+
+            loop {
+                #[cfg(windows)]
+                pump_overlay_messages();
+
+                match main_to_overlay_rx.recv_timeout(std::time::Duration::from_millis(16)) {
+                    Ok(MainToOverlay::Start) => {
+                        did_start = true;
+                        window.show();
+                    }
+                    Ok(MainToOverlay::UpdateSettings) => {
+                        let _ = overlay_to_main_tx.send(OverlayToMain::SaveProgress {
+                            canvas: Default::default(),
+                        });
+                    }
+                    Ok(MainToOverlay::RequestExit { reason }) => {
+                        exit_reason = reason;
+                        break;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        exit_reason = ExitReason::OverlayFailure;
+                        break;
+                    }
+                }
+            }
+
+            if !did_start {
+                let _ = overlay_to_main_tx.send(OverlayToMain::SaveError {
+                    error: "overlay exited before start command".to_string(),
+                });
+            }
+            window.shutdown();
+            let _ = overlay_to_main_tx.send(OverlayToMain::Exited {
+                reason: exit_reason,
+                save_result: SaveResult::Skipped,
+            });
+        })
+        .map_err(|err| anyhow!("failed to spawn draw overlay thread: {err}"))?;
+
+    Ok(OverlayHandles {
+        overlay_thread_handle,
+        main_to_overlay_tx,
+        overlay_to_main_rx,
+    })
+}
+
+#[cfg(windows)]
+fn pump_overlay_messages() {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+    };
+
+    unsafe {
+        let mut msg = MSG::default();
+        while PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_REMOVE).into() {
+            let _ = TranslateMessage(&msg);
+            let _ = DispatchMessageW(&msg);
+        }
+    }
 }
 
 pub fn monitor_contains_point(rect: MonitorRect, point: (i32, i32)) -> bool {
