@@ -4,10 +4,12 @@ use crate::draw::input::{
 };
 use crate::draw::keyboard_hook::{map_key_event_to_command, KeyCommand, KeyEvent};
 use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain, SaveResult};
+use crate::draw::model::{ObjectStyle, Tool};
 use crate::draw::service::MonitorRect;
 use anyhow::{anyhow, Result};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitDialogState {
@@ -36,6 +38,12 @@ pub struct OverlayHandles {
     pub overlay_to_main_rx: Receiver<OverlayToMain>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayPointerSample {
+    pub global_point: (i32, i32),
+    pub event: OverlayPointerEvent,
+}
+
 fn send_exit_after_cleanup<F>(
     cleanup: F,
     overlay_to_main_tx: &Sender<OverlayToMain>,
@@ -51,7 +59,7 @@ fn send_exit_after_cleanup<F>(
     });
 }
 
-pub fn spawn_overlay() -> Result<OverlayHandles> {
+pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHandles> {
     let (main_to_overlay_tx, main_to_overlay_rx) = channel::<MainToOverlay>();
     let (overlay_to_main_tx, overlay_to_main_rx) = channel::<OverlayToMain>();
 
@@ -60,7 +68,7 @@ pub fn spawn_overlay() -> Result<OverlayHandles> {
         .spawn(move || {
             let mut exit_reason: Option<ExitReason> = None;
             let mut did_start = false;
-            let mut window = match OverlayWindow::create_for_cursor() {
+            let mut window = match OverlayWindow::create_for_monitor(monitor_rect) {
                 Some(window) => window,
                 None => {
                     let _ = overlay_to_main_tx.send(OverlayToMain::SaveError {
@@ -74,11 +82,23 @@ pub fn spawn_overlay() -> Result<OverlayHandles> {
                 }
             };
 
+            let mut draw_input = DrawInputState::new(Tool::Pen, ObjectStyle::default());
             loop {
                 #[cfg(windows)]
                 pump_overlay_messages();
 
-                match main_to_overlay_rx.recv_timeout(std::time::Duration::from_millis(16)) {
+                for pointer_event in window.drain_pointer_events() {
+                    let _ = forward_pointer_event_and_request_paint(
+                        &mut draw_input,
+                        ExitDialogState::Hidden,
+                        window.monitor_rect(),
+                        pointer_event.global_point,
+                        pointer_event.event,
+                        &window,
+                    );
+                }
+
+                match main_to_overlay_rx.recv_timeout(Duration::from_millis(16)) {
                     Ok(MainToOverlay::Start) => {
                         did_start = true;
                         window.show();
@@ -142,6 +162,20 @@ pub fn monitor_contains_point(rect: MonitorRect, point: (i32, i32)) -> bool {
         && point.0 < rect.x + rect.width
         && point.1 >= rect.y
         && point.1 < rect.y + rect.height
+}
+
+pub fn resolve_monitor_from_cursor() -> Option<MonitorRect> {
+    #[cfg(windows)]
+    {
+        let monitors = platform::enumerate_monitors();
+        let cursor = platform::resolve_cursor_position()?;
+        return select_monitor_for_point(&monitors, cursor).or_else(|| monitors.first().copied());
+    }
+
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
 pub fn select_monitor_for_point(
@@ -241,11 +275,15 @@ pub fn forward_key_event_and_request_paint(
 }
 #[cfg(windows)]
 mod platform {
-    use super::{global_to_local, select_monitor_for_point};
+    use super::{global_to_local, OverlayPointerEvent, OverlayPointerSample};
     use crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY;
     use crate::draw::service::MonitorRect;
+    use once_cell::sync::Lazy;
+    use std::collections::HashMap;
     use std::mem;
     use std::ptr;
+    use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+    use std::sync::Mutex;
     use std::sync::Once;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -258,12 +296,17 @@ mod platform {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW,
-        RegisterClassW, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, GWLP_USERDATA,
-        HWND_TOPMOST, LWA_COLORKEY, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-        WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_ERASEBKGND, WM_PAINT, WM_SHOWWINDOW,
-        WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-        WS_EX_TOPMOST, WS_POPUP,
+        RegisterClassW, ReleaseCapture, SetCapture, SetLayeredWindowAttributes, SetWindowLongPtrW,
+        SetWindowPos, GWLP_USERDATA, HWND_TOPMOST, LWA_COLORKEY, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_SHOWWINDOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_ERASEBKGND,
+        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SHOWWINDOW, WM_WINDOWPOSCHANGED,
+        WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
+
+    static POINTER_SENDERS: Lazy<Mutex<HashMap<isize, Sender<OverlayPointerSample>>>> =
+        Lazy::new(|| Mutex::new(HashMap::new()));
+    static WINDOW_ORIGINS: Lazy<Mutex<HashMap<isize, (i32, i32)>>> =
+        Lazy::new(|| Mutex::new(HashMap::new()));
 
     pub fn compose_overlay_window_ex_style() -> WINDOW_EX_STYLE {
         WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
@@ -304,7 +347,7 @@ mod platform {
             .collect()
     }
 
-    fn resolve_cursor_position() -> Option<(i32, i32)> {
+    pub(super) fn resolve_cursor_position() -> Option<(i32, i32)> {
         let mut point = POINT::default();
         unsafe {
             if GetCursorPos(&mut point).is_ok() {
@@ -315,7 +358,7 @@ mod platform {
         }
     }
 
-    fn enumerate_monitors() -> Vec<MonitorRect> {
+    pub(super) fn enumerate_monitors() -> Vec<MonitorRect> {
         unsafe extern "system" fn enum_proc(
             monitor: windows::Win32::Graphics::Gdi::HMONITOR,
             _hdc: HDC,
@@ -401,6 +444,34 @@ mod platform {
                 };
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
+            WM_LBUTTONDOWN | WM_MOUSEMOVE | WM_LBUTTONUP => {
+                if msg == WM_LBUTTONDOWN {
+                    let _ = unsafe { SetCapture(hwnd) };
+                } else if msg == WM_LBUTTONUP {
+                    unsafe { ReleaseCapture() };
+                }
+
+                let local_x = (lparam.0 & 0xffff) as i16 as i32;
+                let local_y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
+                if let (Ok(origins), Ok(senders)) = (WINDOW_ORIGINS.lock(), POINTER_SENDERS.lock())
+                {
+                    if let (Some(origin), Some(tx)) = (origins.get(&hwnd.0), senders.get(&hwnd.0)) {
+                        let event = match msg {
+                            WM_LBUTTONDOWN => OverlayPointerEvent::LeftDown {
+                                modifiers: Default::default(),
+                            },
+                            WM_MOUSEMOVE => OverlayPointerEvent::Move,
+                            WM_LBUTTONUP => OverlayPointerEvent::LeftUp,
+                            _ => unreachable!(),
+                        };
+                        let _ = tx.send(OverlayPointerSample {
+                            global_point: (origin.0 + local_x, origin.1 + local_y),
+                            event,
+                        });
+                    }
+                }
+                LRESULT(0)
+            }
             _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
         }
     }
@@ -415,12 +486,21 @@ mod platform {
         size_bytes: usize,
         monitor_rect: MonitorRect,
         origin: (i32, i32),
+        pointer_rx: Receiver<OverlayPointerSample>,
     }
 
     unsafe impl Send for OverlayWindow {}
 
     impl OverlayWindow {
         pub fn create_for_cursor() -> Option<Self> {
+            let cursor = resolve_cursor_position()?;
+            let monitors = enumerate_monitors();
+            let monitor_rect = super::select_monitor_for_point(&monitors, cursor)
+                .or_else(|| monitors.first().copied())?;
+            Self::create_for_monitor(monitor_rect)
+        }
+
+        pub fn create_for_monitor(monitor_rect: MonitorRect) -> Option<Self> {
             static REGISTER_CLASS: Once = Once::new();
             let class_name = widestring("MultiLauncherDrawOverlay");
             let hinstance = unsafe { GetModuleHandleW(PCWSTR::null()) }.ok()?;
@@ -434,11 +514,6 @@ mod platform {
                 };
                 let _ = RegisterClassW(&wc);
             });
-
-            let cursor = resolve_cursor_position()?;
-            let monitors = enumerate_monitors();
-            let monitor_rect = select_monitor_for_point(&monitors, cursor)
-                .or_else(|| monitors.first().copied())?;
 
             let hwnd = unsafe {
                 CreateWindowExW(
@@ -514,6 +589,14 @@ mod platform {
                 let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, mem_dc.0 as isize);
             }
 
+            let (pointer_tx, pointer_rx) = channel::<OverlayPointerSample>();
+            if let Ok(mut senders) = POINTER_SENDERS.lock() {
+                senders.insert(hwnd.0, pointer_tx);
+            }
+            if let Ok(mut origins) = WINDOW_ORIGINS.lock() {
+                origins.insert(hwnd.0, (monitor_rect.x, monitor_rect.y));
+            }
+
             let size_bytes = (monitor_rect.width as usize)
                 .saturating_mul(monitor_rect.height as usize)
                 .saturating_mul(4);
@@ -527,7 +610,19 @@ mod platform {
                 size_bytes,
                 monitor_rect,
                 origin: (monitor_rect.x, monitor_rect.y),
+                pointer_rx,
             })
+        }
+
+        pub fn drain_pointer_events(&self) -> Vec<OverlayPointerSample> {
+            let mut events = Vec::new();
+            loop {
+                match self.pointer_rx.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+                }
+            }
+            events
         }
 
         pub fn monitor_rect(&self) -> MonitorRect {
@@ -588,6 +683,12 @@ mod platform {
                     self.mem_dc = HDC::default();
                 }
                 if !self.hwnd.0.is_null() {
+                    if let Ok(mut senders) = POINTER_SENDERS.lock() {
+                        senders.remove(&self.hwnd.0);
+                    }
+                    if let Ok(mut origins) = WINDOW_ORIGINS.lock() {
+                        origins.remove(&self.hwnd.0);
+                    }
                     let _ = DestroyWindow(self.hwnd);
                     self.hwnd = HWND::default();
                 }
@@ -649,6 +750,10 @@ impl OverlayWindow {
         Some(Self)
     }
 
+    pub fn create_for_monitor(_monitor_rect: MonitorRect) -> Option<Self> {
+        Some(Self)
+    }
+
     pub fn monitor_rect(&self) -> MonitorRect {
         MonitorRect::default()
     }
@@ -660,6 +765,10 @@ impl OverlayWindow {
     pub fn show(&self) {}
 
     pub fn request_paint(&self) {}
+
+    pub fn drain_pointer_events(&self) -> Vec<OverlayPointerSample> {
+        Vec::new()
+    }
 
     pub fn with_bitmap_mut<F>(&mut self, mut f: F)
     where
@@ -719,7 +828,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_dialog_allows_pointer_events_to_commit() {
+    fn pointer_events_route_to_draw_input_state_and_commit_stroke() {
         let mut input = draw_state(Tool::Line);
         let monitor = MonitorRect {
             x: 1920,
@@ -827,8 +936,26 @@ mod tests {
     }
 
     #[test]
-    fn global_to_local_transform() {
-        assert_eq!(global_to_local((2050, 310), (1920, 200)), (130, 110));
+    fn global_to_local_uses_overlay_monitor_rect_not_launcher_rect() {
+        let launcher_rect = MonitorRect {
+            x: 100,
+            y: 100,
+            width: 800,
+            height: 600,
+        };
+        let overlay_monitor_rect = MonitorRect {
+            x: 1920,
+            y: 200,
+            width: 2560,
+            height: 1440,
+        };
+        let point = (2050, 310);
+
+        let overlay_local =
+            global_to_local(point, (overlay_monitor_rect.x, overlay_monitor_rect.y));
+        let launcher_local = global_to_local(point, (launcher_rect.x, launcher_rect.y));
+        assert_eq!(overlay_local, (130, 110));
+        assert_ne!(overlay_local, launcher_local);
     }
 
     #[test]
