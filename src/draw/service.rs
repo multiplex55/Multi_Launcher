@@ -765,6 +765,12 @@ mod tests {
         rt.start().expect("start should succeed");
         rt.request_exit(ExitReason::UserRequest)
             .expect("request exit should succeed");
+
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while !seen_exit.load(Ordering::SeqCst) && Instant::now() < deadline {
+            rt.tick(Instant::now()).expect("tick should process exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         rt.tick(Instant::now()).expect("tick should process exit");
 
         assert!(seen_exit.load(Ordering::SeqCst));
@@ -805,6 +811,13 @@ mod tests {
         rt.start().expect("runtime should start");
         rt.request_exit(ExitReason::UserRequest)
             .expect("request_exit should dispatch");
+
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while !overlay_loop_exited.load(Ordering::SeqCst) && Instant::now() < deadline {
+            rt.tick(Instant::now())
+                .expect("tick should observe overlay exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         rt.tick(Instant::now())
             .expect("tick should observe overlay exit");
 
