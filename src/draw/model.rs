@@ -19,7 +19,18 @@ impl Color {
     pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self { r, g, b, a }
     }
+
+    pub const fn matches_rgb(self, other: Self) -> bool {
+        self.r == other.r && self.g == other.g && self.b == other.b
+    }
 }
+
+/// Temporary color key used for first-pass overlay transparency.
+///
+/// NOTE: The alpha channel is ignored when Windows evaluates `LWA_COLORKEY`.
+/// Until we migrate to `UpdateLayeredWindow`, any painted pixel with this RGB
+/// tuple will become transparent.
+pub const FIRST_PASS_TRANSPARENCY_COLORKEY: Color = Color::rgba(255, 0, 255, 255);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StrokeStyle {
