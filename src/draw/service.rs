@@ -598,20 +598,29 @@ mod tests {
         reset_runtime(rt);
 
         let (tx, rx) = std::sync::mpsc::channel::<OverlayToMain>();
-        set_runtime_spawn_hook(Some(Box::new(move || {
-            let (main_tx, main_rx) = std::sync::mpsc::channel::<MainToOverlay>();
-            let handle = std::thread::spawn(move || {
-                while let Ok(message) = main_rx.recv() {
-                    if matches!(message, MainToOverlay::RequestExit { .. }) {
-                        break;
+        let shared_rx = Arc::new(std::sync::Mutex::new(Some(rx)));
+        set_runtime_spawn_hook(Some(Box::new({
+            let shared_rx = Arc::clone(&shared_rx);
+            move || {
+                let (main_tx, main_rx) = std::sync::mpsc::channel::<MainToOverlay>();
+                let handle = std::thread::spawn(move || {
+                    while let Ok(message) = main_rx.recv() {
+                        if matches!(message, MainToOverlay::RequestExit { .. }) {
+                            break;
+                        }
                     }
-                }
-            });
-            Ok(super::OverlayStartupHandshake {
-                overlay_thread_handle: handle,
-                main_to_overlay_tx: main_tx,
-                overlay_to_main_rx: rx,
-            })
+                });
+                let overlay_to_main_rx = shared_rx
+                    .lock()
+                    .expect("receiver lock should not be poisoned")
+                    .take()
+                    .expect("spawn hook should only be used once");
+                Ok(super::OverlayStartupHandshake {
+                    overlay_thread_handle: handle,
+                    main_to_overlay_tx: main_tx,
+                    overlay_to_main_rx,
+                })
+            }
         })));
 
         rt.start().expect("start should succeed");

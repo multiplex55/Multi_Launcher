@@ -39,7 +39,7 @@ pub fn spawn_overlay() -> Result<OverlayHandles> {
     let overlay_thread_handle = thread::Builder::new()
         .name("draw-overlay".to_string())
         .spawn(move || {
-            let mut exit_reason = ExitReason::OverlayFailure;
+            let mut exit_reason: Option<ExitReason> = None;
             let mut did_start = false;
             let mut window = match OverlayWindow::create_for_cursor() {
                 Some(window) => window,
@@ -70,12 +70,11 @@ pub fn spawn_overlay() -> Result<OverlayHandles> {
                         });
                     }
                     Ok(MainToOverlay::RequestExit { reason }) => {
-                        exit_reason = reason;
+                        exit_reason = Some(reason);
                         break;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        exit_reason = ExitReason::OverlayFailure;
                         break;
                     }
                 }
@@ -88,7 +87,7 @@ pub fn spawn_overlay() -> Result<OverlayHandles> {
             }
             window.shutdown();
             let _ = overlay_to_main_tx.send(OverlayToMain::Exited {
-                reason: exit_reason,
+                reason: exit_reason.unwrap_or(ExitReason::OverlayFailure),
                 save_result: SaveResult::Skipped,
             });
         })
