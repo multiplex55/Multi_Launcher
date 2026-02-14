@@ -1,3 +1,6 @@
+use crate::draw::model::{CanvasModel, FIRST_PASS_TRANSPARENCY_COLORKEY};
+use crate::draw::render::render_canvas_to_pixels;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgba {
     pub r: u8,
@@ -56,6 +59,30 @@ impl RgbaBuffer {
             a: self.pixels[idx + 3],
         }
     }
+}
+
+pub fn annotation_from_canvas(canvas: &CanvasModel, width: u32, height: u32) -> RgbaBuffer {
+    let mut bgra = vec![0u8; (width * height * 4) as usize];
+    render_canvas_to_pixels(canvas, &mut bgra, width, height);
+
+    let mut rgba = Vec::with_capacity(bgra.len());
+    for chunk in bgra.chunks_exact(4) {
+        let b = chunk[0];
+        let g = chunk[1];
+        let r = chunk[2];
+        let a = chunk[3];
+
+        if r == FIRST_PASS_TRANSPARENCY_COLORKEY.r
+            && g == FIRST_PASS_TRANSPARENCY_COLORKEY.g
+            && b == FIRST_PASS_TRANSPARENCY_COLORKEY.b
+        {
+            rgba.extend_from_slice(&[0, 0, 0, 0]);
+        } else {
+            rgba.extend_from_slice(&[r, g, b, a]);
+        }
+    }
+
+    RgbaBuffer::from_pixels(width, height, rgba)
 }
 
 pub fn composite_annotation_over_desktop(
@@ -137,7 +164,11 @@ fn blend_pixel(bottom: Rgba, top: Rgba) -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::{
-        composite_annotation_over_blank, composite_annotation_over_desktop, Rgba, RgbaBuffer,
+        annotation_from_canvas, composite_annotation_over_blank, composite_annotation_over_desktop,
+        Rgba, RgbaBuffer,
+    };
+    use crate::draw::model::{
+        CanvasModel, Color, DrawObject, Geometry, ObjectStyle, StrokeStyle, Tool,
     };
 
     #[test]
@@ -176,6 +207,46 @@ mod tests {
                 g: 255,
                 b: 0,
                 a: 255
+            }
+        );
+    }
+
+    #[test]
+    fn canvas_annotation_maps_colorkey_to_transparent_alpha() {
+        let canvas = CanvasModel {
+            objects: vec![DrawObject {
+                tool: Tool::Line,
+                style: ObjectStyle {
+                    stroke: StrokeStyle {
+                        width: 1,
+                        color: Color::rgba(10, 20, 30, 255),
+                    },
+                    fill: None,
+                },
+                geometry: Geometry::Line {
+                    start: (0, 0),
+                    end: (0, 0),
+                },
+            }],
+        };
+
+        let out = annotation_from_canvas(&canvas, 2, 1);
+        assert_eq!(
+            out.pixel(0, 0),
+            Rgba {
+                r: 10,
+                g: 20,
+                b: 30,
+                a: 255
+            }
+        );
+        assert_eq!(
+            out.pixel(1, 0),
+            Rgba {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0
             }
         );
     }

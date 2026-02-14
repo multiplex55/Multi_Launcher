@@ -36,6 +36,21 @@ pub struct OverlayHandles {
     pub overlay_to_main_rx: Receiver<OverlayToMain>,
 }
 
+fn send_exit_after_cleanup<F>(
+    cleanup: F,
+    overlay_to_main_tx: &Sender<OverlayToMain>,
+    reason: ExitReason,
+    save_result: SaveResult,
+) where
+    F: FnOnce(),
+{
+    cleanup();
+    let _ = overlay_to_main_tx.send(OverlayToMain::Exited {
+        reason,
+        save_result,
+    });
+}
+
 pub fn spawn_overlay() -> Result<OverlayHandles> {
     let (main_to_overlay_tx, main_to_overlay_rx) = channel::<MainToOverlay>();
     let (overlay_to_main_tx, overlay_to_main_rx) = channel::<OverlayToMain>();
@@ -90,11 +105,12 @@ pub fn spawn_overlay() -> Result<OverlayHandles> {
                     error: "overlay exited before start command".to_string(),
                 });
             }
-            window.shutdown();
-            let _ = overlay_to_main_tx.send(OverlayToMain::Exited {
-                reason: exit_reason.unwrap_or(ExitReason::OverlayFailure),
-                save_result: SaveResult::Skipped,
-            });
+            send_exit_after_cleanup(
+                || window.shutdown(),
+                &overlay_to_main_tx,
+                exit_reason.unwrap_or(ExitReason::OverlayFailure),
+                SaveResult::Skipped,
+            );
         })
         .map_err(|err| anyhow!("failed to spawn draw overlay thread: {err}"))?;
 
@@ -660,9 +676,10 @@ impl OverlayWindow {
 mod tests {
     use super::{
         forward_pointer_event_to_draw_input, global_to_local, monitor_contains_point,
-        monitor_local_point_for_global, select_monitor_for_point, ExitDialogState,
-        OverlayPointerEvent,
+        monitor_local_point_for_global, select_monitor_for_point, send_exit_after_cleanup,
+        ExitDialogState, OverlayPointerEvent,
     };
+    use crate::draw::messages::{ExitReason, OverlayToMain, SaveResult};
     use crate::draw::{
         input::DrawInputState,
         model::{ObjectStyle, Tool},
@@ -812,5 +829,31 @@ mod tests {
     #[test]
     fn global_to_local_transform() {
         assert_eq!(global_to_local((2050, 310), (1920, 200)), (130, 110));
+    }
+
+    #[test]
+    fn exit_notification_is_emitted_only_after_cleanup_runs() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cleaned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cleaned_flag = cleaned.clone();
+
+        send_exit_after_cleanup(
+            move || {
+                cleaned_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            },
+            &tx,
+            ExitReason::UserRequest,
+            SaveResult::Skipped,
+        );
+
+        let msg = rx.recv().expect("exit message should be sent");
+        assert!(cleaned.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            msg,
+            OverlayToMain::Exited {
+                reason: ExitReason::UserRequest,
+                save_result: SaveResult::Skipped,
+            }
+        );
     }
 }
