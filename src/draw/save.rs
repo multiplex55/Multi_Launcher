@@ -199,7 +199,7 @@ mod tests {
     use crate::draw::messages::ExitReason;
     use crate::draw::settings::{DrawColor, DrawSettings, LiveBackgroundMode};
     use chrono::{Local, TimeZone};
-    use image::ImageReader;
+    use image::io::Reader as ImageReader;
     use std::path::Path;
 
     #[test]

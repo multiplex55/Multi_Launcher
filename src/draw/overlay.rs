@@ -525,7 +525,7 @@ mod platform {
                 if msg == WM_LBUTTONDOWN {
                     let _ = unsafe { SetCapture(hwnd) };
                 } else if msg == WM_LBUTTONUP {
-                    unsafe { ReleaseCapture() };
+                    let _ = unsafe { ReleaseCapture() };
                 }
 
                 let local_x = (lparam.0 & 0xffff) as i16 as i32;

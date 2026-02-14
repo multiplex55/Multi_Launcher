@@ -132,8 +132,8 @@ struct DrawSettingsDe {
     exit_timeout_seconds: u64,
     #[serde(default = "default_live_background_mode")]
     live_background_mode: LiveBackgroundMode,
-    #[serde(default = "default_live_blank_color", alias = "blank_background_color")]
-    live_blank_color: DrawColor,
+    #[serde(default)]
+    live_blank_color: Option<DrawColor>,
     #[serde(
         default = "default_blank_background_color",
         alias = "export_background_color"
@@ -154,6 +154,10 @@ impl<'de> Deserialize<'de> for DrawSettings {
     {
         let decoded = DrawSettingsDe::deserialize(deserializer)?;
         let legacy_blank = decoded.blank_background_color;
+        let live_blank = decoded
+            .live_blank_color
+            .or(legacy_blank)
+            .unwrap_or_else(default_live_blank_color);
         Ok(Self {
             enable_pressure: decoded.enable_pressure,
             toolbar_position: decoded.toolbar_position,
@@ -168,7 +172,7 @@ impl<'de> Deserialize<'de> for DrawSettings {
             default_outline_color: decoded.default_outline_color,
             exit_timeout_seconds: decoded.exit_timeout_seconds,
             live_background_mode: decoded.live_background_mode,
-            live_blank_color: decoded.live_blank_color,
+            live_blank_color: live_blank,
             export_blank_background_color: legacy_blank
                 .unwrap_or(decoded.export_blank_background_color),
             offer_save_without_desktop: decoded.offer_save_without_desktop,
