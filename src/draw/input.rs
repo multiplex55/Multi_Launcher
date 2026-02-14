@@ -1,5 +1,5 @@
 use crate::draw::history::DrawHistory;
-use crate::draw::keyboard_hook::{should_consume_key_event, KeyCode, KeyEvent, KeyModifiers};
+use crate::draw::keyboard_hook::{map_key_event_to_command, KeyCommand, KeyEvent};
 use crate::draw::messages::ExitReason;
 use crate::draw::model::{DrawObject, Geometry, ObjectStyle, Tool};
 use crate::draw::runtime;
@@ -102,24 +102,17 @@ impl DrawInputState {
     }
 
     pub fn handle_key_event(&mut self, event: KeyEvent) -> Option<InputCommand> {
-        if matches!(event.key, KeyCode::Escape) {
-            return Some(InputCommand::RequestExit);
-        }
-
-        if !should_consume_key_event(true, event) {
-            return None;
-        }
-
-        match (event.key, event.modifiers) {
-            (KeyCode::U, KeyModifiers { ctrl: false, .. }) => {
+        match map_key_event_to_command(true, event) {
+            Some(KeyCommand::Undo) => {
                 let _ = self.history.undo();
                 Some(InputCommand::Undo)
             }
-            (KeyCode::R, KeyModifiers { ctrl: true, .. }) => {
+            Some(KeyCommand::Redo) => {
                 let _ = self.history.redo();
                 Some(InputCommand::Redo)
             }
-            _ => None,
+            Some(KeyCommand::RequestExit) => Some(InputCommand::RequestExit),
+            None => None,
         }
     }
 
@@ -156,6 +149,14 @@ pub fn bridge_left_down_to_runtime(
     );
 }
 
+pub fn bridge_mouse_move_to_runtime(state: &mut DrawInputState, point: (i32, i32)) {
+    state.handle_move(point);
+}
+
+pub fn bridge_left_up_to_runtime(state: &mut DrawInputState, point: (i32, i32)) {
+    state.handle_left_up(point);
+}
+
 pub fn bridge_key_event_to_runtime(state: &mut DrawInputState, event: KeyEvent) {
     route_command_to_runtime(state.handle_key_event(event), ExitReason::UserRequest);
 }
@@ -173,6 +174,7 @@ fn should_append_point(last: Option<(i32, i32)>, point: (i32, i32)) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::draw::keyboard_hook::{KeyCode, KeyModifiers};
 
     fn draw_state(tool: Tool) -> DrawInputState {
         DrawInputState::new(tool, ObjectStyle::default())
@@ -315,6 +317,56 @@ mod tests {
         assert_eq!(state.history().redo_len(), 0);
     }
 
+    #[test]
+    fn bridge_key_event_routes_exit_command_into_runtime_exit_path() {
+        let rt = crate::draw::runtime();
+        rt.reset_for_test();
+        rt.force_lifecycle_for_test(crate::draw::state::DrawLifecycle::Active);
+
+        let mut state = draw_state(Tool::Pen);
+        bridge_key_event_to_runtime(
+            &mut state,
+            KeyEvent {
+                key: KeyCode::Escape,
+                modifiers: KeyModifiers::default(),
+            },
+        );
+
+        assert_eq!(rt.lifecycle(), crate::draw::state::DrawLifecycle::Exiting);
+        assert_eq!(
+            rt.exit_prompt_state().map(|prompt| prompt.reason),
+            Some(ExitReason::UserRequest)
+        );
+        rt.reset_for_test();
+    }
+
+    #[test]
+    fn bridge_left_down_routes_shift_and_ctrl_failsafe_exit_commands_into_runtime() {
+        let rt = crate::draw::runtime();
+        for modifiers in [
+            PointerModifiers {
+                shift: true,
+                ctrl: false,
+            },
+            PointerModifiers {
+                shift: false,
+                ctrl: true,
+            },
+        ] {
+            rt.reset_for_test();
+            rt.force_lifecycle_for_test(crate::draw::state::DrawLifecycle::Active);
+
+            let mut state = draw_state(Tool::Pen);
+            bridge_left_down_to_runtime(&mut state, (20, 20), modifiers);
+
+            assert_eq!(rt.lifecycle(), crate::draw::state::DrawLifecycle::Exiting);
+            assert_eq!(
+                rt.exit_prompt_state().map(|prompt| prompt.reason),
+                Some(ExitReason::UserRequest)
+            );
+        }
+        rt.reset_for_test();
+    }
     #[test]
     fn cancel_gestures_route_request_exit_via_same_runtime_path() {
         let mut state = draw_state(Tool::Pen);
