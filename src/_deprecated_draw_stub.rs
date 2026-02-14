@@ -1,3 +1,7 @@
+// LEGACY STUB: This file is intentionally NOT compiled.
+// Authoritative draw module is src/draw/mod.rs with implementations under src/draw/*.
+// Retained only for historical reference during draw runtime refactors.
+
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 

@@ -28,6 +28,7 @@ It’s designed to be “one hotkey away” from:
 - [Configuration](#configuration)
 - [Data files](#data-files)
 - [Building](#building)
+- [Contributor notes](#contributor-notes)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -238,6 +239,20 @@ The dashboard is a set of configurable widgets you can pin and keep visible as a
   - stopwatch widget, volume widget, recycle bin widget, tempfiles widget, system controls/actions
 
 > Use the dashboard editor UI to add/remove widgets and configure layout.
+
+---
+
+## Contributor notes
+
+- The authoritative draw module is `src/draw/mod.rs` with implementation files in `src/draw/*`.
+- `src/_deprecated_draw_stub.rs` is legacy reference material and must remain outside module resolution (do not restore it as `src/draw.rs`).
+
+Quick verification commands:
+
+```bash
+rg -n '#\[path = "draw/mod.rs"\]' src/lib.rs
+rg -n 'src/draw\.rs|path\s*=\s*"draw\.rs"' src tests README.md
+```
 
 ---
 
