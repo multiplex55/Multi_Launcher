@@ -691,8 +691,7 @@ fn numeric_selection_updates_hint_text() {
     assert!(handle.emit(HookEvent::SelectBinding(1)));
     sleep(Duration::from_millis(10));
 
-    let hints = hint_state.hints.lock().expect("lock hints");
-    let last = hints.last().expect("hint text");
+    let last = wait_for_hint(&hint_state, Duration::from_millis(500)).expect("hint text");
     let first_line = last.lines().next().expect("first line");
     assert!(first_line.contains("Second"));
 
