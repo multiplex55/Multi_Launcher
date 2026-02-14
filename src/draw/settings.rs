@@ -23,6 +23,13 @@ pub enum DrawTool {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveBackgroundMode {
+    DesktopTransparent,
+    SolidColor,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DrawColor {
     pub r: u8,
     pub g: u8,
@@ -58,7 +65,7 @@ impl DrawColor {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DrawSettings {
     #[serde(default = "default_enable_pressure")]
     pub enable_pressure: bool,
@@ -84,12 +91,94 @@ pub struct DrawSettings {
     pub default_outline_color: DrawColor,
     #[serde(default = "default_exit_timeout_seconds")]
     pub exit_timeout_seconds: u64,
+    #[serde(default = "default_live_background_mode")]
+    pub live_background_mode: LiveBackgroundMode,
+    #[serde(default = "default_live_blank_color", alias = "blank_background_color")]
+    pub live_blank_color: DrawColor,
     #[serde(default = "default_blank_background_color")]
-    pub blank_background_color: DrawColor,
+    #[serde(alias = "export_background_color")]
+    pub export_blank_background_color: DrawColor,
     #[serde(default = "default_offer_save_without_desktop")]
     pub offer_save_without_desktop: bool,
     #[serde(default = "default_fixed_save_folder_display")]
     pub fixed_save_folder_display: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DrawSettingsDe {
+    #[serde(default = "default_enable_pressure")]
+    enable_pressure: bool,
+    #[serde(default = "default_toolbar_position")]
+    toolbar_position: ToolbarPosition,
+    #[serde(default)]
+    toolbar_collapsed: bool,
+    #[serde(default = "default_toolbar_toggle_hotkey")]
+    toolbar_toggle_hotkey: String,
+    #[serde(default = "default_quick_colors")]
+    quick_colors: Vec<DrawColor>,
+    #[serde(default = "default_last_tool")]
+    last_tool: DrawTool,
+    #[serde(default = "default_last_color")]
+    last_color: DrawColor,
+    #[serde(default = "default_last_width")]
+    last_width: u32,
+    #[serde(default)]
+    default_fill_enabled: bool,
+    #[serde(default = "default_fill_color")]
+    default_fill_color: DrawColor,
+    #[serde(default = "default_outline_color")]
+    default_outline_color: DrawColor,
+    #[serde(default = "default_exit_timeout_seconds")]
+    exit_timeout_seconds: u64,
+    #[serde(default = "default_live_background_mode")]
+    live_background_mode: LiveBackgroundMode,
+    #[serde(default)]
+    live_blank_color: Option<DrawColor>,
+    #[serde(
+        default = "default_blank_background_color",
+        alias = "export_background_color"
+    )]
+    export_blank_background_color: DrawColor,
+    #[serde(default)]
+    blank_background_color: Option<DrawColor>,
+    #[serde(default = "default_offer_save_without_desktop")]
+    offer_save_without_desktop: bool,
+    #[serde(default = "default_fixed_save_folder_display")]
+    fixed_save_folder_display: String,
+}
+
+impl<'de> Deserialize<'de> for DrawSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let decoded = DrawSettingsDe::deserialize(deserializer)?;
+        let legacy_blank = decoded.blank_background_color;
+        let live_blank = decoded
+            .live_blank_color
+            .or(legacy_blank)
+            .unwrap_or_else(default_live_blank_color);
+        Ok(Self {
+            enable_pressure: decoded.enable_pressure,
+            toolbar_position: decoded.toolbar_position,
+            toolbar_collapsed: decoded.toolbar_collapsed,
+            toolbar_toggle_hotkey: decoded.toolbar_toggle_hotkey,
+            quick_colors: decoded.quick_colors,
+            last_tool: decoded.last_tool,
+            last_color: decoded.last_color,
+            last_width: decoded.last_width,
+            default_fill_enabled: decoded.default_fill_enabled,
+            default_fill_color: decoded.default_fill_color,
+            default_outline_color: decoded.default_outline_color,
+            exit_timeout_seconds: decoded.exit_timeout_seconds,
+            live_background_mode: decoded.live_background_mode,
+            live_blank_color: live_blank,
+            export_blank_background_color: legacy_blank
+                .unwrap_or(decoded.export_blank_background_color),
+            offer_save_without_desktop: decoded.offer_save_without_desktop,
+            fixed_save_folder_display: decoded.fixed_save_folder_display,
+        })
+    }
 }
 
 fn default_enable_pressure() -> bool {
@@ -132,6 +221,14 @@ fn default_blank_background_color() -> DrawColor {
     DrawColor::rgba(15, 18, 24, 255)
 }
 
+fn default_live_background_mode() -> LiveBackgroundMode {
+    LiveBackgroundMode::DesktopTransparent
+}
+
+fn default_live_blank_color() -> DrawColor {
+    default_blank_background_color()
+}
+
 fn default_offer_save_without_desktop() -> bool {
     true
 }
@@ -168,7 +265,9 @@ impl Default for DrawSettings {
             default_fill_color: default_fill_color(),
             default_outline_color: default_outline_color(),
             exit_timeout_seconds: default_exit_timeout_seconds(),
-            blank_background_color: default_blank_background_color(),
+            live_background_mode: default_live_background_mode(),
+            live_blank_color: default_live_blank_color(),
+            export_blank_background_color: default_blank_background_color(),
             offer_save_without_desktop: default_offer_save_without_desktop(),
             fixed_save_folder_display: default_fixed_save_folder_display(),
         }
@@ -203,7 +302,7 @@ impl DrawSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::{DrawColor, DrawSettings};
+    use super::{DrawColor, DrawSettings, LiveBackgroundMode};
 
     #[test]
     fn serde_roundtrip_draw_settings() {
@@ -231,7 +330,15 @@ mod tests {
         let settings = DrawSettings::default();
         assert_eq!(settings.exit_timeout_seconds, 120);
         assert_eq!(
-            settings.blank_background_color,
+            settings.live_background_mode,
+            LiveBackgroundMode::DesktopTransparent
+        );
+        assert_eq!(
+            settings.live_blank_color,
+            super::DrawColor::rgba(15, 18, 24, 255)
+        );
+        assert_eq!(
+            settings.export_blank_background_color,
             super::DrawColor::rgba(15, 18, 24, 255)
         );
         assert_eq!(settings.quick_colors.len(), 8);
@@ -261,5 +368,41 @@ mod tests {
             DrawColor::rgba(254, 0, 255, 255)
         );
         assert_eq!(settings.quick_colors[0], DrawColor::rgba(254, 0, 255, 255));
+    }
+
+    #[test]
+    fn settings_roundtrip_live_background_mode_and_color() {
+        let mut settings = DrawSettings::default();
+        settings.live_background_mode = LiveBackgroundMode::SolidColor;
+        settings.live_blank_color = DrawColor::rgba(22, 33, 44, 255);
+        settings.export_blank_background_color = DrawColor::rgba(1, 2, 3, 255);
+
+        let json = serde_json::to_string(&settings).expect("serialize draw settings");
+        let decoded: DrawSettings = serde_json::from_str(&json).expect("deserialize settings");
+
+        assert_eq!(decoded.live_background_mode, LiveBackgroundMode::SolidColor);
+        assert_eq!(decoded.live_blank_color, DrawColor::rgba(22, 33, 44, 255));
+        assert_eq!(
+            decoded.export_blank_background_color,
+            DrawColor::rgba(1, 2, 3, 255)
+        );
+    }
+
+    #[test]
+    fn deserialize_legacy_blank_background_color_migrates_to_live_and_export() {
+        let decoded: DrawSettings = serde_json::from_value(serde_json::json!({
+            "blank_background_color": { "r": 9, "g": 8, "b": 7, "a": 255 }
+        }))
+        .expect("deserialize legacy draw settings");
+
+        assert_eq!(
+            decoded.live_background_mode,
+            LiveBackgroundMode::DesktopTransparent
+        );
+        assert_eq!(decoded.live_blank_color, DrawColor::rgba(9, 8, 7, 255));
+        assert_eq!(
+            decoded.export_blank_background_color,
+            DrawColor::rgba(9, 8, 7, 255)
+        );
     }
 }

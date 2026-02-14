@@ -1,4 +1,6 @@
-use crate::draw::settings::{DrawColor, DrawSettings, DrawTool, ToolbarPosition};
+use crate::draw::settings::{
+    DrawColor, DrawSettings, DrawTool, LiveBackgroundMode, ToolbarPosition,
+};
 use eframe::egui;
 
 pub fn render_draw_settings_form(
@@ -131,7 +133,33 @@ pub fn render_draw_settings_form(
         .checkbox(&mut settings.default_fill_enabled, "Default fill enabled")
         .changed();
     changed |= edit_color(ui, "Default fill", &mut settings.default_fill_color);
-    changed |= edit_color(ui, "Blank background", &mut settings.blank_background_color);
+    ui.separator();
+    ui.label("Live drawing background");
+    changed |= ui
+        .radio_value(
+            &mut settings.live_background_mode,
+            LiveBackgroundMode::DesktopTransparent,
+            "Draw on desktop (transparent overlay)",
+        )
+        .changed();
+    changed |= ui
+        .radio_value(
+            &mut settings.live_background_mode,
+            LiveBackgroundMode::SolidColor,
+            "Draw on blank canvas (solid background)",
+        )
+        .changed();
+
+    if settings.live_background_mode == LiveBackgroundMode::SolidColor {
+        changed |= edit_color(ui, "Live blank color", &mut settings.live_blank_color);
+    }
+
+    ui.separator();
+    changed |= edit_color(
+        ui,
+        "Export blank background",
+        &mut settings.export_blank_background_color,
+    );
 
     ui.label("Quick colors");
     for (index, color) in settings.quick_colors.iter_mut().enumerate() {

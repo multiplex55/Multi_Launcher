@@ -2,6 +2,7 @@ use crate::draw::composite::{
     composite_annotation_over_blank, composite_annotation_over_desktop, Rgba, RgbaBuffer,
 };
 use crate::draw::messages::ExitReason;
+use crate::draw::settings::DrawSettings;
 use anyhow::{anyhow, Context, Result};
 use chrono::Local;
 use image::RgbaImage;
@@ -27,6 +28,20 @@ impl Default for SaveConfig {
     fn default() -> Self {
         Self {
             blank_background: Rgba::BLACK,
+        }
+    }
+}
+
+impl SaveConfig {
+    pub fn from_draw_settings(settings: &DrawSettings) -> Self {
+        let color = settings.export_blank_background_color;
+        Self {
+            blank_background: Rgba {
+                r: color.r,
+                g: color.g,
+                b: color.b,
+                a: 255,
+            },
         }
     }
 }
@@ -182,7 +197,9 @@ mod tests {
     };
     use crate::draw::composite::{Rgba, RgbaBuffer};
     use crate::draw::messages::ExitReason;
+    use crate::draw::settings::{DrawColor, DrawSettings, LiveBackgroundMode};
     use chrono::{Local, TimeZone};
+    use image::io::Reader as ImageReader;
     use std::path::Path;
 
     #[test]
@@ -321,5 +338,66 @@ mod tests {
         assert_eq!(stats.desktop_capture_count, 0);
         assert_eq!(captures, 0);
         assert!(blank_path.exists());
+    }
+
+    #[test]
+    fn export_with_desktop_uses_capture_even_if_live_blank_mode() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let desktop_path = dir.path().join("desktop.png");
+        let annotation = RgbaBuffer::from_pixels(1, 1, vec![0, 0, 0, 0]);
+        let desktop_bg = RgbaBuffer::from_pixels(1, 1, vec![9, 99, 199, 255]);
+
+        let mut settings = DrawSettings::default();
+        settings.live_background_mode = LiveBackgroundMode::SolidColor;
+        settings.live_blank_color = DrawColor::rgba(1, 2, 3, 255);
+        settings.export_blank_background_color = DrawColor::rgba(200, 100, 50, 255);
+
+        compose_and_persist_saves(
+            &annotation,
+            SaveConfig::from_draw_settings(&settings),
+            &SaveTargets {
+                desktop: Some(desktop_path.clone()),
+                blank: None,
+            },
+            || Ok(desktop_bg.clone()),
+        )
+        .expect("desktop save should succeed");
+
+        let png = ImageReader::open(&desktop_path)
+            .expect("open desktop png")
+            .decode()
+            .expect("decode desktop png")
+            .to_rgba8();
+        assert_eq!(png.get_pixel(0, 0).0, [9, 99, 199, 255]);
+    }
+
+    #[test]
+    fn export_without_desktop_uses_export_background() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let blank_path = dir.path().join("blank.png");
+        let annotation = RgbaBuffer::from_pixels(1, 1, vec![0, 0, 0, 0]);
+
+        let mut settings = DrawSettings::default();
+        settings.live_background_mode = LiveBackgroundMode::DesktopTransparent;
+        settings.live_blank_color = DrawColor::rgba(10, 20, 30, 255);
+        settings.export_blank_background_color = DrawColor::rgba(44, 55, 66, 255);
+
+        compose_and_persist_saves(
+            &annotation,
+            SaveConfig::from_draw_settings(&settings),
+            &SaveTargets {
+                desktop: None,
+                blank: Some(blank_path.clone()),
+            },
+            || Ok(RgbaBuffer::from_pixels(1, 1, vec![255, 0, 0, 255])),
+        )
+        .expect("blank save should succeed");
+
+        let png = ImageReader::open(&blank_path)
+            .expect("open blank png")
+            .decode()
+            .expect("decode blank png")
+            .to_rgba8();
+        assert_eq!(png.get_pixel(0, 0).0, [44, 55, 66, 255]);
     }
 }

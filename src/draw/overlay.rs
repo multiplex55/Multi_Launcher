@@ -9,7 +9,7 @@ use crate::draw::render::{
     convert_rgba_to_dib_bgra, render_canvas_to_rgba, BackgroundClearMode, RenderSettings,
 };
 use crate::draw::service::MonitorRect;
-use crate::draw::settings::{DrawColor, DrawSettings, DrawTool};
+use crate::draw::settings::{DrawColor, DrawSettings, DrawTool, LiveBackgroundMode};
 use anyhow::{anyhow, Result};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
@@ -57,16 +57,12 @@ fn map_draw_color(color: DrawColor) -> Color {
 }
 
 fn live_render_settings(settings: &DrawSettings) -> RenderSettings {
-    let background = settings.blank_background_color;
-    let clear_mode = if background.a == 0 {
-        BackgroundClearMode::Transparent
-    } else {
-        BackgroundClearMode::Solid(Color::rgba(
-            background.r,
-            background.g,
-            background.b,
-            background.a,
-        ))
+    let clear_mode = match settings.live_background_mode {
+        LiveBackgroundMode::DesktopTransparent => BackgroundClearMode::Transparent,
+        LiveBackgroundMode::SolidColor => {
+            let background = settings.live_blank_color;
+            BackgroundClearMode::Solid(Color::rgba(background.r, background.g, background.b, 255))
+        }
     };
 
     RenderSettings { clear_mode }
@@ -529,7 +525,7 @@ mod platform {
                 if msg == WM_LBUTTONDOWN {
                     let _ = unsafe { SetCapture(hwnd) };
                 } else if msg == WM_LBUTTONUP {
-                    unsafe { ReleaseCapture() };
+                    let _ = unsafe { ReleaseCapture() };
                 }
 
                 let local_x = (lparam.0 & 0xffff) as i16 as i32;
@@ -878,15 +874,17 @@ impl OverlayWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        forward_pointer_event_to_draw_input, global_to_local, monitor_contains_point,
-        monitor_local_point_for_global, select_monitor_for_point, send_exit_after_cleanup,
-        ExitDialogState, OverlayPointerEvent,
+        forward_pointer_event_to_draw_input, global_to_local, live_render_settings,
+        monitor_contains_point, monitor_local_point_for_global, select_monitor_for_point,
+        send_exit_after_cleanup, ExitDialogState, OverlayPointerEvent,
     };
     use crate::draw::messages::{ExitReason, OverlayToMain, SaveResult};
     use crate::draw::{
         input::DrawInputState,
-        model::{ObjectStyle, Tool},
+        model::{CanvasModel, ObjectStyle, Tool},
+        render::BackgroundClearMode,
         service::MonitorRect,
+        settings::{DrawColor, DrawSettings, LiveBackgroundMode},
     };
 
     fn draw_state(tool: Tool) -> DrawInputState {
@@ -1075,6 +1073,33 @@ mod tests {
                 reason: ExitReason::UserRequest,
                 save_result: SaveResult::Skipped,
             }
+        );
+    }
+
+    #[test]
+    fn live_render_clear_transparent_vs_solid() {
+        let mut settings = DrawSettings::default();
+        settings.live_background_mode = LiveBackgroundMode::DesktopTransparent;
+        settings.live_blank_color = DrawColor::rgba(12, 34, 56, 10);
+
+        let transparent = crate::draw::render::render_canvas_to_rgba(
+            &CanvasModel::default(),
+            live_render_settings(&settings),
+            (1, 1),
+        );
+        assert_eq!(transparent, vec![0, 0, 0, 0]);
+
+        settings.live_background_mode = LiveBackgroundMode::SolidColor;
+        let solid = crate::draw::render::render_canvas_to_rgba(
+            &CanvasModel::default(),
+            live_render_settings(&settings),
+            (1, 1),
+        );
+        assert_eq!(solid, vec![12, 34, 56, 255]);
+
+        assert_eq!(
+            live_render_settings(&settings).clear_mode,
+            BackgroundClearMode::Solid(crate::draw::model::Color::rgba(12, 34, 56, 255))
         );
     }
 }
