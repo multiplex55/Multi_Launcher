@@ -1,6 +1,6 @@
 use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain};
 use crate::draw::overlay::spawn_overlay;
-use crate::draw::save::ExitPromptState;
+use crate::draw::save::{ExitPromptPhase, ExitPromptState};
 use crate::draw::settings::DrawSettings;
 use crate::draw::state::{can_transition, DrawLifecycle};
 use anyhow::{anyhow, Result};
@@ -90,9 +90,12 @@ impl Default for DrawRuntime {
 static DRAW_RUNTIME: Lazy<DrawRuntime> = Lazy::new(DrawRuntime::default);
 
 type Hook = Box<dyn Fn() -> Result<()> + Send + Sync>;
+type LauncherRestoreHook = Box<dyn Fn(Option<String>) -> Result<()> + Send + Sync>;
 type SpawnHook = Box<dyn Fn() -> Result<OverlayStartupHandshake> + Send + Sync>;
 static DRAW_SPAWN_HOOK: Lazy<Mutex<Option<SpawnHook>>> = Lazy::new(|| Mutex::new(None));
 static DRAW_RESTORE_HOOK: Lazy<Mutex<Option<Hook>>> = Lazy::new(|| Mutex::new(None));
+static DRAW_LAUNCHER_RESTORE_HOOK: Lazy<Mutex<Option<LauncherRestoreHook>>> =
+    Lazy::new(|| Mutex::new(None));
 const OVERLAY_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct OverlayStartupHandshake {
@@ -113,6 +116,14 @@ pub fn set_runtime_spawn_hook(hook: Option<SpawnHook>) {
 
 pub fn set_runtime_restore_hook(hook: Option<Hook>) {
     if let Ok(mut guard) = DRAW_RESTORE_HOOK.lock() {
+        *guard = hook;
+    }
+}
+
+pub fn set_runtime_launcher_restore_hook(
+    hook: Option<Box<dyn Fn(Option<String>) -> Result<()> + Send + Sync>>,
+) {
+    if let Ok(mut guard) = DRAW_LAUNCHER_RESTORE_HOOK.lock() {
         *guard = hook;
     }
 }
@@ -188,7 +199,10 @@ impl DrawRuntime {
 
         if state.lifecycle == DrawLifecycle::Starting || state.lifecycle == DrawLifecycle::Active {
             self.transition_locked(&mut state, DrawLifecycle::Exiting)?;
-            state.exit_prompt = Some(ExitPromptState::from_exit_reason(reason.clone()));
+            state.exit_prompt = Some(ExitPromptState::from_exit_reason(
+                reason.clone(),
+                state.settings.offer_save_without_desktop,
+            ));
             Self::send_overlay_message_locked(&mut state, MainToOverlay::RequestExit { reason });
         }
         Ok(())
@@ -281,6 +295,7 @@ impl DrawRuntime {
         if let Ok(mut state) = self.state.lock() {
             if let Some(prompt) = state.exit_prompt.as_mut() {
                 prompt.overlay_hidden_for_capture = true;
+                prompt.phase = ExitPromptPhase::Saving;
             }
         }
     }
@@ -402,7 +417,12 @@ impl DrawRuntime {
         }
         tracing::warn!(?reason, "draw runtime restore executed from {source}");
 
-        let (overlay_thread_handle, prior_mouse_gesture_state, suspend_token) = {
+        let (
+            overlay_thread_handle,
+            prior_mouse_gesture_state,
+            suspend_token,
+            launcher_offscreen_context,
+        ) = {
             let mut state = self
                 .state
                 .lock()
@@ -420,12 +440,25 @@ impl DrawRuntime {
                 .entry_context
                 .as_mut()
                 .and_then(|ctx| ctx.mouse_gestures_suspend_token.take());
+            let launcher_offscreen_context = state
+                .entry_context
+                .as_ref()
+                .and_then(|ctx| ctx.launcher_offscreen_context.clone());
             state.entry_context = None;
             state.exit_prompt = None;
             state.lifecycle = DrawLifecycle::Idle;
 
-            (handle, prior_mouse_gesture_state, suspend_token)
+            (
+                handle,
+                prior_mouse_gesture_state,
+                suspend_token,
+                launcher_offscreen_context,
+            )
         };
+
+        if let Err(err) = self.call_launcher_restore_hook(launcher_offscreen_context) {
+            tracing::error!(?err, "draw launcher restore hook failed after {source}");
+        }
 
         if let Some(token) = suspend_token {
             crate::plugins::mouse_gestures::resume_from_draw(token);
@@ -473,6 +506,16 @@ impl DrawRuntime {
         Ok(())
     }
 
+    fn call_launcher_restore_hook(&self, context: Option<String>) -> Result<()> {
+        let guard = DRAW_LAUNCHER_RESTORE_HOOK
+            .lock()
+            .map_err(|_| anyhow!("draw launcher restore hook lock poisoned"))?;
+        if let Some(ref hook) = *guard {
+            hook(context)?;
+        }
+        Ok(())
+    }
+
     fn spawn_overlay_runtime(&self) -> Result<OverlayStartupHandshake> {
         if let Ok(guard) = DRAW_SPAWN_HOOK.lock() {
             if let Some(ref hook) = *guard {
@@ -511,8 +554,8 @@ impl DrawRuntime {
 #[cfg(test)]
 mod tests {
     use super::{
-        runtime, set_runtime_restore_hook, set_runtime_spawn_hook, DrawRuntime, EntryContext,
-        StartOutcome,
+        runtime, set_runtime_launcher_restore_hook, set_runtime_restore_hook,
+        set_runtime_spawn_hook, DrawRuntime, EntryContext, StartOutcome,
     };
     use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain, SaveResult};
     use crate::draw::settings::DrawSettings;
@@ -529,6 +572,7 @@ mod tests {
     fn reset_runtime(rt: &DrawRuntime) {
         set_runtime_spawn_hook(None);
         set_runtime_restore_hook(None);
+        set_runtime_launcher_restore_hook(None);
         rt.reset_for_test();
         restore_draw_prior_effective_state(true);
         sync_enabled_plugins(None);
@@ -571,6 +615,10 @@ mod tests {
             .exit_prompt_state()
             .expect("prompt state should be present");
         assert!(prompt.frozen_input);
+        assert_eq!(
+            prompt.phase,
+            crate::draw::save::ExitPromptPhase::PromptVisible
+        );
         assert_eq!(prompt.reason, ExitReason::UserRequest);
         assert_eq!(
             rt.take_dispatched_messages_for_test(),
@@ -579,6 +627,26 @@ mod tests {
             }]
         );
         rt.reset_for_test();
+    }
+
+    #[test]
+    fn request_exit_without_prompt_config_enters_saving_phase_immediately() {
+        let rt = runtime();
+        reset_runtime(rt);
+        rt.force_lifecycle_for_test(DrawLifecycle::Active);
+
+        let mut settings = DrawSettings::default();
+        settings.offer_save_without_desktop = false;
+        rt.apply_settings(settings);
+
+        rt.request_exit(ExitReason::UserRequest)
+            .expect("request_exit should succeed");
+
+        let prompt = rt
+            .exit_prompt_state()
+            .expect("prompt state should be present");
+        assert_eq!(prompt.phase, crate::draw::save::ExitPromptPhase::Saving);
+        reset_runtime(rt);
     }
 
     #[test]
@@ -753,6 +821,34 @@ mod tests {
 
         assert_eq!(restore_count.load(Ordering::SeqCst), 2);
         assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn restore_pipeline_restores_launcher_context_once_for_duplicate_exits() {
+        let rt = runtime();
+        reset_runtime(rt);
+        let restore_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let restore_count_clone = Arc::clone(&restore_count);
+        set_runtime_launcher_restore_hook(Some(Box::new(move |ctx| {
+            assert_eq!(ctx.as_deref(), Some("visible=false,offscreen=(10.0,20.0)"));
+            restore_count_clone.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })));
+
+        let context = EntryContext {
+            launcher_offscreen_context: Some("visible=false,offscreen=(10.0,20.0)".to_string()),
+            ..EntryContext::default()
+        };
+        rt.start_with_context(context)
+            .expect("start with context should succeed");
+
+        rt.notify_overlay_exit(ExitReason::UserRequest)
+            .expect("first restore should succeed");
+        rt.notify_overlay_exit(ExitReason::OverlayFailure)
+            .expect("duplicate restore should be no-op");
+
+        assert_eq!(restore_count.load(Ordering::SeqCst), 1);
         reset_runtime(rt);
     }
 

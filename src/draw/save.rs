@@ -1,7 +1,10 @@
-use crate::draw::composite::Rgba;
+use crate::draw::composite::{
+    composite_annotation_over_blank, composite_annotation_over_desktop, Rgba, RgbaBuffer,
+};
 use crate::draw::messages::ExitReason;
 use anyhow::{anyhow, Context, Result};
 use chrono::Local;
+use image::RgbaImage;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -32,15 +35,27 @@ impl Default for SaveConfig {
 pub struct ExitPromptState {
     pub reason: ExitReason,
     pub frozen_input: bool,
+    pub phase: ExitPromptPhase,
     pub overlay_hidden_for_capture: bool,
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitPromptPhase {
+    PromptVisible,
+    Saving,
+}
+
 impl ExitPromptState {
-    pub fn from_exit_reason(reason: ExitReason) -> Self {
+    pub fn from_exit_reason(reason: ExitReason, show_prompt: bool) -> Self {
         Self {
             reason,
             frozen_input: true,
+            phase: if show_prompt {
+                ExitPromptPhase::PromptVisible
+            } else {
+                ExitPromptPhase::Saving
+            },
             overlay_hidden_for_capture: false,
             last_error: None,
         }
@@ -57,6 +72,11 @@ pub struct SaveTargets {
 pub enum SaveDispatchOutcome {
     Save(SaveTargets),
     Discard,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveCompositionStats {
+    pub desktop_capture_count: usize,
 }
 
 pub fn exe_relative_output_folder_from_path(exe_path: &Path) -> Result<PathBuf> {
@@ -108,12 +128,60 @@ pub fn dispatch_save_choice(
     }
 }
 
+pub fn compose_and_persist_saves<C>(
+    annotation: &RgbaBuffer,
+    config: SaveConfig,
+    targets: &SaveTargets,
+    mut desktop_capture: C,
+) -> Result<SaveCompositionStats>
+where
+    C: FnMut() -> Result<RgbaBuffer>,
+{
+    let mut desktop_background = None;
+    let mut desktop_capture_count = 0;
+
+    if targets.desktop.is_some() {
+        desktop_background = Some(desktop_capture()?);
+        desktop_capture_count += 1;
+    }
+
+    if let Some(path) = &targets.desktop {
+        let composed = composite_annotation_over_desktop(
+            desktop_background
+                .as_ref()
+                .ok_or_else(|| anyhow!("desktop capture was not available"))?,
+            annotation,
+        );
+        save_rgba_buffer_png(path, &composed)?;
+    }
+
+    if let Some(path) = &targets.blank {
+        let composed = composite_annotation_over_blank(annotation, config.blank_background);
+        save_rgba_buffer_png(path, &composed)?;
+    }
+
+    Ok(SaveCompositionStats {
+        desktop_capture_count,
+    })
+}
+
+fn save_rgba_buffer_png(path: &Path, buffer: &RgbaBuffer) -> Result<()> {
+    let image = RgbaImage::from_raw(buffer.width, buffer.height, buffer.pixels.clone())
+        .ok_or_else(|| anyhow!("invalid RGBA buffer dimensions for PNG export"))?;
+    image
+        .save(path)
+        .with_context(|| format!("save draw export {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        build_filename, dispatch_save_choice, exe_relative_output_folder_from_path, SaveChoice,
-        SaveDispatchOutcome, DRAW_EXPORT_SUBDIR,
+        build_filename, compose_and_persist_saves, dispatch_save_choice,
+        exe_relative_output_folder_from_path, ExitPromptPhase, ExitPromptState, SaveChoice,
+        SaveConfig, SaveDispatchOutcome, SaveTargets, DRAW_EXPORT_SUBDIR,
     };
+    use crate::draw::composite::{Rgba, RgbaBuffer};
+    use crate::draw::messages::ExitReason;
     use chrono::{Local, TimeZone};
     use std::path::Path;
 
@@ -197,5 +265,61 @@ mod tests {
             build_filename("20260102_030405", "blank"),
             "20260102_030405_blank.png"
         );
+    }
+
+    #[test]
+    fn exit_prompt_phase_respects_configuration() {
+        assert_eq!(
+            ExitPromptState::from_exit_reason(ExitReason::UserRequest, true).phase,
+            ExitPromptPhase::PromptVisible
+        );
+        assert_eq!(
+            ExitPromptState::from_exit_reason(ExitReason::UserRequest, false).phase,
+            ExitPromptPhase::Saving
+        );
+    }
+
+    #[test]
+    fn save_branching_uses_desktop_capture_only_when_requested() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let annotation = RgbaBuffer::from_pixels(1, 1, vec![255, 0, 0, 255]);
+        let desktop_bg = RgbaBuffer::from_pixels(1, 1, vec![10, 20, 30, 255]);
+
+        let desktop_path = dir.path().join("desktop.png");
+        let stats = compose_and_persist_saves(
+            &annotation,
+            SaveConfig {
+                blank_background: Rgba::BLACK,
+            },
+            &SaveTargets {
+                desktop: Some(desktop_path.clone()),
+                blank: None,
+            },
+            || Ok(desktop_bg.clone()),
+        )
+        .expect("desktop save should succeed");
+        assert_eq!(stats.desktop_capture_count, 1);
+        assert!(desktop_path.exists());
+
+        let blank_path = dir.path().join("blank.png");
+        let mut captures = 0;
+        let stats = compose_and_persist_saves(
+            &annotation,
+            SaveConfig {
+                blank_background: Rgba::BLACK,
+            },
+            &SaveTargets {
+                desktop: None,
+                blank: Some(blank_path.clone()),
+            },
+            || {
+                captures += 1;
+                Ok(desktop_bg.clone())
+            },
+        )
+        .expect("blank save should succeed");
+        assert_eq!(stats.desktop_capture_count, 0);
+        assert_eq!(captures, 0);
+        assert!(blank_path.exists());
     }
 }
