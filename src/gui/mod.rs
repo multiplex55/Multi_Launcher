@@ -3689,6 +3689,13 @@ impl eframe::App for LauncherApp {
         if self.enable_toasts {
             self.toasts.show(ctx);
         }
+        if crate::draw::runtime().is_active() {
+            if let Err(err) = crate::draw::runtime().tick(Instant::now()) {
+                tracing::warn!(?err, "draw runtime tick failed during egui update");
+            }
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+
         for warning in crate::draw::runtime().take_runtime_warnings() {
             if self.enable_toasts {
                 push_toast(

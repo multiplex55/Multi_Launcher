@@ -158,6 +158,11 @@ impl DrawRuntime {
                 return Ok(StartOutcome::AlreadyActive);
             }
 
+            if entry_context.timeout_deadline.is_none() {
+                entry_context.timeout_deadline =
+                    Some(Instant::now() + Duration::from_secs(state.settings.exit_timeout_seconds));
+            }
+
             entry_context.mouse_gestures_prior_effective_state =
                 crate::plugins::mouse_gestures::draw_effective_enabled();
             entry_context.mouse_gestures_suspend_token =
@@ -343,6 +348,7 @@ impl DrawRuntime {
         };
 
         if timed_out {
+            self.request_exit(ExitReason::Timeout)?;
             self.restore_pipeline(ExitReason::Timeout, "overlay timeout failsafe")?;
         }
 
@@ -865,6 +871,143 @@ mod tests {
         rt.tick(Instant::now()).expect("tick should succeed");
         assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
         assert!(restored.load(Ordering::SeqCst));
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn draw_entry_sets_timeout_deadline_from_settings() {
+        let rt = runtime();
+        reset_runtime(rt);
+
+        let mut settings = DrawSettings::default();
+        settings.exit_timeout_seconds = 15;
+        rt.apply_settings(settings);
+
+        let before = Instant::now();
+        rt.start_with_context(EntryContext::default())
+            .expect("start should succeed");
+        let after = Instant::now();
+
+        let context = rt
+            .entry_context_for_test()
+            .expect("entry context should be set");
+        let deadline = context
+            .timeout_deadline
+            .expect("timeout deadline should be assigned from settings");
+        let lower = before + Duration::from_secs(15);
+        let upper = after + Duration::from_secs(15);
+
+        assert!(deadline >= lower);
+        assert!(deadline <= upper);
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn tick_before_deadline_no_exit() {
+        let rt = runtime();
+        reset_runtime(rt);
+
+        let restore_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let restore_count_clone = Arc::clone(&restore_count);
+        set_runtime_restore_hook(Some(Box::new(move || {
+            restore_count_clone.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })));
+
+        let context = EntryContext {
+            timeout_deadline: Some(Instant::now() + Duration::from_secs(5)),
+            ..EntryContext::default()
+        };
+        rt.start_with_context(context)
+            .expect("start with timeout context should succeed");
+
+        rt.tick(Instant::now())
+            .expect("tick before deadline should not exit");
+
+        assert_eq!(restore_count.load(Ordering::SeqCst), 0);
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Active);
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn tick_after_deadline_requests_exit() {
+        let rt = runtime();
+        reset_runtime(rt);
+
+        let context = EntryContext {
+            timeout_deadline: Some(Instant::now() - Duration::from_millis(1)),
+            ..EntryContext::default()
+        };
+        rt.start_with_context(context)
+            .expect("start with expired timeout should succeed");
+
+        rt.tick(Instant::now())
+            .expect("tick after deadline should request exit and restore");
+
+        let dispatched = rt.take_dispatched_messages_for_test();
+        assert!(dispatched.iter().any(|message| {
+            matches!(
+                message,
+                MainToOverlay::RequestExit {
+                    reason: ExitReason::Timeout
+                }
+            )
+        }));
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn timeout_exit_cleans_overlay_and_hooks() {
+        let rt = runtime();
+        reset_runtime(rt);
+
+        let restore_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let restore_count_clone = Arc::clone(&restore_count);
+        set_runtime_restore_hook(Some(Box::new(move || {
+            restore_count_clone.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })));
+
+        let overlay_exited = Arc::new(AtomicBool::new(false));
+        let overlay_exited_clone = Arc::clone(&overlay_exited);
+        set_runtime_spawn_hook(Some(Box::new(move |_| {
+            let (main_tx, main_rx) = std::sync::mpsc::channel::<MainToOverlay>();
+            let (_overlay_tx, overlay_rx) = std::sync::mpsc::channel::<OverlayToMain>();
+            let overlay_exited = Arc::clone(&overlay_exited_clone);
+            let handle = std::thread::spawn(move || {
+                while let Ok(message) = main_rx.recv() {
+                    if matches!(
+                        message,
+                        MainToOverlay::RequestExit {
+                            reason: ExitReason::Timeout
+                        }
+                    ) {
+                        overlay_exited.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            });
+            Ok(super::OverlayStartupHandshake {
+                overlay_thread_handle: handle,
+                main_to_overlay_tx: main_tx,
+                overlay_to_main_rx: overlay_rx,
+            })
+        })));
+
+        let context = EntryContext {
+            timeout_deadline: Some(Instant::now() - Duration::from_millis(1)),
+            ..EntryContext::default()
+        };
+        rt.start_with_context(context)
+            .expect("start with expired timeout should succeed");
+        rt.tick(Instant::now())
+            .expect("tick should trigger timeout cleanup");
+
+        assert!(overlay_exited.load(Ordering::SeqCst));
+        assert_eq!(restore_count.load(Ordering::SeqCst), 1);
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
+        assert!(!rt.startup_handles_present_for_test());
         reset_runtime(rt);
     }
 
