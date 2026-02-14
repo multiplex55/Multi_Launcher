@@ -16,9 +16,17 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::thread;
+use std::time::{Duration, Instant};
 
 static RESTART_TX: Lazy<Mutex<Option<Sender<Settings>>>> = Lazy::new(|| Mutex::new(None));
 static EVENT_TX: Lazy<Mutex<Option<Sender<()>>>> = Lazy::new(|| Mutex::new(None));
+const DRAW_RUNTIME_TICK_INTERVAL: Duration = Duration::from_millis(100);
+
+fn tick_draw_runtime(now: Instant) {
+    if let Err(err) = multi_launcher::draw::runtime().tick(now) {
+        tracing::warn!(?err, "draw runtime tick failed");
+    }
+}
 
 pub fn request_hotkey_restart(settings: Settings) {
     match RESTART_TX.lock() {
@@ -218,7 +226,8 @@ fn main() -> anyhow::Result<()> {
     let mut queued_visibility: Option<bool> = None;
 
     loop {
-        let _ = event_rx.recv();
+        let _ = event_rx.recv_timeout(DRAW_RUNTIME_TICK_INTERVAL);
+        tick_draw_runtime(Instant::now());
 
         if handle.is_finished() {
             listener.stop();
@@ -303,5 +312,47 @@ fn main() -> anyhow::Result<()> {
         ) {
             let _ = event_tx.send(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tick_draw_runtime;
+    use multi_launcher::draw::messages::ExitReason;
+    use multi_launcher::draw::service::{runtime, set_runtime_restore_hook, EntryContext};
+    use multi_launcher::draw::state::DrawLifecycle;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn main_loop_tick_harness_triggers_timeout_restore() {
+        let rt = runtime();
+        rt.reset_for_test();
+
+        let restore_count = Arc::new(AtomicUsize::new(0));
+        let restore_count_clone = Arc::clone(&restore_count);
+        set_runtime_restore_hook(Some(Box::new(move || {
+            restore_count_clone.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })));
+
+        rt.force_lifecycle_for_test(DrawLifecycle::Exiting);
+        rt.notify_overlay_exit(ExitReason::UserRequest)
+            .expect("manual exit should restore");
+
+        let timed_out_context = EntryContext {
+            timeout_deadline: Some(Instant::now() - Duration::from_secs(1)),
+            ..EntryContext::default()
+        };
+        rt.start_with_context(timed_out_context)
+            .expect("start with timeout should succeed");
+
+        tick_draw_runtime(Instant::now());
+
+        assert_eq!(restore_count.load(Ordering::SeqCst), 2);
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
+        set_runtime_restore_hook(None);
+        rt.reset_for_test();
     }
 }

@@ -246,6 +246,13 @@ impl DrawRuntime {
         }
     }
 
+    pub fn settings_snapshot(&self) -> DrawSettings {
+        self.state
+            .lock()
+            .map(|state| state.settings.clone())
+            .unwrap_or_default()
+    }
+
     #[cfg(test)]
     pub fn settings_for_test(&self) -> Option<DrawSettings> {
         self.state.lock().ok().map(|s| s.settings.clone())
@@ -928,6 +935,27 @@ mod tests {
 
         rt.tick(Instant::now()).expect("tick should restore state");
         assert!(draw_effective_enabled());
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn tick_ignores_expired_timeout_when_runtime_inactive() {
+        let rt = runtime();
+        reset_runtime(rt);
+
+        let context = EntryContext {
+            timeout_deadline: Some(Instant::now() - Duration::from_secs(1)),
+            ..EntryContext::default()
+        };
+
+        rt.force_lifecycle_for_test(DrawLifecycle::Idle);
+        if let Ok(mut state) = rt.state.lock() {
+            state.entry_context = Some(context);
+        }
+
+        rt.tick(Instant::now())
+            .expect("tick should ignore timeout while inactive");
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
         reset_runtime(rt);
     }
 
