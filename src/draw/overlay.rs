@@ -1,8 +1,8 @@
 use crate::draw::input::{
     bridge_key_event_to_runtime, bridge_left_down_to_runtime, bridge_left_up_to_runtime,
-    bridge_mouse_move_to_runtime, DrawInputState, PointerModifiers,
+    bridge_mouse_move_to_runtime, DrawInputState, InputCommand, PointerModifiers,
 };
-use crate::draw::keyboard_hook::{map_key_event_to_command, KeyCommand, KeyEvent};
+use crate::draw::keyboard_hook::{KeyEvent, KeyboardHook};
 use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain, SaveResult};
 use crate::draw::model::{Color, ObjectStyle, StrokeStyle, Tool};
 use crate::draw::render::{
@@ -133,6 +133,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
             };
 
             let mut active_settings = crate::draw::runtime().settings_snapshot();
+            let mut keyboard_hook = KeyboardHook::default();
             let mut draw_input = DrawInputState::new(
                 map_draw_tool(active_settings.last_tool),
                 ObjectStyle {
@@ -146,6 +147,17 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
             loop {
                 #[cfg(windows)]
                 pump_overlay_messages();
+
+                for key_event in keyboard_hook.drain_events() {
+                    let dispatch = forward_key_event_to_draw_input(
+                        &mut draw_input,
+                        ExitDialogState::Hidden,
+                        key_event,
+                    );
+                    if dispatch.should_repaint {
+                        rerender_and_repaint(&mut window, &draw_input, &active_settings);
+                    }
+                }
 
                 for pointer_event in window.drain_pointer_events() {
                     let handled = forward_pointer_event_to_draw_input(
@@ -163,6 +175,9 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                 match main_to_overlay_rx.recv_timeout(Duration::from_millis(16)) {
                     Ok(MainToOverlay::Start) => {
                         did_start = true;
+                        if let Err(err) = keyboard_hook.activate() {
+                            tracing::warn!(?err, "failed to activate draw keyboard hook");
+                        }
                         window.show();
                         rerender_and_repaint(&mut window, &draw_input, &active_settings);
                     }
@@ -198,7 +213,10 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                 });
             }
             send_exit_after_cleanup(
-                || window.shutdown(),
+                || {
+                    keyboard_hook.deactivate();
+                    window.shutdown();
+                },
                 &overlay_to_main_tx,
                 exit_reason.unwrap_or(ExitReason::OverlayFailure),
                 SaveResult::Skipped,
@@ -323,13 +341,16 @@ pub fn forward_key_event_to_draw_input(
     draw_input: &mut DrawInputState,
     exit_dialog_state: ExitDialogState,
     event: KeyEvent,
-) -> bool {
+) -> KeyDispatch {
     if exit_dialog_state.blocks_drawing_input() {
-        return false;
+        return KeyDispatch::default();
     }
 
-    bridge_key_event_to_runtime(draw_input, event);
-    true
+    let command = bridge_key_event_to_runtime(draw_input, event);
+    KeyDispatch {
+        handled: true,
+        should_repaint: command_requests_repaint(command),
+    }
 }
 
 pub fn forward_key_event_and_request_paint(
@@ -338,12 +359,21 @@ pub fn forward_key_event_and_request_paint(
     event: KeyEvent,
     window: &OverlayWindow,
 ) -> bool {
-    let mapped = map_key_event_to_command(true, event);
-    let handled = forward_key_event_to_draw_input(draw_input, exit_dialog_state, event);
-    if handled && matches!(mapped, Some(KeyCommand::Undo | KeyCommand::Redo)) {
+    let dispatch = forward_key_event_to_draw_input(draw_input, exit_dialog_state, event);
+    if dispatch.should_repaint {
         window.request_paint();
     }
-    handled
+    dispatch.handled
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KeyDispatch {
+    pub handled: bool,
+    pub should_repaint: bool,
+}
+
+pub fn command_requests_repaint(command: Option<InputCommand>) -> bool {
+    matches!(command, Some(InputCommand::Undo | InputCommand::Redo))
 }
 #[cfg(windows)]
 mod platform {
@@ -874,9 +904,9 @@ impl OverlayWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        forward_pointer_event_to_draw_input, global_to_local, live_render_settings,
-        monitor_contains_point, monitor_local_point_for_global, select_monitor_for_point,
-        send_exit_after_cleanup, ExitDialogState, OverlayPointerEvent,
+        command_requests_repaint, forward_pointer_event_to_draw_input, global_to_local,
+        live_render_settings, monitor_contains_point, monitor_local_point_for_global,
+        select_monitor_for_point, send_exit_after_cleanup, ExitDialogState, OverlayPointerEvent,
     };
     use crate::draw::messages::{ExitReason, OverlayToMain, SaveResult};
     use crate::draw::{
@@ -889,6 +919,20 @@ mod tests {
 
     fn draw_state(tool: Tool) -> DrawInputState {
         DrawInputState::new(tool, ObjectStyle::default())
+    }
+
+    #[test]
+    fn undo_redo_dispatch_requests_repaint() {
+        assert!(command_requests_repaint(Some(
+            crate::draw::input::InputCommand::Undo
+        )));
+        assert!(command_requests_repaint(Some(
+            crate::draw::input::InputCommand::Redo
+        )));
+        assert!(!command_requests_repaint(Some(
+            crate::draw::input::InputCommand::RequestExit
+        )));
+        assert!(!command_requests_repaint(None));
     }
 
     #[test]
