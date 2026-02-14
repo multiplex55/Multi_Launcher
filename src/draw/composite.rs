@@ -1,5 +1,5 @@
-use crate::draw::model::{CanvasModel, FIRST_PASS_TRANSPARENCY_COLORKEY};
-use crate::draw::render::render_canvas_to_pixels;
+use crate::draw::model::CanvasModel;
+use crate::draw::render::{render_canvas_to_rgba, RenderSettings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgba {
@@ -62,26 +62,7 @@ impl RgbaBuffer {
 }
 
 pub fn annotation_from_canvas(canvas: &CanvasModel, width: u32, height: u32) -> RgbaBuffer {
-    let mut bgra = vec![0u8; (width * height * 4) as usize];
-    render_canvas_to_pixels(canvas, &mut bgra, width, height);
-
-    let mut rgba = Vec::with_capacity(bgra.len());
-    for chunk in bgra.chunks_exact(4) {
-        let b = chunk[0];
-        let g = chunk[1];
-        let r = chunk[2];
-        let a = chunk[3];
-
-        if r == FIRST_PASS_TRANSPARENCY_COLORKEY.r
-            && g == FIRST_PASS_TRANSPARENCY_COLORKEY.g
-            && b == FIRST_PASS_TRANSPARENCY_COLORKEY.b
-        {
-            rgba.extend_from_slice(&[0, 0, 0, 0]);
-        } else {
-            rgba.extend_from_slice(&[r, g, b, a]);
-        }
-    }
-
+    let rgba = render_canvas_to_rgba(canvas, RenderSettings::default(), (width, height));
     RgbaBuffer::from_pixels(width, height, rgba)
 }
 

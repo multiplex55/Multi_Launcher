@@ -41,6 +41,26 @@ impl DrawInputState {
         &self.history
     }
 
+    pub fn set_tool(&mut self, tool: Tool) {
+        self.tool = tool;
+    }
+
+    pub fn set_style(&mut self, style: ObjectStyle) {
+        self.style = style;
+    }
+
+    pub fn canvas_with_active(&self) -> crate::draw::model::CanvasModel {
+        let mut canvas = self.history.canvas();
+        if let Some(active) = &self.active_geometry {
+            canvas.objects.push(DrawObject {
+                tool: self.tool,
+                style: self.style,
+                geometry: active.clone(),
+            });
+        }
+        canvas
+    }
+
     pub fn handle_left_down(
         &mut self,
         point: (i32, i32),

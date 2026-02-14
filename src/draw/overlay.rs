@@ -4,8 +4,12 @@ use crate::draw::input::{
 };
 use crate::draw::keyboard_hook::{map_key_event_to_command, KeyCommand, KeyEvent};
 use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain, SaveResult};
-use crate::draw::model::{ObjectStyle, Tool};
+use crate::draw::model::{Color, ObjectStyle, StrokeStyle, Tool};
+use crate::draw::render::{
+    convert_rgba_to_dib_bgra, render_canvas_to_rgba, BackgroundClearMode, RenderSettings,
+};
 use crate::draw::service::MonitorRect;
+use crate::draw::settings::{DrawColor, DrawSettings, DrawTool};
 use anyhow::{anyhow, Result};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
@@ -36,6 +40,56 @@ pub struct OverlayHandles {
     pub overlay_thread_handle: JoinHandle<()>,
     pub main_to_overlay_tx: Sender<MainToOverlay>,
     pub overlay_to_main_rx: Receiver<OverlayToMain>,
+}
+
+fn map_draw_tool(tool: DrawTool) -> Tool {
+    match tool {
+        DrawTool::Pen => Tool::Pen,
+        DrawTool::Line => Tool::Line,
+        DrawTool::Rect => Tool::Rect,
+        DrawTool::Ellipse => Tool::Ellipse,
+        DrawTool::Eraser => Tool::Eraser,
+    }
+}
+
+fn map_draw_color(color: DrawColor) -> Color {
+    Color::rgba(color.r, color.g, color.b, color.a)
+}
+
+fn live_render_settings(settings: &DrawSettings) -> RenderSettings {
+    let background = settings.blank_background_color;
+    let clear_mode = if background.a == 0 {
+        BackgroundClearMode::Transparent
+    } else {
+        BackgroundClearMode::Solid(Color::rgba(
+            background.r,
+            background.g,
+            background.b,
+            background.a,
+        ))
+    };
+
+    RenderSettings { clear_mode }
+}
+
+fn rerender_and_repaint(
+    window: &mut OverlayWindow,
+    draw_input: &DrawInputState,
+    settings: &DrawSettings,
+) {
+    let canvas = draw_input.canvas_with_active();
+    let rgba = render_canvas_to_rgba(
+        &canvas,
+        live_render_settings(settings),
+        window.bitmap_size(),
+    );
+    window.with_bitmap_mut(|dib, width, height| {
+        if width == 0 || height == 0 || dib.len() != rgba.len() {
+            return;
+        }
+        convert_rgba_to_dib_bgra(&rgba, dib);
+    });
+    window.request_paint();
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,31 +136,53 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                 }
             };
 
-            let mut draw_input = DrawInputState::new(Tool::Pen, ObjectStyle::default());
+            let mut active_settings = crate::draw::runtime().settings_snapshot();
+            let mut draw_input = DrawInputState::new(
+                map_draw_tool(active_settings.last_tool),
+                ObjectStyle {
+                    stroke: StrokeStyle {
+                        width: active_settings.last_width.max(1),
+                        color: map_draw_color(active_settings.last_color),
+                    },
+                    fill: None,
+                },
+            );
             loop {
                 #[cfg(windows)]
                 pump_overlay_messages();
 
                 for pointer_event in window.drain_pointer_events() {
-                    let _ = forward_pointer_event_and_request_paint(
+                    let handled = forward_pointer_event_to_draw_input(
                         &mut draw_input,
                         ExitDialogState::Hidden,
                         window.monitor_rect(),
                         pointer_event.global_point,
                         pointer_event.event,
-                        &window,
                     );
+                    if handled {
+                        rerender_and_repaint(&mut window, &draw_input, &active_settings);
+                    }
                 }
 
                 match main_to_overlay_rx.recv_timeout(Duration::from_millis(16)) {
                     Ok(MainToOverlay::Start) => {
                         did_start = true;
                         window.show();
+                        rerender_and_repaint(&mut window, &draw_input, &active_settings);
                     }
                     Ok(MainToOverlay::UpdateSettings) => {
-                        window.request_paint();
+                        active_settings = crate::draw::runtime().settings_snapshot();
+                        draw_input.set_tool(map_draw_tool(active_settings.last_tool));
+                        draw_input.set_style(ObjectStyle {
+                            stroke: StrokeStyle {
+                                width: active_settings.last_width.max(1),
+                                color: map_draw_color(active_settings.last_color),
+                            },
+                            fill: None,
+                        });
+                        rerender_and_repaint(&mut window, &draw_input, &active_settings);
                         let _ = overlay_to_main_tx.send(OverlayToMain::SaveProgress {
-                            canvas: Default::default(),
+                            canvas: draw_input.history().canvas(),
                         });
                     }
                     Ok(MainToOverlay::RequestExit { reason }) => {
@@ -660,6 +736,13 @@ mod platform {
             }
         }
 
+        pub fn bitmap_size(&self) -> (u32, u32) {
+            (
+                self.monitor_rect.width as u32,
+                self.monitor_rect.height as u32,
+            )
+        }
+
         pub fn with_bitmap_mut<F>(&mut self, mut f: F)
         where
             F: FnMut(&mut [u8], u32, u32),
@@ -772,6 +855,10 @@ impl OverlayWindow {
     pub fn show(&self) {}
 
     pub fn request_paint(&self) {}
+
+    pub fn bitmap_size(&self) -> (u32, u32) {
+        (0, 0)
+    }
 
     pub fn drain_pointer_events(&self) -> Vec<OverlayPointerSample> {
         Vec::new()
