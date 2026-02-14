@@ -1,35 +1,86 @@
-use crate::draw::model::{
-    CanvasModel, Color, DrawObject, Geometry, FIRST_PASS_TRANSPARENCY_COLORKEY,
-};
+use crate::draw::model::{CanvasModel, Color, DrawObject, Geometry};
 use crate::draw::overlay::OverlayWindow;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundClearMode {
+    Transparent,
+    Solid(Color),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderSettings {
+    pub clear_mode: BackgroundClearMode,
+}
+
+impl Default for RenderSettings {
+    fn default() -> Self {
+        Self {
+            clear_mode: BackgroundClearMode::Transparent,
+        }
+    }
+}
+
+pub fn convert_rgba_to_dib_bgra(rgba: &[u8], dib_bgra: &mut [u8]) {
+    assert_eq!(rgba.len(), dib_bgra.len());
+    for (src, dst) in rgba.chunks_exact(4).zip(dib_bgra.chunks_exact_mut(4)) {
+        dst[0] = src[2];
+        dst[1] = src[1];
+        dst[2] = src[0];
+        dst[3] = src[3];
+    }
+}
+
+pub fn render_canvas_to_rgba(
+    canvas: &CanvasModel,
+    settings: RenderSettings,
+    size: (u32, u32),
+) -> Vec<u8> {
+    let (width, height) = size;
+    let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
+    clear_rgba_pixels(&mut pixels, settings.clear_mode);
+    for object in &canvas.objects {
+        render_draw_object_rgba(object, settings.clear_mode, &mut pixels, width, height);
+    }
+    pixels
+}
+
 pub fn render_canvas_into_overlay(window: &mut OverlayWindow, canvas: &CanvasModel) {
+    let rgba = render_canvas_to_rgba(canvas, RenderSettings::default(), window.bitmap_size());
     window.with_bitmap_mut(|pixels, width, height| {
-        render_canvas_to_pixels(canvas, pixels, width, height);
+        if width == 0 || height == 0 {
+            return;
+        }
+        convert_rgba_to_dib_bgra(&rgba, pixels);
     });
 }
 
 pub fn render_canvas_to_pixels(canvas: &CanvasModel, pixels: &mut [u8], width: u32, height: u32) {
-    clear_pixels(pixels);
-    for object in &canvas.objects {
-        render_draw_object(object, pixels, width, height);
-    }
+    let rgba = render_canvas_to_rgba(canvas, RenderSettings::default(), (width, height));
+    convert_rgba_to_dib_bgra(&rgba, pixels);
 }
 
-fn clear_pixels(pixels: &mut [u8]) {
+fn clear_rgba_pixels(pixels: &mut [u8], mode: BackgroundClearMode) {
+    let clear = match mode {
+        BackgroundClearMode::Transparent => Color::rgba(0, 0, 0, 0),
+        BackgroundClearMode::Solid(color) => color,
+    };
     for px in pixels.chunks_exact_mut(4) {
-        px.copy_from_slice(&[
-            FIRST_PASS_TRANSPARENCY_COLORKEY.b,
-            FIRST_PASS_TRANSPARENCY_COLORKEY.g,
-            FIRST_PASS_TRANSPARENCY_COLORKEY.r,
-            FIRST_PASS_TRANSPARENCY_COLORKEY.a,
-        ]);
+        px.copy_from_slice(&[clear.r, clear.g, clear.b, clear.a]);
     }
 }
 
-fn render_draw_object(object: &DrawObject, pixels: &mut [u8], width: u32, height: u32) {
+fn render_draw_object_rgba(
+    object: &DrawObject,
+    clear_mode: BackgroundClearMode,
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+) {
     let color = match object.geometry {
-        Geometry::Eraser { .. } => FIRST_PASS_TRANSPARENCY_COLORKEY,
+        Geometry::Eraser { .. } => match clear_mode {
+            BackgroundClearMode::Transparent => Color::rgba(0, 0, 0, 0),
+            BackgroundClearMode::Solid(color) => color,
+        },
         _ => object.style.stroke.color,
     };
     let stroke_width = object.style.stroke.width.max(1);
@@ -218,13 +269,13 @@ fn draw_brush(
             let dx = x - center.0;
             let dy = y - center.1;
             if dx * dx + dy * dy <= radius * radius {
-                set_pixel(pixels, width, height, x, y, color);
+                set_pixel_rgba(pixels, width, height, x, y, color);
             }
         }
     }
 }
 
-fn set_pixel(pixels: &mut [u8], width: u32, height: u32, x: i32, y: i32, color: Color) {
+fn set_pixel_rgba(pixels: &mut [u8], width: u32, height: u32, x: i32, y: i32, color: Color) {
     if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
         return;
     }
@@ -234,23 +285,21 @@ fn set_pixel(pixels: &mut [u8], width: u32, height: u32, x: i32, y: i32, color: 
         return;
     }
 
-    // Windows DIB uses BGRA byte order.
-    pixels[idx] = color.b;
+    pixels[idx] = color.r;
     pixels[idx + 1] = color.g;
-    pixels[idx + 2] = color.r;
+    pixels[idx + 2] = color.b;
     pixels[idx + 3] = color.a;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::render_canvas_to_pixels;
+    use super::{convert_rgba_to_dib_bgra, render_canvas_to_pixels, render_canvas_to_rgba};
     use crate::draw::{
         input::{DrawInputState, PointerModifiers},
-        model::{
-            CanvasModel, Color, DrawObject, Geometry, ObjectStyle, StrokeStyle, Tool,
-            FIRST_PASS_TRANSPARENCY_COLORKEY,
-        },
+        model::{CanvasModel, Color, DrawObject, Geometry, ObjectStyle, StrokeStyle, Tool},
     };
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
     fn object(tool: Tool, geometry: Geometry) -> DrawObject {
         DrawObject {
@@ -267,16 +316,53 @@ mod tests {
     }
 
     fn changed_pixels(canvas: CanvasModel) -> usize {
-        let mut pixels = vec![0u8; 64 * 64 * 4];
-        render_canvas_to_pixels(&canvas, &mut pixels, 64, 64);
+        let pixels = render_canvas_to_rgba(&canvas, super::RenderSettings::default(), (64, 64));
         pixels
             .chunks_exact(4)
-            .filter(|px| {
-                px[0] != FIRST_PASS_TRANSPARENCY_COLORKEY.b
-                    || px[1] != FIRST_PASS_TRANSPARENCY_COLORKEY.g
-                    || px[2] != FIRST_PASS_TRANSPARENCY_COLORKEY.r
-            })
+            .filter(|px| px[0] != 0 || px[1] != 0 || px[2] != 0 || px[3] != 0)
             .count()
+    }
+
+    fn pixel_hash(pixels: &[u8]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        pixels.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn render_empty_canvas_respects_background_clear_mode() {
+        let transparent = render_canvas_to_rgba(
+            &CanvasModel::default(),
+            super::RenderSettings {
+                clear_mode: super::BackgroundClearMode::Transparent,
+            },
+            (2, 1),
+        );
+        assert_eq!(transparent, vec![0, 0, 0, 0, 0, 0, 0, 0]);
+
+        let solid = render_canvas_to_rgba(
+            &CanvasModel::default(),
+            super::RenderSettings {
+                clear_mode: super::BackgroundClearMode::Solid(Color::rgba(7, 8, 9, 255)),
+            },
+            (2, 1),
+        );
+        assert_eq!(solid, vec![7, 8, 9, 255, 7, 8, 9, 255]);
+    }
+
+    #[test]
+    fn render_polyline_writes_nonzero_pixels() {
+        let canvas = CanvasModel {
+            objects: vec![object(
+                Tool::Pen,
+                Geometry::Pen {
+                    points: vec![(2, 2), (8, 8), (12, 4)],
+                },
+            )],
+        };
+
+        let pixels = render_canvas_to_rgba(&canvas, super::RenderSettings::default(), (16, 16));
+        assert!(pixels.chunks_exact(4).any(|px| px[3] != 0));
     }
 
     #[test]
@@ -351,15 +437,19 @@ mod tests {
     }
 
     #[test]
-    fn undo_redo_rerender_is_deterministic() {
+    fn undo_redo_changes_pixel_output_hash() {
         let mut input = DrawInputState::new(Tool::Line, ObjectStyle::default());
         let _ = input.handle_left_down((5, 5), PointerModifiers::default());
         input.handle_left_up((18, 18));
         let _ = input.handle_left_down((10, 30), PointerModifiers::default());
         input.handle_left_up((42, 30));
 
-        let mut before = vec![0u8; 64 * 64 * 4];
-        render_canvas_to_pixels(&input.history().canvas(), &mut before, 64, 64);
+        let before = render_canvas_to_rgba(
+            &input.history().canvas(),
+            super::RenderSettings::default(),
+            (64, 64),
+        );
+        let before_hash = pixel_hash(&before);
 
         let _ = input.handle_key_event(crate::draw::keyboard_hook::KeyEvent {
             key: crate::draw::keyboard_hook::KeyCode::U,
@@ -373,10 +463,95 @@ mod tests {
             },
         });
 
-        let mut after = vec![0u8; 64 * 64 * 4];
-        render_canvas_to_pixels(&input.history().canvas(), &mut after, 64, 64);
+        let after = render_canvas_to_rgba(
+            &input.history().canvas(),
+            super::RenderSettings::default(),
+            (64, 64),
+        );
+        let after_hash = pixel_hash(&after);
 
-        assert_eq!(before, after);
+        assert_eq!(before_hash, after_hash);
+    }
+
+    #[test]
+    fn dib_upload_converts_channel_order_correctly() {
+        let rgba = vec![10, 20, 30, 40, 50, 60, 70, 80];
+        let mut bgra = vec![0; rgba.len()];
+        convert_rgba_to_dib_bgra(&rgba, &mut bgra);
+        assert_eq!(bgra, vec![30, 20, 10, 40, 70, 60, 50, 80]);
+    }
+
+    #[test]
+    fn deterministic_snapshot_mixed_scene_matches_expected_pixels() {
+        let canvas = CanvasModel {
+            objects: vec![
+                object(
+                    Tool::Line,
+                    Geometry::Line {
+                        start: (0, 0),
+                        end: (0, 0),
+                    },
+                ),
+                object(
+                    Tool::Rect,
+                    Geometry::Rect {
+                        start: (1, 1),
+                        end: (1, 1),
+                    },
+                ),
+                object(
+                    Tool::Ellipse,
+                    Geometry::Ellipse {
+                        start: (2, 2),
+                        end: (2, 2),
+                    },
+                ),
+            ],
+        };
+
+        let pixels = render_canvas_to_rgba(&canvas, super::RenderSettings::default(), (3, 3));
+        let white = [255, 255, 255, 255];
+        let transparent = [0, 0, 0, 0];
+        let expected = vec![
+            white[0],
+            white[1],
+            white[2],
+            white[3],
+            transparent[0],
+            transparent[1],
+            transparent[2],
+            transparent[3],
+            transparent[0],
+            transparent[1],
+            transparent[2],
+            transparent[3],
+            transparent[0],
+            transparent[1],
+            transparent[2],
+            transparent[3],
+            white[0],
+            white[1],
+            white[2],
+            white[3],
+            transparent[0],
+            transparent[1],
+            transparent[2],
+            transparent[3],
+            transparent[0],
+            transparent[1],
+            transparent[2],
+            transparent[3],
+            transparent[0],
+            transparent[1],
+            transparent[2],
+            transparent[3],
+            white[0],
+            white[1],
+            white[2],
+            white[3],
+        ];
+
+        assert_eq!(pixels, expected);
     }
 
     #[test]
@@ -419,15 +594,7 @@ mod tests {
         render_canvas_to_pixels(&CanvasModel::default(), &mut pixels, 4, 4);
 
         for px in pixels.chunks_exact(4) {
-            assert_eq!(
-                px,
-                &[
-                    FIRST_PASS_TRANSPARENCY_COLORKEY.b,
-                    FIRST_PASS_TRANSPARENCY_COLORKEY.g,
-                    FIRST_PASS_TRANSPARENCY_COLORKEY.r,
-                    FIRST_PASS_TRANSPARENCY_COLORKEY.a,
-                ]
-            );
+            assert_eq!(px, &[0, 0, 0, 0]);
         }
     }
 }
