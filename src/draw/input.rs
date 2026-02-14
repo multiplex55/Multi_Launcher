@@ -1,7 +1,5 @@
 use crate::draw::history::DrawHistory;
-use crate::draw::keyboard_hook::{
-    map_key_event_to_command, KeyCode, KeyCommand, KeyEvent, KeyModifiers,
-};
+use crate::draw::keyboard_hook::{map_key_event_to_command, KeyCommand, KeyEvent};
 use crate::draw::messages::ExitReason;
 use crate::draw::model::{DrawObject, Geometry, ObjectStyle, Tool};
 use crate::draw::runtime;
@@ -176,6 +174,7 @@ fn should_append_point(last: Option<(i32, i32)>, point: (i32, i32)) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::draw::keyboard_hook::{KeyCode, KeyModifiers};
 
     fn draw_state(tool: Tool) -> DrawInputState {
         DrawInputState::new(tool, ObjectStyle::default())

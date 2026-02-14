@@ -2581,6 +2581,7 @@ impl LauncherApp {
                 mouse_gestures_prior_effective_state:
                     crate::plugins::mouse_gestures::draw_effective_enabled(),
                 timeout_deadline: None,
+                mouse_gestures_suspend_token: None,
             };
 
             match crate::draw::runtime().start_with_context(entry_context) {
