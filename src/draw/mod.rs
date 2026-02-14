@@ -5,6 +5,7 @@ pub mod keyboard_hook;
 pub mod messages;
 pub mod model;
 pub mod overlay;
+pub mod render;
 pub mod save;
 pub mod service;
 pub mod settings;

@@ -2,7 +2,7 @@ use crate::draw::input::{
     bridge_key_event_to_runtime, bridge_left_down_to_runtime, bridge_left_up_to_runtime,
     bridge_mouse_move_to_runtime, DrawInputState, PointerModifiers,
 };
-use crate::draw::keyboard_hook::KeyEvent;
+use crate::draw::keyboard_hook::{map_key_event_to_command, KeyCommand, KeyEvent};
 use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain, SaveResult};
 use crate::draw::service::MonitorRect;
 use anyhow::{anyhow, Result};
@@ -69,6 +69,7 @@ pub fn spawn_overlay() -> Result<OverlayHandles> {
                         window.show();
                     }
                     Ok(MainToOverlay::UpdateSettings) => {
+                        window.request_paint();
                         let _ = overlay_to_main_tx.send(OverlayToMain::SaveProgress {
                             canvas: Default::default(),
                         });
@@ -176,6 +177,26 @@ pub fn forward_pointer_event_to_draw_input(
     true
 }
 
+pub fn forward_pointer_event_and_request_paint(
+    draw_input: &mut DrawInputState,
+    exit_dialog_state: ExitDialogState,
+    tool_monitor_rect: MonitorRect,
+    global_point: (i32, i32),
+    event: OverlayPointerEvent,
+    window: &OverlayWindow,
+) -> bool {
+    let handled = forward_pointer_event_to_draw_input(
+        draw_input,
+        exit_dialog_state,
+        tool_monitor_rect,
+        global_point,
+        event,
+    );
+    if handled {
+        window.request_paint();
+    }
+    handled
+}
 pub fn forward_key_event_to_draw_input(
     draw_input: &mut DrawInputState,
     exit_dialog_state: ExitDialogState,
@@ -189,6 +210,19 @@ pub fn forward_key_event_to_draw_input(
     true
 }
 
+pub fn forward_key_event_and_request_paint(
+    draw_input: &mut DrawInputState,
+    exit_dialog_state: ExitDialogState,
+    event: KeyEvent,
+    window: &OverlayWindow,
+) -> bool {
+    let mapped = map_key_event_to_command(true, event);
+    let handled = forward_key_event_to_draw_input(draw_input, exit_dialog_state, event);
+    if handled && matches!(mapped, Some(KeyCommand::Undo | KeyCommand::Redo)) {
+        window.request_paint();
+    }
+    handled
+}
 #[cfg(windows)]
 mod platform {
     use super::{global_to_local, select_monitor_for_point};
@@ -472,6 +506,22 @@ mod platform {
             }
         }
 
+        pub fn with_bitmap_mut<F>(&mut self, mut f: F)
+        where
+            F: FnMut(&mut [u8], u32, u32),
+        {
+            if self.bits.is_null() || self.size_bytes == 0 {
+                return;
+            }
+
+            let pixels = unsafe { std::slice::from_raw_parts_mut(self.bits, self.size_bytes) };
+            f(
+                pixels,
+                self.monitor_rect.width as u32,
+                self.monitor_rect.height as u32,
+            );
+        }
+
         pub fn shutdown(&mut self) {
             unsafe {
                 if !self.mem_dc.0.is_null() {
@@ -542,6 +592,14 @@ impl OverlayWindow {
     pub fn show(&self) {}
 
     pub fn request_paint(&self) {}
+
+    pub fn with_bitmap_mut<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&mut [u8], u32, u32),
+    {
+        let mut pixels = [];
+        f(&mut pixels, 0, 0);
+    }
 
     pub fn shutdown(&mut self) {}
 }
