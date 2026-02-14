@@ -1,4 +1,6 @@
-use crate::draw::model::{CanvasModel, Color, DrawObject, Geometry};
+use crate::draw::model::{
+    CanvasModel, Color, DrawObject, Geometry, FIRST_PASS_TRANSPARENCY_COLORKEY,
+};
 use crate::draw::overlay::OverlayWindow;
 
 pub fn render_canvas_into_overlay(window: &mut OverlayWindow, canvas: &CanvasModel) {
@@ -16,13 +18,18 @@ pub fn render_canvas_to_pixels(canvas: &CanvasModel, pixels: &mut [u8], width: u
 
 fn clear_pixels(pixels: &mut [u8]) {
     for px in pixels.chunks_exact_mut(4) {
-        px.copy_from_slice(&[0, 0, 0, 0]);
+        px.copy_from_slice(&[
+            FIRST_PASS_TRANSPARENCY_COLORKEY.b,
+            FIRST_PASS_TRANSPARENCY_COLORKEY.g,
+            FIRST_PASS_TRANSPARENCY_COLORKEY.r,
+            FIRST_PASS_TRANSPARENCY_COLORKEY.a,
+        ]);
     }
 }
 
 fn render_draw_object(object: &DrawObject, pixels: &mut [u8], width: u32, height: u32) {
     let color = match object.geometry {
-        Geometry::Eraser { .. } => Color::rgba(0, 0, 0, 0),
+        Geometry::Eraser { .. } => FIRST_PASS_TRANSPARENCY_COLORKEY,
         _ => object.style.stroke.color,
     };
     let stroke_width = object.style.stroke.width.max(1);
@@ -239,7 +246,10 @@ mod tests {
     use super::render_canvas_to_pixels;
     use crate::draw::{
         input::{DrawInputState, PointerModifiers},
-        model::{CanvasModel, Color, DrawObject, Geometry, ObjectStyle, StrokeStyle, Tool},
+        model::{
+            CanvasModel, Color, DrawObject, Geometry, ObjectStyle, StrokeStyle, Tool,
+            FIRST_PASS_TRANSPARENCY_COLORKEY,
+        },
     };
 
     fn object(tool: Tool, geometry: Geometry) -> DrawObject {
@@ -259,7 +269,14 @@ mod tests {
     fn changed_pixels(canvas: CanvasModel) -> usize {
         let mut pixels = vec![0u8; 64 * 64 * 4];
         render_canvas_to_pixels(&canvas, &mut pixels, 64, 64);
-        pixels.chunks_exact(4).filter(|px| px[3] != 0).count()
+        pixels
+            .chunks_exact(4)
+            .filter(|px| {
+                px[0] != FIRST_PASS_TRANSPARENCY_COLORKEY.b
+                    || px[1] != FIRST_PASS_TRANSPARENCY_COLORKEY.g
+                    || px[2] != FIRST_PASS_TRANSPARENCY_COLORKEY.r
+            })
+            .count()
     }
 
     #[test]
@@ -394,5 +411,23 @@ mod tests {
         render_canvas_to_pixels(&canvas, &mut pixels, 8, 8);
 
         assert_eq!(pixels.len(), 8 * 8 * 4);
+    }
+
+    #[test]
+    fn untouched_pixels_are_initialized_to_first_pass_colorkey() {
+        let mut pixels = vec![0u8; 4 * 4 * 4];
+        render_canvas_to_pixels(&CanvasModel::default(), &mut pixels, 4, 4);
+
+        for px in pixels.chunks_exact(4) {
+            assert_eq!(
+                px,
+                &[
+                    FIRST_PASS_TRANSPARENCY_COLORKEY.b,
+                    FIRST_PASS_TRANSPARENCY_COLORKEY.g,
+                    FIRST_PASS_TRANSPARENCY_COLORKEY.r,
+                    FIRST_PASS_TRANSPARENCY_COLORKEY.a,
+                ]
+            );
+        }
     }
 }

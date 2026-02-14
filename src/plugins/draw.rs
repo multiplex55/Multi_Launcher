@@ -20,7 +20,8 @@ impl Default for DrawPlugin {
 }
 
 impl DrawPlugin {
-    fn persist_settings(&mut self, value: &mut serde_json::Value, settings: DrawSettings) {
+    fn persist_settings(&mut self, value: &mut serde_json::Value, mut settings: DrawSettings) {
+        settings.sanitize_for_first_pass_transparency();
         self.settings = settings.clone();
         runtime().apply_settings(settings.clone());
         if let Ok(serialized) = serde_json::to_value(&settings) {
@@ -92,7 +93,8 @@ impl Plugin for DrawPlugin {
     }
 
     fn apply_settings(&mut self, value: &serde_json::Value) {
-        if let Ok(settings) = serde_json::from_value::<DrawSettings>(value.clone()) {
+        if let Ok(mut settings) = serde_json::from_value::<DrawSettings>(value.clone()) {
+            settings.sanitize_for_first_pass_transparency();
             self.settings = settings.clone();
             runtime().apply_settings(settings);
         }
@@ -190,6 +192,27 @@ mod tests {
         plugin.apply_settings(&value);
 
         assert_eq!(rt.settings_for_test(), Some(custom));
+        rt.reset_for_test();
+    }
+
+    #[test]
+    fn apply_settings_resolves_colorkey_collision_before_runtime_update() {
+        let rt = runtime();
+        rt.reset_for_test();
+
+        let mut plugin = DrawPlugin::default();
+        let mut custom = DrawSettings::default();
+        custom.last_color = DrawColor::rgba(255, 0, 255, 12);
+        let value = serde_json::to_value(&custom).expect("serialize settings");
+
+        plugin.apply_settings(&value);
+
+        let applied = rt.settings_for_test().expect("runtime settings");
+        assert_eq!(applied.last_color, DrawColor::rgba(254, 0, 255, 255));
+        assert_eq!(
+            plugin.settings.last_color,
+            DrawColor::rgba(254, 0, 255, 255)
+        );
         rt.reset_for_test();
     }
 }

@@ -222,7 +222,8 @@ impl DrawRuntime {
         }
     }
 
-    pub fn apply_settings(&self, settings: DrawSettings) {
+    pub fn apply_settings(&self, mut settings: DrawSettings) {
+        settings.sanitize_for_first_pass_transparency();
         if let Ok(mut state) = self.state.lock() {
             state.settings = settings;
             if state.lifecycle.is_active() {

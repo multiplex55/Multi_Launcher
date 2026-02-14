@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+const FIRST_PASS_TRANSPARENCY_COLORKEY: DrawColor = DrawColor::rgba(255, 0, 255, 255);
+const COLORKEY_SAFE_FALLBACK: DrawColor = DrawColor::rgba(254, 0, 255, 255);
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolbarPosition {
@@ -38,6 +41,20 @@ impl DrawColor {
 
     pub fn from_rgba_array(color: [u8; 4]) -> Self {
         Self::rgba(color[0], color[1], color[2], color[3])
+    }
+
+    pub fn collides_with_first_pass_colorkey(self) -> bool {
+        self.r == FIRST_PASS_TRANSPARENCY_COLORKEY.r
+            && self.g == FIRST_PASS_TRANSPARENCY_COLORKEY.g
+            && self.b == FIRST_PASS_TRANSPARENCY_COLORKEY.b
+    }
+
+    pub fn resolve_first_pass_colorkey_collision(self) -> Self {
+        if self.collides_with_first_pass_colorkey() {
+            COLORKEY_SAFE_FALLBACK
+        } else {
+            self
+        }
     }
 }
 
@@ -158,9 +175,35 @@ impl Default for DrawSettings {
     }
 }
 
+impl DrawSettings {
+    /// First-pass transparency guard: selected pen colors must not collide with
+    /// the reserved color key while the overlay uses `LWA_COLORKEY`.
+    pub fn sanitize_for_first_pass_transparency(&mut self) -> bool {
+        let mut changed = false;
+
+        let next = self.last_color.resolve_first_pass_colorkey_collision();
+        changed |= next != self.last_color;
+        self.last_color = next;
+
+        let next = self
+            .default_outline_color
+            .resolve_first_pass_colorkey_collision();
+        changed |= next != self.default_outline_color;
+        self.default_outline_color = next;
+
+        for quick in &mut self.quick_colors {
+            let next = quick.resolve_first_pass_colorkey_collision();
+            changed |= next != *quick;
+            *quick = next;
+        }
+
+        changed
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::DrawSettings;
+    use super::{DrawColor, DrawSettings};
 
     #[test]
     fn serde_roundtrip_draw_settings() {
@@ -200,5 +243,23 @@ mod tests {
             settings.quick_colors[1],
             super::DrawColor::rgba(0, 0, 0, 255)
         );
+    }
+
+    #[test]
+    fn first_pass_transparency_guard_resolves_colorkey_collision() {
+        let mut settings = DrawSettings::default();
+        settings.last_color = DrawColor::rgba(255, 0, 255, 32);
+        settings.default_outline_color = DrawColor::rgba(255, 0, 255, 255);
+        settings.quick_colors[0] = DrawColor::rgba(255, 0, 255, 255);
+
+        let changed = settings.sanitize_for_first_pass_transparency();
+
+        assert!(changed);
+        assert_eq!(settings.last_color, DrawColor::rgba(254, 0, 255, 255));
+        assert_eq!(
+            settings.default_outline_color,
+            DrawColor::rgba(254, 0, 255, 255)
+        );
+        assert_eq!(settings.quick_colors[0], DrawColor::rgba(254, 0, 255, 255));
     }
 }

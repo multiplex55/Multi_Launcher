@@ -226,6 +226,7 @@ pub fn forward_key_event_and_request_paint(
 #[cfg(windows)]
 mod platform {
     use super::{global_to_local, select_monitor_for_point};
+    use crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY;
     use crate::draw::service::MonitorRect;
     use std::mem;
     use std::ptr;
@@ -242,7 +243,7 @@ mod platform {
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW,
         RegisterClassW, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, GWLP_USERDATA,
-        HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+        HWND_TOPMOST, LWA_COLORKEY, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
         WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_ERASEBKGND, WM_PAINT, WM_SHOWWINDOW,
         WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
         WS_EX_TOPMOST, WS_POPUP,
@@ -250,6 +251,33 @@ mod platform {
 
     pub fn compose_overlay_window_ex_style() -> WINDOW_EX_STYLE {
         WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+    }
+
+    pub enum OverlayTransparencyMode {
+        ColorKeyFirstPass,
+    }
+
+    pub fn first_pass_transparency_colorkey() -> COLORREF {
+        COLORREF(
+            (FIRST_PASS_TRANSPARENCY_COLORKEY.r as u32)
+                | ((FIRST_PASS_TRANSPARENCY_COLORKEY.g as u32) << 8)
+                | ((FIRST_PASS_TRANSPARENCY_COLORKEY.b as u32) << 16),
+        )
+    }
+
+    pub fn configure_layered_window_transparency(
+        hwnd: HWND,
+        mode: OverlayTransparencyMode,
+    ) -> windows::core::Result<()> {
+        // Technical debt: this first pass uses colorkey transparency, which cannot
+        // represent per-pixel alpha. Keep this seam so we can swap to
+        // `UpdateLayeredWindow` without changing overlay window creation call sites.
+        let (key, alpha, flags) = match mode {
+            OverlayTransparencyMode::ColorKeyFirstPass => {
+                (first_pass_transparency_colorkey(), 0, LWA_COLORKEY)
+            }
+        };
+        unsafe { SetLayeredWindowAttributes(hwnd, key, alpha, flags) }
     }
 
     fn widestring(value: &str) -> Vec<u16> {
@@ -414,8 +442,16 @@ mod platform {
                 .ok()?
             };
 
-            unsafe {
-                let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+            if configure_layered_window_transparency(
+                hwnd,
+                OverlayTransparencyMode::ColorKeyFirstPass,
+            )
+            .is_err()
+            {
+                unsafe {
+                    let _ = DestroyWindow(hwnd);
+                }
+                return None;
             }
 
             let mem_dc = unsafe { CreateCompatibleDC(HDC::default()) };
@@ -553,9 +589,13 @@ mod platform {
 
     #[cfg(test)]
     mod windows_tests {
-        use super::compose_overlay_window_ex_style;
+        use super::{
+            compose_overlay_window_ex_style, configure_layered_window_transparency,
+            first_pass_transparency_colorkey, OverlayTransparencyMode,
+        };
+        use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{
-            WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+            LWA_COLORKEY, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
         };
 
         #[test]
@@ -564,6 +604,18 @@ mod platform {
             assert_ne!(style.0 & WS_EX_LAYERED.0, 0);
             assert_ne!(style.0 & WS_EX_TOPMOST.0, 0);
             assert_eq!(style.0 & WS_EX_TRANSPARENT.0, 0);
+        }
+
+        #[test]
+        fn colorkey_mode_is_wired_for_first_pass_transparency() {
+            assert_eq!(first_pass_transparency_colorkey().0, 0x00ff00ff);
+
+            let result = configure_layered_window_transparency(
+                HWND::default(),
+                OverlayTransparencyMode::ColorKeyFirstPass,
+            );
+            assert!(result.is_err());
+            assert_eq!(LWA_COLORKEY.0, 0x1);
         }
     }
 }

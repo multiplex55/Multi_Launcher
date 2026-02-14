@@ -39,6 +39,7 @@ impl DrawSettingsDialog {
 
     fn persist(&mut self, app: &mut crate::gui::LauncherApp) {
         self.last_error = None;
+        self.settings.sanitize_for_first_pass_transparency();
 
         let mut settings = match Settings::load(&app.settings_path) {
             Ok(settings) => settings,
