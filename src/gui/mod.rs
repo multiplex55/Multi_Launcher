@@ -5677,7 +5677,7 @@ mod tests {
             .find(|command| command.label == "draw")
             .expect("draw command");
 
-        crate::draw::set_runtime_spawn_hook(Some(Box::new(|| {
+        crate::draw::set_runtime_spawn_hook(Some(Box::new(|_| {
             let (main_to_overlay_tx, _main_to_overlay_rx) = std::sync::mpsc::channel();
             let (_overlay_to_main_tx, overlay_to_main_rx) = std::sync::mpsc::channel();
             let overlay_thread_handle = std::thread::spawn(|| {});
@@ -5718,7 +5718,7 @@ mod tests {
             .expect("draw command");
         let called = Arc::new(AtomicBool::new(false));
         let called_clone = Arc::clone(&called);
-        crate::draw::set_runtime_spawn_hook(Some(Box::new(move || {
+        crate::draw::set_runtime_spawn_hook(Some(Box::new(move |_| {
             called_clone.store(true, Ordering::SeqCst);
             let (main_to_overlay_tx, _main_to_overlay_rx) = std::sync::mpsc::channel();
             let (_overlay_to_main_tx, overlay_to_main_rx) = std::sync::mpsc::channel();
@@ -5747,7 +5747,7 @@ mod tests {
             .into_iter()
             .find(|command| command.label == "draw")
             .expect("draw command");
-        crate::draw::set_runtime_spawn_hook(Some(Box::new(|| anyhow::bail!("draw failed"))));
+        crate::draw::set_runtime_spawn_hook(Some(Box::new(|_| anyhow::bail!("draw failed"))));
 
         app.activate_action(draw_command, None, ActivationSource::Enter);
 

@@ -1,5 +1,5 @@
 use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain};
-use crate::draw::overlay::spawn_overlay;
+use crate::draw::overlay::{resolve_monitor_from_cursor, spawn_overlay_for_monitor};
 use crate::draw::save::{ExitPromptPhase, ExitPromptState};
 use crate::draw::settings::DrawSettings;
 use crate::draw::state::{can_transition, DrawLifecycle};
@@ -91,7 +91,7 @@ static DRAW_RUNTIME: Lazy<DrawRuntime> = Lazy::new(DrawRuntime::default);
 
 type Hook = Box<dyn Fn() -> Result<()> + Send + Sync>;
 type LauncherRestoreHook = Box<dyn Fn(Option<String>) -> Result<()> + Send + Sync>;
-type SpawnHook = Box<dyn Fn() -> Result<OverlayStartupHandshake> + Send + Sync>;
+type SpawnHook = Box<dyn Fn(&EntryContext) -> Result<OverlayStartupHandshake> + Send + Sync>;
 static DRAW_SPAWN_HOOK: Lazy<Mutex<Option<SpawnHook>>> = Lazy::new(|| Mutex::new(None));
 static DRAW_RESTORE_HOOK: Lazy<Mutex<Option<Hook>>> = Lazy::new(|| Mutex::new(None));
 static DRAW_LAUNCHER_RESTORE_HOOK: Lazy<Mutex<Option<LauncherRestoreHook>>> =
@@ -145,6 +145,8 @@ impl DrawRuntime {
     }
 
     pub fn start_with_context(&self, mut entry_context: EntryContext) -> Result<StartOutcome> {
+        let resolved_monitor = resolve_monitor_from_cursor().unwrap_or(entry_context.monitor_rect);
+        entry_context.monitor_rect = resolved_monitor;
         {
             let mut state = self
                 .state
@@ -167,7 +169,7 @@ impl DrawRuntime {
             state.overlay_thread_handle = None;
         }
 
-        let startup = match self.spawn_overlay_runtime() {
+        let startup = match self.spawn_overlay_runtime(&entry_context) {
             Ok(startup) => startup,
             Err(err) => {
                 let _ = self.rollback_after_start_failure();
@@ -523,14 +525,17 @@ impl DrawRuntime {
         Ok(())
     }
 
-    fn spawn_overlay_runtime(&self) -> Result<OverlayStartupHandshake> {
+    fn spawn_overlay_runtime(
+        &self,
+        entry_context: &EntryContext,
+    ) -> Result<OverlayStartupHandshake> {
         if let Ok(guard) = DRAW_SPAWN_HOOK.lock() {
             if let Some(ref hook) = *guard {
-                return hook();
+                return hook(entry_context);
             }
         }
 
-        let startup = spawn_overlay()?;
+        let startup = spawn_overlay_for_monitor(entry_context.monitor_rect)?;
         Ok(OverlayStartupHandshake {
             overlay_thread_handle: startup.overlay_thread_handle,
             main_to_overlay_tx: startup.main_to_overlay_tx,
@@ -590,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn start_from_idle_succeeds_only_after_handles_are_populated() {
+    fn draw_runtime_start_spawns_overlay_engine_and_keeps_channels() {
         let rt = runtime();
         reset_runtime(rt);
         let outcome = rt.start().expect("start should succeed");
@@ -662,7 +667,7 @@ mod tests {
         reset_runtime(rt);
         let restored = Arc::new(AtomicBool::new(false));
         let restored_clone = Arc::clone(&restored);
-        set_runtime_spawn_hook(Some(Box::new(|| anyhow::bail!("overlay spawn failed"))));
+        set_runtime_spawn_hook(Some(Box::new(|_| anyhow::bail!("overlay spawn failed"))));
         set_runtime_restore_hook(Some(Box::new(move || {
             restored_clone.store(true, Ordering::SeqCst);
             Ok(())
@@ -687,7 +692,7 @@ mod tests {
         let shared_rx = Arc::new(std::sync::Mutex::new(Some(rx)));
         set_runtime_spawn_hook(Some(Box::new({
             let shared_rx = Arc::clone(&shared_rx);
-            move || {
+            move |_| {
                 let (main_tx, main_rx) = std::sync::mpsc::channel::<MainToOverlay>();
                 let handle = std::thread::spawn(move || {
                     while let Ok(message) = main_rx.recv() {
@@ -724,6 +729,101 @@ mod tests {
         rt.tick(Instant::now()).expect("tick should process exits");
         assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
         assert!(!rt.startup_handles_present_for_test());
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn request_exit_message_reaches_overlay_receiver() {
+        let rt = runtime();
+        reset_runtime(rt);
+
+        let seen_exit = Arc::new(AtomicBool::new(false));
+        let seen_exit_clone = Arc::clone(&seen_exit);
+        set_runtime_spawn_hook(Some(Box::new(move |_| {
+            let (main_tx, main_rx) = std::sync::mpsc::channel::<MainToOverlay>();
+            let (overlay_tx, overlay_rx) = std::sync::mpsc::channel::<OverlayToMain>();
+            let seen_exit = Arc::clone(&seen_exit_clone);
+            let handle = std::thread::spawn(move || {
+                while let Ok(message) = main_rx.recv() {
+                    if let MainToOverlay::RequestExit { reason } = message {
+                        seen_exit.store(true, Ordering::SeqCst);
+                        let _ = overlay_tx.send(OverlayToMain::Exited {
+                            reason,
+                            save_result: SaveResult::Skipped,
+                        });
+                        break;
+                    }
+                }
+            });
+            Ok(super::OverlayStartupHandshake {
+                overlay_thread_handle: handle,
+                main_to_overlay_tx: main_tx,
+                overlay_to_main_rx: overlay_rx,
+            })
+        })));
+
+        rt.start().expect("start should succeed");
+        rt.request_exit(ExitReason::UserRequest)
+            .expect("request exit should succeed");
+
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while !seen_exit.load(Ordering::SeqCst) && Instant::now() < deadline {
+            rt.tick(Instant::now()).expect("tick should process exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        rt.tick(Instant::now()).expect("tick should process exit");
+
+        assert!(seen_exit.load(Ordering::SeqCst));
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn start_send_request_exit_exits_overlay_loop_and_returns_runtime_to_inactive() {
+        let rt = runtime();
+        reset_runtime(rt);
+
+        let overlay_loop_exited = Arc::new(AtomicBool::new(false));
+        let overlay_loop_exited_clone = Arc::clone(&overlay_loop_exited);
+        set_runtime_spawn_hook(Some(Box::new(move |_| {
+            let (main_tx, main_rx) = std::sync::mpsc::channel::<MainToOverlay>();
+            let (overlay_tx, overlay_rx) = std::sync::mpsc::channel::<OverlayToMain>();
+            let exited = Arc::clone(&overlay_loop_exited_clone);
+            let handle = std::thread::spawn(move || {
+                while let Ok(message) = main_rx.recv() {
+                    if let MainToOverlay::RequestExit { reason } = message {
+                        exited.store(true, Ordering::SeqCst);
+                        let _ = overlay_tx.send(OverlayToMain::Exited {
+                            reason,
+                            save_result: SaveResult::Skipped,
+                        });
+                        break;
+                    }
+                }
+            });
+            Ok(super::OverlayStartupHandshake {
+                overlay_thread_handle: handle,
+                main_to_overlay_tx: main_tx,
+                overlay_to_main_rx: overlay_rx,
+            })
+        })));
+
+        rt.start().expect("runtime should start");
+        rt.request_exit(ExitReason::UserRequest)
+            .expect("request_exit should dispatch");
+
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while !overlay_loop_exited.load(Ordering::SeqCst) && Instant::now() < deadline {
+            rt.tick(Instant::now())
+                .expect("tick should observe overlay exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        rt.tick(Instant::now())
+            .expect("tick should observe overlay exit");
+
+        assert!(overlay_loop_exited.load(Ordering::SeqCst));
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
+        assert!(!rt.is_active());
         reset_runtime(rt);
     }
 
@@ -919,7 +1019,7 @@ mod tests {
         let rt = runtime();
         reset_runtime(rt);
 
-        set_runtime_spawn_hook(Some(Box::new(|| anyhow::bail!("overlay spawn failed"))));
+        set_runtime_spawn_hook(Some(Box::new(|_| anyhow::bail!("overlay spawn failed"))));
         let start_res = rt.start();
         assert!(start_res.is_err());
         assert!(draw_effective_enabled());
