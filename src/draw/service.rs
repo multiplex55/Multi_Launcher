@@ -839,9 +839,14 @@ mod tests {
         assert_eq!(prompt.reason, ExitReason::UserRequest);
         assert_eq!(
             rt.take_dispatched_messages_for_test(),
-            vec![MainToOverlay::SetExitDialogMode {
-                mode: crate::draw::messages::ExitDialogMode::PromptVisible
-            }]
+            vec![
+                MainToOverlay::SetExitDialogMode {
+                    mode: crate::draw::messages::ExitDialogMode::PromptVisible,
+                },
+                MainToOverlay::RequestExit {
+                    reason: ExitReason::UserRequest,
+                },
+            ]
         );
         rt.reset_for_test();
     }
