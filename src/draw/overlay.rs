@@ -6,7 +6,10 @@ use crate::draw::input::{
 use crate::draw::keyboard_hook::{KeyEvent, KeyboardHook};
 use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain, SaveResult};
 use crate::draw::model::{Color, ObjectStyle, StrokeStyle, Tool};
-use crate::draw::render::{BackgroundClearMode, DirtyRect, RenderFrameBuffer, RenderSettings};
+use crate::draw::monitor;
+use crate::draw::render::{
+    BackgroundClearMode, DirtyRect, LayeredRenderer, RenderFrameBuffer, RenderSettings,
+};
 use crate::draw::service::MonitorRect;
 use crate::draw::settings::{
     default_debug_hud_toggle_hotkey_value, default_toolbar_toggle_hotkey_value, DrawColor,
@@ -272,12 +275,35 @@ fn rerender_and_repaint(
     settings: &DrawSettings,
     overlay_state: &mut OverlayThreadState,
     framebuffer: &mut RenderFrameBuffer,
+    layered_renderer: &mut LayeredRenderer,
     dirty: Option<DirtyRect>,
     force_full_redraw: bool,
 ) {
-    let canvas = draw_input.canvas_with_active();
     let window_size = window.bitmap_size();
     let requires_full_overlay = overlay_state.toolbar_visible || overlay_state.debug_hud_visible;
+
+    if !requires_full_overlay {
+        let active_object = draw_input.active_object();
+        layered_renderer.render_to_window(
+            window,
+            &draw_input.committed_canvas(),
+            active_object.as_ref(),
+            live_render_settings(settings),
+            window_size,
+            dirty,
+            force_full_redraw,
+            draw_input.committed_revision(),
+        );
+        overlay_state.diagnostics.paint_count += 1;
+        window.request_paint();
+        return;
+    }
+
+    let canvas = draw_input.committed_canvas();
+    let mut canvas = canvas;
+    if let Some(active) = draw_input.active_object() {
+        canvas.objects.push(active);
+    }
 
     framebuffer.render(
         &canvas,
@@ -832,6 +858,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                 },
             );
             let mut framebuffer = RenderFrameBuffer::default();
+            let mut layered_renderer = LayeredRenderer::default();
             let frame_interval = Duration::from_micros(8_333);
             let mut next_frame = Instant::now();
             let mut needs_redraw = true;
@@ -943,6 +970,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                         &active_settings,
                         &mut overlay_state,
                         &mut framebuffer,
+                        &mut layered_renderer,
                         dirty,
                         forced_full_redraw,
                     );
@@ -1007,35 +1035,19 @@ fn pump_overlay_messages() {
     }
 }
 
-pub fn monitor_contains_point(rect: MonitorRect, point: (i32, i32)) -> bool {
-    point.0 >= rect.x
-        && point.0 < rect.x + rect.width
-        && point.1 >= rect.y
-        && point.1 < rect.y + rect.height
-}
-
 pub fn resolve_monitor_from_cursor() -> Option<MonitorRect> {
-    #[cfg(windows)]
-    {
-        let monitors = platform::enumerate_monitors();
-        let cursor = platform::resolve_cursor_position()?;
-        return select_monitor_for_point(&monitors, cursor).or_else(|| monitors.first().copied());
-    }
-
-    #[cfg(not(windows))]
-    {
-        None
-    }
+    monitor::resolve_monitor_from_cursor()
 }
 
 pub fn select_monitor_for_point(
     monitors: &[MonitorRect],
     point: (i32, i32),
 ) -> Option<MonitorRect> {
-    monitors
-        .iter()
-        .copied()
-        .find(|rect| monitor_contains_point(*rect, point))
+    monitor::select_monitor_for_point(monitors, point)
+}
+
+pub fn monitor_contains_point(rect: MonitorRect, point: (i32, i32)) -> bool {
+    monitor::monitor_contains_point(rect, point)
 }
 
 pub fn global_to_local(point: (i32, i32), origin: (i32, i32)) -> (i32, i32) {
@@ -1678,7 +1690,7 @@ mod tests {
     use crate::draw::{
         input::DrawInputState,
         model::{CanvasModel, ObjectStyle, Tool},
-        render::{BackgroundClearMode, RenderFrameBuffer},
+        render::{BackgroundClearMode, LayeredRenderer, RenderFrameBuffer},
         service::MonitorRect,
         settings::{DrawColor, DrawSettings, LiveBackgroundMode},
     };
@@ -2088,6 +2100,7 @@ mod tests {
         })
         .expect("overlay window test stub");
         let mut framebuffer = RenderFrameBuffer::default();
+        let mut layered_renderer = LayeredRenderer::default();
 
         rerender_and_repaint(
             &mut window,
@@ -2095,6 +2108,7 @@ mod tests {
             &settings,
             &mut state,
             &mut framebuffer,
+            &mut layered_renderer,
             None,
             true,
         );
