@@ -1131,10 +1131,28 @@ mod tests {
         assert_eq!(framebuffer.allocation_count(), initial_allocs);
     }
 
+    fn make_test_overlay_window() -> OverlayWindow {
+        #[cfg(windows)]
+        {
+            OverlayWindow::create_for_monitor(crate::draw::service::MonitorRect {
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64,
+            })
+            .expect("create test overlay window")
+        }
+
+        #[cfg(not(windows))]
+        {
+            OverlayWindow::default()
+        }
+    }
+
     #[test]
     fn committed_layer_rebuilds_only_on_history_mutation() {
         let mut renderer = LayeredRenderer::default();
-        let mut window = OverlayWindow::default();
+        let mut window = make_test_overlay_window();
         let settings = super::RenderSettings::default();
         let committed = CanvasModel {
             objects: vec![object(

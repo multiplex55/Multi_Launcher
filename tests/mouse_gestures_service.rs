@@ -219,7 +219,6 @@ fn disabling_config_stops_worker_and_blocks_hook_events() {
     assert!(!handle.emit(HookEvent::RButtonDown));
 }
 
-
 #[test]
 fn draw_mode_gate_suppresses_gesture_down_move_up_paths() {
     let _guard = TEST_MUTEX.lock().expect("test mutex");
