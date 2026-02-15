@@ -244,7 +244,8 @@ The dashboard is a set of configurable widgets you can pin and keep visible as a
 
 ## Contributor notes
 
-- The authoritative draw module is `src/draw/mod.rs` with implementation files in `src/draw/*`.
+- Draw architecture entrypoint: `src/draw/mod.rs` (wired from `src/lib.rs` via `#[path = "draw/mod.rs"] pub mod draw;`).
+- Keep draw implementation files under `src/draw/*`.
 - `src/_deprecated_draw_stub.rs` is legacy reference material and must remain outside module resolution (do not restore it as `src/draw.rs`).
 
 Quick verification commands:
