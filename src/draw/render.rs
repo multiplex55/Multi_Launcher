@@ -416,7 +416,7 @@ pub fn render_shape_preview_update(
             width,
             height,
             old,
-            BackgroundClearMode::Transparent,
+            BackgroundClearMode::Solid(Color::rgba(0, 0, 0, 0)),
         );
         let dirty = old.union(next_bounds).clamp(width, height)?;
         render_draw_object_rgba(
