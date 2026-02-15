@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 pub const DRAW_SETTINGS_FILE_NAME: &str = "draw_settings.json";
 const LEGACY_DRAW_PLUGIN_NAME: &str = "draw";
+const DRAW_SETTINGS_PATH_ENV: &str = "ML_DRAW_SETTINGS_PATH";
 
 pub fn settings_path_from_exe_path(exe_path: &Path) -> Result<PathBuf> {
     let parent = exe_path
@@ -14,6 +15,9 @@ pub fn settings_path_from_exe_path(exe_path: &Path) -> Result<PathBuf> {
 }
 
 pub fn resolve_settings_path() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os(DRAW_SETTINGS_PATH_ENV) {
+        return Ok(PathBuf::from(path));
+    }
     let exe_path = std::env::current_exe().context("resolve current executable")?;
     settings_path_from_exe_path(&exe_path)
 }
@@ -96,6 +100,18 @@ mod tests {
     };
     use crate::draw::settings::{DrawColor, DrawSettings};
     use std::path::Path;
+
+    #[test]
+    fn resolve_settings_path_uses_env_override_when_present() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let override_path = dir.path().join(DRAW_SETTINGS_FILE_NAME);
+
+        std::env::set_var("ML_DRAW_SETTINGS_PATH", &override_path);
+        let resolved = super::resolve_settings_path().expect("resolve path");
+        std::env::remove_var("ML_DRAW_SETTINGS_PATH");
+
+        assert_eq!(resolved, override_path);
+    }
 
     #[test]
     fn settings_path_is_resolved_next_to_executable() {

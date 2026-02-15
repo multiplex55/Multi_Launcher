@@ -103,6 +103,7 @@ impl Plugin for DrawPlugin {
             .ok()
             .flatten()
             .or_else(|| serde_json::from_value::<DrawSettings>(value.clone()).ok())
+            .or_else(|| settings_store::load("settings.json").ok())
             .unwrap_or_default();
         settings.sanitize_for_first_pass_transparency();
         self.settings = settings.clone();
@@ -140,6 +141,20 @@ mod tests {
 
     static DRAW_SETTINGS_TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
+    fn set_draw_settings_path_for_test(path: &std::path::Path) -> Option<std::ffi::OsString> {
+        let prev = std::env::var_os("ML_DRAW_SETTINGS_PATH");
+        std::env::set_var("ML_DRAW_SETTINGS_PATH", path);
+        prev
+    }
+
+    fn restore_draw_settings_path_for_test(prev: Option<std::ffi::OsString>) {
+        if let Some(value) = prev {
+            std::env::set_var("ML_DRAW_SETTINGS_PATH", value);
+        } else {
+            std::env::remove_var("ML_DRAW_SETTINGS_PATH");
+        }
+    }
+
     #[test]
     fn search_draw_returns_enter_action() {
         let plugin = DrawPlugin::default();
@@ -174,17 +189,30 @@ mod tests {
     #[test]
     fn settings_roundtrip_default_apply() {
         let _lock = DRAW_SETTINGS_TEST_MUTEX.lock().expect("lock");
+        let path_dir = tempfile::tempdir().expect("temp dir");
+        let path_prev = set_draw_settings_path_for_test(
+            &path_dir
+                .path()
+                .join(settings_store::DRAW_SETTINGS_FILE_NAME),
+        );
         let mut plugin = DrawPlugin::default();
         let default_value = plugin.default_settings().expect("default settings");
         plugin.apply_settings(&default_value);
         let applied: DrawSettings =
             serde_json::from_value(default_value).expect("deserialize draw settings");
         assert_eq!(plugin.settings, applied);
+        restore_draw_settings_path_for_test(path_prev);
     }
 
     #[test]
     fn reset_action_restores_defaults_after_customization() {
         let _lock = DRAW_SETTINGS_TEST_MUTEX.lock().expect("lock");
+        let path_dir = tempfile::tempdir().expect("temp dir");
+        let path_prev = set_draw_settings_path_for_test(
+            &path_dir
+                .path()
+                .join(settings_store::DRAW_SETTINGS_FILE_NAME),
+        );
         let mut plugin = DrawPlugin::default();
         let mut settings = DrawSettings::default();
         settings.exit_timeout_seconds = 42;
@@ -197,11 +225,18 @@ mod tests {
             serde_json::from_value(value).expect("deserialize reset settings");
         assert_eq!(reset, DrawSettings::default());
         assert_eq!(plugin.settings, DrawSettings::default());
+        restore_draw_settings_path_for_test(path_prev);
     }
 
     #[test]
     fn apply_settings_updates_runtime_settings() {
         let _lock = DRAW_SETTINGS_TEST_MUTEX.lock().expect("lock");
+        let path_dir = tempfile::tempdir().expect("temp dir");
+        let path_prev = set_draw_settings_path_for_test(
+            &path_dir
+                .path()
+                .join(settings_store::DRAW_SETTINGS_FILE_NAME),
+        );
         let rt = runtime();
         rt.reset_for_test();
 
@@ -213,12 +248,19 @@ mod tests {
         plugin.apply_settings(&value);
 
         assert_eq!(rt.settings_for_test(), Some(custom));
+        restore_draw_settings_path_for_test(path_prev);
         rt.reset_for_test();
     }
 
     #[test]
     fn apply_settings_resolves_colorkey_collision_before_runtime_update() {
         let _lock = DRAW_SETTINGS_TEST_MUTEX.lock().expect("lock");
+        let path_dir = tempfile::tempdir().expect("temp dir");
+        let path_prev = set_draw_settings_path_for_test(
+            &path_dir
+                .path()
+                .join(settings_store::DRAW_SETTINGS_FILE_NAME),
+        );
         let rt = runtime();
         rt.reset_for_test();
 
@@ -235,6 +277,7 @@ mod tests {
             plugin.settings.last_color,
             DrawColor::rgba(254, 0, 255, 255)
         );
+        restore_draw_settings_path_for_test(path_prev);
         rt.reset_for_test();
     }
 
@@ -244,8 +287,9 @@ mod tests {
         let rt = runtime();
         rt.reset_for_test();
 
-        let draw_settings_path = settings_store::resolve_settings_path().expect("path");
-        let draw_settings_backup = std::fs::read(&draw_settings_path).ok();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let draw_settings_path = dir.path().join(settings_store::DRAW_SETTINGS_FILE_NAME);
+        let path_prev = set_draw_settings_path_for_test(&draw_settings_path);
 
         let mut dedicated = DrawSettings::default();
         dedicated.last_width = 93;
@@ -264,11 +308,7 @@ mod tests {
             93
         );
 
-        if let Some(bytes) = draw_settings_backup {
-            std::fs::write(&draw_settings_path, bytes).expect("restore backup");
-        } else {
-            let _ = std::fs::remove_file(&draw_settings_path);
-        }
+        restore_draw_settings_path_for_test(path_prev);
         rt.reset_for_test();
     }
 
@@ -279,9 +319,8 @@ mod tests {
         rt.reset_for_test();
 
         let dir = tempfile::tempdir().expect("temp dir");
-        let draw_settings_path = settings_store::resolve_settings_path().expect("path");
-        let draw_settings_backup = std::fs::read(&draw_settings_path).ok();
-        let _ = std::fs::remove_file(&draw_settings_path);
+        let draw_settings_path = dir.path().join(settings_store::DRAW_SETTINGS_FILE_NAME);
+        let path_prev = set_draw_settings_path_for_test(&draw_settings_path);
 
         let orig_dir = std::env::current_dir().expect("cwd");
         std::env::set_current_dir(dir.path()).expect("set cwd");
@@ -307,11 +346,7 @@ mod tests {
         );
 
         std::env::set_current_dir(orig_dir).expect("restore cwd");
-        if let Some(bytes) = draw_settings_backup {
-            std::fs::write(&draw_settings_path, bytes).expect("restore backup");
-        } else {
-            let _ = std::fs::remove_file(&draw_settings_path);
-        }
+        restore_draw_settings_path_for_test(path_prev);
         rt.reset_for_test();
     }
 }

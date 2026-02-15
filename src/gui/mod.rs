@@ -5171,6 +5171,20 @@ mod tests {
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
+    fn set_draw_settings_path_for_test(path: &std::path::Path) -> Option<std::ffi::OsString> {
+        let prev = std::env::var_os("ML_DRAW_SETTINGS_PATH");
+        std::env::set_var("ML_DRAW_SETTINGS_PATH", path);
+        prev
+    }
+
+    fn restore_draw_settings_path_for_test(prev: Option<std::ffi::OsString>) {
+        if let Some(value) = prev {
+            std::env::set_var("ML_DRAW_SETTINGS_PATH", value);
+        } else {
+            std::env::remove_var("ML_DRAW_SETTINGS_PATH");
+        }
+    }
+
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
             ctx,
@@ -5484,6 +5498,7 @@ mod tests {
         assert!(log.contains("Removed note special-name"));
 
         std::env::set_current_dir(orig_dir).unwrap();
+        restore_draw_settings_path_for_test(path_prev);
     }
 
     #[test]
@@ -5582,6 +5597,8 @@ mod tests {
     fn draw_dialog_settings_action_opens_dialog() {
         let _lock = TEST_MUTEX.lock().unwrap();
         let dir = tempdir().unwrap();
+        let draw_settings_path = dir.path().join(settings_store::DRAW_SETTINGS_FILE_NAME);
+        let path_prev = set_draw_settings_path_for_test(&draw_settings_path);
         let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         std::env::set_current_dir(dir.path()).unwrap();
         Settings::default().save("settings.json").unwrap();
@@ -5605,6 +5622,7 @@ mod tests {
         assert_eq!(app.draw_dialog_settings_for_test(), DrawSettings::default());
 
         std::env::set_current_dir(orig_dir).unwrap();
+        restore_draw_settings_path_for_test(path_prev);
     }
 
     #[test]
@@ -5614,9 +5632,8 @@ mod tests {
         rt.reset_for_test();
 
         let dir = tempdir().unwrap();
-        let draw_settings_path = settings_store::resolve_settings_path().unwrap();
-        let draw_settings_backup = std::fs::read(&draw_settings_path).ok();
-        let _ = std::fs::remove_file(&draw_settings_path);
+        let draw_settings_path = dir.path().join(settings_store::DRAW_SETTINGS_FILE_NAME);
+        let path_prev = set_draw_settings_path_for_test(&draw_settings_path);
         let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         std::env::set_current_dir(dir.path()).unwrap();
         Settings::default().save("settings.json").unwrap();
@@ -5640,11 +5657,7 @@ mod tests {
 
         rt.reset_for_test();
         std::env::set_current_dir(orig_dir).unwrap();
-        if let Some(bytes) = draw_settings_backup {
-            std::fs::write(&draw_settings_path, bytes).unwrap();
-        } else {
-            let _ = std::fs::remove_file(&draw_settings_path);
-        }
+        restore_draw_settings_path_for_test(path_prev);
     }
 
     #[test]
@@ -5654,6 +5667,8 @@ mod tests {
         rt.reset_for_test();
 
         let dir = tempdir().unwrap();
+        let draw_settings_path = dir.path().join(settings_store::DRAW_SETTINGS_FILE_NAME);
+        let path_prev = set_draw_settings_path_for_test(&draw_settings_path);
         let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         std::env::set_current_dir(dir.path()).unwrap();
         Settings::default().save("settings.json").unwrap();
@@ -5680,6 +5695,7 @@ mod tests {
 
         rt.reset_for_test();
         std::env::set_current_dir(orig_dir).unwrap();
+        restore_draw_settings_path_for_test(path_prev);
     }
 
     #[test]
@@ -5689,9 +5705,8 @@ mod tests {
         rt.reset_for_test();
 
         let dir = tempdir().unwrap();
-        let draw_settings_path = settings_store::resolve_settings_path().unwrap();
-        let draw_settings_backup = std::fs::read(&draw_settings_path).ok();
-        let _ = std::fs::remove_file(&draw_settings_path);
+        let draw_settings_path = dir.path().join(settings_store::DRAW_SETTINGS_FILE_NAME);
+        let path_prev = set_draw_settings_path_for_test(&draw_settings_path);
         let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         std::env::set_current_dir(dir.path()).unwrap();
         Settings::default().save("settings.json").unwrap();
@@ -5714,20 +5729,15 @@ mod tests {
 
         rt.reset_for_test();
         std::env::set_current_dir(orig_dir).unwrap();
-        if let Some(bytes) = draw_settings_backup {
-            std::fs::write(&draw_settings_path, bytes).unwrap();
-        } else {
-            let _ = std::fs::remove_file(&draw_settings_path);
-        }
+        restore_draw_settings_path_for_test(path_prev);
     }
 
     #[test]
     fn draw_dialog_loads_from_legacy_plugin_settings_when_dedicated_file_missing() {
         let _lock = TEST_MUTEX.lock().unwrap();
         let dir = tempdir().unwrap();
-        let draw_settings_path = settings_store::resolve_settings_path().unwrap();
-        let draw_settings_backup = std::fs::read(&draw_settings_path).ok();
-        let _ = std::fs::remove_file(&draw_settings_path);
+        let draw_settings_path = dir.path().join(settings_store::DRAW_SETTINGS_FILE_NAME);
+        let path_prev = set_draw_settings_path_for_test(&draw_settings_path);
         let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         std::env::set_current_dir(dir.path()).unwrap();
 
@@ -5747,11 +5757,7 @@ mod tests {
         assert_eq!(app.draw_dialog_settings_for_test(), expected);
 
         std::env::set_current_dir(orig_dir).unwrap();
-        if let Some(bytes) = draw_settings_backup {
-            std::fs::write(&draw_settings_path, bytes).unwrap();
-        } else {
-            let _ = std::fs::remove_file(&draw_settings_path);
-        }
+        restore_draw_settings_path_for_test(path_prev);
     }
 
     #[test]
