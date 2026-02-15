@@ -1,5 +1,7 @@
 use anyhow::Result;
 
+use crate::hotkey::{Hotkey, Key};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyCode {
     KeyA,
@@ -99,28 +101,136 @@ pub enum KeyCommand {
     Undo,
     Redo,
     RequestExit,
+    ToggleToolbar,
 }
 
 pub fn should_consume_key_event(active: bool, _event: KeyEvent) -> bool {
     active
 }
 
-pub fn map_key_event_to_command(active: bool, event: KeyEvent) -> Option<KeyCommand> {
+fn map_keycode_to_hotkey_key(key: KeyCode) -> Option<Key> {
+    Some(match key {
+        KeyCode::KeyA => Key::KeyA,
+        KeyCode::KeyB => Key::KeyB,
+        KeyCode::KeyC => Key::KeyC,
+        KeyCode::KeyD => Key::KeyD,
+        KeyCode::KeyE => Key::KeyE,
+        KeyCode::KeyF => Key::KeyF,
+        KeyCode::KeyG => Key::KeyG,
+        KeyCode::KeyH => Key::KeyH,
+        KeyCode::KeyI => Key::KeyI,
+        KeyCode::KeyJ => Key::KeyJ,
+        KeyCode::KeyK => Key::KeyK,
+        KeyCode::KeyL => Key::KeyL,
+        KeyCode::KeyM => Key::KeyM,
+        KeyCode::KeyN => Key::KeyN,
+        KeyCode::KeyO => Key::KeyO,
+        KeyCode::KeyP => Key::KeyP,
+        KeyCode::KeyQ => Key::KeyQ,
+        KeyCode::KeyR => Key::KeyR,
+        KeyCode::KeyS => Key::KeyS,
+        KeyCode::KeyT => Key::KeyT,
+        KeyCode::U => Key::KeyU,
+        KeyCode::KeyV => Key::KeyV,
+        KeyCode::KeyW => Key::KeyW,
+        KeyCode::KeyX => Key::KeyX,
+        KeyCode::KeyY => Key::KeyY,
+        KeyCode::KeyZ => Key::KeyZ,
+        KeyCode::Num0 => Key::Num0,
+        KeyCode::Num1 => Key::Num1,
+        KeyCode::Num2 => Key::Num2,
+        KeyCode::Num3 => Key::Num3,
+        KeyCode::Num4 => Key::Num4,
+        KeyCode::Num5 => Key::Num5,
+        KeyCode::Num6 => Key::Num6,
+        KeyCode::Num7 => Key::Num7,
+        KeyCode::Num8 => Key::Num8,
+        KeyCode::Num9 => Key::Num9,
+        KeyCode::Space => Key::Space,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::Enter => Key::Return,
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::CapsLock => Key::CapsLock,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
+        KeyCode::Left => Key::LeftArrow,
+        KeyCode::Right => Key::RightArrow,
+        KeyCode::Up => Key::UpArrow,
+        KeyCode::Down => Key::DownArrow,
+        KeyCode::F1 => Key::F1,
+        KeyCode::F2 => Key::F2,
+        KeyCode::F3 => Key::F3,
+        KeyCode::F4 => Key::F4,
+        KeyCode::F5 => Key::F5,
+        KeyCode::F6 => Key::F6,
+        KeyCode::F7 => Key::F7,
+        KeyCode::F8 => Key::F8,
+        KeyCode::F9 => Key::F9,
+        KeyCode::F10 => Key::F10,
+        KeyCode::F11 => Key::F11,
+        KeyCode::F12 => Key::F12,
+        KeyCode::F13 => Key::F13,
+        KeyCode::F14 => Key::F14,
+        KeyCode::F15 => Key::F15,
+        KeyCode::F16 => Key::F16,
+        KeyCode::F17 => Key::F17,
+        KeyCode::F18 => Key::F18,
+        KeyCode::F19 => Key::F19,
+        KeyCode::F20 => Key::F20,
+        KeyCode::F21 => Key::F21,
+        KeyCode::F22 => Key::F22,
+        KeyCode::F23 => Key::F23,
+        KeyCode::F24 => Key::F24,
+        KeyCode::Escape => Key::Escape,
+        KeyCode::Other => return None,
+    })
+}
+
+fn key_event_matches_hotkey(event: KeyEvent, hotkey: Hotkey) -> bool {
+    let Some(key) = map_keycode_to_hotkey_key(event.key) else {
+        return false;
+    };
+    key == hotkey.key
+        && event.modifiers.ctrl == hotkey.ctrl
+        && event.modifiers.shift == hotkey.shift
+        && event.modifiers.alt == hotkey.alt
+        && event.modifiers.win == hotkey.win
+}
+
+pub fn map_key_event_to_command(
+    active: bool,
+    event: KeyEvent,
+    toolbar_toggle_hotkey: Option<Hotkey>,
+) -> Option<KeyCommand> {
     if !should_consume_key_event(active, event) {
         return None;
     }
 
-    match (event.key, event.modifiers) {
-        (KeyCode::Escape, _) => Some(KeyCommand::RequestExit),
-        (KeyCode::U, KeyModifiers { ctrl: false, .. }) => Some(KeyCommand::Undo),
-        (KeyCode::KeyR, KeyModifiers { ctrl: true, .. }) => Some(KeyCommand::Redo),
-        _ => None,
+    if matches!(event.key, KeyCode::Escape) {
+        return Some(KeyCommand::RequestExit);
     }
+    if matches!(event.key, KeyCode::U) && !event.modifiers.ctrl {
+        return Some(KeyCommand::Undo);
+    }
+    if matches!(event.key, KeyCode::KeyR) && event.modifiers.ctrl {
+        return Some(KeyCommand::Redo);
+    }
+    if let Some(hotkey) = toolbar_toggle_hotkey {
+        if key_event_matches_hotkey(event, hotkey) {
+            return Some(KeyCommand::ToggleToolbar);
+        }
+    }
+
+    None
 }
 
 #[derive(Debug, Default)]
 pub struct KeyboardHook {
     active: bool,
+    toolbar_toggle_hotkey: Option<Hotkey>,
     #[cfg(windows)]
     backend: platform::KeyboardHookBackend,
 }
@@ -132,7 +242,7 @@ impl KeyboardHook {
         }
 
         #[cfg(windows)]
-        self.backend.install()?;
+        self.backend.install(self.toolbar_toggle_hotkey)?;
 
         self.active = true;
         Ok(())
@@ -149,6 +259,12 @@ impl KeyboardHook {
         }
 
         self.active = false;
+    }
+
+    pub fn set_toolbar_toggle_hotkey(&mut self, hotkey: Option<Hotkey>) {
+        self.toolbar_toggle_hotkey = hotkey;
+        #[cfg(windows)]
+        self.backend.set_toolbar_toggle_hotkey(hotkey);
     }
 
     pub fn is_active(&self) -> bool {
@@ -183,6 +299,7 @@ impl Drop for KeyboardHook {
 #[cfg(windows)]
 mod platform {
     use super::{map_key_event_to_command, KeyCode, KeyEvent, KeyModifiers};
+    use crate::hotkey::Hotkey;
     use anyhow::{anyhow, Result};
     use once_cell::sync::Lazy;
     use std::sync::mpsc::{channel, Receiver, Sender};
@@ -198,6 +315,7 @@ mod platform {
     };
 
     static KEY_EVENT_SENDER: Lazy<Mutex<Option<Sender<KeyEvent>>>> = Lazy::new(|| Mutex::new(None));
+    static TOOLBAR_TOGGLE_HOTKEY: Lazy<Mutex<Option<Hotkey>>> = Lazy::new(|| Mutex::new(None));
 
     #[derive(Debug)]
     struct HookThread {
@@ -214,10 +332,12 @@ mod platform {
     unsafe impl Send for KeyboardHookBackend {}
 
     impl KeyboardHookBackend {
-        pub fn install(&mut self) -> Result<()> {
+        pub fn install(&mut self, toolbar_toggle_hotkey: Option<Hotkey>) -> Result<()> {
             if self.hook_thread.is_some() {
                 return Ok(());
             }
+
+            self.set_toolbar_toggle_hotkey(toolbar_toggle_hotkey);
 
             let (event_tx, event_rx) = channel::<KeyEvent>();
             if let Ok(mut guard) = KEY_EVENT_SENDER.lock() {
@@ -305,6 +425,12 @@ mod platform {
 
             self.receiver = None;
             Ok(())
+        }
+
+        pub fn set_toolbar_toggle_hotkey(&self, hotkey: Option<Hotkey>) {
+            if let Ok(mut guard) = TOOLBAR_TOGGLE_HOTKEY.lock() {
+                *guard = hotkey;
+            }
         }
 
         pub fn is_installed(&self) -> bool {
@@ -456,7 +582,8 @@ mod platform {
                         }
                     }
 
-                    if map_key_event_to_command(true, event).is_some() {
+                    let toolbar_toggle_hotkey = TOOLBAR_TOGGLE_HOTKEY.lock().ok().and_then(|g| *g);
+                    if map_key_event_to_command(true, event, toolbar_toggle_hotkey).is_some() {
                         return windows::Win32::Foundation::LRESULT(1);
                     }
                 }
@@ -485,6 +612,7 @@ mod tests {
                     key: KeyCode::U,
                     modifiers: KeyModifiers::default(),
                 },
+                None,
             ),
             Some(KeyCommand::Undo)
         );
@@ -504,6 +632,7 @@ mod tests {
                         win: false,
                     },
                 },
+                None,
             ),
             Some(KeyCommand::Redo)
         );
@@ -518,6 +647,7 @@ mod tests {
                     key: KeyCode::Escape,
                     modifiers: KeyModifiers::default(),
                 },
+                None,
             ),
             Some(KeyCommand::RequestExit)
         );
@@ -532,6 +662,7 @@ mod tests {
                     key: KeyCode::Other,
                     modifiers: KeyModifiers::default(),
                 },
+                None,
             ),
             None
         );
@@ -542,9 +673,34 @@ mod tests {
                     key: KeyCode::Escape,
                     modifiers: KeyModifiers::default(),
                 },
+                None,
             ),
             None
         );
+    }
+
+    #[test]
+    fn maps_custom_toolbar_hotkey() {
+        let command = map_key_event_to_command(
+            true,
+            KeyEvent {
+                key: KeyCode::Num1,
+                modifiers: KeyModifiers {
+                    ctrl: true,
+                    shift: false,
+                    alt: true,
+                    win: false,
+                },
+            },
+            Some(Hotkey {
+                key: Key::Num1,
+                ctrl: true,
+                shift: false,
+                alt: true,
+                win: false,
+            }),
+        );
+        assert_eq!(command, Some(KeyCommand::ToggleToolbar));
     }
 
     #[test]

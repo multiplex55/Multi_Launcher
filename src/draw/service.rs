@@ -260,12 +260,13 @@ impl DrawRuntime {
 
     pub fn apply_settings(&self, mut settings: DrawSettings) {
         settings.sanitize_for_first_pass_transparency();
-        let invalid_hotkey = settings.sanitize_toolbar_hotkey_or_default();
         if let Ok(mut state) = self.state.lock() {
-            if invalid_hotkey {
-                let warning = "Invalid toolbar hotkey; reverted to default".to_string();
+            if settings.parse_toolbar_toggle_hotkey().is_err() {
+                let warning =
+                    "Invalid toolbar hotkey; keeping last-known-good toolbar binding".to_string();
                 tracing::warn!("{warning}");
                 state.runtime_warnings.push(warning);
+                settings.toolbar_toggle_hotkey = state.settings.toolbar_toggle_hotkey.clone();
             }
             state.settings = settings;
             if state.lifecycle.is_active() {
@@ -1269,21 +1270,22 @@ mod tests {
     }
 
     #[test]
-    fn runtime_invalid_hotkey_falls_back_to_default_and_emits_warning() {
+    fn runtime_invalid_hotkey_keeps_last_known_good_binding_and_emits_warning() {
         let rt = runtime();
         reset_runtime(rt);
 
-        let mut settings = DrawSettings::default();
-        settings.toolbar_toggle_hotkey = "Ctrl+Shift+NotAKey".to_string();
+        let mut valid = DrawSettings::default();
+        valid.toolbar_toggle_hotkey = "Ctrl+Alt+1".to_string();
+        rt.apply_settings(valid.clone());
 
-        rt.apply_settings(settings);
+        let mut invalid = valid;
+        invalid.toolbar_toggle_hotkey = "Ctrl+Shift+NotAKey".to_string();
+        rt.apply_settings(invalid);
 
         let snapshot = rt.settings_snapshot();
-        assert_eq!(snapshot.toolbar_toggle_hotkey, "Ctrl+Shift+D");
-        assert!(rt
-            .take_runtime_warnings()
-            .iter()
-            .any(|warning| warning.contains("Invalid toolbar hotkey; reverted to default")));
+        assert_eq!(snapshot.toolbar_toggle_hotkey, "Ctrl+Alt+1");
+        assert!(rt.take_runtime_warnings().iter().any(|warning| warning
+            .contains("Invalid toolbar hotkey; keeping last-known-good toolbar binding")));
         reset_runtime(rt);
     }
 

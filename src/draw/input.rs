@@ -185,7 +185,7 @@ impl DrawInputState {
     }
 
     pub fn handle_key_event(&mut self, event: KeyEvent) -> Option<InputCommand> {
-        match map_key_event_to_command(true, event) {
+        match map_key_event_to_command(true, event, None) {
             Some(KeyCommand::Undo) => {
                 if self.history.undo().is_some() {
                     self.request_full_redraw();
@@ -201,6 +201,7 @@ impl DrawInputState {
                 Some(InputCommand::Redo)
             }
             Some(KeyCommand::RequestExit) => Some(InputCommand::RequestExit),
+            Some(KeyCommand::ToggleToolbar) => None,
             None => None,
         }
     }

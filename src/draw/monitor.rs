@@ -37,7 +37,7 @@ fn resolve_cursor_position() -> Option<(i32, i32)> {
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
     let mut point = POINT::default();
-    if unsafe { GetCursorPos(&mut point) }.as_bool() {
+    if unsafe { GetCursorPos(&mut point) }.is_ok() {
         Some((point.x, point.y))
     } else {
         None
@@ -48,8 +48,9 @@ fn resolve_cursor_position() -> Option<(i32, i32)> {
 fn enumerate_monitors() -> Vec<MonitorRect> {
     use std::mem;
     use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
-    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR, MONITORINFOEXW};
-    use windows::Win32::UI::WindowsAndMessaging::GetMonitorInfoW;
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
+    };
 
     extern "system" fn monitor_enum_proc(
         monitor: HMONITOR,
@@ -77,7 +78,7 @@ fn enumerate_monitors() -> Vec<MonitorRect> {
     unsafe {
         let _ = EnumDisplayMonitors(
             HDC::default(),
-            std::ptr::null(),
+            None,
             Some(monitor_enum_proc),
             LPARAM(&mut monitors as *mut Vec<MonitorRect> as isize),
         );

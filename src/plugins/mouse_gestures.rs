@@ -6,8 +6,8 @@ use crate::mouse_gestures::db::{
     SharedGestureDb, GESTURES_FILE,
 };
 use crate::mouse_gestures::service::{
-    with_service as with_gesture_service, CancelBehavior, MouseGestureConfig, NoMatchBehavior,
-    WheelCycleGate,
+    set_draw_mode_active as set_draw_mode_active_gate, with_service as with_gesture_service,
+    CancelBehavior, MouseGestureConfig, NoMatchBehavior, WheelCycleGate,
 };
 use crate::plugin::Plugin;
 use eframe::egui;
@@ -256,6 +256,7 @@ impl MouseGestureRuntime {
 
     fn set_draw_mode_active(&mut self, active: bool) {
         self.draw_suspend_count = usize::from(active);
+        set_draw_mode_active_gate(active);
         self.apply();
     }
 

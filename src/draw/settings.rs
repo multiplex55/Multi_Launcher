@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::hotkey::Hotkey;
+
 const FIRST_PASS_TRANSPARENCY_COLORKEY: DrawColor = DrawColor::rgba(255, 0, 255, 255);
 const COLORKEY_SAFE_FALLBACK: DrawColor = DrawColor::rgba(254, 0, 255, 255);
 
@@ -319,6 +321,11 @@ impl Default for DrawSettings {
 }
 
 impl DrawSettings {
+    pub fn parse_toolbar_toggle_hotkey(&self) -> Result<Hotkey, String> {
+        crate::hotkey::parse_hotkey(&self.toolbar_toggle_hotkey)
+            .ok_or_else(|| "Invalid hotkey format (example: Ctrl+Shift+D).".to_string())
+    }
+
     /// Live desktop transparency guard: selected pen colors must not collide with
     /// the reserved color key used by the legacy first-pass overlay pipeline.
     pub fn sanitize_for_first_pass_transparency(&mut self) -> bool {
@@ -344,7 +351,7 @@ impl DrawSettings {
     }
 
     pub fn toolbar_hotkey_valid(&self) -> bool {
-        crate::hotkey::parse_hotkey(&self.toolbar_toggle_hotkey).is_some()
+        self.parse_toolbar_toggle_hotkey().is_ok()
     }
 
     pub fn sanitize_toolbar_hotkey_or_default(&mut self) -> bool {
@@ -359,6 +366,7 @@ impl DrawSettings {
 #[cfg(test)]
 mod tests {
     use super::{DrawColor, DrawSettings, LiveBackgroundMode};
+    use crate::hotkey::Key;
 
     #[test]
     fn serde_roundtrip_draw_settings() {
@@ -509,5 +517,28 @@ mod tests {
                 color: DrawColor::rgba(12, 34, 56, 255)
             }
         );
+    }
+
+    #[test]
+    fn toolbar_hotkey_parser_accepts_common_combos() {
+        let mut settings = DrawSettings::default();
+        settings.toolbar_toggle_hotkey = "Ctrl+Alt+1".to_string();
+        let parsed = settings
+            .parse_toolbar_toggle_hotkey()
+            .expect("hotkey should parse");
+        assert_eq!(parsed.key, Key::Num1);
+        assert!(parsed.ctrl);
+        assert!(parsed.alt);
+        assert!(!parsed.shift);
+    }
+
+    #[test]
+    fn toolbar_hotkey_parser_rejects_malformed_or_unknown_keys() {
+        let mut settings = DrawSettings::default();
+        settings.toolbar_toggle_hotkey = "Ctrl++D".to_string();
+        assert!(settings.parse_toolbar_toggle_hotkey().is_err());
+
+        settings.toolbar_toggle_hotkey = "Ctrl+Shift+NotAKey".to_string();
+        assert!(settings.parse_toolbar_toggle_hotkey().is_err());
     }
 }
