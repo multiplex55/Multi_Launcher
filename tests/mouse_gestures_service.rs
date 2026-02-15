@@ -5,8 +5,9 @@ use multi_launcher::mouse_gestures::db::{
 use multi_launcher::mouse_gestures::engine::DirMode;
 use multi_launcher::mouse_gestures::overlay::OverlayBackend;
 use multi_launcher::mouse_gestures::service::{
-    should_ignore_window_title, CancelBehavior, CursorPositionProvider, HookEvent, MockHookBackend,
-    MouseGestureConfig, MouseGestureService, NoMatchBehavior, OverlayFactory, RightClickBackend,
+    set_draw_mode_active, should_ignore_window_title, CancelBehavior, CursorPositionProvider,
+    HookEvent, MockHookBackend, MouseGestureConfig, MouseGestureService, NoMatchBehavior,
+    OverlayFactory, RightClickBackend,
 };
 use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -216,6 +217,47 @@ fn disabling_config_stops_worker_and_blocks_hook_events() {
 
     assert!(!service.is_running());
     assert!(!handle.emit(HookEvent::RButtonDown));
+}
+
+
+#[test]
+fn draw_mode_gate_suppresses_gesture_down_move_up_paths() {
+    let _guard = TEST_MUTEX.lock().expect("test mutex");
+    set_draw_mode_active(false);
+
+    let (backend, handle) = MockHookBackend::new();
+    let overlay_state = Arc::new(TestOverlayState::default());
+    let overlay_factory: Arc<dyn OverlayFactory> = Arc::new(TestOverlayFactory {
+        state: Arc::clone(&overlay_state),
+    });
+    let click_backend = Arc::new(TestRightClickBackend::default());
+    let click_backend_trait: Arc<dyn RightClickBackend> = click_backend.clone();
+    let cursor_provider = Arc::new(TestCursorProvider::new((10.0, 10.0)));
+    let cursor_provider_trait: Arc<dyn CursorPositionProvider> = cursor_provider.clone();
+
+    let mut service = MouseGestureService::new_with_backend_and_overlays(
+        Box::new(backend),
+        overlay_factory,
+        Arc::clone(&click_backend_trait),
+        Arc::clone(&cursor_provider_trait),
+    );
+
+    let mut config = MouseGestureConfig::default();
+    config.enabled = true;
+    service.update_config(config);
+
+    set_draw_mode_active(true);
+    assert!(handle.emit(HookEvent::RButtonDown));
+    cursor_provider.set_position((120.0, 120.0));
+    sleep(Duration::from_millis(80));
+    assert!(handle.emit(HookEvent::RButtonUp));
+    sleep(Duration::from_millis(80));
+
+    assert_eq!(click_backend.clicks.load(Ordering::SeqCst), 0);
+    assert_eq!(overlay_state.trail_clears.load(Ordering::SeqCst), 0);
+
+    set_draw_mode_active(false);
+    service.stop();
 }
 
 #[test]

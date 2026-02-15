@@ -64,12 +64,14 @@ pub fn render_draw_settings_form(
             .text_edit_singleline(&mut settings.toolbar_toggle_hotkey)
             .changed();
     });
-    if !settings.toolbar_hotkey_valid() {
-        toolbar_hotkey_error = Some("Invalid hotkey format (example: Ctrl+Shift+D).".to_string());
+    if let Err(error) = settings.parse_toolbar_toggle_hotkey() {
+        toolbar_hotkey_error = Some(error);
         ui.colored_label(
             egui::Color32::RED,
             "Invalid hotkey format (example: Ctrl+Shift+D)",
         );
+    } else {
+        ui.colored_label(egui::Color32::GREEN, "Hotkey is valid.");
     }
 
     ui.horizontal(|ui| {

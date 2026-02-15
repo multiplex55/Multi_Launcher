@@ -11,9 +11,7 @@ use anyhow::anyhow;
 use chrono::Local;
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
-#[cfg(windows)]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -340,6 +338,15 @@ impl MouseGestureService {
 }
 
 static SERVICE: OnceCell<Mutex<MouseGestureService>> = OnceCell::new();
+static DRAW_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_draw_mode_active(active: bool) {
+    DRAW_MODE_ACTIVE.store(active, Ordering::Release);
+}
+
+fn draw_mode_active() -> bool {
+    DRAW_MODE_ACTIVE.load(Ordering::Acquire)
+}
 
 pub fn with_service<F>(f: F)
 where
@@ -421,6 +428,21 @@ fn worker_loop(
         }
         if stop_rx.try_recv().is_ok() {
             break;
+        }
+        if draw_mode_active() {
+            if active {
+                trail_overlay.clear();
+                hint_overlay.reset();
+                active = false;
+                exceeded_deadzone = false;
+                tracker.reset();
+                #[cfg(windows)]
+                {
+                    hook_dispatch().set_tracking(false);
+                    hook_dispatch().set_active(false);
+                }
+            }
+            continue;
         }
         match event_rx.recv_timeout(poll_interval) {
             Ok(event) => match event {
@@ -722,7 +744,7 @@ fn worker_loop(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        if active && last_trail.elapsed() >= poll_interval {
+        if active && !draw_mode_active() && last_trail.elapsed() >= poll_interval {
             if let Some(pos) = cursor_provider.cursor_position() {
                 let dx = pos.0 - start_pos.0;
                 let dy = pos.1 - start_pos.1;
@@ -1675,6 +1697,17 @@ unsafe extern "system" fn mouse_hook_proc(
         if msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP || msg == WM_MOUSEWHEEL {
             let dispatch = hook_dispatch();
 
+            if draw_mode_active() {
+                dispatch.set_tracking(false);
+                dispatch.set_active(false);
+                return CallNextHookEx(
+                    windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
+                    n_code,
+                    w_param,
+                    l_param,
+                );
+            }
+
             if dispatch.enabled.load(Ordering::Acquire) {
                 // If we're injecting (or the event is injected), do NOT consume it and do NOT forward to worker.
                 let info = &*(l_param.0 as *const MSLLHOOKSTRUCT);
@@ -1783,6 +1816,16 @@ unsafe extern "system" fn keyboard_hook_proc(
             let injected = (info.flags & KBDLLHOOKSTRUCT_FLAGS(0x10)) != KBDLLHOOKSTRUCT_FLAGS(0);
             if !injected {
                 let dispatch = hook_dispatch();
+                if draw_mode_active() {
+                    dispatch.set_tracking(false);
+                    dispatch.set_active(false);
+                    return CallNextHookEx(
+                        windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
+                        n_code,
+                        w_param,
+                        l_param,
+                    );
+                }
                 if dispatch.enabled.load(Ordering::Acquire) && dispatch.is_active() {
                     if let Ok(guard) = dispatch.sender.try_lock() {
                         if let Some(sender) = guard.as_ref() {

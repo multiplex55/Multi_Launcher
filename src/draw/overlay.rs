@@ -847,6 +847,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
             let mut active_settings = crate::draw::runtime().settings_snapshot();
             let mut overlay_state = OverlayThreadState::from_settings(&active_settings);
             let mut keyboard_hook = KeyboardHook::default();
+            keyboard_hook.set_toolbar_toggle_hotkey(Some(overlay_state.toolbar_toggle_hotkey));
             let mut draw_input = DrawInputState::new(
                 map_draw_tool(active_settings.last_tool),
                 ObjectStyle {
@@ -926,6 +927,8 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                 controller.pump_runtime_messages(|| {
                     active_settings = crate::draw::runtime().settings_snapshot();
                     overlay_state.update_from_settings(&active_settings);
+                    keyboard_hook
+                        .set_toolbar_toggle_hotkey(Some(overlay_state.toolbar_toggle_hotkey));
                     draw_input.set_tool(map_draw_tool(active_settings.last_tool));
                     draw_input.set_style(ObjectStyle {
                         stroke: StrokeStyle {
