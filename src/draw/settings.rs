@@ -23,10 +23,24 @@ pub enum DrawTool {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LiveBackgroundMode {
+    Transparent,
+    Blank { color: DrawColor },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum LegacyLiveBackgroundMode {
     DesktopTransparent,
     SolidColor,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+enum LiveBackgroundModeWire {
+    New(LiveBackgroundMode),
+    Legacy(LegacyLiveBackgroundMode),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -97,8 +111,6 @@ pub struct DrawSettings {
     pub exit_timeout_seconds: u64,
     #[serde(default = "default_live_background_mode")]
     pub live_background_mode: LiveBackgroundMode,
-    #[serde(default = "default_live_blank_color", alias = "blank_background_color")]
-    pub live_blank_color: DrawColor,
     #[serde(default = "default_blank_background_color")]
     #[serde(alias = "export_background_color")]
     pub export_blank_background_color: DrawColor,
@@ -138,8 +150,8 @@ struct DrawSettingsDe {
     default_outline_color: DrawColor,
     #[serde(default = "default_exit_timeout_seconds")]
     exit_timeout_seconds: u64,
-    #[serde(default = "default_live_background_mode")]
-    live_background_mode: LiveBackgroundMode,
+    #[serde(default)]
+    live_background_mode: Option<LiveBackgroundModeWire>,
     #[serde(default)]
     live_blank_color: Option<DrawColor>,
     #[serde(
@@ -166,6 +178,16 @@ impl<'de> Deserialize<'de> for DrawSettings {
             .live_blank_color
             .or(legacy_blank)
             .unwrap_or_else(default_live_blank_color);
+        let live_background_mode = match decoded.live_background_mode {
+            Some(LiveBackgroundModeWire::New(mode)) => mode,
+            Some(LiveBackgroundModeWire::Legacy(LegacyLiveBackgroundMode::DesktopTransparent)) => {
+                LiveBackgroundMode::Transparent
+            }
+            Some(LiveBackgroundModeWire::Legacy(LegacyLiveBackgroundMode::SolidColor)) => {
+                LiveBackgroundMode::Blank { color: live_blank }
+            }
+            None => default_live_background_mode(),
+        };
         Ok(Self {
             enable_pressure: decoded.enable_pressure,
             toolbar_position: decoded.toolbar_position,
@@ -181,8 +203,7 @@ impl<'de> Deserialize<'de> for DrawSettings {
             default_fill_color: decoded.default_fill_color,
             default_outline_color: decoded.default_outline_color,
             exit_timeout_seconds: decoded.exit_timeout_seconds,
-            live_background_mode: decoded.live_background_mode,
-            live_blank_color: live_blank,
+            live_background_mode,
             export_blank_background_color: legacy_blank
                 .unwrap_or(decoded.export_blank_background_color),
             offer_save_without_desktop: decoded.offer_save_without_desktop,
@@ -244,7 +265,7 @@ fn default_blank_background_color() -> DrawColor {
 }
 
 fn default_live_background_mode() -> LiveBackgroundMode {
-    LiveBackgroundMode::DesktopTransparent
+    LiveBackgroundMode::Transparent
 }
 
 fn default_live_blank_color() -> DrawColor {
@@ -290,7 +311,6 @@ impl Default for DrawSettings {
             default_outline_color: default_outline_color(),
             exit_timeout_seconds: default_exit_timeout_seconds(),
             live_background_mode: default_live_background_mode(),
-            live_blank_color: default_live_blank_color(),
             export_blank_background_color: default_blank_background_color(),
             offer_save_without_desktop: default_offer_save_without_desktop(),
             fixed_save_folder_display: default_fixed_save_folder_display(),
@@ -300,7 +320,7 @@ impl Default for DrawSettings {
 
 impl DrawSettings {
     /// Live desktop transparency guard: selected pen colors must not collide with
-    /// the reserved color key used by the current `LWA_COLORKEY` overlay pipeline.
+    /// the reserved color key used by the legacy first-pass overlay pipeline.
     pub fn sanitize_for_first_pass_transparency(&mut self) -> bool {
         let mut changed = false;
 
@@ -369,11 +389,7 @@ mod tests {
         assert_eq!(settings.exit_timeout_seconds, 120);
         assert_eq!(
             settings.live_background_mode,
-            LiveBackgroundMode::DesktopTransparent
-        );
-        assert_eq!(
-            settings.live_blank_color,
-            super::DrawColor::rgba(15, 18, 24, 255)
+            LiveBackgroundMode::Transparent
         );
         assert_eq!(
             settings.export_blank_background_color,
@@ -411,19 +427,55 @@ mod tests {
     #[test]
     fn settings_roundtrip_live_background_mode_and_color() {
         let mut settings = DrawSettings::default();
-        settings.live_background_mode = LiveBackgroundMode::SolidColor;
-        settings.live_blank_color = DrawColor::rgba(22, 33, 44, 255);
+        settings.live_background_mode = LiveBackgroundMode::Blank {
+            color: DrawColor::rgba(22, 33, 44, 255),
+        };
         settings.export_blank_background_color = DrawColor::rgba(1, 2, 3, 255);
 
         let json = serde_json::to_string(&settings).expect("serialize draw settings");
         let decoded: DrawSettings = serde_json::from_str(&json).expect("deserialize settings");
 
-        assert_eq!(decoded.live_background_mode, LiveBackgroundMode::SolidColor);
-        assert_eq!(decoded.live_blank_color, DrawColor::rgba(22, 33, 44, 255));
+        assert_eq!(
+            decoded.live_background_mode,
+            LiveBackgroundMode::Blank {
+                color: DrawColor::rgba(22, 33, 44, 255)
+            }
+        );
         assert_eq!(
             decoded.export_blank_background_color,
             DrawColor::rgba(1, 2, 3, 255)
         );
+    }
+
+    #[test]
+    fn live_background_mode_serializes_with_explicit_kind_and_color() {
+        let transparent = LiveBackgroundMode::Transparent;
+        let blank = LiveBackgroundMode::Blank {
+            color: DrawColor::rgba(1, 2, 3, 255),
+        };
+
+        let transparent_json = serde_json::to_value(transparent).expect("serialize transparent");
+        let blank_json = serde_json::to_value(blank).expect("serialize blank");
+
+        assert_eq!(
+            transparent_json,
+            serde_json::json!({ "kind": "transparent" })
+        );
+        assert_eq!(
+            blank_json,
+            serde_json::json!({
+                "kind": "blank",
+                "color": { "r": 1, "g": 2, "b": 3, "a": 255 }
+            })
+        );
+
+        let decoded_transparent: LiveBackgroundMode =
+            serde_json::from_value(transparent_json).expect("deserialize transparent");
+        let decoded_blank: LiveBackgroundMode =
+            serde_json::from_value(blank_json).expect("deserialize blank");
+
+        assert_eq!(decoded_transparent, LiveBackgroundMode::Transparent);
+        assert_eq!(decoded_blank, blank);
     }
 
     #[test]
@@ -435,12 +487,27 @@ mod tests {
 
         assert_eq!(
             decoded.live_background_mode,
-            LiveBackgroundMode::DesktopTransparent
+            LiveBackgroundMode::Transparent
         );
-        assert_eq!(decoded.live_blank_color, DrawColor::rgba(9, 8, 7, 255));
         assert_eq!(
             decoded.export_blank_background_color,
             DrawColor::rgba(9, 8, 7, 255)
+        );
+    }
+
+    #[test]
+    fn deserialize_legacy_live_background_mode_solid_color() {
+        let decoded: DrawSettings = serde_json::from_value(serde_json::json!({
+            "live_background_mode": "solid_color",
+            "live_blank_color": { "r": 12, "g": 34, "b": 56, "a": 255 }
+        }))
+        .expect("deserialize legacy draw settings");
+
+        assert_eq!(
+            decoded.live_background_mode,
+            LiveBackgroundMode::Blank {
+                color: DrawColor::rgba(12, 34, 56, 255)
+            }
         );
     }
 }

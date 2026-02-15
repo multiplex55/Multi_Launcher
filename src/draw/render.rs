@@ -943,6 +943,43 @@ mod tests {
     }
 
     #[test]
+    fn framebuffer_transparent_mode_initializes_fully_transparent_surface() {
+        let mut framebuffer = RenderFrameBuffer::default();
+        framebuffer.render(
+            &CanvasModel::default(),
+            super::RenderSettings {
+                clear_mode: super::BackgroundClearMode::Transparent,
+            },
+            (3, 2),
+            None,
+            true,
+        );
+
+        assert!(framebuffer
+            .rgba_pixels()
+            .chunks_exact(4)
+            .all(|px| px == [0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn framebuffer_blank_mode_initializes_surface_with_solid_color() {
+        let mut framebuffer = RenderFrameBuffer::default();
+        framebuffer.render(
+            &CanvasModel::default(),
+            super::RenderSettings {
+                clear_mode: super::BackgroundClearMode::Solid(Color::rgba(9, 8, 7, 255)),
+            },
+            (2, 2),
+            None,
+            true,
+        );
+
+        assert!(framebuffer
+            .rgba_pixels()
+            .chunks_exact(4)
+            .all(|px| px == [9, 8, 7, 255]));
+    }
+    #[test]
     fn framebuffer_is_reused_for_same_dimensions() {
         let canvas = CanvasModel {
             objects: vec![object(
