@@ -1,4 +1,4 @@
-use crate::draw::model::{CanvasModel, Color, DrawObject, Geometry};
+use crate::draw::model::{CanvasModel, Color, DrawObject, Geometry, ObjectStyle, Tool};
 use crate::draw::overlay::OverlayWindow;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,6 +330,88 @@ pub fn render_canvas_to_pixels(canvas: &CanvasModel, pixels: &mut [u8], width: u
     convert_rgba_to_dib_bgra(&rgba, pixels);
 }
 
+pub fn segment_dirty_bounds(start: (i32, i32), end: (i32, i32), stroke_width: u32) -> DirtyRect {
+    let radius = stroke_width.max(1) as i32;
+    DirtyRect::from_points(start, end, radius + 2)
+}
+
+pub fn render_incremental_segment_update(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    tool: Tool,
+    style: ObjectStyle,
+    start: (i32, i32),
+    end: (i32, i32),
+    clear_mode: BackgroundClearMode,
+) -> Option<DirtyRect> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let dirty = segment_dirty_bounds(start, end, style.stroke.width.max(1)).clamp(width, height)?;
+    let color = if matches!(tool, Tool::Eraser) {
+        match clear_mode {
+            BackgroundClearMode::Transparent => Color::rgba(0, 0, 0, 0),
+            BackgroundClearMode::Solid(color) => color,
+        }
+    } else {
+        style.stroke.color
+    };
+
+    draw_segment(
+        start,
+        end,
+        color,
+        style.stroke.width.max(1),
+        pixels,
+        width,
+        height,
+        Some(dirty),
+    );
+    Some(dirty)
+}
+
+pub fn render_shape_preview_update(
+    preview_pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    object: &DrawObject,
+    previous_bounds: Option<DirtyRect>,
+    clear_mode: BackgroundClearMode,
+) -> Option<DirtyRect> {
+    let next_bounds = geometry_bounds(&object.geometry, object.style.stroke.width.max(1))?
+        .clamp(width, height)?;
+    if let Some(old) = previous_bounds.and_then(|r| r.clamp(width, height)) {
+        clear_rect_rgba(
+            preview_pixels,
+            width,
+            height,
+            old,
+            BackgroundClearMode::Transparent,
+        );
+        let dirty = old.union(next_bounds).clamp(width, height)?;
+        render_draw_object_rgba(
+            object,
+            clear_mode,
+            preview_pixels,
+            width,
+            height,
+            Some(next_bounds),
+        );
+        return Some(dirty);
+    }
+
+    render_draw_object_rgba(
+        object,
+        clear_mode,
+        preview_pixels,
+        width,
+        height,
+        Some(next_bounds),
+    );
+    Some(next_bounds)
+}
+
 fn clear_rgba_pixels(pixels: &mut [u8], mode: BackgroundClearMode) {
     let clear = match mode {
         BackgroundClearMode::Transparent => Color::rgba(0, 0, 0, 0),
@@ -638,6 +720,26 @@ fn set_pixel_rgba(
     pixels[idx + 3] = color.a;
 }
 
+fn geometry_bounds(geometry: &Geometry, stroke_width: u32) -> Option<DirtyRect> {
+    match geometry {
+        Geometry::Pen { points } | Geometry::Eraser { points } => {
+            let first = points.first().copied()?;
+            let mut rect = segment_dirty_bounds(first, first, stroke_width);
+            let mut last = first;
+            for point in points.iter().copied().skip(1) {
+                rect = rect.union(segment_dirty_bounds(last, point, stroke_width));
+                last = point;
+            }
+            Some(rect)
+        }
+        Geometry::Line { start, end }
+        | Geometry::Rect { start, end }
+        | Geometry::Ellipse { start, end } => {
+            Some(segment_dirty_bounds(*start, *end, stroke_width))
+        }
+    }
+}
+
 fn clear_rect_rgba(
     pixels: &mut [u8],
     width: u32,
@@ -684,8 +786,9 @@ fn convert_rgba_to_bgra_rect(
 #[cfg(test)]
 mod tests {
     use super::{
-        convert_rgba_to_dib_bgra, render_canvas_to_pixels, render_canvas_to_rgba, DirtyRect,
-        LayeredRenderer, RenderFrameBuffer,
+        convert_rgba_to_dib_bgra, render_canvas_to_pixels, render_canvas_to_rgba,
+        render_incremental_segment_update, render_shape_preview_update, segment_dirty_bounds,
+        DirtyRect, LayeredRenderer, RenderFrameBuffer,
     };
     use crate::draw::{
         input::{DrawInputState, PointerModifiers},
@@ -1129,6 +1232,77 @@ mod tests {
         }
 
         assert_eq!(framebuffer.allocation_count(), initial_allocs);
+    }
+
+    #[test]
+    fn segment_dirty_bounds_expands_by_stroke_radius_and_unions() {
+        let first = segment_dirty_bounds((10, 10), (20, 20), 4);
+        let second = segment_dirty_bounds((18, 18), (24, 24), 4);
+        let union = first.union(second);
+
+        assert!(first.x <= 4 && first.y <= 4);
+        assert!(union.width >= first.width);
+        assert!(union.height >= first.height);
+    }
+
+    #[test]
+    fn shape_preview_update_clears_previous_preview_region() {
+        let mut preview = vec![0u8; 64 * 64 * 4];
+        let first = object(
+            Tool::Rect,
+            Geometry::Rect {
+                start: (4, 4),
+                end: (14, 14),
+            },
+        );
+        let second = object(
+            Tool::Rect,
+            Geometry::Rect {
+                start: (20, 20),
+                end: (30, 30),
+            },
+        );
+
+        let first_dirty = render_shape_preview_update(
+            &mut preview,
+            64,
+            64,
+            &first,
+            None,
+            super::BackgroundClearMode::Transparent,
+        )
+        .expect("first dirty");
+        let second_dirty = render_shape_preview_update(
+            &mut preview,
+            64,
+            64,
+            &second,
+            Some(first_dirty),
+            super::BackgroundClearMode::Transparent,
+        )
+        .expect("second dirty");
+
+        assert!(second_dirty.width >= first_dirty.width);
+        assert_eq!(preview[((6 * 64 + 6) * 4 + 3) as usize], 0);
+    }
+
+    #[test]
+    fn incremental_segment_updates_do_not_require_committed_rebuild() {
+        let mut pixels = vec![0u8; 64 * 64 * 4];
+        let style = ObjectStyle::default();
+        let dirty = render_incremental_segment_update(
+            &mut pixels,
+            64,
+            64,
+            Tool::Pen,
+            style,
+            (2, 2),
+            (20, 20),
+            super::BackgroundClearMode::Transparent,
+        );
+
+        assert!(dirty.is_some());
+        assert!(pixels.chunks_exact(4).any(|px| px[3] > 0));
     }
 
     fn make_test_overlay_window() -> OverlayWindow {
