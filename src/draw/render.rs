@@ -139,6 +139,23 @@ impl RenderFrameBuffer {
         });
     }
 
+    pub fn copy_rect_to_window(&self, window: &mut OverlayWindow, rect: DirtyRect) {
+        let Some(rect) = rect.clamp(self.size.0, self.size.1) else {
+            return;
+        };
+        window.with_bitmap_mut(|dib, width, height| {
+            if width == 0 || height == 0 || dib.len() != self.bgra.len() {
+                return;
+            }
+            for y in rect.y..(rect.y + rect.height) {
+                for x in rect.x..(rect.x + rect.width) {
+                    let idx = ((y as u32 * width + x as u32) * 4) as usize;
+                    dib[idx..idx + 4].copy_from_slice(&self.bgra[idx..idx + 4]);
+                }
+            }
+        });
+    }
+
     #[cfg(test)]
     pub fn allocation_count(&self) -> usize {
         self.allocation_count
@@ -146,6 +163,105 @@ impl RenderFrameBuffer {
 
     pub fn rgba_pixels(&self) -> &[u8] {
         &self.rgba
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct LayeredRenderer {
+    committed: RenderFrameBuffer,
+    composed: RenderFrameBuffer,
+    last_committed_revision: Option<u64>,
+    #[cfg(test)]
+    committed_rebuild_count: usize,
+}
+
+impl LayeredRenderer {
+    pub fn render_to_window(
+        &mut self,
+        window: &mut OverlayWindow,
+        committed_canvas: &CanvasModel,
+        active_object: Option<&DrawObject>,
+        settings: RenderSettings,
+        size: (u32, u32),
+        dirty: Option<DirtyRect>,
+        force_full_redraw: bool,
+        committed_revision: u64,
+    ) {
+        let committed_changed = force_full_redraw
+            || self.last_committed_revision != Some(committed_revision)
+            || self.committed.size != size
+            || !self.committed.initialized;
+        if committed_changed {
+            self.committed
+                .render(committed_canvas, settings, size, None, true);
+            self.last_committed_revision = Some(committed_revision);
+            #[cfg(test)]
+            {
+                self.committed_rebuild_count += 1;
+            }
+        }
+
+        self.composed.ensure_size(size);
+        let full_redraw = force_full_redraw || committed_changed || dirty.is_none();
+        let dirty = dirty.and_then(|d| d.clamp(size.0, size.1));
+
+        if full_redraw {
+            self.composed.rgba.copy_from_slice(&self.committed.rgba);
+            self.composed.bgra.copy_from_slice(&self.committed.bgra);
+        } else if let Some(rect) = dirty {
+            copy_rect(&self.committed.rgba, &mut self.composed.rgba, size.0, rect);
+            copy_rect(&self.committed.bgra, &mut self.composed.bgra, size.0, rect);
+        }
+
+        if let Some(active) = active_object {
+            if full_redraw {
+                render_draw_object_rgba(
+                    active,
+                    settings.clear_mode,
+                    &mut self.composed.rgba,
+                    size.0,
+                    size.1,
+                    None,
+                );
+                convert_rgba_to_dib_bgra(&self.composed.rgba, &mut self.composed.bgra);
+            } else if let Some(rect) = dirty {
+                render_draw_object_rgba(
+                    active,
+                    settings.clear_mode,
+                    &mut self.composed.rgba,
+                    size.0,
+                    size.1,
+                    Some(rect),
+                );
+                convert_rgba_to_bgra_rect(
+                    &self.composed.rgba,
+                    &mut self.composed.bgra,
+                    size.0,
+                    size.1,
+                    rect,
+                );
+            }
+        }
+
+        if full_redraw {
+            self.composed.copy_to_window(window);
+        } else if let Some(rect) = dirty {
+            self.composed.copy_rect_to_window(window, rect);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn committed_rebuild_count(&self) -> usize {
+        self.committed_rebuild_count
+    }
+}
+
+fn copy_rect(src: &[u8], dst: &mut [u8], width: u32, rect: DirtyRect) {
+    for y in rect.y..(rect.y + rect.height) {
+        for x in rect.x..(rect.x + rect.width) {
+            let idx = ((y as u32 * width + x as u32) * 4) as usize;
+            dst[idx..idx + 4].copy_from_slice(&src[idx..idx + 4]);
+        }
     }
 }
 
@@ -569,11 +685,12 @@ fn convert_rgba_to_bgra_rect(
 mod tests {
     use super::{
         convert_rgba_to_dib_bgra, render_canvas_to_pixels, render_canvas_to_rgba, DirtyRect,
-        RenderFrameBuffer,
+        LayeredRenderer, RenderFrameBuffer,
     };
     use crate::draw::{
         input::{DrawInputState, PointerModifiers},
         model::{CanvasModel, Color, DrawObject, Geometry, ObjectStyle, StrokeStyle, Tool},
+        overlay::OverlayWindow,
     };
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -1012,5 +1129,62 @@ mod tests {
         }
 
         assert_eq!(framebuffer.allocation_count(), initial_allocs);
+    }
+
+    #[test]
+    fn committed_layer_rebuilds_only_on_history_mutation() {
+        let mut renderer = LayeredRenderer::default();
+        let mut window = OverlayWindow::default();
+        let settings = super::RenderSettings::default();
+        let committed = CanvasModel {
+            objects: vec![object(
+                Tool::Line,
+                Geometry::Line {
+                    start: (1, 1),
+                    end: (10, 10),
+                },
+            )],
+        };
+        let active = object(
+            Tool::Line,
+            Geometry::Line {
+                start: (4, 4),
+                end: (16, 16),
+            },
+        );
+
+        renderer.render_to_window(
+            &mut window,
+            &committed,
+            Some(&active),
+            settings,
+            (64, 64),
+            Some(DirtyRect::from_points((4, 4), (16, 16), 5)),
+            true,
+            1,
+        );
+        renderer.render_to_window(
+            &mut window,
+            &committed,
+            Some(&active),
+            settings,
+            (64, 64),
+            Some(DirtyRect::from_points((4, 4), (20, 20), 5)),
+            false,
+            1,
+        );
+        assert_eq!(renderer.committed_rebuild_count(), 1);
+
+        renderer.render_to_window(
+            &mut window,
+            &committed,
+            None,
+            settings,
+            (64, 64),
+            None,
+            false,
+            2,
+        );
+        assert_eq!(renderer.committed_rebuild_count(), 2);
     }
 }

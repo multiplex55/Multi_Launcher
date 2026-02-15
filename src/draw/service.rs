@@ -1,5 +1,6 @@
 use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain};
-use crate::draw::overlay::{resolve_monitor_from_cursor, spawn_overlay_for_monitor};
+use crate::draw::monitor::resolve_monitor_from_cursor;
+use crate::draw::overlay::spawn_overlay_for_monitor;
 use crate::draw::save::{ExitPromptPhase, ExitPromptState};
 use crate::draw::settings::DrawSettings;
 use crate::draw::state::{can_transition, DrawLifecycle};

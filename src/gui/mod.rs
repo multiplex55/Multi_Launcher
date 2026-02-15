@@ -2573,13 +2573,16 @@ impl LauncherApp {
             self.open_draw_settings_dialog();
         } else if a.action == "draw:enter" {
             let draw_settings = crate::draw::runtime().settings_snapshot();
-            let entry_context = crate::draw::EntryContext {
-                monitor_rect: crate::draw::MonitorRect {
+            let monitor_rect = crate::draw::monitor::resolve_monitor_from_cursor().unwrap_or(
+                crate::draw::MonitorRect {
                     x: self.window_pos.0,
                     y: self.window_pos.1,
                     width: self.window_size.0,
                     height: self.window_size.1,
                 },
+            );
+            let entry_context = crate::draw::EntryContext {
+                monitor_rect,
                 launcher_offscreen_context: Some(format!(
                     "visible={},offscreen=({:.1},{:.1})",
                     self.visible_flag.load(Ordering::SeqCst),

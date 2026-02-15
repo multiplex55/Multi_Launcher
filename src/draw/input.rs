@@ -26,6 +26,7 @@ pub struct DrawInputState {
     style: ObjectStyle,
     active_geometry: Option<Geometry>,
     history: DrawHistory,
+    committed_revision: u64,
     dirty_rect: Option<DirtyRect>,
     full_redraw_requested: bool,
 }
@@ -37,6 +38,7 @@ impl DrawInputState {
             style,
             active_geometry: None,
             history: DrawHistory::default(),
+            committed_revision: 0,
             dirty_rect: None,
             full_redraw_requested: true,
         }
@@ -52,6 +54,10 @@ impl DrawInputState {
 
     pub fn current_style(&self) -> ObjectStyle {
         self.style
+    }
+
+    pub fn committed_revision(&self) -> u64 {
+        self.committed_revision
     }
 
     pub fn set_tool(&mut self, tool: Tool) {
@@ -84,16 +90,16 @@ impl DrawInputState {
         self.dirty_rect = None;
     }
 
-    pub fn canvas_with_active(&self) -> crate::draw::model::CanvasModel {
-        let mut canvas = self.history.canvas();
-        if let Some(active) = &self.active_geometry {
-            canvas.objects.push(DrawObject {
-                tool: self.tool,
-                style: self.style,
-                geometry: active.clone(),
-            });
-        }
-        canvas
+    pub fn committed_canvas(&self) -> crate::draw::model::CanvasModel {
+        self.history.canvas()
+    }
+
+    pub fn active_object(&self) -> Option<DrawObject> {
+        self.active_geometry.as_ref().map(|geometry| DrawObject {
+            tool: self.tool,
+            style: self.style,
+            geometry: geometry.clone(),
+        })
     }
 
     pub fn handle_left_down(
@@ -147,12 +153,14 @@ impl DrawInputState {
                     points.push(point);
                 }
             }
-            Some(Geometry::Line { end, .. })
-            | Some(Geometry::Rect { end, .. })
-            | Some(Geometry::Ellipse { end, .. }) => {
+            Some(Geometry::Line { start, end })
+            | Some(Geometry::Rect { start, end })
+            | Some(Geometry::Ellipse { start, end }) => {
                 let previous = *end;
+                let before = DirtyRect::from_points(*start, previous, pad);
                 *end = point;
-                dirty = Some(DirtyRect::from_points(previous, point, pad));
+                let after = DirtyRect::from_points(*start, point, pad);
+                dirty = Some(before.union(after));
             }
             None => {}
         }
@@ -172,19 +180,24 @@ impl DrawInputState {
                 style: self.style,
                 geometry,
             });
+            self.committed_revision = self.committed_revision.saturating_add(1);
         }
     }
 
     pub fn handle_key_event(&mut self, event: KeyEvent) -> Option<InputCommand> {
         match map_key_event_to_command(true, event) {
             Some(KeyCommand::Undo) => {
-                let _ = self.history.undo();
-                self.request_full_redraw();
+                if self.history.undo().is_some() {
+                    self.request_full_redraw();
+                    self.committed_revision = self.committed_revision.saturating_add(1);
+                }
                 Some(InputCommand::Undo)
             }
             Some(KeyCommand::Redo) => {
-                let _ = self.history.redo();
-                self.request_full_redraw();
+                if self.history.redo().is_some() {
+                    self.request_full_redraw();
+                    self.committed_revision = self.committed_revision.saturating_add(1);
+                }
                 Some(InputCommand::Redo)
             }
             Some(KeyCommand::RequestExit) => Some(InputCommand::RequestExit),
@@ -197,7 +210,7 @@ impl DrawInputState {
     }
 }
 
-fn geometry_dirty_rect(geometry: &Geometry, stroke_width: u32) -> Option<DirtyRect> {
+pub(crate) fn geometry_dirty_rect(geometry: &Geometry, stroke_width: u32) -> Option<DirtyRect> {
     let pad = (stroke_width as i32) + 2;
     match geometry {
         Geometry::Pen { points } | Geometry::Eraser { points } => {
@@ -527,5 +540,61 @@ mod tests {
                 ExitReason::UserRequest,
             ]
         );
+    }
+
+    #[test]
+    fn geometry_dirty_rect_covers_segment_and_shapes() {
+        let line = geometry_dirty_rect(
+            &Geometry::Line {
+                start: (10, 10),
+                end: (20, 14),
+            },
+            2,
+        )
+        .expect("line rect");
+        assert_eq!(line, DirtyRect::from_points((10, 10), (20, 14), 4));
+
+        let rect = geometry_dirty_rect(
+            &Geometry::Rect {
+                start: (5, 8),
+                end: (12, 18),
+            },
+            3,
+        )
+        .expect("rect bounds");
+        assert_eq!(rect, DirtyRect::from_points((5, 8), (12, 18), 5));
+    }
+
+    #[test]
+    fn committed_revision_advances_only_on_history_mutation() {
+        let mut state = draw_state(Tool::Line);
+        assert_eq!(state.committed_revision(), 0);
+
+        state.handle_move((50, 50));
+        assert_eq!(state.committed_revision(), 0);
+
+        let _ = state.handle_left_down((0, 0), PointerModifiers::default());
+        state.handle_move((10, 10));
+        assert_eq!(state.committed_revision(), 0);
+
+        state.handle_left_up((20, 20));
+        assert_eq!(state.committed_revision(), 1);
+
+        let _ = state.handle_key_event(KeyEvent {
+            key: KeyCode::U,
+            modifiers: KeyModifiers::default(),
+        });
+        assert_eq!(state.committed_revision(), 2);
+
+        let _ = state.handle_key_event(KeyEvent {
+            key: KeyCode::KeyR,
+            modifiers: KeyModifiers {
+                ctrl: true,
+                shift: false,
+                alt: false,
+                win: false,
+            },
+        });
+        assert_eq!(state.committed_revision(), 3);
     }
 }
