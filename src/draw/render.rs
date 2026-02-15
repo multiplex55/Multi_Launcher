@@ -1764,6 +1764,60 @@ mod tests {
     }
 
     #[test]
+    fn repeated_freehand_preview_growth_reuses_committed_layer() {
+        let mut renderer = LayeredRenderer::default();
+        let mut window = make_test_overlay_window();
+        let settings = super::RenderSettings::default();
+        let committed = CanvasModel::default();
+
+        let mut points = vec![(2, 2), (4, 4)];
+        renderer.render_to_window(
+            &mut window,
+            &committed,
+            Some(&object(
+                Tool::Pen,
+                Geometry::Pen {
+                    points: points.clone(),
+                },
+            )),
+            settings,
+            (64, 64),
+            Some(DirtyRect::from_points((2, 2), (4, 4), 4)),
+            true,
+            7,
+        );
+
+        for next in [(8, 8), (12, 12), (16, 16), (20, 20)] {
+            let start = *points.last().expect("existing point");
+            points.push(next);
+            let active = object(
+                Tool::Pen,
+                Geometry::Pen {
+                    points: points.clone(),
+                },
+            );
+            let dirty = DirtyRect::from_points(start, next, 4);
+            renderer.render_to_window(
+                &mut window,
+                &committed,
+                Some(&active),
+                settings,
+                (64, 64),
+                Some(dirty),
+                false,
+                7,
+            );
+
+            let presented = renderer
+                .last_presented_dirty()
+                .expect("presented dirty rect");
+            assert!(presented.width <= 24 && presented.height <= 24);
+        }
+
+        assert_eq!(renderer.committed_rebuild_count(), 1);
+    }
+
+    #[test]
     fn wide_and_thin_paths_match_pixels_for_representative_widths_and_angles() {
         let widths = [1, 3, 7, 11, 17];
         let segments = [((2, 2), (50, 2)), ((2, 2), (40, 30)), ((30, 3), (4, 40))];

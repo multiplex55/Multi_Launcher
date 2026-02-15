@@ -107,12 +107,12 @@ impl DrawInputState {
         self.full_redraw_request_count
     }
 
-    pub fn committed_canvas(&self) -> crate::draw::model::CanvasModel {
-        self.committed_buffer.clone()
+    pub fn committed_canvas(&self) -> &CanvasModel {
+        &self.committed_buffer
     }
 
-    pub fn active_object(&self) -> Option<DrawObject> {
-        self.preview_buffer.clone()
+    pub fn active_object(&self) -> Option<&DrawObject> {
+        self.preview_buffer.as_ref()
     }
 
     pub fn handle_left_down(
@@ -207,26 +207,47 @@ impl DrawInputState {
                     }
                     points.push(point);
 
-                    let geometry = match self.tool {
-                        Tool::Pen => Geometry::Pen {
-                            points: points.clone(),
-                        },
-                        Tool::Eraser => Geometry::Eraser {
-                            points: points.clone(),
-                        },
-                        Tool::Line | Tool::Rect | Tool::Ellipse => {
-                            unreachable!("freehand preview tools only")
+                    let mut preview_updated = false;
+                    if let Some(preview) = self.preview_buffer.as_mut() {
+                        if preview.tool == self.tool && preview.style == self.style {
+                            match &mut preview.geometry {
+                                Geometry::Pen {
+                                    points: preview_points,
+                                }
+                                | Geometry::Eraser {
+                                    points: preview_points,
+                                } => {
+                                    preview_points.push(point);
+                                    preview_updated = true;
+                                }
+                                Geometry::Line { .. }
+                                | Geometry::Rect { .. }
+                                | Geometry::Ellipse { .. } => {}
+                            }
                         }
-                    };
-                    self.preview_buffer = Some(DrawObject {
-                        tool: self.tool,
-                        style: self.style,
-                        geometry: geometry.clone(),
-                    });
+                    }
+                    if !preview_updated {
+                        let geometry = match self.tool {
+                            Tool::Pen => Geometry::Pen {
+                                points: points.clone(),
+                            },
+                            Tool::Eraser => Geometry::Eraser {
+                                points: points.clone(),
+                            },
+                            Tool::Line | Tool::Rect | Tool::Ellipse => {
+                                unreachable!("freehand preview tools only")
+                            }
+                        };
+                        self.preview_buffer = Some(DrawObject {
+                            tool: self.tool,
+                            style: self.style,
+                            geometry,
+                        });
+                    }
 
-                    if let Some(current_bounds) =
-                        geometry_dirty_rect(&geometry, self.style.stroke.width.max(1))
-                    {
+                    if let Some(current_bounds) = self.preview_buffer.as_ref().and_then(|preview| {
+                        geometry_dirty_rect(&preview.geometry, self.style.stroke.width.max(1))
+                    }) {
                         let previous_bounds = self.previous_preview_bounds;
                         self.previous_preview_bounds = Some(current_bounds);
                         let dirty_with_preview = previous_bounds
@@ -504,6 +525,44 @@ mod tests {
                 "missing preview for {tool:?}"
             );
         }
+    }
+
+    #[test]
+    fn borrowed_accessors_track_preview_and_commit_transitions() {
+        let mut state = draw_state(Tool::Pen);
+        assert!(state.active_object().is_none());
+        assert!(state.committed_canvas().objects.is_empty());
+
+        let _ = state.handle_left_down((0, 0), PointerModifiers::default());
+        state.handle_move((5, 0));
+
+        let preview = state.active_object().expect("preview exists after move");
+        match &preview.geometry {
+            Geometry::Pen { points } => assert_eq!(points, &vec![(0, 0), (5, 0)]),
+            other => panic!("unexpected preview geometry: {other:?}"),
+        }
+
+        state.handle_left_up((10, 0));
+
+        assert!(state.active_object().is_none());
+        let committed = state.committed_canvas();
+        assert_eq!(committed.objects.len(), 1);
+        match &committed.objects[0].geometry {
+            Geometry::Pen { points } => assert_eq!(points, &vec![(0, 0), (5, 0), (10, 0)]),
+            other => panic!("unexpected committed geometry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn borrowed_preview_accessor_is_stable_and_non_allocating_for_reads() {
+        let mut state = draw_state(Tool::Pen);
+        let _ = state.handle_left_down((0, 0), PointerModifiers::default());
+        state.handle_move((4, 0));
+
+        let first = state.active_object().expect("first preview");
+        let second = state.active_object().expect("second preview");
+        assert!(std::ptr::eq(first, second));
+        assert_eq!(first, second);
     }
 
     #[test]
