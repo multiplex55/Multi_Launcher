@@ -1,5 +1,13 @@
 use crate::draw::model::{CanvasModel, Color, Tool};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitDialogMode {
+    Hidden,
+    PromptVisible,
+    Saving,
+    ErrorVisible,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExitReason {
     UserRequest,
@@ -34,6 +42,7 @@ pub enum OverlayCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MainToOverlay {
     Start,
+    SetExitDialogMode { mode: ExitDialogMode },
     RequestExit { reason: ExitReason },
     UpdateSettings,
     DispatchCommand { command: OverlayCommand },

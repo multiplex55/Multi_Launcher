@@ -1,3 +1,4 @@
+pub mod capture;
 pub mod composite;
 pub mod controller;
 pub mod history;

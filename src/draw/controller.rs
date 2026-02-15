@@ -1,4 +1,6 @@
-use crate::draw::messages::{ExitReason, MainToOverlay, OverlayLifecycleEvent, OverlayToMain};
+use crate::draw::messages::{
+    ExitDialogMode, ExitReason, MainToOverlay, OverlayLifecycleEvent, OverlayToMain,
+};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +16,7 @@ pub struct OverlayController {
     overlay_to_main_tx: Sender<OverlayToMain>,
     lifecycle: ControllerLifecycle,
     exit_reason: Option<ExitReason>,
+    exit_dialog_mode: ExitDialogMode,
 }
 
 impl OverlayController {
@@ -26,6 +29,7 @@ impl OverlayController {
             overlay_to_main_tx,
             lifecycle: ControllerLifecycle::Starting,
             exit_reason: None,
+            exit_dialog_mode: ExitDialogMode::Hidden,
         }
     }
 
@@ -35,6 +39,10 @@ impl OverlayController {
 
     pub fn exit_reason(&self) -> Option<ExitReason> {
         self.exit_reason.clone()
+    }
+
+    pub fn exit_dialog_mode(&self) -> ExitDialogMode {
+        self.exit_dialog_mode
     }
 
     pub fn pump_runtime_messages<F, C>(&mut self, mut on_update_settings: F, mut on_command: C)
@@ -49,6 +57,9 @@ impl OverlayController {
                     let _ = self.overlay_to_main_tx.send(OverlayToMain::LifecycleEvent(
                         OverlayLifecycleEvent::Started,
                     ));
+                }
+                Ok(MainToOverlay::SetExitDialogMode { mode }) => {
+                    self.exit_dialog_mode = mode;
                 }
                 Ok(MainToOverlay::UpdateSettings) => {
                     on_update_settings();
@@ -85,7 +96,9 @@ impl OverlayController {
 #[cfg(test)]
 mod tests {
     use super::{ControllerLifecycle, OverlayController};
-    use crate::draw::messages::{ExitReason, MainToOverlay, OverlayLifecycleEvent, OverlayToMain};
+    use crate::draw::messages::{
+        ExitDialogMode, ExitReason, MainToOverlay, OverlayLifecycleEvent, OverlayToMain,
+    };
 
     #[test]
     fn request_exit_message_transitions_controller_state() {
@@ -108,6 +121,22 @@ mod tests {
                 reason: ExitReason::UserRequest
             })
         );
+    }
+
+    #[test]
+    fn exit_dialog_mode_updates_are_tracked() {
+        let (main_tx, main_rx) = std::sync::mpsc::channel::<MainToOverlay>();
+        let (overlay_tx, _overlay_rx) = std::sync::mpsc::channel::<OverlayToMain>();
+        let mut controller = OverlayController::new(main_rx, overlay_tx);
+
+        main_tx
+            .send(MainToOverlay::SetExitDialogMode {
+                mode: ExitDialogMode::PromptVisible,
+            })
+            .expect("set exit dialog mode send");
+
+        controller.pump_runtime_messages(|| {}, |_| {});
+        assert_eq!(controller.exit_dialog_mode(), ExitDialogMode::PromptVisible);
     }
 
     #[test]
