@@ -1,5 +1,6 @@
 use crate::draw::service::runtime;
 use crate::draw::settings::DrawSettings;
+use crate::draw::settings_store;
 use crate::draw::settings_ui::render_draw_settings_form;
 use crate::settings::Settings;
 use eframe::egui;
@@ -22,13 +23,9 @@ impl DrawSettingsDialog {
     fn reload(&mut self, settings_path: &str) {
         self.last_error = None;
         self.hotkey_validation_error = None;
-        match Settings::load(settings_path) {
+        match settings_store::load(settings_path) {
             Ok(settings) => {
-                self.settings = settings
-                    .plugin_settings
-                    .get("draw")
-                    .and_then(|v| serde_json::from_value::<DrawSettings>(v.clone()).ok())
-                    .unwrap_or_default();
+                self.settings = settings;
                 self.dirty = false;
             }
             Err(e) => {
@@ -51,6 +48,11 @@ impl DrawSettingsDialog {
             return;
         }
         self.hotkey_validation_error = None;
+
+        if let Err(e) = settings_store::save(&self.settings) {
+            self.last_error = Some(format!("Failed to save draw settings: {e}"));
+            return;
+        }
 
         let mut settings = match Settings::load(&app.settings_path) {
             Ok(settings) => settings,

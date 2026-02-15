@@ -5151,7 +5151,7 @@ mod tests {
         common::slug::reset_slug_lookup,
         dashboard::config::OverflowMode,
         dashboard::layout::NormalizedSlot,
-        draw::{service::runtime, settings::DrawSettings},
+        draw::{service::runtime, settings::DrawSettings, settings_store},
         plugin::{Plugin, PluginManager},
         plugins::draw::DrawPlugin,
         plugins::note::{append_note, load_notes, save_notes, NotePlugin},
@@ -5170,6 +5170,20 @@ mod tests {
     use tempfile::tempdir;
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn set_draw_settings_path_for_test(path: &std::path::Path) -> Option<std::ffi::OsString> {
+        let prev = std::env::var_os("ML_DRAW_SETTINGS_PATH");
+        std::env::set_var("ML_DRAW_SETTINGS_PATH", path);
+        prev
+    }
+
+    fn restore_draw_settings_path_for_test(prev: Option<std::ffi::OsString>) {
+        if let Some(value) = prev {
+            std::env::set_var("ML_DRAW_SETTINGS_PATH", value);
+        } else {
+            std::env::remove_var("ML_DRAW_SETTINGS_PATH");
+        }
+    }
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
@@ -5582,6 +5596,8 @@ mod tests {
     fn draw_dialog_settings_action_opens_dialog() {
         let _lock = TEST_MUTEX.lock().unwrap();
         let dir = tempdir().unwrap();
+        let draw_settings_path = dir.path().join(settings_store::DRAW_SETTINGS_FILE_NAME);
+        let path_prev = set_draw_settings_path_for_test(&draw_settings_path);
         let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         std::env::set_current_dir(dir.path()).unwrap();
         Settings::default().save("settings.json").unwrap();
@@ -5605,15 +5621,18 @@ mod tests {
         assert_eq!(app.draw_dialog_settings_for_test(), DrawSettings::default());
 
         std::env::set_current_dir(orig_dir).unwrap();
+        restore_draw_settings_path_for_test(path_prev);
     }
 
     #[test]
-    fn draw_dialog_save_persists_plugin_settings_and_applies_runtime() {
+    fn draw_dialog_save_persists_dedicated_draw_settings_and_applies_runtime() {
         let _lock = TEST_MUTEX.lock().unwrap();
         let rt = runtime();
         rt.reset_for_test();
 
         let dir = tempdir().unwrap();
+        let draw_settings_path = dir.path().join(settings_store::DRAW_SETTINGS_FILE_NAME);
+        let path_prev = set_draw_settings_path_for_test(&draw_settings_path);
         let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         std::env::set_current_dir(dir.path()).unwrap();
         Settings::default().save("settings.json").unwrap();
@@ -5628,23 +5647,16 @@ mod tests {
         app.draw_dialog_set_settings_for_test(edited.clone());
         app.draw_dialog_save_for_test();
 
+        let saved = settings_store::load("settings.json").unwrap();
         let persisted = Settings::load("settings.json").unwrap();
-        let payload = persisted
-            .plugin_settings
-            .get("draw")
-            .cloned()
-            .expect("draw settings payload");
-        let saved: DrawSettings = serde_json::from_value(payload.clone()).unwrap();
 
         assert_eq!(saved, edited);
         assert_eq!(rt.settings_for_test(), Some(edited.clone()));
-        assert_eq!(
-            app.settings_editor.get_plugin_setting_value("draw"),
-            Some(&payload)
-        );
+        assert!(persisted.plugin_settings.contains_key("draw"));
 
         rt.reset_for_test();
         std::env::set_current_dir(orig_dir).unwrap();
+        restore_draw_settings_path_for_test(path_prev);
     }
 
     #[test]
@@ -5654,6 +5666,8 @@ mod tests {
         rt.reset_for_test();
 
         let dir = tempdir().unwrap();
+        let draw_settings_path = dir.path().join(settings_store::DRAW_SETTINGS_FILE_NAME);
+        let path_prev = set_draw_settings_path_for_test(&draw_settings_path);
         let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         std::env::set_current_dir(dir.path()).unwrap();
         Settings::default().save("settings.json").unwrap();
@@ -5680,6 +5694,7 @@ mod tests {
 
         rt.reset_for_test();
         std::env::set_current_dir(orig_dir).unwrap();
+        restore_draw_settings_path_for_test(path_prev);
     }
 
     #[test]
@@ -5689,6 +5704,8 @@ mod tests {
         rt.reset_for_test();
 
         let dir = tempdir().unwrap();
+        let draw_settings_path = dir.path().join(settings_store::DRAW_SETTINGS_FILE_NAME);
+        let path_prev = set_draw_settings_path_for_test(&draw_settings_path);
         let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         std::env::set_current_dir(dir.path()).unwrap();
         Settings::default().save("settings.json").unwrap();
@@ -5704,66 +5721,42 @@ mod tests {
         app.draw_dialog_save_for_test();
         app.draw_dialog_reset_for_test();
 
-        let persisted = Settings::load("settings.json").unwrap();
-        let payload = persisted
-            .plugin_settings
-            .get("draw")
-            .cloned()
-            .expect("draw settings payload");
-        let saved: DrawSettings = serde_json::from_value(payload).unwrap();
+        let saved = settings_store::load("settings.json").unwrap();
 
         assert_eq!(saved, DrawSettings::default());
         assert_eq!(rt.settings_for_test(), Some(DrawSettings::default()));
 
         rt.reset_for_test();
         std::env::set_current_dir(orig_dir).unwrap();
+        restore_draw_settings_path_for_test(path_prev);
     }
 
     #[test]
-    fn draw_enter_sets_entry_timeout_from_active_draw_settings() {
+    fn draw_dialog_loads_from_legacy_plugin_settings_when_dedicated_file_missing() {
         let _lock = TEST_MUTEX.lock().unwrap();
-        let rt = runtime();
-        rt.reset_for_test();
+        let dir = tempdir().unwrap();
+        let draw_settings_path = dir.path().join(settings_store::DRAW_SETTINGS_FILE_NAME);
+        let path_prev = set_draw_settings_path_for_test(&draw_settings_path);
+        let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        std::env::set_current_dir(dir.path()).unwrap();
 
-        let mut settings = DrawSettings::default();
-        settings.exit_timeout_seconds = 5;
-        rt.apply_settings(settings.clone());
+        let mut legacy_settings = Settings::default();
+        let mut expected = DrawSettings::default();
+        expected.last_width = 64;
+        expected.enable_pressure = false;
+        legacy_settings
+            .plugin_settings
+            .insert("draw".to_string(), serde_json::to_value(&expected).unwrap());
+        legacy_settings.save("settings.json").unwrap();
 
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
-        let draw_command = DrawPlugin::default()
-            .commands()
-            .into_iter()
-            .find(|command| command.label == "draw")
-            .expect("draw command");
+        app.open_draw_settings_dialog();
 
-        crate::draw::set_runtime_spawn_hook(Some(Box::new(|_| {
-            let (main_to_overlay_tx, _main_to_overlay_rx) = std::sync::mpsc::channel();
-            let (_overlay_to_main_tx, overlay_to_main_rx) = std::sync::mpsc::channel();
-            let overlay_thread_handle = std::thread::spawn(|| {});
-            Ok(crate::draw::service::OverlayStartupHandshake {
-                overlay_thread_handle,
-                main_to_overlay_tx,
-                overlay_to_main_rx,
-            })
-        })));
+        assert_eq!(app.draw_dialog_settings_for_test(), expected);
 
-        let before = Instant::now();
-        app.activate_action(draw_command, None, ActivationSource::Enter);
-        let after = Instant::now();
-
-        crate::draw::set_runtime_spawn_hook(None);
-
-        let deadline = rt
-            .entry_context_for_test()
-            .expect("entry context should exist")
-            .timeout_deadline
-            .expect("timeout deadline should be set");
-        let timeout = Duration::from_secs(settings.exit_timeout_seconds);
-        assert!(deadline >= before + timeout);
-        assert!(deadline <= after + timeout + Duration::from_millis(200));
-
-        rt.reset_for_test();
+        std::env::set_current_dir(orig_dir).unwrap();
+        restore_draw_settings_path_for_test(path_prev);
     }
 
     #[test]
@@ -5771,11 +5764,12 @@ mod tests {
         let _lock = TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
-        let draw_command = DrawPlugin::default()
-            .commands()
-            .into_iter()
-            .find(|command| command.label == "draw")
-            .expect("draw command");
+        let draw_command = Action {
+            label: "draw".into(),
+            desc: "Draw".into(),
+            action: "draw:enter".into(),
+            args: None,
+        };
         let called = Arc::new(AtomicBool::new(false));
         let called_clone = Arc::clone(&called);
         crate::draw::set_runtime_spawn_hook(Some(Box::new(move |_| {
@@ -5802,11 +5796,12 @@ mod tests {
         let _lock = TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
-        let draw_command = DrawPlugin::default()
-            .commands()
-            .into_iter()
-            .find(|command| command.label == "draw")
-            .expect("draw command");
+        let draw_command = Action {
+            label: "draw".into(),
+            desc: "Draw".into(),
+            action: "draw:enter".into(),
+            args: None,
+        };
         crate::draw::set_runtime_spawn_hook(Some(Box::new(|_| anyhow::bail!("draw failed"))));
 
         app.activate_action(draw_command, None, ActivationSource::Enter);

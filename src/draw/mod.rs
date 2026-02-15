@@ -9,6 +9,7 @@ pub mod render;
 pub mod save;
 pub mod service;
 pub mod settings;
+pub mod settings_store;
 pub mod settings_ui;
 pub mod state;
 
