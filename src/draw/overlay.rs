@@ -121,7 +121,7 @@ impl OverlayThreadState {
     fn from_settings(settings: &DrawSettings) -> Self {
         Self {
             toolbar_state: ToolbarState::new(
-                !settings.toolbar_collapsed,
+                settings.toolbar_visible,
                 settings.toolbar_collapsed,
                 (settings.toolbar_origin_x, settings.toolbar_origin_y),
             ),
@@ -145,6 +145,7 @@ impl OverlayThreadState {
     fn update_from_settings(&mut self, settings: &DrawSettings) {
         self.toolbar_toggle_hotkey =
             parse_toolbar_hotkey_with_fallback(&settings.toolbar_toggle_hotkey);
+        self.toolbar_state.visible = settings.toolbar_visible;
         self.toolbar_state.collapsed = settings.toolbar_collapsed;
         self.toolbar_state.position = (settings.toolbar_origin_x, settings.toolbar_origin_y);
         self.debug_hud_toggle_hotkey =
@@ -367,7 +368,7 @@ fn rerender_and_repaint(
     draw_input: &DrawInputState,
     settings: &DrawSettings,
     overlay_state: &mut OverlayThreadState,
-    framebuffer: &mut RenderFrameBuffer,
+    _framebuffer: &mut RenderFrameBuffer,
     layered_renderer: &mut LayeredRenderer,
     dirty: Option<DirtyRect>,
     force_full_redraw: bool,
@@ -378,74 +379,75 @@ fn rerender_and_repaint(
         .and_then(|rect| rect.clamp(window_size.0, window_size.1))
         .map(|rect| (rect.width.max(0) as u64).saturating_mul(rect.height.max(0) as u64))
         .unwrap_or_else(|| window_size.0 as u64 * window_size.1 as u64);
-    let requires_full_overlay =
-        overlay_state.toolbar_state.visible || overlay_state.debug_hud_visible;
 
     let raster_span = overlay_state.perf_stats.begin_raster();
-    if !requires_full_overlay {
-        let active_object = draw_input.active_object();
-        layered_renderer.render_to_window(
-            window,
-            &draw_input.committed_canvas(),
-            active_object.as_ref(),
-            live_render_settings(settings),
-            window_size,
-            dirty,
-            force_full_redraw,
-            draw_input.committed_revision(),
-        );
-    } else {
-        let canvas = draw_input.committed_canvas();
-        let mut canvas = canvas;
-        if let Some(active) = draw_input.active_object() {
-            canvas.objects.push(active);
-        }
-
-        framebuffer.render(
-            &canvas,
-            live_render_settings(settings),
-            window_size,
-            None,
-            force_full_redraw || requires_full_overlay,
-        );
-
-        let mut rgba = framebuffer_clone_rgba(framebuffer);
-        if overlay_state.toolbar_state.visible {
-            draw_compact_toolbar_panel(
-                &mut rgba,
-                window.bitmap_size(),
-                draw_input,
-                &overlay_state.quick_colors,
-                &overlay_state.toolbar_state,
-            );
-        }
-        if overlay_state.debug_hud_visible {
-            let perf_snapshot = overlay_state.perf_stats.snapshot();
-            draw_debug_hud_panel(
-                &mut rgba,
-                window.bitmap_size(),
-                draw_input,
-                &overlay_state.diagnostics,
-                perf_snapshot,
-            );
-        }
-        window.with_bitmap_mut(|dib, width, height| {
-            if width == 0 || height == 0 || dib.len() != rgba.len() {
-                return;
+    let active_object = draw_input.active_object();
+    let force_full_frame = force_full_redraw || overlay_state.debug_hud_visible;
+    let debug_hud_visible = overlay_state.debug_hud_visible;
+    let toolbar_visible = overlay_state.toolbar_state.visible;
+    let toolbar_state = overlay_state.toolbar_state;
+    let quick_colors = overlay_state.quick_colors.clone();
+    let diagnostics = overlay_state.diagnostics.clone();
+    let perf_snapshot = overlay_state.perf_stats.snapshot();
+    layered_renderer.render_to_window_with_overlay(
+        window,
+        &draw_input.committed_canvas(),
+        active_object.as_ref(),
+        live_render_settings(settings),
+        window_size,
+        dirty,
+        force_full_frame,
+        draw_input.committed_revision(),
+        |rgba, size| {
+            let mut overlay_dirty = None;
+            if toolbar_visible {
+                draw_compact_toolbar_panel(rgba, size, draw_input, &quick_colors, &toolbar_state);
+                if let Some(layout) =
+                    toolbar::ToolbarLayout::for_state(size, &toolbar_state, quick_colors.len())
+                {
+                    overlay_dirty = Some(DirtyRect {
+                        x: layout.panel.x,
+                        y: layout.panel.y,
+                        width: layout.panel.w,
+                        height: layout.panel.h,
+                    });
+                }
             }
-            crate::draw::render::convert_rgba_to_dib_bgra(&rgba, dib);
-        });
-    }
+            if debug_hud_visible {
+                draw_debug_hud_panel(rgba, size, draw_input, &diagnostics, perf_snapshot);
+                let hud_rect = debug_hud_dirty_rect(size);
+                overlay_dirty = Some(match overlay_dirty {
+                    Some(rect) => rect.union(hud_rect),
+                    None => hud_rect,
+                });
+            }
+            overlay_dirty
+        },
+    );
     overlay_state
         .perf_stats
         .end_raster(raster_span, dirty_pixels.max(1));
 
     overlay_state.diagnostics.paint_count += 1;
     overlay_state.perf_stats.mark_invalidate_requested();
-    if requires_full_overlay || force_full_redraw {
+    if force_full_frame {
         window.request_paint();
     } else if let Some(rect) = dirty.and_then(|d| d.clamp(window_size.0, window_size.1)) {
-        window.request_paint_rect(rect);
+        let upload_dirty = if toolbar_visible {
+            toolbar::ToolbarLayout::for_state(window_size, &toolbar_state, quick_colors.len())
+                .map(|layout| {
+                    rect.union(DirtyRect {
+                        x: layout.panel.x,
+                        y: layout.panel.y,
+                        width: layout.panel.w,
+                        height: layout.panel.h,
+                    })
+                })
+                .unwrap_or(rect)
+        } else {
+            rect
+        };
+        window.request_paint_rect(upload_dirty);
     } else {
         window.request_paint();
     }
@@ -459,8 +461,15 @@ fn rerender_and_repaint(
     overlay_state.diagnostics.effective_present_hz = perf.effective_present_hz;
 }
 
-fn framebuffer_clone_rgba(framebuffer: &RenderFrameBuffer) -> Vec<u8> {
-    framebuffer.rgba_pixels().to_vec()
+fn debug_hud_dirty_rect(size: (u32, u32)) -> DirtyRect {
+    let panel_w = 360;
+    let panel_h = 168;
+    DirtyRect {
+        x: size.0 as i32 - panel_w - 16,
+        y: 16,
+        width: panel_w,
+        height: panel_h,
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -609,6 +618,10 @@ fn apply_toolbar_command(
             overlay_state
                 .toolbar_state
                 .apply_command(ToolbarCommand::ToggleCollapsed);
+            let mut settings = crate::draw::runtime().settings_snapshot();
+            settings.toolbar_visible = overlay_state.toolbar_state.visible;
+            settings.toolbar_collapsed = overlay_state.toolbar_state.collapsed;
+            crate::draw::runtime().apply_settings(settings);
         }
         ToolbarCommand::SetPosition { x, y } => {
             overlay_state
@@ -617,6 +630,7 @@ fn apply_toolbar_command(
             let mut settings = crate::draw::runtime().settings_snapshot();
             settings.toolbar_origin_x = x;
             settings.toolbar_origin_y = y;
+            settings.toolbar_visible = overlay_state.toolbar_state.visible;
             settings.toolbar_collapsed = overlay_state.toolbar_state.collapsed;
             crate::draw::runtime().apply_settings(settings);
         }
@@ -627,6 +641,10 @@ fn apply_toolbar_command(
             overlay_state
                 .toolbar_state
                 .apply_command(ToolbarCommand::ToggleVisibility);
+            let mut settings = crate::draw::runtime().settings_snapshot();
+            settings.toolbar_visible = overlay_state.toolbar_state.visible;
+            settings.toolbar_collapsed = overlay_state.toolbar_state.collapsed;
+            crate::draw::runtime().apply_settings(settings);
         }
     }
 
@@ -2891,21 +2909,21 @@ mod tests {
     }
 
     #[test]
-    fn initial_toolbar_state_respects_toolbar_collapsed_setting() {
+    fn initial_toolbar_state_respects_explicit_visibility_setting() {
         let mut settings = DrawSettings::default();
-        settings.toolbar_collapsed = true;
+        settings.toolbar_visible = false;
+        settings.toolbar_collapsed = false;
         assert!(
             !OverlayThreadState::from_settings(&settings)
                 .toolbar_state
                 .visible
         );
 
-        settings.toolbar_collapsed = false;
-        assert!(
-            OverlayThreadState::from_settings(&settings)
-                .toolbar_state
-                .visible
-        );
+        settings.toolbar_visible = true;
+        settings.toolbar_collapsed = true;
+        let state = OverlayThreadState::from_settings(&settings);
+        assert!(state.toolbar_state.visible);
+        assert!(state.toolbar_state.collapsed);
     }
 
     #[test]
@@ -2953,6 +2971,74 @@ mod tests {
         assert_eq!(state.diagnostics.key_event_count, 1);
         assert_eq!(state.diagnostics.undo_count, 1);
         assert_eq!(state.diagnostics.redo_count, 0);
+    }
+
+    #[test]
+    fn rerender_uses_dirty_rect_path_when_toolbar_and_hud_hidden() {
+        let mut settings = DrawSettings::default();
+        settings.toolbar_visible = false;
+        settings.debug_hud_enabled = false;
+
+        let mut state = OverlayThreadState::from_settings(&settings);
+        let input = draw_state(Tool::Pen);
+        let mut window = OverlayWindow::create_for_monitor(MonitorRect {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        })
+        .expect("overlay window test stub");
+        let mut framebuffer = RenderFrameBuffer::default();
+        let mut layered_renderer = LayeredRenderer::default();
+        let dirty = DirtyRect::from_points((10, 12), (40, 48), 2)
+            .clamp(800, 600)
+            .expect("dirty rect in bounds");
+
+        rerender_and_repaint(
+            &mut window,
+            &input,
+            &settings,
+            &mut state,
+            &mut framebuffer,
+            &mut layered_renderer,
+            Some(dirty),
+            false,
+        );
+
+        assert_eq!(layered_renderer.last_presented_dirty(), Some(dirty));
+    }
+
+    #[test]
+    fn toolbar_visibility_roundtrip_and_legacy_decode_survive_toggle_transitions() {
+        let mut settings = DrawSettings::default();
+        settings.toolbar_visible = true;
+        settings.toolbar_collapsed = false;
+
+        let mut state = OverlayThreadState::from_settings(&settings);
+        state
+            .toolbar_state
+            .apply_command(ToolbarCommand::ToggleCollapsed);
+        state
+            .toolbar_state
+            .apply_command(ToolbarCommand::ToggleVisibility);
+
+        settings.toolbar_visible = state.toolbar_state.visible;
+        settings.toolbar_collapsed = state.toolbar_state.collapsed;
+
+        let json = serde_json::to_value(&settings).expect("serialize toolbar state");
+        let decoded: DrawSettings =
+            serde_json::from_value(json).expect("decode explicit toolbar settings");
+        assert_eq!(decoded.toolbar_visible, state.toolbar_state.visible);
+        assert_eq!(decoded.toolbar_collapsed, state.toolbar_state.collapsed);
+
+        let legacy_decoded: DrawSettings = serde_json::from_value(serde_json::json!({
+            "toolbar_collapsed": state.toolbar_state.collapsed
+        }))
+        .expect("decode legacy toolbar settings");
+        assert_eq!(
+            legacy_decoded.toolbar_visible,
+            !state.toolbar_state.collapsed
+        );
     }
 
     #[test]
