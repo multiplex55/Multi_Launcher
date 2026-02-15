@@ -1149,22 +1149,24 @@ mod platform {
     use std::sync::Mutex;
     use std::sync::Once;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+    use windows::Win32::Foundation::{
+        BOOL, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+    };
     use windows::Win32::Graphics::Gdi::{
         BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EndPaint,
-        EnumDisplayMonitors, GetMonitorInfoW, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-        DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, MONITORINFOEXW, PAINTSTRUCT, SRCCOPY,
+        EnumDisplayMonitors, GetDC, GetMonitorInfoW, ReleaseDC, SelectObject, AC_SRC_ALPHA,
+        AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP,
+        HDC, HGDIOBJ, MONITORINFOEXW, PAINTSTRUCT, SRCCOPY,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetDC, GetWindowLongPtrW,
-        RegisterClassW, ReleaseDC, SetWindowLongPtrW, SetWindowPos, UpdateLayeredWindow,
-        AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, GWLP_USERDATA, HWND_TOPMOST, SWP_NOACTIVATE,
-        SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, ULW_ALPHA, WINDOW_EX_STYLE, WINDOW_STYLE,
-        WM_ACTIVATE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
-        WM_SHOWWINDOW, WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW,
+        RegisterClassW, SetWindowLongPtrW, SetWindowPos, UpdateLayeredWindow, GWLP_USERDATA,
+        HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, ULW_ALPHA,
+        WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        WM_MOUSEMOVE, WM_PAINT, WM_SHOWWINDOW, WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_LAYERED,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
 
     static POINTER_SENDERS: Lazy<Mutex<HashMap<isize, Sender<OverlayPointerSample>>>> =
@@ -1503,7 +1505,7 @@ mod platform {
                     Some(&size),
                     self.mem_dc,
                     Some(&src),
-                    0,
+                    COLORREF(0),
                     Some(&blend),
                     ULW_ALPHA,
                 );
@@ -1932,7 +1934,7 @@ mod tests {
 
     #[test]
     fn toolbar_hit_test_tool_region_updates_active_tool() {
-        let mut state = OverlayThreadState::from_settings(&DrawSettings::default());
+        let state = OverlayThreadState::from_settings(&DrawSettings::default());
         let mut input = draw_state(Tool::Pen);
         let layout = super::ToolbarLayout::for_state((800, 600), state.quick_colors.len())
             .expect("toolbar layout available");
