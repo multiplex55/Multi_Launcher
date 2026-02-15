@@ -111,7 +111,7 @@ impl Drop for KeyboardHook {
 #[cfg(windows)]
 mod platform {
     use super::{map_key_event_to_command, KeyCode, KeyEvent, KeyModifiers};
-    use anyhow::Result;
+    use anyhow::{anyhow, Result};
     use once_cell::sync::Lazy;
     use std::sync::mpsc::{channel, Receiver, Sender};
     use std::sync::Mutex;
