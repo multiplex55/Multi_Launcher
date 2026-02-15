@@ -883,13 +883,20 @@ mod tests {
     }
 
     #[test]
-    fn untouched_pixels_are_initialized_to_first_pass_colorkey() {
-        let mut pixels = vec![0u8; 4 * 4 * 4];
-        render_canvas_to_pixels(&CanvasModel::default(), &mut pixels, 4, 4);
+    fn untouched_pixels_are_initialized_to_colorkey_for_colorkey_pipeline() {
+        let colorkey = crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY;
+        let rgba = render_canvas_to_rgba(
+            &CanvasModel::default(),
+            super::RenderSettings {
+                clear_mode: super::BackgroundClearMode::Solid(colorkey),
+            },
+            (2, 1),
+        );
+        assert_eq!(rgba, vec![255, 0, 255, 255, 255, 0, 255, 255]);
 
-        for px in pixels.chunks_exact(4) {
-            assert_eq!(px, &[0, 0, 0, 0]);
-        }
+        let mut dib = vec![0u8; rgba.len()];
+        super::convert_rgba_to_dib_bgra(&rgba, &mut dib);
+        assert_eq!(dib, vec![255, 0, 255, 255, 255, 0, 255, 255]);
     }
 
     #[test]
