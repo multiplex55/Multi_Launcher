@@ -89,6 +89,10 @@ pub struct DrawSettings {
     pub toolbar_position: ToolbarPosition,
     #[serde(default)]
     pub toolbar_collapsed: bool,
+    #[serde(default = "default_toolbar_origin_x")]
+    pub toolbar_origin_x: i32,
+    #[serde(default = "default_toolbar_origin_y")]
+    pub toolbar_origin_y: i32,
     #[serde(default = "default_toolbar_toggle_hotkey")]
     pub toolbar_toggle_hotkey: String,
     #[serde(default)]
@@ -130,6 +134,10 @@ struct DrawSettingsDe {
     toolbar_position: ToolbarPosition,
     #[serde(default)]
     toolbar_collapsed: bool,
+    #[serde(default = "default_toolbar_origin_x")]
+    toolbar_origin_x: i32,
+    #[serde(default = "default_toolbar_origin_y")]
+    toolbar_origin_y: i32,
     #[serde(default = "default_toolbar_toggle_hotkey")]
     toolbar_toggle_hotkey: String,
     #[serde(default)]
@@ -194,6 +202,8 @@ impl<'de> Deserialize<'de> for DrawSettings {
             enable_pressure: decoded.enable_pressure,
             toolbar_position: decoded.toolbar_position,
             toolbar_collapsed: decoded.toolbar_collapsed,
+            toolbar_origin_x: decoded.toolbar_origin_x,
+            toolbar_origin_y: decoded.toolbar_origin_y,
             toolbar_toggle_hotkey: decoded.toolbar_toggle_hotkey,
             debug_hud_enabled: decoded.debug_hud_enabled,
             debug_hud_toggle_hotkey: decoded.debug_hud_toggle_hotkey,
@@ -220,6 +230,14 @@ fn default_enable_pressure() -> bool {
 
 fn default_toolbar_position() -> ToolbarPosition {
     ToolbarPosition::Top
+}
+
+fn default_toolbar_origin_x() -> i32 {
+    16
+}
+
+fn default_toolbar_origin_y() -> i32 {
+    16
 }
 
 fn default_toolbar_toggle_hotkey() -> String {
@@ -301,6 +319,8 @@ impl Default for DrawSettings {
             enable_pressure: default_enable_pressure(),
             toolbar_position: default_toolbar_position(),
             toolbar_collapsed: false,
+            toolbar_origin_x: default_toolbar_origin_x(),
+            toolbar_origin_y: default_toolbar_origin_y(),
             toolbar_toggle_hotkey: default_toolbar_toggle_hotkey(),
             debug_hud_enabled: false,
             debug_hud_toggle_hotkey: default_debug_hud_toggle_hotkey(),

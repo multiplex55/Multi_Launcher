@@ -1,4 +1,4 @@
-use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain};
+use crate::draw::messages::{ExitReason, MainToOverlay, OverlayCommand, OverlayToMain};
 use crate::draw::monitor::resolve_monitor_from_cursor;
 use crate::draw::overlay::spawn_overlay_for_monitor;
 use crate::draw::save::{ExitPromptPhase, ExitPromptState};
@@ -207,6 +207,20 @@ impl DrawRuntime {
         self.transition_locked(&mut state, DrawLifecycle::Active)?;
         Self::send_overlay_message_locked(&mut state, MainToOverlay::Start);
         Ok(StartOutcome::Started)
+    }
+
+    pub fn dispatch_overlay_command(&self, command: OverlayCommand) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
+        if state.lifecycle.is_active() {
+            Self::send_overlay_message_locked(
+                &mut state,
+                MainToOverlay::DispatchCommand { command },
+            );
+        }
+        Ok(())
     }
 
     pub fn request_exit(&self, reason: ExitReason) -> Result<()> {
