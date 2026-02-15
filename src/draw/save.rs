@@ -116,9 +116,9 @@ fn normalize_fixed_save_folder_display(display: &str) -> Result<Option<PathBuf>>
     }
 
     let expanded = if trimmed == "~" {
-        dirs::home_dir().ok_or_else(|| anyhow!("home directory is unavailable"))?
+        dirs_next::home_dir().ok_or_else(|| anyhow!("home directory is unavailable"))?
     } else if let Some(stripped) = trimmed.strip_prefix("~/") {
-        dirs::home_dir()
+        dirs_next::home_dir()
             .ok_or_else(|| anyhow!("home directory is unavailable"))?
             .join(stripped)
     } else {
@@ -128,7 +128,7 @@ fn normalize_fixed_save_folder_display(display: &str) -> Result<Option<PathBuf>>
     if expanded.is_absolute() {
         Ok(Some(expanded))
     } else {
-        let home = dirs::home_dir().ok_or_else(|| anyhow!("home directory is unavailable"))?;
+        let home = dirs_next::home_dir().ok_or_else(|| anyhow!("home directory is unavailable"))?;
         Ok(Some(home.join(expanded)))
     }
 }
