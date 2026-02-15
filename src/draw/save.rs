@@ -353,8 +353,9 @@ mod tests {
         let desktop_bg = RgbaBuffer::from_pixels(1, 1, vec![9, 99, 199, 255]);
 
         let mut settings = DrawSettings::default();
-        settings.live_background_mode = LiveBackgroundMode::SolidColor;
-        settings.live_blank_color = DrawColor::rgba(1, 2, 3, 255);
+        settings.live_background_mode = LiveBackgroundMode::Blank {
+            color: DrawColor::rgba(1, 2, 3, 255),
+        };
         settings.export_blank_background_color = DrawColor::rgba(200, 100, 50, 255);
 
         compose_and_persist_saves(
@@ -383,8 +384,7 @@ mod tests {
         let annotation = RgbaBuffer::from_pixels(1, 1, vec![0, 0, 0, 0]);
 
         let mut settings = DrawSettings::default();
-        settings.live_background_mode = LiveBackgroundMode::DesktopTransparent;
-        settings.live_blank_color = DrawColor::rgba(10, 20, 30, 255);
+        settings.live_background_mode = LiveBackgroundMode::Transparent;
         settings.export_blank_background_color = DrawColor::rgba(44, 55, 66, 255);
 
         compose_and_persist_saves(

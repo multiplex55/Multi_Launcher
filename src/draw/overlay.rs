@@ -5,7 +5,7 @@ use crate::draw::input::{
 };
 use crate::draw::keyboard_hook::{KeyEvent, KeyboardHook};
 use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain, SaveResult};
-use crate::draw::model::{Color, ObjectStyle, StrokeStyle, Tool, FIRST_PASS_TRANSPARENCY_COLORKEY};
+use crate::draw::model::{Color, ObjectStyle, StrokeStyle, Tool};
 use crate::draw::render::{BackgroundClearMode, DirtyRect, RenderFrameBuffer, RenderSettings};
 use crate::draw::service::MonitorRect;
 use crate::draw::settings::{
@@ -257,12 +257,9 @@ fn map_draw_color(color: DrawColor) -> Color {
 
 fn live_render_settings(settings: &DrawSettings) -> RenderSettings {
     let clear_mode = match settings.live_background_mode {
-        LiveBackgroundMode::DesktopTransparent => {
-            BackgroundClearMode::Solid(FIRST_PASS_TRANSPARENCY_COLORKEY)
-        }
-        LiveBackgroundMode::SolidColor => {
-            let background = settings.live_blank_color;
-            BackgroundClearMode::Solid(Color::rgba(background.r, background.g, background.b, 255))
+        LiveBackgroundMode::Transparent => BackgroundClearMode::Transparent,
+        LiveBackgroundMode::Blank { color } => {
+            BackgroundClearMode::Solid(Color::rgba(color.r, color.g, color.b, 255))
         }
     };
 
@@ -1143,7 +1140,6 @@ pub fn command_requests_repaint(command: Option<InputCommand>) -> bool {
 #[cfg(windows)]
 mod platform {
     use super::{global_to_local, OverlayPointerEvent, OverlayPointerSample};
-    use crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY;
     use crate::draw::service::MonitorRect;
     use once_cell::sync::Lazy;
     use std::collections::HashMap;
@@ -1153,22 +1149,22 @@ mod platform {
     use std::sync::Mutex;
     use std::sync::Once;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
     use windows::Win32::Graphics::Gdi::{
         BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EndPaint,
-        EnumDisplayMonitors, GetMonitorInfoW, InvalidateRect, SelectObject, BITMAPINFO,
-        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, MONITORINFOEXW,
-        PAINTSTRUCT, SRCCOPY,
+        EnumDisplayMonitors, GetMonitorInfoW, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, MONITORINFOEXW, PAINTSTRUCT, SRCCOPY,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW,
-        RegisterClassW, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, GWLP_USERDATA,
-        HWND_TOPMOST, LWA_COLORKEY, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-        WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
-        WM_MOUSEMOVE, WM_PAINT, WM_SHOWWINDOW, WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_LAYERED,
-        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetDC, GetWindowLongPtrW,
+        RegisterClassW, ReleaseDC, SetWindowLongPtrW, SetWindowPos, UpdateLayeredWindow,
+        AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, GWLP_USERDATA, HWND_TOPMOST, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, ULW_ALPHA, WINDOW_EX_STYLE, WINDOW_STYLE,
+        WM_ACTIVATE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
+        WM_SHOWWINDOW, WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
 
     static POINTER_SENDERS: Lazy<Mutex<HashMap<isize, Sender<OverlayPointerSample>>>> =
@@ -1184,31 +1180,8 @@ mod platform {
         WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
     }
 
-    pub enum OverlayTransparencyMode {
-        ColorKeyFirstPass,
-    }
-
-    pub fn first_pass_transparency_colorkey() -> COLORREF {
-        COLORREF(
-            (FIRST_PASS_TRANSPARENCY_COLORKEY.r as u32)
-                | ((FIRST_PASS_TRANSPARENCY_COLORKEY.g as u32) << 8)
-                | ((FIRST_PASS_TRANSPARENCY_COLORKEY.b as u32) << 16),
-        )
-    }
-
-    pub fn configure_layered_window_transparency(
-        hwnd: HWND,
-        mode: OverlayTransparencyMode,
-    ) -> windows::core::Result<()> {
-        // Technical debt: this first pass uses colorkey transparency, which cannot
-        // represent per-pixel alpha. Keep this seam so we can swap to
-        // `UpdateLayeredWindow` without changing overlay window creation call sites.
-        let (key, alpha, flags) = match mode {
-            OverlayTransparencyMode::ColorKeyFirstPass => {
-                (first_pass_transparency_colorkey(), 0, LWA_COLORKEY)
-            }
-        };
-        unsafe { SetLayeredWindowAttributes(hwnd, key, alpha, flags) }
+    pub fn configure_layered_window_transparency(_hwnd: HWND) -> windows::core::Result<()> {
+        Ok(())
     }
 
     fn widestring(value: &str) -> Vec<u16> {
@@ -1407,12 +1380,7 @@ mod platform {
                 .ok()?
             };
 
-            if configure_layered_window_transparency(
-                hwnd,
-                OverlayTransparencyMode::ColorKeyFirstPass,
-            )
-            .is_err()
-            {
+            if configure_layered_window_transparency(hwnd).is_err() {
                 unsafe {
                     let _ = DestroyWindow(hwnd);
                 }
@@ -1507,6 +1475,42 @@ mod platform {
             global_to_local(point, self.origin)
         }
 
+        fn present(&self) {
+            unsafe {
+                let screen_dc = GetDC(HWND::default());
+                if screen_dc.0.is_null() {
+                    return;
+                }
+                let dst = POINT {
+                    x: self.monitor_rect.x,
+                    y: self.monitor_rect.y,
+                };
+                let src = POINT { x: 0, y: 0 };
+                let size = SIZE {
+                    cx: self.monitor_rect.width,
+                    cy: self.monitor_rect.height,
+                };
+                let blend = BLENDFUNCTION {
+                    BlendOp: AC_SRC_OVER as u8,
+                    BlendFlags: 0,
+                    SourceConstantAlpha: 255,
+                    AlphaFormat: AC_SRC_ALPHA as u8,
+                };
+                let _ = UpdateLayeredWindow(
+                    self.hwnd,
+                    screen_dc,
+                    Some(&dst),
+                    Some(&size),
+                    self.mem_dc,
+                    Some(&src),
+                    0,
+                    Some(&blend),
+                    ULW_ALPHA,
+                );
+                let _ = ReleaseDC(HWND::default(), screen_dc);
+            }
+        }
+
         pub fn show(&self) {
             unsafe {
                 let _ = SetWindowPos(
@@ -1519,12 +1523,11 @@ mod platform {
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 );
             }
+            self.present();
         }
 
         pub fn request_paint(&self) {
-            unsafe {
-                let _ = InvalidateRect(self.hwnd, None, false);
-            }
+            self.present();
         }
 
         pub fn bitmap_size(&self) -> (u32, u32) {
@@ -1587,13 +1590,10 @@ mod platform {
 
     #[cfg(test)]
     mod windows_tests {
-        use super::{
-            compose_overlay_window_ex_style, configure_layered_window_transparency,
-            first_pass_transparency_colorkey, OverlayTransparencyMode,
-        };
+        use super::{compose_overlay_window_ex_style, configure_layered_window_transparency};
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{
-            LWA_COLORKEY, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+            WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
         };
 
         #[test]
@@ -1605,15 +1605,9 @@ mod platform {
         }
 
         #[test]
-        fn colorkey_mode_is_wired_for_first_pass_transparency() {
-            assert_eq!(first_pass_transparency_colorkey().0, 0x00ff00ff);
-
-            let result = configure_layered_window_transparency(
-                HWND::default(),
-                OverlayTransparencyMode::ColorKeyFirstPass,
-            );
-            assert!(result.is_err());
-            assert_eq!(LWA_COLORKEY.0, 0x1);
+        fn layered_window_configuration_accepts_per_pixel_alpha_pipeline() {
+            let result = configure_layered_window_transparency(HWND::default());
+            assert!(result.is_ok());
         }
     }
 }
@@ -2171,31 +2165,24 @@ mod tests {
     }
 
     #[test]
-    fn live_render_clear_desktop_transparent_vs_solid() {
+    fn live_render_clear_transparent_vs_blank() {
         let mut settings = DrawSettings::default();
-        settings.live_background_mode = LiveBackgroundMode::DesktopTransparent;
-        settings.live_blank_color = DrawColor::rgba(12, 34, 56, 10);
+        settings.live_background_mode = LiveBackgroundMode::Transparent;
 
         let transparent = crate::draw::render::render_canvas_to_rgba(
             &CanvasModel::default(),
             live_render_settings(&settings),
             (1, 1),
         );
-        assert_eq!(
-            transparent,
-            vec![
-                crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY.r,
-                crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY.g,
-                crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY.b,
-                crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY.a,
-            ]
-        );
+        assert_eq!(transparent, vec![0, 0, 0, 0]);
         assert_eq!(
             live_render_settings(&settings).clear_mode,
-            BackgroundClearMode::Solid(crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY)
+            BackgroundClearMode::Transparent
         );
 
-        settings.live_background_mode = LiveBackgroundMode::SolidColor;
+        settings.live_background_mode = LiveBackgroundMode::Blank {
+            color: DrawColor::rgba(12, 34, 56, 10),
+        };
         let solid = crate::draw::render::render_canvas_to_rgba(
             &CanvasModel::default(),
             live_render_settings(&settings),

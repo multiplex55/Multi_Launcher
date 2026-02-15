@@ -148,23 +148,42 @@ pub fn render_draw_settings_form(
     changed |= edit_color(ui, "Default fill", &mut settings.default_fill_color);
     ui.separator();
     ui.label("Live drawing background");
-    changed |= ui
-        .radio_value(
-            &mut settings.live_background_mode,
-            LiveBackgroundMode::DesktopTransparent,
-            "Draw on desktop (transparent overlay)",
-        )
-        .changed();
-    changed |= ui
-        .radio_value(
-            &mut settings.live_background_mode,
-            LiveBackgroundMode::SolidColor,
-            "Draw on blank canvas (solid background)",
-        )
-        .changed();
+    let is_transparent = matches!(
+        settings.live_background_mode,
+        LiveBackgroundMode::Transparent
+    );
+    if ui
+        .radio(is_transparent, "Draw on desktop (transparent overlay)")
+        .changed()
+        && !is_transparent
+    {
+        settings.live_background_mode = LiveBackgroundMode::Transparent;
+        changed = true;
+    }
 
-    if settings.live_background_mode == LiveBackgroundMode::SolidColor {
-        changed |= edit_color(ui, "Live blank color", &mut settings.live_blank_color);
+    let mut blank_color = match settings.live_background_mode {
+        LiveBackgroundMode::Blank { color } => color,
+        LiveBackgroundMode::Transparent => DrawColor::rgba(15, 18, 24, 255),
+    };
+    let is_blank = matches!(
+        settings.live_background_mode,
+        LiveBackgroundMode::Blank { .. }
+    );
+    if ui
+        .radio(is_blank, "Draw on blank canvas (solid background)")
+        .changed()
+        && !is_blank
+    {
+        settings.live_background_mode = LiveBackgroundMode::Blank { color: blank_color };
+        changed = true;
+    }
+
+    if matches!(
+        settings.live_background_mode,
+        LiveBackgroundMode::Blank { .. }
+    ) {
+        changed |= edit_color(ui, "Live blank color", &mut blank_color);
+        settings.live_background_mode = LiveBackgroundMode::Blank { color: blank_color };
     }
 
     ui.separator();
