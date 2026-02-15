@@ -2,6 +2,7 @@ use crate::draw::history::DrawHistory;
 use crate::draw::keyboard_hook::{map_key_event_to_command, KeyCommand, KeyEvent};
 use crate::draw::messages::ExitReason;
 use crate::draw::model::{DrawObject, Geometry, ObjectStyle, Tool};
+use crate::draw::render::DirtyRect;
 use crate::draw::runtime;
 
 const MIN_POINT_DIST_SQ: i64 = 9;
@@ -25,6 +26,8 @@ pub struct DrawInputState {
     style: ObjectStyle,
     active_geometry: Option<Geometry>,
     history: DrawHistory,
+    dirty_rect: Option<DirtyRect>,
+    full_redraw_requested: bool,
 }
 
 impl DrawInputState {
@@ -34,6 +37,8 @@ impl DrawInputState {
             style,
             active_geometry: None,
             history: DrawHistory::default(),
+            dirty_rect: None,
+            full_redraw_requested: true,
         }
     }
 
@@ -51,10 +56,32 @@ impl DrawInputState {
 
     pub fn set_tool(&mut self, tool: Tool) {
         self.tool = tool;
+        self.request_full_redraw();
     }
 
     pub fn set_style(&mut self, style: ObjectStyle) {
         self.style = style;
+        self.request_full_redraw();
+    }
+
+    pub fn take_dirty_rect(&mut self) -> Option<DirtyRect> {
+        self.dirty_rect.take()
+    }
+
+    pub fn take_full_redraw_request(&mut self) -> bool {
+        std::mem::take(&mut self.full_redraw_requested)
+    }
+
+    fn mark_dirty(&mut self, rect: DirtyRect) {
+        self.dirty_rect = Some(match self.dirty_rect.take() {
+            Some(existing) => existing.union(rect),
+            None => rect,
+        });
+    }
+
+    fn request_full_redraw(&mut self) {
+        self.full_redraw_requested = true;
+        self.dirty_rect = None;
     }
 
     pub fn canvas_with_active(&self) -> crate::draw::model::CanvasModel {
@@ -99,28 +126,47 @@ impl DrawInputState {
             },
         });
 
+        self.mark_dirty(DirtyRect::from_points(
+            point,
+            point,
+            (self.style.stroke.width.max(1) as i32) + 2,
+        ));
+
         None
     }
 
     pub fn handle_move(&mut self, point: (i32, i32)) {
+        let pad = (self.style.stroke.width.max(1) as i32) + 2;
+        let mut dirty: Option<DirtyRect> = None;
         match self.active_geometry.as_mut() {
             Some(Geometry::Pen { points }) | Some(Geometry::Eraser { points }) => {
                 if should_append_point(points.last().copied(), point) {
+                    if let Some(last) = points.last().copied() {
+                        dirty = Some(DirtyRect::from_points(last, point, pad));
+                    }
                     points.push(point);
                 }
             }
             Some(Geometry::Line { end, .. })
             | Some(Geometry::Rect { end, .. })
             | Some(Geometry::Ellipse { end, .. }) => {
+                let previous = *end;
                 *end = point;
+                dirty = Some(DirtyRect::from_points(previous, point, pad));
             }
             None => {}
+        }
+        if let Some(rect) = dirty {
+            self.mark_dirty(rect);
         }
     }
 
     pub fn handle_left_up(&mut self, point: (i32, i32)) {
         self.handle_move(point);
         if let Some(geometry) = self.active_geometry.take() {
+            if let Some(bounds) = geometry_dirty_rect(&geometry, self.style.stroke.width.max(1)) {
+                self.mark_dirty(bounds);
+            }
             self.history.commit(DrawObject {
                 tool: self.tool,
                 style: self.style,
@@ -133,10 +179,12 @@ impl DrawInputState {
         match map_key_event_to_command(true, event) {
             Some(KeyCommand::Undo) => {
                 let _ = self.history.undo();
+                self.request_full_redraw();
                 Some(InputCommand::Undo)
             }
             Some(KeyCommand::Redo) => {
                 let _ = self.history.redo();
+                self.request_full_redraw();
                 Some(InputCommand::Redo)
             }
             Some(KeyCommand::RequestExit) => Some(InputCommand::RequestExit),
@@ -146,6 +194,25 @@ impl DrawInputState {
 
     pub fn request_exit(&self) -> InputCommand {
         InputCommand::RequestExit
+    }
+}
+
+fn geometry_dirty_rect(geometry: &Geometry, stroke_width: u32) -> Option<DirtyRect> {
+    let pad = (stroke_width as i32) + 2;
+    match geometry {
+        Geometry::Pen { points } | Geometry::Eraser { points } => {
+            let first = points.first().copied()?;
+            let mut rect = DirtyRect::from_points(first, first, pad);
+            let mut last = first;
+            for point in points.iter().copied().skip(1) {
+                rect = rect.union(DirtyRect::from_points(last, point, pad));
+                last = point;
+            }
+            Some(rect)
+        }
+        Geometry::Line { start, end }
+        | Geometry::Rect { start, end }
+        | Geometry::Ellipse { start, end } => Some(DirtyRect::from_points(*start, *end, pad)),
     }
 }
 
