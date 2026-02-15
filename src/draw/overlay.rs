@@ -4,7 +4,9 @@ use crate::draw::input::{
     bridge_mouse_move_to_runtime, DrawInputState, InputCommand, PointerModifiers,
 };
 use crate::draw::keyboard_hook::{KeyEvent, KeyboardHook};
-use crate::draw::messages::{ExitReason, MainToOverlay, OverlayCommand, OverlayToMain, SaveResult};
+use crate::draw::messages::{
+    ExitDialogMode, ExitReason, MainToOverlay, OverlayCommand, OverlayToMain, SaveResult,
+};
 use crate::draw::model::{Color, ObjectStyle, StrokeStyle, Tool};
 use crate::draw::monitor;
 use crate::draw::render::{
@@ -33,6 +35,17 @@ pub enum ExitDialogState {
 impl ExitDialogState {
     pub fn blocks_drawing_input(self) -> bool {
         !matches!(self, Self::Hidden)
+    }
+}
+
+impl From<ExitDialogMode> for ExitDialogState {
+    fn from(value: ExitDialogMode) -> Self {
+        match value {
+            ExitDialogMode::Hidden => Self::Hidden,
+            ExitDialogMode::PromptVisible => Self::PromptVisible,
+            ExitDialogMode::Saving => Self::Saving,
+            ExitDialogMode::ErrorVisible => Self::ErrorVisible,
+        }
     }
 }
 
@@ -929,6 +942,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
             );
             let mut framebuffer = RenderFrameBuffer::default();
             let mut layered_renderer = LayeredRenderer::default();
+            let mut last_reported_revision = draw_input.committed_revision();
             let frame_interval = Duration::from_micros(8_333);
             let mut next_frame = Instant::now();
             let mut needs_redraw = true;
@@ -952,7 +966,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
 
                     let dispatch = forward_key_event_to_draw_input(
                         &mut draw_input,
-                        ExitDialogState::Hidden,
+                        controller.exit_dialog_mode().into(),
                         key_event,
                     );
                     if dispatch.handled {
@@ -981,7 +995,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                     } else {
                         forward_pointer_event_to_draw_input(
                             &mut draw_input,
-                            ExitDialogState::Hidden,
+                            controller.exit_dialog_mode().into(),
                             window.monitor_rect(),
                             pointer_event.global_point,
                             pointer_event.event,
@@ -1024,6 +1038,13 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                     }
                     needs_redraw = true;
                     forced_full_redraw = true;
+                }
+
+                if draw_input.committed_revision() != last_reported_revision {
+                    last_reported_revision = draw_input.committed_revision();
+                    let _ = controller_tx.send(OverlayToMain::SaveProgress {
+                        canvas: draw_input.history().canvas(),
+                    });
                 }
 
                 if controller.lifecycle() == crate::draw::controller::ControllerLifecycle::Active
@@ -1864,6 +1885,21 @@ mod tests {
 
         assert_eq!(input.history().undo_len(), 1);
         assert_eq!(input.history().canvas().objects.len(), 1);
+    }
+
+    #[test]
+    fn non_hidden_dialog_blocks_key_dispatch() {
+        let mut input = draw_state(Tool::Pen);
+        let dispatch = forward_key_event_to_draw_input(
+            &mut input,
+            ExitDialogState::PromptVisible,
+            KeyEvent {
+                key: KeyCode::U,
+                modifiers: KeyModifiers::default(),
+            },
+        );
+        assert!(!dispatch.handled);
+        assert_eq!(dispatch.command, None);
     }
 
     #[test]

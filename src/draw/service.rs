@@ -1,7 +1,15 @@
-use crate::draw::messages::{ExitReason, MainToOverlay, OverlayCommand, OverlayToMain};
+use crate::draw::capture::capture_monitor_rgba;
+use crate::draw::composite::annotation_from_canvas;
+use crate::draw::messages::{
+    ExitDialogMode, ExitReason, MainToOverlay, OverlayCommand, OverlayToMain,
+};
+use crate::draw::model::CanvasModel;
 use crate::draw::monitor::resolve_monitor_from_cursor;
 use crate::draw::overlay::spawn_overlay_for_monitor;
-use crate::draw::save::{ExitPromptPhase, ExitPromptState};
+use crate::draw::save::{
+    compose_and_persist_saves, dispatch_save_choice, ensure_output_folder, ExitPromptPhase,
+    ExitPromptState, SaveChoice, SaveConfig, SaveDispatchOutcome,
+};
 use crate::draw::settings::DrawSettings;
 use crate::draw::state::{can_transition, DrawLifecycle};
 use anyhow::{anyhow, Result};
@@ -57,6 +65,9 @@ struct DrawRuntimeState {
     exit_prompt: Option<ExitPromptState>,
     dispatched_messages: Vec<MainToOverlay>,
     runtime_warnings: Vec<String>,
+    latest_canvas: CanvasModel,
+    pending_save_choice: Option<SaveChoice>,
+    pending_exit_reason: Option<ExitReason>,
 }
 
 impl Default for DrawRuntimeState {
@@ -71,6 +82,9 @@ impl Default for DrawRuntimeState {
             exit_prompt: None,
             dispatched_messages: Vec::new(),
             runtime_warnings: Vec::new(),
+            latest_canvas: CanvasModel::default(),
+            pending_save_choice: None,
+            pending_exit_reason: None,
         }
     }
 }
@@ -235,15 +249,56 @@ impl DrawRuntime {
 
         if state.lifecycle == DrawLifecycle::Starting || state.lifecycle == DrawLifecycle::Active {
             self.transition_locked(&mut state, DrawLifecycle::Exiting)?;
+            let show_prompt = state.settings.offer_save_without_desktop;
+            state.pending_exit_reason = Some(reason.clone());
             state.exit_prompt = Some(ExitPromptState::from_exit_reason(
                 reason.clone(),
-                state.settings.offer_save_without_desktop,
+                show_prompt,
             ));
+            let mode = if show_prompt {
+                ExitDialogMode::PromptVisible
+            } else {
+                state.pending_save_choice = Some(SaveChoice::Desktop);
+                ExitDialogMode::Saving
+            };
+            Self::send_overlay_message_locked(
+                &mut state,
+                MainToOverlay::SetExitDialogMode { mode },
+            );
             Self::send_overlay_message_locked(&mut state, MainToOverlay::RequestExit { reason });
         }
         Ok(())
     }
 
+    pub fn submit_exit_choice(&self, choice: SaveChoice) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
+
+        if state.lifecycle != DrawLifecycle::Exiting {
+            return Ok(());
+        }
+
+        let Some(reason) = state.pending_exit_reason.clone() else {
+            return Ok(());
+        };
+
+        if let Some(prompt) = state.exit_prompt.as_mut() {
+            prompt.phase = ExitPromptPhase::Saving;
+            prompt.frozen_input = true;
+        }
+        Self::send_overlay_message_locked(
+            &mut state,
+            MainToOverlay::SetExitDialogMode {
+                mode: ExitDialogMode::Saving,
+            },
+        );
+
+        state.pending_save_choice = Some(choice);
+        Self::send_overlay_message_locked(&mut state, MainToOverlay::RequestExit { reason });
+        Ok(())
+    }
     pub fn notify_overlay_exit(&self, reason: ExitReason) -> Result<()> {
         self.restore_pipeline(reason, "overlay exit notification")
     }
@@ -402,6 +457,7 @@ impl DrawRuntime {
     fn process_overlay_notifications(&self) -> Result<()> {
         let mut terminal_reason = None;
         let mut save_error = None;
+        let mut latest_canvas = None;
 
         {
             let state = self
@@ -418,10 +474,7 @@ impl DrawRuntime {
                             terminal_reason = Some(reason);
                         }
                         Ok(OverlayToMain::SaveProgress { canvas }) => {
-                            tracing::debug!(
-                                objects = canvas.objects.len(),
-                                "draw overlay save progress update"
-                            );
+                            latest_canvas = Some(canvas);
                         }
                         Ok(OverlayToMain::SaveError { error }) => {
                             tracing::error!(error = %error, "draw overlay save error");
@@ -440,13 +493,70 @@ impl DrawRuntime {
             }
         }
 
+        if let Some(canvas) = latest_canvas {
+            if let Ok(mut state) = self.state.lock() {
+                state.latest_canvas = canvas;
+            }
+        }
+
         if let Some(error) = save_error {
             self.set_exit_prompt_error(error);
         }
         if let Some(reason) = terminal_reason {
+            self.complete_save_flow(&reason)?;
             self.restore_pipeline(reason, "overlay exited notification")?;
         }
 
+        Ok(())
+    }
+
+    fn complete_save_flow(&self, reason: &ExitReason) -> Result<()> {
+        let (choice, canvas, settings, monitor_rect) = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
+            let choice = state.pending_save_choice.take();
+            let canvas = state.latest_canvas.clone();
+            let settings = state.settings.clone();
+            let monitor_rect = state.entry_context.as_ref().map(|ctx| ctx.monitor_rect);
+            state.pending_exit_reason = None;
+            (choice, canvas, settings, monitor_rect)
+        };
+
+        let Some(choice) = choice else {
+            return Ok(());
+        };
+
+        if matches!(choice, SaveChoice::Discard) {
+            return Ok(());
+        }
+
+        let output_dir = ensure_output_folder()?;
+        let SaveDispatchOutcome::Save(targets) =
+            dispatch_save_choice(choice, &output_dir, chrono::Local::now())
+        else {
+            return Ok(());
+        };
+
+        let annotation = annotation_from_canvas(
+            &canvas,
+            monitor_rect.unwrap_or_default().width.max(1) as u32,
+            monitor_rect.unwrap_or_default().height.max(1) as u32,
+        );
+        compose_and_persist_saves(
+            &annotation,
+            SaveConfig::from_draw_settings(&settings),
+            &targets,
+            || {
+                let rect = monitor_rect.unwrap_or_default();
+                capture_monitor_rgba(rect)
+            },
+        )
+        .map_err(|err| {
+            self.set_exit_prompt_error(format!("save failed after {reason:?}: {err}"));
+            err
+        })?;
         Ok(())
     }
 
@@ -508,6 +618,9 @@ impl DrawRuntime {
                 .and_then(|ctx| ctx.launcher_offscreen_context.clone());
             state.entry_context = None;
             state.exit_prompt = None;
+            state.pending_save_choice = None;
+            state.pending_exit_reason = None;
+            state.latest_canvas = CanvasModel::default();
             state.lifecycle = DrawLifecycle::Idle;
 
             (
@@ -623,6 +736,7 @@ mod tests {
         set_runtime_spawn_hook, set_runtime_start_hook, DrawRuntime, EntryContext, StartOutcome,
     };
     use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain, SaveResult};
+    use crate::draw::save::SaveChoice;
     use crate::draw::settings::DrawSettings;
     use crate::draw::state::{can_transition, DrawLifecycle};
     use crate::plugins::mouse_gestures::{
@@ -725,9 +839,14 @@ mod tests {
         assert_eq!(prompt.reason, ExitReason::UserRequest);
         assert_eq!(
             rt.take_dispatched_messages_for_test(),
-            vec![MainToOverlay::RequestExit {
-                reason: ExitReason::UserRequest
-            }]
+            vec![
+                MainToOverlay::SetExitDialogMode {
+                    mode: crate::draw::messages::ExitDialogMode::PromptVisible,
+                },
+                MainToOverlay::RequestExit {
+                    reason: ExitReason::UserRequest,
+                },
+            ]
         );
         rt.reset_for_test();
     }
@@ -749,6 +868,54 @@ mod tests {
             .exit_prompt_state()
             .expect("prompt state should be present");
         assert_eq!(prompt.phase, crate::draw::save::ExitPromptPhase::Saving);
+        let dispatched = rt.take_dispatched_messages_for_test();
+        assert!(matches!(
+            dispatched.get(dispatched.len().saturating_sub(2)),
+            Some(MainToOverlay::SetExitDialogMode {
+                mode: crate::draw::messages::ExitDialogMode::Saving,
+            })
+        ));
+        assert!(matches!(
+            dispatched.last(),
+            Some(MainToOverlay::RequestExit {
+                reason: ExitReason::UserRequest,
+            })
+        ));
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn submit_exit_choice_dispatches_saving_and_exit_for_each_choice() {
+        let rt = runtime();
+        for choice in [
+            SaveChoice::Desktop,
+            SaveChoice::Blank,
+            SaveChoice::Both,
+            SaveChoice::Discard,
+        ] {
+            reset_runtime(rt);
+            rt.force_lifecycle_for_test(DrawLifecycle::Active);
+            rt.request_exit(ExitReason::UserRequest)
+                .expect("request_exit should succeed");
+            rt.take_dispatched_messages_for_test();
+
+            rt.submit_exit_choice(choice)
+                .expect("submit_exit_choice should succeed");
+
+            let dispatched = rt.take_dispatched_messages_for_test();
+            assert_eq!(
+                dispatched,
+                vec![
+                    MainToOverlay::SetExitDialogMode {
+                        mode: crate::draw::messages::ExitDialogMode::Saving,
+                    },
+                    MainToOverlay::RequestExit {
+                        reason: ExitReason::UserRequest,
+                    },
+                ],
+                "unexpected message flow for choice {choice:?}"
+            );
+        }
         reset_runtime(rt);
     }
 
