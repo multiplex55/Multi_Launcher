@@ -329,7 +329,10 @@ fn live_render_settings(settings: &DrawSettings) -> RenderSettings {
         }
     };
 
-    RenderSettings { clear_mode }
+    RenderSettings {
+        clear_mode,
+        wide_stroke_threshold: 10,
+    }
 }
 
 fn rerender_and_repaint(

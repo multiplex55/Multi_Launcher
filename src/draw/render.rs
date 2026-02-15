@@ -1,5 +1,12 @@
 use crate::draw::model::{CanvasModel, Color, DrawObject, Geometry, ObjectStyle, Tool};
 use crate::draw::overlay::OverlayWindow;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
+
+const DEFAULT_WIDE_STROKE_THRESHOLD: u32 = 10;
+static WIDE_STROKE_THRESHOLD: AtomicU32 = AtomicU32::new(DEFAULT_WIDE_STROKE_THRESHOLD);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirtyRect {
@@ -102,6 +109,7 @@ impl RenderFrameBuffer {
                 render_draw_object_rgba(
                     object,
                     settings.clear_mode,
+                    active_wide_stroke_threshold(settings),
                     &mut self.rgba,
                     size.0,
                     size.1,
@@ -119,6 +127,7 @@ impl RenderFrameBuffer {
                 render_draw_object_rgba(
                     object,
                     settings.clear_mode,
+                    active_wide_stroke_threshold(settings),
                     &mut self.rgba,
                     size.0,
                     size.1,
@@ -218,6 +227,7 @@ impl LayeredRenderer {
                 render_draw_object_rgba(
                     active,
                     settings.clear_mode,
+                    active_wide_stroke_threshold(settings),
                     &mut self.composed.rgba,
                     size.0,
                     size.1,
@@ -228,6 +238,7 @@ impl LayeredRenderer {
                 render_draw_object_rgba(
                     active,
                     settings.clear_mode,
+                    active_wide_stroke_threshold(settings),
                     &mut self.composed.rgba,
                     size.0,
                     size.1,
@@ -274,13 +285,27 @@ pub enum BackgroundClearMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderSettings {
     pub clear_mode: BackgroundClearMode,
+    pub wide_stroke_threshold: u32,
 }
 
 impl Default for RenderSettings {
     fn default() -> Self {
         Self {
             clear_mode: BackgroundClearMode::Transparent,
+            wide_stroke_threshold: DEFAULT_WIDE_STROKE_THRESHOLD,
         }
+    }
+}
+
+pub fn set_wide_stroke_threshold(threshold: u32) {
+    WIDE_STROKE_THRESHOLD.store(threshold.max(1), Ordering::Relaxed);
+}
+
+fn active_wide_stroke_threshold(settings: RenderSettings) -> u32 {
+    if settings.wide_stroke_threshold == DEFAULT_WIDE_STROKE_THRESHOLD {
+        WIDE_STROKE_THRESHOLD.load(Ordering::Relaxed).max(1)
+    } else {
+        settings.wide_stroke_threshold.max(1)
     }
 }
 
@@ -306,6 +331,7 @@ pub fn render_canvas_to_rgba(
         render_draw_object_rgba(
             object,
             settings.clear_mode,
+            active_wide_stroke_threshold(settings),
             &mut pixels,
             width,
             height,
@@ -363,6 +389,7 @@ pub fn render_incremental_segment_update(
         end,
         color,
         style.stroke.width.max(1),
+        WIDE_STROKE_THRESHOLD.load(Ordering::Relaxed),
         pixels,
         width,
         height,
@@ -393,6 +420,7 @@ pub fn render_shape_preview_update(
         render_draw_object_rgba(
             object,
             clear_mode,
+            WIDE_STROKE_THRESHOLD.load(Ordering::Relaxed),
             preview_pixels,
             width,
             height,
@@ -404,6 +432,7 @@ pub fn render_shape_preview_update(
     render_draw_object_rgba(
         object,
         clear_mode,
+        WIDE_STROKE_THRESHOLD.load(Ordering::Relaxed),
         preview_pixels,
         width,
         height,
@@ -425,6 +454,7 @@ fn clear_rgba_pixels(pixels: &mut [u8], mode: BackgroundClearMode) {
 fn render_draw_object_rgba(
     object: &DrawObject,
     clear_mode: BackgroundClearMode,
+    wide_stroke_threshold: u32,
     pixels: &mut [u8],
     width: u32,
     height: u32,
@@ -444,6 +474,7 @@ fn render_draw_object_rgba(
             points,
             color,
             stroke_width,
+            wide_stroke_threshold,
             pixels,
             width,
             height,
@@ -454,6 +485,7 @@ fn render_draw_object_rgba(
             *end,
             color,
             stroke_width,
+            wide_stroke_threshold,
             pixels,
             width,
             height,
@@ -464,6 +496,7 @@ fn render_draw_object_rgba(
             *end,
             color,
             stroke_width,
+            wide_stroke_threshold,
             pixels,
             width,
             height,
@@ -474,6 +507,7 @@ fn render_draw_object_rgba(
             *end,
             color,
             stroke_width,
+            wide_stroke_threshold,
             pixels,
             width,
             height,
@@ -486,6 +520,7 @@ fn draw_polyline(
     points: &[(i32, i32)],
     color: Color,
     stroke_width: u32,
+    wide_stroke_threshold: u32,
     pixels: &mut [u8],
     width: u32,
     height: u32,
@@ -499,6 +534,7 @@ fn draw_polyline(
             points[0],
             color,
             stroke_width,
+            stroke_width >= wide_stroke_threshold,
             pixels,
             width,
             height,
@@ -513,6 +549,7 @@ fn draw_polyline(
             segment[1],
             color,
             stroke_width,
+            wide_stroke_threshold,
             pixels,
             width,
             height,
@@ -526,6 +563,7 @@ fn draw_rect(
     end: (i32, i32),
     color: Color,
     stroke_width: u32,
+    wide_stroke_threshold: u32,
     pixels: &mut [u8],
     width: u32,
     height: u32,
@@ -547,6 +585,7 @@ fn draw_rect(
         (x1, y0),
         color,
         stroke_width,
+        wide_stroke_threshold,
         pixels,
         width,
         height,
@@ -557,6 +596,7 @@ fn draw_rect(
         (x1, y1),
         color,
         stroke_width,
+        wide_stroke_threshold,
         pixels,
         width,
         height,
@@ -567,6 +607,7 @@ fn draw_rect(
         (x0, y1),
         color,
         stroke_width,
+        wide_stroke_threshold,
         pixels,
         width,
         height,
@@ -577,6 +618,7 @@ fn draw_rect(
         (x0, y0),
         color,
         stroke_width,
+        wide_stroke_threshold,
         pixels,
         width,
         height,
@@ -589,6 +631,7 @@ fn draw_ellipse(
     end: (i32, i32),
     color: Color,
     stroke_width: u32,
+    wide_stroke_threshold: u32,
     pixels: &mut [u8],
     width: u32,
     height: u32,
@@ -615,6 +658,7 @@ fn draw_ellipse(
             (x, y),
             color,
             stroke_width,
+            stroke_width >= wide_stroke_threshold,
             pixels,
             width,
             height,
@@ -628,11 +672,14 @@ fn draw_segment(
     end: (i32, i32),
     color: Color,
     stroke_width: u32,
+    wide_stroke_threshold: u32,
     pixels: &mut [u8],
     width: u32,
     height: u32,
     clip_rect: Option<DirtyRect>,
 ) {
+    let wide = stroke_width >= wide_stroke_threshold;
+    let started = Instant::now();
     let mut x0 = start.0;
     let mut y0 = start.1;
     let x1 = end.0;
@@ -649,6 +696,7 @@ fn draw_segment(
             (x0, y0),
             color,
             stroke_width,
+            wide,
             pixels,
             width,
             height,
@@ -667,18 +715,32 @@ fn draw_segment(
             y0 += sy;
         }
     }
+    record_segment_cost(stroke_width, started.elapsed().as_nanos() as u64);
 }
 
 fn draw_brush(
     center: (i32, i32),
     color: Color,
     stroke_width: u32,
+    use_mask_cache: bool,
     pixels: &mut [u8],
     width: u32,
     height: u32,
     clip_rect: Option<DirtyRect>,
 ) {
     let radius = (stroke_width.saturating_sub(1) / 2) as i32;
+    if use_mask_cache {
+        draw_brush_mask(
+            center,
+            color,
+            stroke_width,
+            pixels,
+            width,
+            height,
+            clip_rect,
+        );
+        return;
+    }
     for y in (center.1 - radius)..=(center.1 + radius) {
         for x in (center.0 - radius)..=(center.0 + radius) {
             let dx = x - center.0;
@@ -687,6 +749,154 @@ fn draw_brush(
                 set_pixel_rgba(pixels, width, height, x, y, color, clip_rect);
             }
         }
+    }
+}
+
+#[derive(Clone)]
+struct BrushMask {
+    rows: Vec<BrushMaskRow>,
+}
+
+#[derive(Clone)]
+struct BrushMaskRow {
+    dy: i32,
+    min_dx: i32,
+    max_dx: i32,
+}
+
+fn brush_mask_cache() -> &'static Mutex<HashMap<u32, BrushMask>> {
+    static CACHE: OnceLock<Mutex<HashMap<u32, BrushMask>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn get_brush_mask(stroke_width: u32) -> BrushMask {
+    let cache = brush_mask_cache();
+    if let Ok(guard) = cache.lock() {
+        if let Some(mask) = guard.get(&stroke_width) {
+            return mask.clone();
+        }
+    }
+
+    let radius = (stroke_width.saturating_sub(1) / 2) as i32;
+    let mut rows = Vec::with_capacity((radius.saturating_mul(2) + 1) as usize);
+    for dy in -radius..=radius {
+        let mut max_dx = radius;
+        while max_dx >= 0 && max_dx * max_dx + dy * dy > radius * radius {
+            max_dx -= 1;
+        }
+        if max_dx >= 0 {
+            rows.push(BrushMaskRow {
+                dy,
+                min_dx: -max_dx,
+                max_dx,
+            });
+        }
+    }
+    let mask = BrushMask { rows };
+    if let Ok(mut guard) = cache.lock() {
+        let _ = guard.insert(stroke_width, mask.clone());
+    }
+    mask
+}
+
+fn draw_brush_mask(
+    center: (i32, i32),
+    color: Color,
+    stroke_width: u32,
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    clip_rect: Option<DirtyRect>,
+) {
+    let mask = get_brush_mask(stroke_width);
+    let clip = clip_rect.unwrap_or(DirtyRect {
+        x: 0,
+        y: 0,
+        width: width as i32,
+        height: height as i32,
+    });
+    let Some(clip) = clip.clamp(width, height) else {
+        return;
+    };
+
+    let clip_x0 = clip.x;
+    let clip_x1 = clip.x + clip.width - 1;
+    let clip_y0 = clip.y;
+    let clip_y1 = clip.y + clip.height - 1;
+
+    for row in &mask.rows {
+        let y = center.1 + row.dy;
+        if y < clip_y0 || y > clip_y1 {
+            continue;
+        }
+        let x0 = (center.0 + row.min_dx).max(clip_x0);
+        let x1 = (center.0 + row.max_dx).min(clip_x1);
+        if x0 > x1 {
+            continue;
+        }
+        let row_base = ((y as u32 * width) * 4) as usize;
+        for x in x0..=x1 {
+            let idx = row_base + (x as usize * 4);
+            pixels[idx] = color.r;
+            pixels[idx + 1] = color.g;
+            pixels[idx + 2] = color.b;
+            pixels[idx + 3] = color.a;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StrokeWidthBucketStat {
+    pub count: u64,
+    pub total_ns: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SegmentBenchmarkSnapshot {
+    pub buckets: Vec<(String, StrokeWidthBucketStat)>,
+}
+
+fn segment_bench_store() -> &'static Mutex<HashMap<&'static str, StrokeWidthBucketStat>> {
+    static STORE: OnceLock<Mutex<HashMap<&'static str, StrokeWidthBucketStat>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn segment_bucket(width: u32) -> &'static str {
+    match width {
+        0..=2 => "w1_2",
+        3..=4 => "w3_4",
+        5..=8 => "w5_8",
+        9..=16 => "w9_16",
+        _ => "w17p",
+    }
+}
+
+fn record_segment_cost(width: u32, cost_ns: u64) {
+    if !crate::draw::perf::draw_perf_runtime_enabled(false) {
+        return;
+    }
+    if let Ok(mut store) = segment_bench_store().lock() {
+        let entry = store.entry(segment_bucket(width)).or_default();
+        entry.count = entry.count.saturating_add(1);
+        entry.total_ns = entry.total_ns.saturating_add(cost_ns);
+    }
+}
+
+pub fn stroke_segment_benchmark_snapshot() -> SegmentBenchmarkSnapshot {
+    let mut buckets = Vec::new();
+    if let Ok(store) = segment_bench_store().lock() {
+        for (name, stats) in store.iter() {
+            buckets.push(((*name).to_string(), *stats));
+        }
+    }
+    buckets.sort_by(|a, b| a.0.cmp(&b.0));
+    SegmentBenchmarkSnapshot { buckets }
+}
+
+#[cfg(test)]
+fn reset_stroke_segment_benchmark() {
+    if let Ok(mut store) = segment_bench_store().lock() {
+        store.clear();
     }
 }
 
@@ -788,7 +998,8 @@ mod tests {
     use super::{
         convert_rgba_to_dib_bgra, render_canvas_to_pixels, render_canvas_to_rgba,
         render_incremental_segment_update, render_shape_preview_update, segment_dirty_bounds,
-        DirtyRect, LayeredRenderer, RenderFrameBuffer,
+        set_wide_stroke_threshold, stroke_segment_benchmark_snapshot, DirtyRect, LayeredRenderer,
+        RenderFrameBuffer,
     };
     use crate::draw::{
         input::{DrawInputState, PointerModifiers},
@@ -840,12 +1051,35 @@ mod tests {
         hasher.finish()
     }
 
+    fn render_line_canvas(
+        width: u32,
+        threshold: u32,
+        start: (i32, i32),
+        end: (i32, i32),
+    ) -> Vec<u8> {
+        render_canvas_to_rgba(
+            &CanvasModel {
+                objects: vec![object_with_width(
+                    Tool::Line,
+                    Geometry::Line { start, end },
+                    width,
+                )],
+            },
+            super::RenderSettings {
+                clear_mode: super::BackgroundClearMode::Transparent,
+                wide_stroke_threshold: threshold,
+            },
+            (64, 64),
+        )
+    }
+
     #[test]
     fn render_empty_canvas_respects_background_clear_mode() {
         let transparent = render_canvas_to_rgba(
             &CanvasModel::default(),
             super::RenderSettings {
                 clear_mode: super::BackgroundClearMode::Transparent,
+                wide_stroke_threshold: super::DEFAULT_WIDE_STROKE_THRESHOLD,
             },
             (2, 1),
         );
@@ -855,6 +1089,7 @@ mod tests {
             &CanvasModel::default(),
             super::RenderSettings {
                 clear_mode: super::BackgroundClearMode::Solid(Color::rgba(7, 8, 9, 255)),
+                wide_stroke_threshold: super::DEFAULT_WIDE_STROKE_THRESHOLD,
             },
             (2, 1),
         );
@@ -1111,6 +1346,7 @@ mod tests {
             &CanvasModel::default(),
             super::RenderSettings {
                 clear_mode: super::BackgroundClearMode::Solid(colorkey),
+                wide_stroke_threshold: super::DEFAULT_WIDE_STROKE_THRESHOLD,
             },
             (2, 1),
         );
@@ -1169,6 +1405,7 @@ mod tests {
             &CanvasModel::default(),
             super::RenderSettings {
                 clear_mode: super::BackgroundClearMode::Transparent,
+                wide_stroke_threshold: super::DEFAULT_WIDE_STROKE_THRESHOLD,
             },
             (3, 2),
             None,
@@ -1188,6 +1425,7 @@ mod tests {
             &CanvasModel::default(),
             super::RenderSettings {
                 clear_mode: super::BackgroundClearMode::Solid(Color::rgba(9, 8, 7, 255)),
+                wide_stroke_threshold: super::DEFAULT_WIDE_STROKE_THRESHOLD,
             },
             (2, 2),
             None,
@@ -1378,5 +1616,94 @@ mod tests {
             2,
         );
         assert_eq!(renderer.committed_rebuild_count(), 2);
+    }
+
+    #[test]
+    fn wide_and_thin_paths_match_pixels_for_representative_widths_and_angles() {
+        let widths = [1, 3, 7, 11, 17];
+        let segments = [((2, 2), (50, 2)), ((2, 2), (40, 30)), ((30, 3), (4, 40))];
+        for width in widths {
+            for (start, end) in segments {
+                let thin = render_line_canvas(width, u32::MAX, start, end);
+                let wide = render_line_canvas(width, 1, start, end);
+                assert_eq!(thin, wide, "width={width} start={start:?} end={end:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn threshold_switch_is_configurable() {
+        let width = 12;
+        let thin = render_line_canvas(width, width + 10, (4, 5), (48, 28));
+        let wide = render_line_canvas(width, 1, (4, 5), (48, 28));
+        assert_eq!(thin, wide);
+
+        set_wide_stroke_threshold(1);
+        let global_wide = render_canvas_to_rgba(
+            &CanvasModel {
+                objects: vec![object_with_width(
+                    Tool::Line,
+                    Geometry::Line {
+                        start: (4, 5),
+                        end: (48, 28),
+                    },
+                    width,
+                )],
+            },
+            super::RenderSettings::default(),
+            (64, 64),
+        );
+        assert_eq!(global_wide, wide);
+        set_wide_stroke_threshold(super::DEFAULT_WIDE_STROKE_THRESHOLD);
+    }
+
+    #[test]
+    fn clipping_at_edges_is_safe_and_writes_only_canvas() {
+        let mut pixels = vec![0u8; 16 * 16 * 4];
+        let dirty = render_incremental_segment_update(
+            &mut pixels,
+            16,
+            16,
+            Tool::Pen,
+            ObjectStyle {
+                stroke: StrokeStyle {
+                    width: 22,
+                    color: Color::rgba(3, 4, 5, 6),
+                },
+                fill: None,
+            },
+            (-30, -30),
+            (40, 40),
+            super::BackgroundClearMode::Transparent,
+        );
+        assert!(dirty.is_some());
+        assert_eq!(pixels.len(), 16 * 16 * 4);
+        assert!(pixels.chunks_exact(4).any(|px| px == [3, 4, 5, 6]));
+    }
+
+    #[test]
+    fn wide_polyline_has_round_join_continuity_without_gaps() {
+        let canvas = CanvasModel {
+            objects: vec![object_with_width(
+                Tool::Pen,
+                Geometry::Pen {
+                    points: vec![(10, 45), (30, 20), (52, 45)],
+                },
+                15,
+            )],
+        };
+        let pixels = render_canvas_to_rgba(&canvas, super::RenderSettings::default(), (64, 64));
+        let join_idx = ((20 * 64 + 30) * 4 + 3) as usize;
+        assert!(pixels[join_idx] > 0);
+    }
+
+    #[test]
+    fn segment_benchmark_buckets_record_samples() {
+        std::env::set_var(crate::draw::perf::DRAW_PERF_DEBUG_ENV, "1");
+        super::reset_stroke_segment_benchmark();
+        let _ = render_line_canvas(14, 1, (2, 2), (50, 30));
+        let snapshot = stroke_segment_benchmark_snapshot();
+        assert!(snapshot.buckets.iter().any(|(_, stats)| stats.count > 0));
+        std::env::remove_var(crate::draw::perf::DRAW_PERF_DEBUG_ENV);
     }
 }
