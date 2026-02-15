@@ -2283,7 +2283,7 @@ mod tests {
     use crate::draw::{
         input::DrawInputState,
         model::{CanvasModel, Color, ObjectStyle, StrokeStyle, Tool},
-        render::{BackgroundClearMode, LayeredRenderer, RenderFrameBuffer},
+        render::{BackgroundClearMode, DirtyRect, LayeredRenderer, RenderFrameBuffer},
         service::MonitorRect,
         settings::{CanvasBackgroundMode, DrawColor, DrawSettings},
         toolbar::{ToolbarCommand, ToolbarHitTarget},
