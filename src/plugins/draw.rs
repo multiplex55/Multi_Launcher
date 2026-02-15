@@ -96,9 +96,10 @@ impl Plugin for DrawPlugin {
     }
 
     fn apply_settings(&mut self, value: &serde_json::Value) {
-        let mut settings = settings_store::load("settings.json")
-            .or_else(|_| serde_json::from_value::<DrawSettings>(value.clone()).map_err(Into::into))
-            .unwrap_or_else(|_| DrawSettings::default());
+        let mut settings = match settings_store::load("settings.json") {
+            Ok(settings) => settings,
+            Err(_) => serde_json::from_value::<DrawSettings>(value.clone()).unwrap_or_default(),
+        };
         settings.sanitize_for_first_pass_transparency();
         self.settings = settings.clone();
         runtime().apply_settings(settings);
