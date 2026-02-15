@@ -140,9 +140,53 @@ pub fn render_draw_settings_form(
     changed |= ui
         .checkbox(
             &mut settings.drop_intermediate_move_points_on_lag,
-            "Drop intermediate move points when render falls behind",
+            "Enable stricter move sampling when render falls behind",
         )
         .changed();
+
+    ui.horizontal(|ui| {
+        ui.label("Move samples / frame");
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut settings.sampling.move_samples_per_frame)
+                    .clamp_range(1..=32),
+            )
+            .changed();
+        ui.label("Lag");
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut settings.sampling.lag_move_samples_per_frame)
+                    .clamp_range(1..=32),
+            )
+            .changed();
+        ui.label("Target Hz");
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut settings.sampling.move_samples_target_hz)
+                    .clamp_range(30..=240),
+            )
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Move max gap px");
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut settings.sampling.move_sample_min_gap_px)
+                    .clamp_range(1..=128),
+            )
+            .changed();
+        ui.label("Stroke width multiplier");
+        changed |= ui
+            .add(
+                egui::DragValue::new(
+                    &mut settings
+                        .sampling
+                        .move_sample_max_gap_stroke_width_multiplier,
+                )
+                .clamp_range(1..=16),
+            )
+            .changed();
+    });
 
     changed |= ui
         .checkbox(

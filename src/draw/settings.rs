@@ -61,6 +61,20 @@ pub struct DrawColor {
     pub a: u8,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DrawSamplingSettings {
+    #[serde(default = "default_move_samples_target_hz")]
+    pub move_samples_target_hz: u32,
+    #[serde(default = "default_move_samples_per_frame")]
+    pub move_samples_per_frame: usize,
+    #[serde(default = "default_lag_move_samples_per_frame")]
+    pub lag_move_samples_per_frame: usize,
+    #[serde(default = "default_move_sample_max_gap_stroke_width_multiplier")]
+    pub move_sample_max_gap_stroke_width_multiplier: u32,
+    #[serde(default = "default_move_sample_min_gap_px")]
+    pub move_sample_min_gap_px: u32,
+}
+
 impl DrawColor {
     pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self { r, g, b, a }
@@ -117,6 +131,8 @@ pub struct DrawSettings {
     pub render_fallback_hz: u32,
     #[serde(default = "default_drop_intermediate_move_points_on_lag")]
     pub drop_intermediate_move_points_on_lag: bool,
+    #[serde(default)]
+    pub sampling: DrawSamplingSettings,
     #[serde(default = "default_quick_colors")]
     pub quick_colors: Vec<DrawColor>,
     #[serde(default = "default_last_tool")]
@@ -177,6 +193,8 @@ struct DrawSettingsDe {
     render_fallback_hz: u32,
     #[serde(default = "default_drop_intermediate_move_points_on_lag")]
     drop_intermediate_move_points_on_lag: bool,
+    #[serde(default)]
+    sampling: DrawSamplingSettings,
     #[serde(default = "default_quick_colors")]
     quick_colors: Vec<DrawColor>,
     #[serde(default = "default_last_tool")]
@@ -264,6 +282,7 @@ impl<'de> Deserialize<'de> for DrawSettings {
             render_target_hz: decoded.render_target_hz,
             render_fallback_hz: decoded.render_fallback_hz,
             drop_intermediate_move_points_on_lag: decoded.drop_intermediate_move_points_on_lag,
+            sampling: decoded.sampling,
             quick_colors: decoded.quick_colors,
             last_tool: decoded.last_tool,
             last_color: decoded.last_color,
@@ -316,6 +335,26 @@ pub fn default_debug_hud_toggle_hotkey_value() -> String {
 
 fn default_last_tool() -> DrawTool {
     DrawTool::Pen
+}
+
+fn default_move_samples_target_hz() -> u32 {
+    120
+}
+
+fn default_move_samples_per_frame() -> usize {
+    6
+}
+
+fn default_lag_move_samples_per_frame() -> usize {
+    3
+}
+
+fn default_move_sample_max_gap_stroke_width_multiplier() -> u32 {
+    3
+}
+
+fn default_move_sample_min_gap_px() -> u32 {
+    6
 }
 
 fn default_render_target_hz() -> u32 {
@@ -399,6 +438,7 @@ impl Default for DrawSettings {
             render_target_hz: default_render_target_hz(),
             render_fallback_hz: default_render_fallback_hz(),
             drop_intermediate_move_points_on_lag: default_drop_intermediate_move_points_on_lag(),
+            sampling: DrawSamplingSettings::default(),
             quick_colors: default_quick_colors(),
             last_tool: default_last_tool(),
             last_color: default_last_color(),
@@ -416,7 +456,48 @@ impl Default for DrawSettings {
     }
 }
 
+impl Default for DrawSamplingSettings {
+    fn default() -> Self {
+        Self {
+            move_samples_target_hz: default_move_samples_target_hz(),
+            move_samples_per_frame: default_move_samples_per_frame(),
+            lag_move_samples_per_frame: default_lag_move_samples_per_frame(),
+            move_sample_max_gap_stroke_width_multiplier:
+                default_move_sample_max_gap_stroke_width_multiplier(),
+            move_sample_min_gap_px: default_move_sample_min_gap_px(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrawSamplingResolved {
+    pub max_points_per_frame: usize,
+    pub max_gap_px: i32,
+}
+
 impl DrawSettings {
+    pub fn resolved_sampling(&self, lag_mode: bool) -> DrawSamplingResolved {
+        let hz = self.resolved_render_hz().max(1);
+        let target_hz = self.sampling.move_samples_target_hz.max(1);
+        let base_points = if lag_mode {
+            self.sampling.lag_move_samples_per_frame.max(1)
+        } else {
+            self.sampling.move_samples_per_frame.max(1)
+        };
+        let scaled_points = (base_points as u64)
+            .saturating_mul(hz as u64)
+            .saturating_div(target_hz as u64)
+            .clamp(1, 32) as usize;
+        let stroke_gap = (self.last_width.max(1) as i32)
+            .saturating_mul(self.sampling.move_sample_max_gap_stroke_width_multiplier as i32);
+        DrawSamplingResolved {
+            max_points_per_frame: scaled_points,
+            max_gap_px: stroke_gap
+                .max(self.sampling.move_sample_min_gap_px as i32)
+                .max(1),
+        }
+    }
+
     pub fn resolved_render_hz(&self) -> u32 {
         let target = self.render_target_hz.min(240);
         let fallback = self.render_fallback_hz.max(1).min(240);
@@ -505,6 +586,9 @@ mod tests {
         assert_eq!(settings.render_target_hz, 120);
         assert_eq!(settings.render_fallback_hz, 60);
         assert!(settings.drop_intermediate_move_points_on_lag);
+        assert_eq!(settings.sampling.move_samples_target_hz, 120);
+        assert_eq!(settings.sampling.move_samples_per_frame, 6);
+        assert_eq!(settings.sampling.lag_move_samples_per_frame, 3);
         assert!(settings.offer_save_without_desktop);
         assert_eq!(
             settings.fixed_save_folder_display,
@@ -623,6 +707,21 @@ mod tests {
 
         assert_eq!(decoded_transparent, CanvasBackgroundMode::Transparent);
         assert_eq!(decoded_solid, CanvasBackgroundMode::Solid);
+    }
+
+    #[test]
+    fn sampling_resolution_scales_by_hz_and_stroke_width() {
+        let mut settings = DrawSettings::default();
+        settings.render_target_hz = 60;
+        settings.sampling.move_samples_target_hz = 120;
+        settings.last_width = 5;
+
+        let normal = settings.resolved_sampling(false);
+        let lag = settings.resolved_sampling(true);
+
+        assert_eq!(normal.max_points_per_frame, 3);
+        assert_eq!(lag.max_points_per_frame, 1);
+        assert_eq!(normal.max_gap_px, 15);
     }
 
     #[test]

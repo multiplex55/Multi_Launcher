@@ -5,7 +5,8 @@ use crate::draw::model::{CanvasModel, Color, DrawObject, Geometry, ObjectStyle, 
 use crate::draw::render::DirtyRect;
 use crate::draw::runtime;
 
-const MIN_POINT_DIST_SQ: i64 = 9;
+// Upstream pointer sampling already limits move frequency; keep only exact duplicates filtered here.
+const MIN_POINT_DIST_SQ: i64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PointerModifiers {
@@ -505,12 +506,62 @@ mod tests {
                 Geometry::Pen { points } | Geometry::Eraser { points } => {
                     assert_eq!(
                         points,
-                        &vec![(0, 0), (3, 0)],
+                        &vec![(0, 0), (1, 1), (2, 2), (3, 0)],
                         "unexpected points for {tool:?}"
                     );
                 }
                 other => panic!("unexpected geometry for {tool:?}: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn movement_threshold_only_suppresses_exact_duplicate_points() {
+        let mut state = draw_state(Tool::Pen);
+        let _ = state.handle_left_down((0, 0), PointerModifiers::default());
+        state.handle_move((0, 0));
+        state.handle_move((1, 0));
+        state.handle_left_up((2, 0));
+
+        let object = state
+            .history()
+            .canvas()
+            .objects
+            .first()
+            .expect("single committed object");
+        match &object.geometry {
+            Geometry::Pen { points } => {
+                assert_eq!(points, &vec![(0, 0), (1, 0), (2, 0)]);
+            }
+            other => panic!("unexpected geometry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn high_velocity_sequence_preserves_continuous_stroke_points() {
+        let mut state = draw_state(Tool::Pen);
+        let _ = state.handle_left_down((0, 0), PointerModifiers::default());
+        for point in [(30, 2), (64, 6), (100, 10), (142, 12), (190, 18)] {
+            state.handle_move(point);
+        }
+        state.handle_left_up((240, 24));
+
+        let object = state
+            .history()
+            .canvas()
+            .objects
+            .first()
+            .expect("single committed object");
+        match &object.geometry {
+            Geometry::Pen { points } => {
+                assert_eq!(points.len(), 7);
+                assert_eq!(points.first().copied(), Some((0, 0)));
+                assert_eq!(points.last().copied(), Some((240, 24)));
+                for window in points.windows(2) {
+                    assert_ne!(window[0], window[1]);
+                }
+            }
+            other => panic!("unexpected geometry: {other:?}"),
         }
     }
 
