@@ -2642,6 +2642,7 @@ mod tests {
     #[test]
     fn toolbar_hit_test_quick_color_region_updates_style_color() {
         let mut settings = DrawSettings::default();
+        settings.toolbar_visible = true;
         settings.quick_colors = vec![
             DrawColor::rgba(17, 34, 51, 255),
             DrawColor::rgba(1, 2, 3, 255),
@@ -2740,6 +2741,7 @@ mod tests {
     #[test]
     fn toolbar_renders_quick_and_fill_swatches_with_selection_outlines() {
         let mut settings = DrawSettings::default();
+        settings.toolbar_visible = true;
         settings.quick_colors = vec![
             DrawColor::rgba(200, 10, 20, 255),
             DrawColor::rgba(2, 220, 40, 255),
@@ -2872,6 +2874,7 @@ mod tests {
         state.toolbar_state.visible = true;
         let mut input = draw_state(Tool::Pen);
         let mut settings = DrawSettings::default();
+        settings.toolbar_visible = true;
         settings.quick_colors = vec![
             DrawColor::rgba(200, 10, 20, 255),
             DrawColor::rgba(2, 220, 40, 255),
