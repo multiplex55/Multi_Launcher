@@ -75,6 +75,10 @@ pub struct DrawSettings {
     pub toolbar_collapsed: bool,
     #[serde(default = "default_toolbar_toggle_hotkey")]
     pub toolbar_toggle_hotkey: String,
+    #[serde(default)]
+    pub debug_hud_enabled: bool,
+    #[serde(default = "default_debug_hud_toggle_hotkey")]
+    pub debug_hud_toggle_hotkey: String,
     #[serde(default = "default_quick_colors")]
     pub quick_colors: Vec<DrawColor>,
     #[serde(default = "default_last_tool")]
@@ -114,6 +118,10 @@ struct DrawSettingsDe {
     toolbar_collapsed: bool,
     #[serde(default = "default_toolbar_toggle_hotkey")]
     toolbar_toggle_hotkey: String,
+    #[serde(default)]
+    debug_hud_enabled: bool,
+    #[serde(default = "default_debug_hud_toggle_hotkey")]
+    debug_hud_toggle_hotkey: String,
     #[serde(default = "default_quick_colors")]
     quick_colors: Vec<DrawColor>,
     #[serde(default = "default_last_tool")]
@@ -163,6 +171,8 @@ impl<'de> Deserialize<'de> for DrawSettings {
             toolbar_position: decoded.toolbar_position,
             toolbar_collapsed: decoded.toolbar_collapsed,
             toolbar_toggle_hotkey: decoded.toolbar_toggle_hotkey,
+            debug_hud_enabled: decoded.debug_hud_enabled,
+            debug_hud_toggle_hotkey: decoded.debug_hud_toggle_hotkey,
             quick_colors: decoded.quick_colors,
             last_tool: decoded.last_tool,
             last_color: decoded.last_color,
@@ -193,8 +203,16 @@ fn default_toolbar_toggle_hotkey() -> String {
     "Ctrl+Shift+D".to_owned()
 }
 
+fn default_debug_hud_toggle_hotkey() -> String {
+    "Ctrl+Shift+H".to_owned()
+}
+
 pub fn default_toolbar_toggle_hotkey_value() -> String {
     default_toolbar_toggle_hotkey()
+}
+
+pub fn default_debug_hud_toggle_hotkey_value() -> String {
+    default_debug_hud_toggle_hotkey()
 }
 
 fn default_last_tool() -> DrawTool {
@@ -261,6 +279,8 @@ impl Default for DrawSettings {
             toolbar_position: default_toolbar_position(),
             toolbar_collapsed: false,
             toolbar_toggle_hotkey: default_toolbar_toggle_hotkey(),
+            debug_hud_enabled: false,
+            debug_hud_toggle_hotkey: default_debug_hud_toggle_hotkey(),
             quick_colors: default_quick_colors(),
             last_tool: default_last_tool(),
             last_color: default_last_color(),
@@ -334,6 +354,8 @@ mod tests {
         assert!(settings.enable_pressure);
         assert_eq!(settings.toolbar_position, super::ToolbarPosition::Top);
         assert_eq!(settings.toolbar_toggle_hotkey, "Ctrl+Shift+D");
+        assert!(!settings.debug_hud_enabled);
+        assert_eq!(settings.debug_hud_toggle_hotkey, "Ctrl+Shift+H");
         assert!(settings.offer_save_without_desktop);
         assert_eq!(
             settings.fixed_save_folder_display,
