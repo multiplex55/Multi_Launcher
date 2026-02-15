@@ -24,6 +24,7 @@ pub enum MainToOverlay {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlayToMain {
+    LifecycleEvent(OverlayLifecycleEvent),
     Exited {
         reason: ExitReason,
         save_result: SaveResult,
@@ -34,4 +35,11 @@ pub enum OverlayToMain {
     SaveError {
         error: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OverlayLifecycleEvent {
+    Started,
+    ExitRequested { reason: ExitReason },
+    SettingsApplied,
 }
