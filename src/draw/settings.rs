@@ -96,6 +96,8 @@ pub struct DrawSettings {
     #[serde(default = "default_toolbar_position")]
     pub toolbar_position: ToolbarPosition,
     #[serde(default)]
+    pub toolbar_visible: bool,
+    #[serde(default)]
     pub toolbar_collapsed: bool,
     #[serde(default = "default_toolbar_origin_x")]
     pub toolbar_origin_x: i32,
@@ -153,6 +155,8 @@ struct DrawSettingsDe {
     enable_pressure: bool,
     #[serde(default = "default_toolbar_position")]
     toolbar_position: ToolbarPosition,
+    #[serde(default)]
+    toolbar_visible: Option<bool>,
     #[serde(default)]
     toolbar_collapsed: bool,
     #[serde(default = "default_toolbar_origin_x")]
@@ -247,6 +251,9 @@ impl<'de> Deserialize<'de> for DrawSettings {
         Ok(Self {
             enable_pressure: decoded.enable_pressure,
             toolbar_position: decoded.toolbar_position,
+            toolbar_visible: decoded
+                .toolbar_visible
+                .unwrap_or(!decoded.toolbar_collapsed),
             toolbar_collapsed: decoded.toolbar_collapsed,
             toolbar_origin_x: decoded.toolbar_origin_x,
             toolbar_origin_y: decoded.toolbar_origin_y,
@@ -381,6 +388,7 @@ impl Default for DrawSettings {
         Self {
             enable_pressure: default_enable_pressure(),
             toolbar_position: default_toolbar_position(),
+            toolbar_visible: false,
             toolbar_collapsed: false,
             toolbar_origin_x: default_toolbar_origin_x(),
             toolbar_origin_y: default_toolbar_origin_y(),
@@ -490,6 +498,7 @@ mod tests {
         let settings = DrawSettings::default();
         assert!(settings.enable_pressure);
         assert_eq!(settings.toolbar_position, super::ToolbarPosition::Top);
+        assert!(!settings.toolbar_visible);
         assert_eq!(settings.toolbar_toggle_hotkey, "Ctrl+Shift+D");
         assert!(!settings.debug_hud_enabled);
         assert_eq!(settings.debug_hud_toggle_hotkey, "Ctrl+Shift+H");
@@ -690,5 +699,29 @@ mod tests {
 
         settings.toolbar_toggle_hotkey = "Ctrl+Shift+NotAKey".to_string();
         assert!(settings.parse_toolbar_toggle_hotkey().is_err());
+    }
+
+    #[test]
+    fn defaults_hide_toolbar_for_first_run_performance_mode() {
+        let settings = DrawSettings::default();
+        assert!(!settings.toolbar_visible);
+        assert!(!settings.draw_perf_debug);
+    }
+
+    #[test]
+    fn deserialize_legacy_toolbar_collapsed_preserves_visibility_semantics() {
+        let hidden: DrawSettings = serde_json::from_value(serde_json::json!({
+            "toolbar_collapsed": true
+        }))
+        .expect("deserialize hidden toolbar settings");
+        assert!(!hidden.toolbar_visible);
+        assert!(hidden.toolbar_collapsed);
+
+        let shown: DrawSettings = serde_json::from_value(serde_json::json!({
+            "toolbar_collapsed": false
+        }))
+        .expect("deserialize visible toolbar settings");
+        assert!(shown.toolbar_visible);
+        assert!(!shown.toolbar_collapsed);
     }
 }

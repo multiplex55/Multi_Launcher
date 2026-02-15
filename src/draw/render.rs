@@ -198,6 +198,33 @@ impl LayeredRenderer {
         force_full_redraw: bool,
         committed_revision: u64,
     ) {
+        self.render_to_window_with_overlay(
+            window,
+            committed_canvas,
+            active_object,
+            settings,
+            size,
+            dirty,
+            force_full_redraw,
+            committed_revision,
+            |_, _| None,
+        );
+    }
+
+    pub fn render_to_window_with_overlay<F>(
+        &mut self,
+        window: &mut OverlayWindow,
+        committed_canvas: &CanvasModel,
+        active_object: Option<&DrawObject>,
+        settings: RenderSettings,
+        size: (u32, u32),
+        dirty: Option<DirtyRect>,
+        force_full_redraw: bool,
+        committed_revision: u64,
+        overlay_draw: F,
+    ) where
+        F: FnOnce(&mut [u8], (u32, u32)) -> Option<DirtyRect>,
+    {
         let committed_changed = force_full_redraw
             || self.last_committed_revision != Some(committed_revision)
             || self.committed.size != size
@@ -285,7 +312,20 @@ impl LayeredRenderer {
             }
         }
 
+        let overlay_dirty =
+            overlay_draw(&mut self.composed.rgba, size).and_then(|rect| rect.clamp(size.0, size.1));
+        if let Some(overlay_dirty) = overlay_dirty {
+            presented_dirty = Some(
+                presented_dirty
+                    .map(|rect| rect.union(overlay_dirty))
+                    .unwrap_or(overlay_dirty),
+            );
+        }
+
         if full_redraw {
+            if overlay_dirty.is_some() {
+                convert_rgba_to_dib_bgra(&self.composed.rgba, &mut self.composed.bgra);
+            }
             self.composed.copy_to_window(window);
             #[cfg(test)]
             {
