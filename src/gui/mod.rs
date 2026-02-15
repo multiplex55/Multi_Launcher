@@ -5498,7 +5498,6 @@ mod tests {
         assert!(log.contains("Removed note special-name"));
 
         std::env::set_current_dir(orig_dir).unwrap();
-        restore_draw_settings_path_for_test(path_prev);
     }
 
     #[test]
