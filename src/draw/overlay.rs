@@ -4,7 +4,7 @@ use crate::draw::input::{
 };
 use crate::draw::keyboard_hook::{KeyEvent, KeyboardHook};
 use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain, SaveResult};
-use crate::draw::model::{Color, ObjectStyle, StrokeStyle, Tool};
+use crate::draw::model::{Color, ObjectStyle, StrokeStyle, Tool, FIRST_PASS_TRANSPARENCY_COLORKEY};
 use crate::draw::render::{BackgroundClearMode, DirtyRect, RenderFrameBuffer, RenderSettings};
 use crate::draw::service::MonitorRect;
 use crate::draw::settings::{
@@ -183,7 +183,9 @@ fn map_draw_color(color: DrawColor) -> Color {
 
 fn live_render_settings(settings: &DrawSettings) -> RenderSettings {
     let clear_mode = match settings.live_background_mode {
-        LiveBackgroundMode::DesktopTransparent => BackgroundClearMode::Transparent,
+        LiveBackgroundMode::DesktopTransparent => {
+            BackgroundClearMode::Solid(FIRST_PASS_TRANSPARENCY_COLORKEY)
+        }
         LiveBackgroundMode::SolidColor => {
             let background = settings.live_blank_color;
             BackgroundClearMode::Solid(Color::rgba(background.r, background.g, background.b, 255))
@@ -1772,7 +1774,7 @@ mod tests {
     }
 
     #[test]
-    fn live_render_clear_transparent_vs_solid() {
+    fn live_render_clear_desktop_transparent_vs_solid() {
         let mut settings = DrawSettings::default();
         settings.live_background_mode = LiveBackgroundMode::DesktopTransparent;
         settings.live_blank_color = DrawColor::rgba(12, 34, 56, 10);
@@ -1782,7 +1784,19 @@ mod tests {
             live_render_settings(&settings),
             (1, 1),
         );
-        assert_eq!(transparent, vec![0, 0, 0, 0]);
+        assert_eq!(
+            transparent,
+            vec![
+                crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY.r,
+                crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY.g,
+                crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY.b,
+                crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY.a,
+            ]
+        );
+        assert_eq!(
+            live_render_settings(&settings).clear_mode,
+            BackgroundClearMode::Solid(crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY)
+        );
 
         settings.live_background_mode = LiveBackgroundMode::SolidColor;
         let solid = crate::draw::render::render_canvas_to_rgba(

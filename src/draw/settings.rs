@@ -299,8 +299,8 @@ impl Default for DrawSettings {
 }
 
 impl DrawSettings {
-    /// First-pass transparency guard: selected pen colors must not collide with
-    /// the reserved color key while the overlay uses `LWA_COLORKEY`.
+    /// Live desktop transparency guard: selected pen colors must not collide with
+    /// the reserved color key used by the current `LWA_COLORKEY` overlay pipeline.
     pub fn sanitize_for_first_pass_transparency(&mut self) -> bool {
         let mut changed = false;
 
