@@ -3,7 +3,7 @@ use crate::draw::input::{
     bridge_key_event_to_runtime, bridge_left_down_to_runtime, bridge_left_up_to_runtime,
     bridge_mouse_move_to_runtime, DrawInputState, InputCommand, PointerModifiers,
 };
-use crate::draw::keyboard_hook::{KeyEvent, KeyboardHook};
+use crate::draw::keyboard_hook::{map_key_event_to_command, KeyCommand, KeyEvent, KeyboardHook};
 use crate::draw::messages::{
     ExitDialogMode, ExitReason, MainToOverlay, OverlayCommand, OverlayToMain, SaveResult,
 };
@@ -1262,6 +1262,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                     let dispatch = forward_key_event_to_draw_input(
                         &mut draw_input,
                         controller.exit_dialog_mode().into(),
+                        &overlay_state.quick_colors,
                         key_event,
                     );
                     if dispatch.handled {
@@ -1580,15 +1581,34 @@ pub fn forward_pointer_event_and_request_paint(
 pub fn forward_key_event_to_draw_input(
     draw_input: &mut DrawInputState,
     exit_dialog_state: ExitDialogState,
+    quick_colors: &[DrawColor],
     event: KeyEvent,
 ) -> KeyDispatch {
     if exit_dialog_state.blocks_drawing_input() {
         return KeyDispatch::default();
     }
 
-    let command = bridge_key_event_to_runtime(draw_input, event);
+    let mapped = map_key_event_to_command(true, event, None);
+    if let Some(KeyCommand::SelectQuickColor(index)) = mapped {
+        if let Some(color) = quick_colors.get(index).copied() {
+            draw_input.apply_quick_color(map_draw_color(color));
+            return KeyDispatch {
+                handled: true,
+                should_repaint: true,
+                command: None,
+            };
+        }
+        return KeyDispatch {
+            handled: true,
+            should_repaint: false,
+            command: None,
+        };
+    }
+
+    let command = draw_input.handle_key_command(mapped);
+    crate::draw::input::route_command_to_runtime(command.clone(), ExitReason::UserRequest);
     KeyDispatch {
-        handled: true,
+        handled: mapped.is_some(),
         should_repaint: command_requests_repaint(command.clone()),
         command,
     }
@@ -1597,10 +1617,12 @@ pub fn forward_key_event_to_draw_input(
 pub fn forward_key_event_and_request_paint(
     draw_input: &mut DrawInputState,
     exit_dialog_state: ExitDialogState,
+    quick_colors: &[DrawColor],
     event: KeyEvent,
     window: &OverlayWindow,
 ) -> bool {
-    let dispatch = forward_key_event_to_draw_input(draw_input, exit_dialog_state, event);
+    let dispatch =
+        forward_key_event_to_draw_input(draw_input, exit_dialog_state, quick_colors, event);
     if dispatch.should_repaint {
         window.request_paint();
     }
@@ -2339,6 +2361,7 @@ mod tests {
         let dispatch = forward_key_event_to_draw_input(
             &mut input,
             ExitDialogState::PromptVisible,
+            &[],
             KeyEvent {
                 key: KeyCode::U,
                 modifiers: KeyModifiers::default(),
@@ -2346,6 +2369,51 @@ mod tests {
         );
         assert!(!dispatch.handled);
         assert_eq!(dispatch.command, None);
+    }
+
+    #[test]
+    fn quick_color_hotkey_updates_stroke_from_overlay_palette() {
+        let mut input = draw_state(Tool::Pen);
+        let quick_colors = vec![DrawColor::rgba(9, 8, 7, 255), DrawColor::rgba(1, 2, 3, 255)];
+
+        let dispatch = forward_key_event_to_draw_input(
+            &mut input,
+            ExitDialogState::Hidden,
+            &quick_colors,
+            KeyEvent {
+                key: KeyCode::Num2,
+                modifiers: KeyModifiers::default(),
+            },
+        );
+
+        assert!(dispatch.handled);
+        assert!(dispatch.should_repaint);
+        assert_eq!(dispatch.command, None);
+        assert_eq!(
+            input.current_style().stroke.color,
+            Color::rgba(1, 2, 3, 255)
+        );
+    }
+
+    #[test]
+    fn quick_color_hotkey_out_of_range_is_ignored_safely() {
+        let mut input = draw_state(Tool::Pen);
+        let baseline = input.current_style().stroke.color;
+
+        let dispatch = forward_key_event_to_draw_input(
+            &mut input,
+            ExitDialogState::Hidden,
+            &[DrawColor::rgba(4, 5, 6, 255)],
+            KeyEvent {
+                key: KeyCode::Num8,
+                modifiers: KeyModifiers::default(),
+            },
+        );
+
+        assert!(dispatch.handled);
+        assert!(!dispatch.should_repaint);
+        assert_eq!(dispatch.command, None);
+        assert_eq!(input.current_style().stroke.color, baseline);
     }
 
     #[test]
@@ -2871,6 +2939,7 @@ mod tests {
         let dispatch = forward_key_event_to_draw_input(
             &mut input,
             ExitDialogState::Hidden,
+            &state.quick_colors,
             KeyEvent {
                 key: KeyCode::U,
                 modifiers: KeyModifiers::default(),

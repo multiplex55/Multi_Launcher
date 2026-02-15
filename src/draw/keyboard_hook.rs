@@ -102,6 +102,7 @@ pub enum KeyCommand {
     Redo,
     RequestExit,
     ToggleToolbar,
+    SelectQuickColor(usize),
 }
 
 pub fn should_consume_key_event(active: bool, _event: KeyEvent) -> bool {
@@ -221,6 +222,27 @@ pub fn map_key_event_to_command(
     if let Some(hotkey) = toolbar_toggle_hotkey {
         if key_event_matches_hotkey(event, hotkey) {
             return Some(KeyCommand::ToggleToolbar);
+        }
+    }
+
+    if !event.modifiers.ctrl
+        && !event.modifiers.shift
+        && !event.modifiers.alt
+        && !event.modifiers.win
+    {
+        let quick_color_index = match event.key {
+            KeyCode::Num1 => Some(0),
+            KeyCode::Num2 => Some(1),
+            KeyCode::Num3 => Some(2),
+            KeyCode::Num4 => Some(3),
+            KeyCode::Num5 => Some(4),
+            KeyCode::Num6 => Some(5),
+            KeyCode::Num7 => Some(6),
+            KeyCode::Num8 => Some(7),
+            _ => None,
+        };
+        if let Some(index) = quick_color_index {
+            return Some(KeyCommand::SelectQuickColor(index));
         }
     }
 
@@ -701,6 +723,49 @@ mod tests {
             }),
         );
         assert_eq!(command, Some(KeyCommand::ToggleToolbar));
+    }
+
+    #[test]
+    fn maps_number_keys_to_quick_color_commands() {
+        let cases = [
+            (KeyCode::Num1, 0),
+            (KeyCode::Num2, 1),
+            (KeyCode::Num3, 2),
+            (KeyCode::Num4, 3),
+            (KeyCode::Num5, 4),
+            (KeyCode::Num6, 5),
+            (KeyCode::Num7, 6),
+            (KeyCode::Num8, 7),
+        ];
+
+        for (key, index) in cases {
+            assert_eq!(
+                map_key_event_to_command(
+                    true,
+                    KeyEvent {
+                        key,
+                        modifiers: KeyModifiers::default(),
+                    },
+                    None,
+                ),
+                Some(KeyCommand::SelectQuickColor(index))
+            );
+        }
+    }
+
+    #[test]
+    fn quick_color_keys_are_suppressed_outside_draw_mode() {
+        assert_eq!(
+            map_key_event_to_command(
+                false,
+                KeyEvent {
+                    key: KeyCode::Num1,
+                    modifiers: KeyModifiers::default(),
+                },
+                None,
+            ),
+            None
+        );
     }
 
     #[test]

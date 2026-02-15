@@ -1,7 +1,7 @@
 use crate::draw::history::DrawHistory;
 use crate::draw::keyboard_hook::{map_key_event_to_command, KeyCommand, KeyEvent};
 use crate::draw::messages::ExitReason;
-use crate::draw::model::{CanvasModel, DrawObject, Geometry, ObjectStyle, Tool};
+use crate::draw::model::{CanvasModel, Color, DrawObject, Geometry, ObjectStyle, Tool};
 use crate::draw::render::DirtyRect;
 use crate::draw::runtime;
 
@@ -76,6 +76,10 @@ impl DrawInputState {
 
     pub fn set_style(&mut self, style: ObjectStyle) {
         self.style = style;
+    }
+
+    pub fn apply_quick_color(&mut self, color: Color) {
+        self.style.stroke.color = color;
     }
 
     pub fn take_dirty_rect(&mut self) -> Option<DirtyRect> {
@@ -301,7 +305,12 @@ impl DrawInputState {
     }
 
     pub fn handle_key_event(&mut self, event: KeyEvent) -> Option<InputCommand> {
-        match map_key_event_to_command(true, event, None) {
+        let command = map_key_event_to_command(true, event, None);
+        self.handle_key_command(command)
+    }
+
+    pub fn handle_key_command(&mut self, command: Option<KeyCommand>) -> Option<InputCommand> {
+        match command {
             Some(KeyCommand::Undo) => {
                 if self.history.undo().is_some() {
                     self.committed_buffer = self.history.canvas();
@@ -320,6 +329,7 @@ impl DrawInputState {
             }
             Some(KeyCommand::RequestExit) => Some(InputCommand::RequestExit),
             Some(KeyCommand::ToggleToolbar) => None,
+            Some(KeyCommand::SelectQuickColor(_)) => None,
             None => None,
         }
     }
@@ -719,6 +729,42 @@ mod tests {
 
         assert_eq!(state.full_redraw_request_count(), baseline);
         assert!(!state.take_full_redraw_request());
+    }
+
+    #[test]
+    fn quick_color_style_mutation_does_not_change_tool_or_history() {
+        let mut state = draw_state(Tool::Rect);
+        assert!(state.take_full_redraw_request());
+        let initial_tool = state.current_tool();
+        let initial_undo_len = state.history().undo_len();
+        let initial_redo_len = state.history().redo_len();
+        let initial_revision = state.committed_revision();
+
+        state.apply_quick_color(crate::draw::model::Color::rgba(12, 34, 56, 255));
+
+        assert_eq!(state.current_tool(), initial_tool);
+        assert_eq!(state.history().undo_len(), initial_undo_len);
+        assert_eq!(state.history().redo_len(), initial_redo_len);
+        assert_eq!(state.committed_revision(), initial_revision);
+        assert_eq!(
+            state.current_style().stroke.color,
+            crate::draw::model::Color::rgba(12, 34, 56, 255)
+        );
+        assert!(!state.take_full_redraw_request());
+    }
+
+    #[test]
+    fn quick_color_key_command_is_non_destructive_when_unhandled_locally() {
+        let mut state = draw_state(Tool::Pen);
+        let baseline_style = state.current_style();
+        let baseline_revision = state.committed_revision();
+
+        let command = state.handle_key_command(Some(KeyCommand::SelectQuickColor(3)));
+        assert_eq!(command, None);
+        assert_eq!(state.current_style(), baseline_style);
+        assert_eq!(state.committed_revision(), baseline_revision);
+        assert_eq!(state.history().undo_len(), 0);
+        assert_eq!(state.history().redo_len(), 0);
     }
 
     #[test]
