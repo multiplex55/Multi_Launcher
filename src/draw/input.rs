@@ -418,10 +418,12 @@ mod tests {
         });
 
         let redo_command = state.handle_key_event(KeyEvent {
-            key: KeyCode::R,
+            key: KeyCode::KeyR,
             modifiers: KeyModifiers {
                 ctrl: true,
                 shift: false,
+                alt: false,
+                win: false,
             },
         });
         assert_eq!(redo_command, Some(InputCommand::Redo));

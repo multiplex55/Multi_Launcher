@@ -62,6 +62,7 @@ struct OverlayThreadState {
     toolbar_toggle_hotkey: Hotkey,
     debug_hud_visible: bool,
     debug_hud_toggle_hotkey: Hotkey,
+    quick_colors: Vec<DrawColor>,
     diagnostics: OverlayDiagnostics,
 }
 
@@ -76,6 +77,7 @@ impl OverlayThreadState {
             debug_hud_toggle_hotkey: parse_debug_hud_hotkey_with_fallback(
                 &settings.debug_hud_toggle_hotkey,
             ),
+            quick_colors: settings.quick_colors.clone(),
             diagnostics: OverlayDiagnostics::default(),
         }
     }
@@ -85,6 +87,7 @@ impl OverlayThreadState {
             parse_toolbar_hotkey_with_fallback(&settings.toolbar_toggle_hotkey);
         self.debug_hud_toggle_hotkey =
             parse_debug_hud_hotkey_with_fallback(&settings.debug_hud_toggle_hotkey);
+        self.quick_colors = settings.quick_colors.clone();
     }
 
     fn apply_pointer_event(&mut self, event: OverlayPointerEvent) {
@@ -134,8 +137,8 @@ fn key_event_matches_hotkey(event: KeyEvent, hotkey: Hotkey) -> bool {
     key == hotkey.key
         && event.modifiers.ctrl == hotkey.ctrl
         && event.modifiers.shift == hotkey.shift
-        && !hotkey.alt
-        && !hotkey.win
+        && event.modifiers.alt == hotkey.alt
+        && event.modifiers.win == hotkey.win
 }
 
 fn handle_toolbar_toggle_hotkey_event(state: &mut OverlayThreadState, event: KeyEvent) -> bool {
@@ -157,14 +160,84 @@ fn handle_debug_hud_toggle_hotkey_event(state: &mut OverlayThreadState, event: K
 
 fn map_overlay_key_to_hotkey_key(key: crate::draw::keyboard_hook::KeyCode) -> Option<Key> {
     use crate::draw::keyboard_hook::KeyCode;
-    match key {
-        KeyCode::U => Some(Key::KeyU),
-        KeyCode::R => Some(Key::KeyR),
-        KeyCode::Escape => Some(Key::Escape),
-        KeyCode::D => Some(Key::KeyD),
-        KeyCode::H => Some(Key::KeyH),
-        KeyCode::Other => None,
-    }
+    Some(match key {
+        KeyCode::KeyA => Key::KeyA,
+        KeyCode::KeyB => Key::KeyB,
+        KeyCode::KeyC => Key::KeyC,
+        KeyCode::KeyD => Key::KeyD,
+        KeyCode::KeyE => Key::KeyE,
+        KeyCode::KeyF => Key::KeyF,
+        KeyCode::KeyG => Key::KeyG,
+        KeyCode::KeyH => Key::KeyH,
+        KeyCode::KeyI => Key::KeyI,
+        KeyCode::KeyJ => Key::KeyJ,
+        KeyCode::KeyK => Key::KeyK,
+        KeyCode::KeyL => Key::KeyL,
+        KeyCode::KeyM => Key::KeyM,
+        KeyCode::KeyN => Key::KeyN,
+        KeyCode::KeyO => Key::KeyO,
+        KeyCode::KeyP => Key::KeyP,
+        KeyCode::KeyQ => Key::KeyQ,
+        KeyCode::KeyR => Key::KeyR,
+        KeyCode::KeyS => Key::KeyS,
+        KeyCode::KeyT => Key::KeyT,
+        KeyCode::U => Key::KeyU,
+        KeyCode::KeyV => Key::KeyV,
+        KeyCode::KeyW => Key::KeyW,
+        KeyCode::KeyX => Key::KeyX,
+        KeyCode::KeyY => Key::KeyY,
+        KeyCode::KeyZ => Key::KeyZ,
+        KeyCode::Num0 => Key::Num0,
+        KeyCode::Num1 => Key::Num1,
+        KeyCode::Num2 => Key::Num2,
+        KeyCode::Num3 => Key::Num3,
+        KeyCode::Num4 => Key::Num4,
+        KeyCode::Num5 => Key::Num5,
+        KeyCode::Num6 => Key::Num6,
+        KeyCode::Num7 => Key::Num7,
+        KeyCode::Num8 => Key::Num8,
+        KeyCode::Num9 => Key::Num9,
+        KeyCode::Space => Key::Space,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::Enter => Key::Return,
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::CapsLock => Key::CapsLock,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
+        KeyCode::Left => Key::LeftArrow,
+        KeyCode::Right => Key::RightArrow,
+        KeyCode::Up => Key::UpArrow,
+        KeyCode::Down => Key::DownArrow,
+        KeyCode::F1 => Key::F1,
+        KeyCode::F2 => Key::F2,
+        KeyCode::F3 => Key::F3,
+        KeyCode::F4 => Key::F4,
+        KeyCode::F5 => Key::F5,
+        KeyCode::F6 => Key::F6,
+        KeyCode::F7 => Key::F7,
+        KeyCode::F8 => Key::F8,
+        KeyCode::F9 => Key::F9,
+        KeyCode::F10 => Key::F10,
+        KeyCode::F11 => Key::F11,
+        KeyCode::F12 => Key::F12,
+        KeyCode::F13 => Key::F13,
+        KeyCode::F14 => Key::F14,
+        KeyCode::F15 => Key::F15,
+        KeyCode::F16 => Key::F16,
+        KeyCode::F17 => Key::F17,
+        KeyCode::F18 => Key::F18,
+        KeyCode::F19 => Key::F19,
+        KeyCode::F20 => Key::F20,
+        KeyCode::F21 => Key::F21,
+        KeyCode::F22 => Key::F22,
+        KeyCode::F23 => Key::F23,
+        KeyCode::F24 => Key::F24,
+        KeyCode::Escape => Key::Escape,
+        KeyCode::Other => return None,
+    })
 }
 
 fn map_draw_tool(tool: DrawTool) -> Tool {
@@ -222,7 +295,12 @@ fn rerender_and_repaint(
         Vec::new()
     };
     if overlay_state.toolbar_visible {
-        draw_compact_toolbar_panel(&mut rgba, window.bitmap_size(), draw_input);
+        draw_compact_toolbar_panel(
+            &mut rgba,
+            window.bitmap_size(),
+            draw_input,
+            &overlay_state.quick_colors,
+        );
     }
     if overlay_state.debug_hud_visible {
         draw_debug_hud_panel(
@@ -275,83 +353,278 @@ pub struct OverlayPointerSample {
     pub event: OverlayPointerEvent,
 }
 
-fn draw_compact_toolbar_panel(rgba: &mut [u8], size: (u32, u32), draw_input: &DrawInputState) {
-    let (width, height) = size;
-    if width < 160 || height < 60 {
-        return;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ToolbarRect {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+impl ToolbarRect {
+    fn contains(self, point: (i32, i32)) -> bool {
+        point.0 >= self.x
+            && point.0 < self.x + self.w
+            && point.1 >= self.y
+            && point.1 < self.y + self.h
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolbarKeyAction {
+    Undo,
+    Redo,
+    Exit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolbarHitTarget {
+    Tool(Tool),
+    QuickColor(usize),
+    KeyAction(ToolbarKeyAction),
+}
+
+#[derive(Debug, Clone)]
+struct ToolbarLayout {
+    panel: ToolbarRect,
+    tool_rects: Vec<(Tool, ToolbarRect)>,
+    quick_color_rects: Vec<(usize, ToolbarRect)>,
+    key_action_rects: Vec<(ToolbarKeyAction, ToolbarRect)>,
+}
+
+impl ToolbarLayout {
+    fn for_state(size: (u32, u32), quick_colors: usize) -> Option<Self> {
+        let (width, height) = size;
+        if width < 280 || height < 120 {
+            return None;
+        }
+        let panel = ToolbarRect {
+            x: 16,
+            y: 16,
+            w: 372,
+            h: 92,
+        };
+        let tools = [
+            Tool::Pen,
+            Tool::Line,
+            Tool::Rect,
+            Tool::Ellipse,
+            Tool::Eraser,
+        ];
+        let tool_rects = tools
+            .into_iter()
+            .enumerate()
+            .map(|(idx, tool)| {
+                (
+                    tool,
+                    ToolbarRect {
+                        x: panel.x + 8 + (idx as i32 * 28),
+                        y: panel.y + 8,
+                        w: 22,
+                        h: 22,
+                    },
+                )
+            })
+            .collect();
+
+        let quick_color_rects = (0..quick_colors)
+            .map(|idx| {
+                (
+                    idx,
+                    ToolbarRect {
+                        x: panel.x + 8 + (idx as i32 * 22),
+                        y: panel.y + 40,
+                        w: 18,
+                        h: 18,
+                    },
+                )
+            })
+            .collect();
+
+        let key_action_rects = [
+            ToolbarKeyAction::Undo,
+            ToolbarKeyAction::Redo,
+            ToolbarKeyAction::Exit,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(idx, action)| {
+            (
+                action,
+                ToolbarRect {
+                    x: panel.x + 238 + (idx as i32 * 42),
+                    y: panel.y + 8,
+                    w: 34,
+                    h: 22,
+                },
+            )
+        })
+        .collect();
+
+        Some(Self {
+            panel,
+            tool_rects,
+            quick_color_rects,
+            key_action_rects,
+        })
     }
 
-    let panel_x = 16;
-    let panel_y = 16;
+    fn hit_test(&self, point: (i32, i32)) -> Option<ToolbarHitTarget> {
+        for (tool, rect) in &self.tool_rects {
+            if rect.contains(point) {
+                return Some(ToolbarHitTarget::Tool(*tool));
+            }
+        }
+        for (idx, rect) in &self.quick_color_rects {
+            if rect.contains(point) {
+                return Some(ToolbarHitTarget::QuickColor(*idx));
+            }
+        }
+        for (action, rect) in &self.key_action_rects {
+            if rect.contains(point) {
+                return Some(ToolbarHitTarget::KeyAction(*action));
+            }
+        }
+        None
+    }
+}
+
+fn apply_toolbar_hit_target(
+    draw_input: &mut DrawInputState,
+    overlay_state: &OverlayThreadState,
+    target: ToolbarHitTarget,
+) {
+    match target {
+        ToolbarHitTarget::Tool(tool) => draw_input.set_tool(tool),
+        ToolbarHitTarget::QuickColor(index) => {
+            if let Some(color) = overlay_state.quick_colors.get(index).copied() {
+                let mut style = draw_input.current_style();
+                style.stroke.color = map_draw_color(color);
+                draw_input.set_style(style);
+            }
+        }
+        ToolbarHitTarget::KeyAction(action) => {
+            let event = match action {
+                ToolbarKeyAction::Undo => KeyEvent {
+                    key: crate::draw::keyboard_hook::KeyCode::U,
+                    modifiers: Default::default(),
+                },
+                ToolbarKeyAction::Redo => KeyEvent {
+                    key: crate::draw::keyboard_hook::KeyCode::KeyR,
+                    modifiers: crate::draw::keyboard_hook::KeyModifiers {
+                        ctrl: true,
+                        shift: false,
+                        alt: false,
+                        win: false,
+                    },
+                },
+                ToolbarKeyAction::Exit => KeyEvent {
+                    key: crate::draw::keyboard_hook::KeyCode::Escape,
+                    modifiers: Default::default(),
+                },
+            };
+            let _ = bridge_key_event_to_runtime(draw_input, event);
+        }
+    }
+}
+
+fn handle_toolbar_pointer_event(
+    draw_input: &mut DrawInputState,
+    overlay_state: &OverlayThreadState,
+    local_point: (i32, i32),
+    event: OverlayPointerEvent,
+    window_size: (u32, u32),
+) -> bool {
+    if !overlay_state.toolbar_visible || !matches!(event, OverlayPointerEvent::LeftDown { .. }) {
+        return false;
+    }
+    let Some(layout) = ToolbarLayout::for_state(window_size, overlay_state.quick_colors.len())
+    else {
+        return false;
+    };
+    if !layout.panel.contains(local_point) {
+        return false;
+    }
+    if let Some(target) = layout.hit_test(local_point) {
+        apply_toolbar_hit_target(draw_input, overlay_state, target);
+        return true;
+    }
+    true
+}
+
+fn draw_compact_toolbar_panel(
+    rgba: &mut [u8],
+    size: (u32, u32),
+    draw_input: &DrawInputState,
+    quick_colors: &[DrawColor],
+) {
+    let (width, height) = size;
+    let Some(layout) = ToolbarLayout::for_state(size, quick_colors.len()) else {
+        return;
+    };
+
     fill_rect(
         rgba,
         width,
         height,
-        panel_x,
-        panel_y,
-        220,
-        46,
+        layout.panel.x,
+        layout.panel.y,
+        layout.panel.w,
+        layout.panel.h,
         [24, 24, 24, 200],
     );
 
-    let style = draw_input.current_style();
-    fill_rect(
-        rgba,
-        width,
-        height,
-        panel_x + 8,
-        panel_y + 8,
-        28,
-        28,
-        [
-            style.stroke.color.r,
-            style.stroke.color.g,
-            style.stroke.color.b,
-            255,
-        ],
-    );
+    for (tool, rect) in &layout.tool_rects {
+        let selected = draw_input.current_tool() == *tool;
+        let color = if selected {
+            [220, 220, 220, 255]
+        } else {
+            [84, 84, 84, 255]
+        };
+        fill_rect(rgba, width, height, rect.x, rect.y, rect.w, rect.h, color);
+    }
 
-    let width_px = draw_input.current_style().stroke.width.clamp(1, 64) as i32;
-    fill_rect(
-        rgba,
-        width,
-        height,
-        panel_x + 46,
-        panel_y + 18,
-        width_px,
-        8,
-        [220, 220, 220, 255],
-    );
+    let active_color = draw_input.current_style().stroke.color;
+    for (idx, rect) in &layout.quick_color_rects {
+        let Some(color) = quick_colors.get(*idx) else {
+            continue;
+        };
+        fill_rect(
+            rgba,
+            width,
+            height,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            [color.r, color.g, color.b, 255],
+        );
+        let is_active = active_color.r == color.r
+            && active_color.g == color.g
+            && active_color.b == color.b
+            && active_color.a == color.a;
+        if is_active {
+            fill_rect(
+                rgba,
+                width,
+                height,
+                rect.x - 1,
+                rect.y - 1,
+                rect.w + 2,
+                1,
+                [255, 255, 255, 255],
+            );
+        }
+    }
 
-    let tool_color = match draw_input.current_tool() {
-        Tool::Pen => [80, 220, 120, 255],
-        Tool::Line => [80, 170, 255, 255],
-        Tool::Rect => [255, 220, 80, 255],
-        Tool::Ellipse => [255, 120, 210, 255],
-        Tool::Eraser => [255, 120, 120, 255],
-    };
-    fill_rect(
-        rgba,
-        width,
-        height,
-        panel_x + 120,
-        panel_y + 8,
-        18,
-        18,
-        tool_color,
-    );
-
-    // actionable control indicator: hotkey toggle glyph area
-    fill_rect(
-        rgba,
-        width,
-        height,
-        panel_x + 190,
-        panel_y + 8,
-        22,
-        22,
-        [70, 70, 70, 255],
-    );
+    for (action, rect) in &layout.key_action_rects {
+        let color = match action {
+            ToolbarKeyAction::Undo => [98, 144, 255, 255],
+            ToolbarKeyAction::Redo => [98, 220, 144, 255],
+            ToolbarKeyAction::Exit => [255, 120, 120, 255],
+        };
+        fill_rect(rgba, width, height, rect.x, rect.y, rect.w, rect.h, color);
+    }
 }
 
 fn draw_debug_hud_panel(
@@ -597,13 +870,27 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
 
                 for pointer_event in coalesce_pointer_events(window.drain_pointer_events()) {
                     had_work = true;
-                    let handled = forward_pointer_event_to_draw_input(
-                        &mut draw_input,
-                        ExitDialogState::Hidden,
-                        window.monitor_rect(),
+                    let local_point = global_to_local(
                         pointer_event.global_point,
-                        pointer_event.event,
+                        (window.monitor_rect().x, window.monitor_rect().y),
                     );
+                    let handled = if handle_toolbar_pointer_event(
+                        &mut draw_input,
+                        &overlay_state,
+                        local_point,
+                        pointer_event.event,
+                        window.bitmap_size(),
+                    ) {
+                        true
+                    } else {
+                        forward_pointer_event_to_draw_input(
+                            &mut draw_input,
+                            ExitDialogState::Hidden,
+                            window.monitor_rect(),
+                            pointer_event.global_point,
+                            pointer_event.event,
+                        )
+                    };
                     if handled {
                         overlay_state.apply_pointer_event(pointer_event.event);
                         needs_redraw = true;
@@ -1388,11 +1675,11 @@ mod tests {
     use super::{
         coalesce_pointer_events, command_requests_repaint, forward_key_event_to_draw_input,
         forward_pointer_event_to_draw_input, global_to_local, handle_debug_hud_toggle_hotkey_event,
-        handle_toolbar_toggle_hotkey_event, live_render_settings, monitor_contains_point,
-        monitor_local_point_for_global, parse_debug_hud_hotkey_with_fallback,
-        parse_toolbar_hotkey_with_fallback, rerender_and_repaint, select_monitor_for_point,
-        send_exit_after_cleanup, ExitDialogState, OverlayPointerEvent, OverlayThreadState,
-        OverlayWindow,
+        handle_toolbar_pointer_event, handle_toolbar_toggle_hotkey_event, live_render_settings,
+        monitor_contains_point, monitor_local_point_for_global,
+        parse_debug_hud_hotkey_with_fallback, parse_toolbar_hotkey_with_fallback,
+        rerender_and_repaint, select_monitor_for_point, send_exit_after_cleanup, ExitDialogState,
+        OverlayPointerEvent, OverlayThreadState, OverlayWindow,
     };
     use crate::draw::keyboard_hook::{KeyCode, KeyEvent, KeyModifiers};
     use crate::draw::messages::{ExitReason, OverlayToMain, SaveResult};
@@ -1616,16 +1903,128 @@ mod tests {
         let toggled = handle_toolbar_toggle_hotkey_event(
             &mut state,
             KeyEvent {
-                key: KeyCode::D,
+                key: KeyCode::KeyD,
                 modifiers: KeyModifiers {
                     ctrl: true,
                     shift: true,
+                    alt: false,
+                    win: false,
                 },
             },
         );
 
         assert!(toggled);
         assert!(!state.toolbar_visible);
+    }
+
+    #[test]
+    fn toolbar_toggle_supports_non_default_alt_hotkey() {
+        let mut state = OverlayThreadState::from_settings(&DrawSettings::default());
+        state.toolbar_visible = true;
+        state.toolbar_toggle_hotkey = parse_toolbar_hotkey_with_fallback("Ctrl+Alt+1");
+
+        let toggled = handle_toolbar_toggle_hotkey_event(
+            &mut state,
+            KeyEvent {
+                key: KeyCode::Num1,
+                modifiers: KeyModifiers {
+                    ctrl: true,
+                    shift: false,
+                    alt: true,
+                    win: false,
+                },
+            },
+        );
+
+        assert!(toggled);
+        assert!(!state.toolbar_visible);
+    }
+
+    #[test]
+    fn toolbar_hit_test_tool_region_updates_active_tool() {
+        let mut state = OverlayThreadState::from_settings(&DrawSettings::default());
+        let mut input = draw_state(Tool::Pen);
+        let layout = super::ToolbarLayout::for_state((800, 600), state.quick_colors.len())
+            .expect("toolbar layout available");
+        let (_, rect) = layout.tool_rects[2]; // rect tool
+        let click_point = (rect.x + 2, rect.y + 2);
+
+        let handled = handle_toolbar_pointer_event(
+            &mut input,
+            &state,
+            click_point,
+            OverlayPointerEvent::LeftDown {
+                modifiers: Default::default(),
+            },
+            (800, 600),
+        );
+
+        assert!(handled);
+        assert_eq!(input.current_tool(), Tool::Rect);
+    }
+
+    #[test]
+    fn toolbar_hit_test_quick_color_region_updates_style_color() {
+        let mut settings = DrawSettings::default();
+        settings.quick_colors = vec![
+            DrawColor::rgba(17, 34, 51, 255),
+            DrawColor::rgba(1, 2, 3, 255),
+        ];
+        let state = OverlayThreadState::from_settings(&settings);
+        let mut input = draw_state(Tool::Pen);
+        let layout = super::ToolbarLayout::for_state((800, 600), state.quick_colors.len())
+            .expect("toolbar layout available");
+        let (_, rect) = layout.quick_color_rects[0];
+
+        let handled = handle_toolbar_pointer_event(
+            &mut input,
+            &state,
+            (rect.x + 1, rect.y + 1),
+            OverlayPointerEvent::LeftDown {
+                modifiers: Default::default(),
+            },
+            (800, 600),
+        );
+
+        assert!(handled);
+        let stroke = input.current_style().stroke.color;
+        assert_eq!((stroke.r, stroke.g, stroke.b, stroke.a), (17, 34, 51, 255));
+    }
+
+    #[test]
+    fn update_settings_refreshes_quick_colors_and_selection_uses_new_palette() {
+        let mut state = OverlayThreadState::from_settings(&DrawSettings::default());
+        let mut input = draw_state(Tool::Pen);
+        let mut settings = DrawSettings::default();
+        settings.quick_colors = vec![
+            DrawColor::rgba(200, 10, 20, 255),
+            DrawColor::rgba(2, 220, 40, 255),
+        ];
+        state.update_from_settings(&settings);
+
+        assert_eq!(state.quick_colors, settings.quick_colors);
+
+        let layout = super::ToolbarLayout::for_state((800, 600), state.quick_colors.len())
+            .expect("toolbar layout available");
+        let (_, rect) = layout.quick_color_rects[1];
+        assert!(handle_toolbar_pointer_event(
+            &mut input,
+            &state,
+            (rect.x + 1, rect.y + 1),
+            OverlayPointerEvent::LeftDown {
+                modifiers: Default::default(),
+            },
+            (800, 600),
+        ));
+
+        let stroke = input.current_style().stroke.color;
+        assert_eq!((stroke.r, stroke.g, stroke.b, stroke.a), (2, 220, 40, 255));
+
+        let mut rgba = vec![0; 800 * 600 * 4];
+        super::draw_compact_toolbar_panel(&mut rgba, (800, 600), &input, &state.quick_colors);
+        let sample = layout.quick_color_rects[1].1;
+        let idx = (((sample.y + 2) as usize * 800 + (sample.x + 2) as usize) * 4) as usize;
+        assert_eq!(&rgba[idx..idx + 3], &[2, 220, 40]);
     }
 
     #[test]
@@ -1755,10 +2154,12 @@ mod tests {
         let toggled = handle_debug_hud_toggle_hotkey_event(
             &mut state,
             KeyEvent {
-                key: KeyCode::H,
+                key: KeyCode::KeyH,
                 modifiers: KeyModifiers {
                     ctrl: true,
                     shift: true,
+                    alt: false,
+                    win: false,
                 },
             },
         );

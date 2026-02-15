@@ -747,10 +747,12 @@ mod tests {
             modifiers: Default::default(),
         });
         let _ = input.handle_key_event(crate::draw::keyboard_hook::KeyEvent {
-            key: crate::draw::keyboard_hook::KeyCode::R,
+            key: crate::draw::keyboard_hook::KeyCode::KeyR,
             modifiers: crate::draw::keyboard_hook::KeyModifiers {
                 ctrl: true,
                 shift: false,
+                alt: false,
+                win: false,
             },
         });
 

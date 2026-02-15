@@ -2,11 +2,81 @@ use anyhow::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyCode {
+    KeyA,
+    KeyB,
+    KeyC,
+    KeyD,
+    KeyE,
+    KeyF,
+    KeyG,
+    KeyH,
+    KeyI,
+    KeyJ,
+    KeyK,
+    KeyL,
+    KeyM,
+    KeyN,
+    KeyO,
+    KeyP,
+    KeyQ,
+    KeyR,
+    KeyS,
+    KeyT,
     U,
-    R,
+    KeyV,
+    KeyW,
+    KeyX,
+    KeyY,
+    KeyZ,
+    Num0,
+    Num1,
+    Num2,
+    Num3,
+    Num4,
+    Num5,
+    Num6,
+    Num7,
+    Num8,
+    Num9,
+    Space,
+    Tab,
+    Enter,
+    Backspace,
+    Delete,
+    CapsLock,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Left,
+    Right,
+    Up,
+    Down,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    F13,
+    F14,
+    F15,
+    F16,
+    F17,
+    F18,
+    F19,
+    F20,
+    F21,
+    F22,
+    F23,
+    F24,
     Escape,
-    D,
-    H,
     Other,
 }
 
@@ -14,6 +84,8 @@ pub enum KeyCode {
 pub struct KeyModifiers {
     pub ctrl: bool,
     pub shift: bool,
+    pub alt: bool,
+    pub win: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +113,7 @@ pub fn map_key_event_to_command(active: bool, event: KeyEvent) -> Option<KeyComm
     match (event.key, event.modifiers) {
         (KeyCode::Escape, _) => Some(KeyCommand::RequestExit),
         (KeyCode::U, KeyModifiers { ctrl: false, .. }) => Some(KeyCommand::Undo),
-        (KeyCode::R, KeyModifiers { ctrl: true, .. }) => Some(KeyCommand::Redo),
+        (KeyCode::KeyR, KeyModifiers { ctrl: true, .. }) => Some(KeyCommand::Redo),
         _ => None,
     }
 }
@@ -118,7 +190,11 @@ mod platform {
     use std::thread::JoinHandle;
     use std::time::Duration;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, VK_CONTROL, VK_D, VK_ESCAPE, VK_H, VK_R, VK_SHIFT, VK_U,
+        GetAsyncKeyState, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE,
+        VK_F1, VK_F10, VK_F11, VK_F12, VK_F13, VK_F14, VK_F15, VK_F16, VK_F17, VK_F18, VK_F19,
+        VK_F2, VK_F20, VK_F21, VK_F22, VK_F23, VK_F24, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8,
+        VK_F9, VK_HOME, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_RWIN,
+        VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
     };
 
     static KEY_EVENT_SENDER: Lazy<Mutex<Option<Sender<KeyEvent>>>> = Lazy::new(|| Mutex::new(None));
@@ -249,16 +325,105 @@ mod platform {
     fn key_modifiers_snapshot() -> KeyModifiers {
         let ctrl = unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) } < 0;
         let shift = unsafe { GetAsyncKeyState(VK_SHIFT.0 as i32) } < 0;
-        KeyModifiers { ctrl, shift }
+        let alt = unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0;
+        let win = unsafe { GetAsyncKeyState(VK_LWIN.0 as i32) } < 0
+            || unsafe { GetAsyncKeyState(VK_RWIN.0 as i32) } < 0;
+        KeyModifiers {
+            ctrl,
+            shift,
+            alt,
+            win,
+        }
     }
 
     fn map_vk_to_keycode(vk_code: u32) -> KeyCode {
+        if (0x41..=0x5A).contains(&vk_code) {
+            return match vk_code {
+                0x41 => KeyCode::KeyA,
+                0x42 => KeyCode::KeyB,
+                0x43 => KeyCode::KeyC,
+                0x44 => KeyCode::KeyD,
+                0x45 => KeyCode::KeyE,
+                0x46 => KeyCode::KeyF,
+                0x47 => KeyCode::KeyG,
+                0x48 => KeyCode::KeyH,
+                0x49 => KeyCode::KeyI,
+                0x4A => KeyCode::KeyJ,
+                0x4B => KeyCode::KeyK,
+                0x4C => KeyCode::KeyL,
+                0x4D => KeyCode::KeyM,
+                0x4E => KeyCode::KeyN,
+                0x4F => KeyCode::KeyO,
+                0x50 => KeyCode::KeyP,
+                0x51 => KeyCode::KeyQ,
+                0x52 => KeyCode::KeyR,
+                0x53 => KeyCode::KeyS,
+                0x54 => KeyCode::KeyT,
+                0x55 => KeyCode::U,
+                0x56 => KeyCode::KeyV,
+                0x57 => KeyCode::KeyW,
+                0x58 => KeyCode::KeyX,
+                0x59 => KeyCode::KeyY,
+                0x5A => KeyCode::KeyZ,
+                _ => KeyCode::Other,
+            };
+        }
+        if (0x30..=0x39).contains(&vk_code) {
+            return match vk_code {
+                0x30 => KeyCode::Num0,
+                0x31 => KeyCode::Num1,
+                0x32 => KeyCode::Num2,
+                0x33 => KeyCode::Num3,
+                0x34 => KeyCode::Num4,
+                0x35 => KeyCode::Num5,
+                0x36 => KeyCode::Num6,
+                0x37 => KeyCode::Num7,
+                0x38 => KeyCode::Num8,
+                0x39 => KeyCode::Num9,
+                _ => KeyCode::Other,
+            };
+        }
+
         match vk_code {
-            code if code == VK_U.0 as u32 => KeyCode::U,
-            code if code == VK_R.0 as u32 => KeyCode::R,
             code if code == VK_ESCAPE.0 as u32 => KeyCode::Escape,
-            code if code == VK_D.0 as u32 => KeyCode::D,
-            code if code == VK_H.0 as u32 => KeyCode::H,
+            code if code == VK_SPACE.0 as u32 => KeyCode::Space,
+            code if code == VK_TAB.0 as u32 => KeyCode::Tab,
+            code if code == VK_RETURN.0 as u32 => KeyCode::Enter,
+            code if code == VK_BACK.0 as u32 => KeyCode::Backspace,
+            code if code == VK_DELETE.0 as u32 => KeyCode::Delete,
+            code if code == VK_CAPITAL.0 as u32 => KeyCode::CapsLock,
+            code if code == VK_HOME.0 as u32 => KeyCode::Home,
+            code if code == VK_END.0 as u32 => KeyCode::End,
+            code if code == VK_PRIOR.0 as u32 => KeyCode::PageUp,
+            code if code == VK_NEXT.0 as u32 => KeyCode::PageDown,
+            code if code == VK_LEFT.0 as u32 => KeyCode::Left,
+            code if code == VK_RIGHT.0 as u32 => KeyCode::Right,
+            code if code == VK_UP.0 as u32 => KeyCode::Up,
+            code if code == VK_DOWN.0 as u32 => KeyCode::Down,
+            code if code == VK_F1.0 as u32 => KeyCode::F1,
+            code if code == VK_F2.0 as u32 => KeyCode::F2,
+            code if code == VK_F3.0 as u32 => KeyCode::F3,
+            code if code == VK_F4.0 as u32 => KeyCode::F4,
+            code if code == VK_F5.0 as u32 => KeyCode::F5,
+            code if code == VK_F6.0 as u32 => KeyCode::F6,
+            code if code == VK_F7.0 as u32 => KeyCode::F7,
+            code if code == VK_F8.0 as u32 => KeyCode::F8,
+            code if code == VK_F9.0 as u32 => KeyCode::F9,
+            code if code == VK_F10.0 as u32 => KeyCode::F10,
+            code if code == VK_F11.0 as u32 => KeyCode::F11,
+            code if code == VK_F12.0 as u32 => KeyCode::F12,
+            code if code == VK_F13.0 as u32 => KeyCode::F13,
+            code if code == VK_F14.0 as u32 => KeyCode::F14,
+            code if code == VK_F15.0 as u32 => KeyCode::F15,
+            code if code == VK_F16.0 as u32 => KeyCode::F16,
+            code if code == VK_F17.0 as u32 => KeyCode::F17,
+            code if code == VK_F18.0 as u32 => KeyCode::F18,
+            code if code == VK_F19.0 as u32 => KeyCode::F19,
+            code if code == VK_F20.0 as u32 => KeyCode::F20,
+            code if code == VK_F21.0 as u32 => KeyCode::F21,
+            code if code == VK_F22.0 as u32 => KeyCode::F22,
+            code if code == VK_F23.0 as u32 => KeyCode::F23,
+            code if code == VK_F24.0 as u32 => KeyCode::F24,
             _ => KeyCode::Other,
         }
     }
@@ -331,10 +496,12 @@ mod tests {
             map_key_event_to_command(
                 true,
                 KeyEvent {
-                    key: KeyCode::R,
+                    key: KeyCode::KeyR,
                     modifiers: KeyModifiers {
                         ctrl: true,
                         shift: false,
+                        alt: false,
+                        win: false,
                     },
                 },
             ),
