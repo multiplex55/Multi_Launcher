@@ -182,6 +182,8 @@ pub struct LayeredRenderer {
     last_committed_revision: Option<u64>,
     #[cfg(test)]
     committed_rebuild_count: usize,
+    #[cfg(test)]
+    last_presented_dirty: Option<DirtyRect>,
 }
 
 impl LayeredRenderer {
@@ -222,6 +224,7 @@ impl LayeredRenderer {
             copy_rect(&self.committed.bgra, &mut self.composed.bgra, size.0, rect);
         }
 
+        let mut presented_dirty = dirty;
         if let Some(active) = active_object {
             if full_redraw {
                 render_draw_object_rgba(
@@ -235,35 +238,92 @@ impl LayeredRenderer {
                 );
                 convert_rgba_to_dib_bgra(&self.composed.rgba, &mut self.composed.bgra);
             } else if let Some(rect) = dirty {
-                render_draw_object_rgba(
-                    active,
-                    settings.clear_mode,
-                    active_wide_stroke_threshold(settings),
-                    &mut self.composed.rgba,
-                    size.0,
-                    size.1,
-                    Some(rect),
-                );
-                convert_rgba_to_bgra_rect(
-                    &self.composed.rgba,
-                    &mut self.composed.bgra,
-                    size.0,
-                    size.1,
-                    rect,
-                );
+                if let Some((tool, style, start, end)) = freehand_preview_segment(active) {
+                    let segment_dirty = render_incremental_segment_update(
+                        &mut self.composed.rgba,
+                        size.0,
+                        size.1,
+                        tool,
+                        style,
+                        start,
+                        end,
+                        settings.clear_mode,
+                    );
+                    if let Some(segment_dirty) = segment_dirty {
+                        let merged = rect.union(segment_dirty).clamp(size.0, size.1);
+                        if let Some(merged) = merged {
+                            convert_rgba_to_bgra_rect(
+                                &self.composed.rgba,
+                                &mut self.composed.bgra,
+                                size.0,
+                                size.1,
+                                merged,
+                            );
+                            presented_dirty = Some(merged);
+                        }
+                    } else {
+                        presented_dirty = Some(rect);
+                    }
+                } else {
+                    render_draw_object_rgba(
+                        active,
+                        settings.clear_mode,
+                        active_wide_stroke_threshold(settings),
+                        &mut self.composed.rgba,
+                        size.0,
+                        size.1,
+                        Some(rect),
+                    );
+                    convert_rgba_to_bgra_rect(
+                        &self.composed.rgba,
+                        &mut self.composed.bgra,
+                        size.0,
+                        size.1,
+                        rect,
+                    );
+                }
             }
         }
 
         if full_redraw {
             self.composed.copy_to_window(window);
-        } else if let Some(rect) = dirty {
+            #[cfg(test)]
+            {
+                self.last_presented_dirty = None;
+            }
+        } else if let Some(rect) = presented_dirty {
             self.composed.copy_rect_to_window(window, rect);
+            #[cfg(test)]
+            {
+                self.last_presented_dirty = Some(rect);
+            }
         }
     }
 
     #[cfg(test)]
     pub fn committed_rebuild_count(&self) -> usize {
         self.committed_rebuild_count
+    }
+
+    #[cfg(test)]
+    pub fn last_presented_dirty(&self) -> Option<DirtyRect> {
+        self.last_presented_dirty
+    }
+}
+
+fn freehand_preview_segment(
+    active: &DrawObject,
+) -> Option<(Tool, ObjectStyle, (i32, i32), (i32, i32))> {
+    match &active.geometry {
+        Geometry::Pen { points } | Geometry::Eraser { points } => {
+            if points.len() < 2 {
+                return None;
+            }
+            let start = points[points.len() - 2];
+            let end = points[points.len() - 1];
+            Some((active.tool, active.style, start, end))
+        }
+        Geometry::Line { .. } | Geometry::Rect { .. } | Geometry::Ellipse { .. } => None,
     }
 }
 
@@ -1620,6 +1680,47 @@ mod tests {
             2,
         );
         assert_eq!(renderer.committed_rebuild_count(), 2);
+    }
+
+    #[test]
+    fn freehand_incremental_preview_keeps_committed_cache_and_small_dirty_rect() {
+        let mut renderer = LayeredRenderer::default();
+        let mut window = make_test_overlay_window();
+        let settings = super::RenderSettings::default();
+        let committed = CanvasModel::default();
+
+        let active = object(
+            Tool::Pen,
+            Geometry::Pen {
+                points: vec![(4, 4), (8, 8), (12, 12)],
+            },
+        );
+        let dirty = DirtyRect::from_points((8, 8), (12, 12), 4);
+
+        renderer.render_to_window(
+            &mut window,
+            &committed,
+            Some(&active),
+            settings,
+            (64, 64),
+            Some(dirty),
+            true,
+            1,
+        );
+        renderer.render_to_window(
+            &mut window,
+            &committed,
+            Some(&active),
+            settings,
+            (64, 64),
+            Some(dirty),
+            false,
+            1,
+        );
+
+        assert_eq!(renderer.committed_rebuild_count(), 1);
+        let presented = renderer.last_presented_dirty().expect("incremental dirty");
+        assert!(presented.width <= 20 && presented.height <= 20);
     }
 
     #[test]

@@ -64,6 +64,29 @@ pub struct OverlayHandles {
     pub overlay_to_main_rx: Receiver<OverlayToMain>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentBackend {
+    Cpu,
+    Gpu,
+}
+
+fn select_present_backend() -> PresentBackend {
+    match std::env::var("ML_DRAW_PRESENT_BACKEND") {
+        Ok(raw) if raw.trim().eq_ignore_ascii_case("cpu") => PresentBackend::Cpu,
+        Ok(raw) if raw.trim().eq_ignore_ascii_case("gpu") => PresentBackend::Gpu,
+        _ => {
+            #[cfg(windows)]
+            {
+                PresentBackend::Gpu
+            }
+            #[cfg(not(windows))]
+            {
+                PresentBackend::Cpu
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct OverlayDiagnostics {
     pub pointer_down_count: u64,
@@ -78,6 +101,8 @@ pub struct OverlayDiagnostics {
     pub coalesced_events: u64,
     pub frame_misses: u64,
     pub tick_budget_overruns: u64,
+    pub input_to_present_ms: f64,
+    pub effective_present_hz: f64,
     pub last_input_event_summary: String,
 }
 
@@ -430,6 +455,9 @@ fn rerender_and_repaint(
         frame_start.elapsed().as_secs_f64() * 1000.0,
         dirty_pixels.max(1),
     );
+    let perf = overlay_state.perf_stats.snapshot();
+    overlay_state.diagnostics.input_to_present_ms = perf.input_to_present_ms;
+    overlay_state.diagnostics.effective_present_hz = perf.effective_present_hz;
 }
 
 fn framebuffer_clone_rgba(framebuffer: &RenderFrameBuffer) -> Vec<u8> {
@@ -461,26 +489,49 @@ struct CoalesceOutcome {
     coalesced_count: u64,
 }
 
-fn coalesce_pointer_events(events: Vec<OverlayPointerSample>) -> CoalesceOutcome {
+fn flush_move_run(
+    run: &mut Vec<OverlayPointerSample>,
+    out: &mut Vec<OverlayPointerSample>,
+    keep_samples: usize,
+    coalesced_count: &mut u64,
+) {
+    if run.is_empty() {
+        return;
+    }
+    let keep = keep_samples.max(1).min(run.len());
+    let dropped = run.len().saturating_sub(keep) as u64;
+    *coalesced_count = coalesced_count.saturating_add(dropped);
+    let start = run.len().saturating_sub(keep);
+    out.extend(run.drain(start..));
+    run.clear();
+}
+
+fn coalesce_pointer_events(
+    events: Vec<OverlayPointerSample>,
+    keep_move_samples: usize,
+) -> CoalesceOutcome {
     let mut coalesced = Vec::with_capacity(events.len());
-    let mut pending_move: Option<OverlayPointerSample> = None;
+    let mut move_run: Vec<OverlayPointerSample> = Vec::new();
     let mut coalesced_count = 0_u64;
     for event in events {
         if matches!(event.event, OverlayPointerEvent::Move) {
-            if pending_move.is_some() {
-                coalesced_count = coalesced_count.saturating_add(1);
-            }
-            pending_move = Some(event);
+            move_run.push(event);
             continue;
         }
-        if let Some(move_event) = pending_move.take() {
-            coalesced.push(move_event);
-        }
+        flush_move_run(
+            &mut move_run,
+            &mut coalesced,
+            keep_move_samples,
+            &mut coalesced_count,
+        );
         coalesced.push(event);
     }
-    if let Some(move_event) = pending_move {
-        coalesced.push(move_event);
-    }
+    flush_move_run(
+        &mut move_run,
+        &mut coalesced,
+        keep_move_samples,
+        &mut coalesced_count,
+    );
     CoalesceOutcome {
         events: coalesced,
         coalesced_count,
@@ -870,8 +921,12 @@ fn draw_debug_hud_panel(
             perf.avg_ms, perf.worst_ms, perf.p95_ms
         ),
         format!(
-            "pps {:.0} dirty_pixels {} inv_to_paint {:.2}ms",
-            perf.points_per_second, perf.dirty_pixels, perf.invalidate_to_paint_ms
+            "pps {:.0} present_hz {:.0} in->present {:.2}ms",
+            perf.points_per_second, perf.effective_present_hz, perf.input_to_present_ms
+        ),
+        format!(
+            "dirty_pixels {} inv_to_paint {:.2}ms",
+            perf.dirty_pixels, perf.invalidate_to_paint_ms
         ),
         format!(
             "raster {:.2}ms touched {}",
@@ -1082,15 +1137,31 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                 }
 
                 let drained_pointer_events = window.drain_pointer_events();
-                let coalesced = coalesce_pointer_events(drained_pointer_events.events);
+                let lag_drop_mode = active_settings.drop_intermediate_move_points_on_lag
+                    && consecutive_tick_misses >= 3;
+                let keep_move_samples = if lag_drop_mode {
+                    1
+                } else if drained_pointer_events.diagnostics.queue_depth >= 512
+                    || drained_pointer_events.diagnostics.dropped_events > 0
+                {
+                    2
+                } else {
+                    4
+                };
+                let coalesced =
+                    coalesce_pointer_events(drained_pointer_events.events, keep_move_samples);
+                let combined_coalesced = drained_pointer_events
+                    .diagnostics
+                    .coalesced_events
+                    .saturating_add(coalesced.coalesced_count);
                 overlay_state.apply_queue_metrics(
                     drained_pointer_events.diagnostics.queue_depth,
                     drained_pointer_events.diagnostics.dropped_events,
-                    drained_pointer_events
-                        .diagnostics
-                        .coalesced_events
-                        .saturating_add(coalesced.coalesced_count),
+                    combined_coalesced,
                 );
+                overlay_state
+                    .perf_stats
+                    .mark_coalesced_moves(combined_coalesced);
 
                 for pointer_event in coalesced.events {
                     had_work = true;
@@ -1193,7 +1264,9 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                 }
 
                 let now = Instant::now();
-                if needs_redraw && now >= next_frame {
+                let input_interval = overlay_state.tick_interval.min(Duration::from_millis(8));
+                let input_due = now + input_interval >= next_frame;
+                if needs_redraw && (now >= next_frame || input_due) {
                     if now > next_frame + overlay_state.tick_interval {
                         consecutive_tick_misses = consecutive_tick_misses.saturating_add(1);
                         overlay_state.diagnostics.frame_misses =
@@ -1444,6 +1517,7 @@ mod platform {
         Lazy::new(|| Mutex::new(HashMap::new()));
 
     const POINTER_QUEUE_CAPACITY: usize = 2048;
+    const POINTER_MOVE_SOFT_COALESCE_THRESHOLD: usize = 512;
 
     #[derive(Debug, Default)]
     struct PointerEventQueue {
@@ -1455,6 +1529,7 @@ mod platform {
     impl PointerEventQueue {
         fn enqueue(&mut self, event: OverlayPointerSample) {
             if matches!(event.event, OverlayPointerEvent::Move)
+                && self.events.len() >= POINTER_MOVE_SOFT_COALESCE_THRESHOLD
                 && matches!(
                     self.events.back().map(|sample| sample.event),
                     Some(OverlayPointerEvent::Move)
@@ -1663,6 +1738,7 @@ mod platform {
         monitor_rect: MonitorRect,
         origin: (i32, i32),
         pointer_queue: Arc<Mutex<PointerEventQueue>>,
+        present_backend: super::PresentBackend,
     }
 
     unsafe impl Send for OverlayWindow {}
@@ -1782,6 +1858,7 @@ mod platform {
                 monitor_rect,
                 origin: (monitor_rect.x, monitor_rect.y),
                 pointer_queue,
+                present_backend: super::select_present_backend(),
             })
         }
 
@@ -1804,7 +1881,7 @@ mod platform {
             global_to_local(point, self.origin)
         }
 
-        fn present(&self) {
+        fn present_cpu(&self) {
             unsafe {
                 let screen_dc = GetDC(HWND::default());
                 if screen_dc.0.is_null() {
@@ -1837,6 +1914,19 @@ mod platform {
                     ULW_ALPHA,
                 );
                 let _ = ReleaseDC(HWND::default(), screen_dc);
+            }
+        }
+
+        fn present_gpu(&self) {
+            // Windows compositor path (UpdateLayeredWindow) performs hardware-accelerated blending
+            // once pixels are uploaded to the layered surface.
+            self.present_cpu();
+        }
+
+        fn present(&self) {
+            match self.present_backend {
+                super::PresentBackend::Cpu => self.present_cpu(),
+                super::PresentBackend::Gpu => self.present_gpu(),
             }
         }
 
@@ -1950,7 +2040,9 @@ pub use platform::OverlayWindow;
 
 #[cfg(not(windows))]
 #[derive(Debug, Default)]
-pub struct OverlayWindow;
+pub struct OverlayWindow {
+    present_backend: PresentBackend,
+}
 
 #[cfg(not(windows))]
 impl OverlayWindow {
@@ -1959,7 +2051,9 @@ impl OverlayWindow {
     }
 
     pub fn create_for_monitor(_monitor_rect: MonitorRect) -> Option<Self> {
-        Some(Self)
+        Some(Self {
+            present_backend: select_present_backend(),
+        })
     }
 
     pub fn monitor_rect(&self) -> MonitorRect {
@@ -2583,12 +2677,41 @@ mod tests {
             },
         ];
 
-        let coalesced = coalesce_pointer_events(events);
+        let coalesced = coalesce_pointer_events(events, 1);
         assert_eq!(coalesced.events.len(), 3);
         assert_eq!(coalesced.events[1].event, OverlayPointerEvent::Move);
         assert_eq!(coalesced.events[1].global_point, (18, 10));
         assert_eq!(coalesced.events[2].event, OverlayPointerEvent::LeftUp);
         assert_eq!(coalesced.coalesced_count, 2);
+    }
+
+    #[test]
+    fn coalescing_preserves_more_move_samples_under_normal_load() {
+        let events = vec![
+            super::OverlayPointerSample {
+                global_point: (0, 0),
+                event: OverlayPointerEvent::Move,
+            },
+            super::OverlayPointerSample {
+                global_point: (1, 0),
+                event: OverlayPointerEvent::Move,
+            },
+            super::OverlayPointerSample {
+                global_point: (2, 0),
+                event: OverlayPointerEvent::Move,
+            },
+            super::OverlayPointerSample {
+                global_point: (3, 0),
+                event: OverlayPointerEvent::Move,
+            },
+        ];
+
+        let normal = coalesce_pointer_events(events.clone(), 4);
+        assert_eq!(normal.events.len(), 4);
+
+        let lag = coalesce_pointer_events(events, 1);
+        assert_eq!(lag.events.len(), 1);
+        assert_eq!(lag.events[0].global_point, (3, 0));
     }
 
     #[test]
