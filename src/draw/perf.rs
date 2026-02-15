@@ -303,8 +303,12 @@ fn p95(window: &VecDeque<f64>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{DrawPerfStats, DRAW_PERF_DEBUG_ENV};
+    use once_cell::sync::Lazy;
+    use std::sync::Mutex;
     use std::thread;
     use std::time::Duration;
+
+    static ENV_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     #[test]
     fn rolling_window_avg_max_and_p95_respect_window_bounds() {
@@ -362,6 +366,7 @@ mod tests {
 
     #[test]
     fn runtime_gate_accepts_env_override() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex");
         std::env::set_var(DRAW_PERF_DEBUG_ENV, "1");
         assert!(super::draw_perf_runtime_enabled(false));
         std::env::remove_var(DRAW_PERF_DEBUG_ENV);
