@@ -351,6 +351,7 @@ fn rerender_and_repaint(
             window.bitmap_size(),
             draw_input,
             &overlay_state.quick_colors,
+            &overlay_state.toolbar_state,
         );
     }
     if overlay_state.debug_hud_visible {
@@ -992,6 +993,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                     }
                 }
 
+                let mut queued_commands = Vec::new();
                 controller.pump_runtime_messages(
                     || {
                         active_settings = crate::draw::runtime().settings_snapshot();
@@ -1013,13 +1015,16 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                         });
                     },
                     |command| {
-                        if let Some(mapped) = map_overlay_command_to_toolbar(command) {
-                            apply_toolbar_command(&mut draw_input, &mut overlay_state, mapped);
-                        }
-                        needs_redraw = true;
-                        forced_full_redraw = true;
+                        queued_commands.push(command);
                     },
                 );
+                for command in queued_commands {
+                    if let Some(mapped) = map_overlay_command_to_toolbar(command) {
+                        apply_toolbar_command(&mut draw_input, &mut overlay_state, mapped);
+                    }
+                    needs_redraw = true;
+                    forced_full_redraw = true;
+                }
 
                 if controller.lifecycle() == crate::draw::controller::ControllerLifecycle::Active
                     && !did_start
@@ -1757,22 +1762,24 @@ impl OverlayWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        coalesce_pointer_events, command_requests_repaint, forward_key_event_to_draw_input,
-        forward_pointer_event_to_draw_input, global_to_local, handle_debug_hud_toggle_hotkey_event,
-        handle_toolbar_pointer_event, handle_toolbar_toggle_hotkey_event, live_render_settings,
+        apply_toolbar_command, coalesce_pointer_events, command_requests_repaint,
+        forward_key_event_to_draw_input, forward_pointer_event_to_draw_input, global_to_local,
+        handle_debug_hud_toggle_hotkey_event, handle_toolbar_pointer_event,
+        handle_toolbar_toggle_hotkey_event, live_render_settings, map_overlay_command_to_toolbar,
         monitor_contains_point, monitor_local_point_for_global,
         parse_debug_hud_hotkey_with_fallback, parse_toolbar_hotkey_with_fallback,
         rerender_and_repaint, select_monitor_for_point, send_exit_after_cleanup, ExitDialogState,
         OverlayPointerEvent, OverlayThreadState, OverlayWindow,
     };
     use crate::draw::keyboard_hook::{KeyCode, KeyEvent, KeyModifiers};
-    use crate::draw::messages::{ExitReason, OverlayToMain, SaveResult};
+    use crate::draw::messages::{ExitReason, OverlayCommand, OverlayToMain, SaveResult};
     use crate::draw::{
         input::DrawInputState,
-        model::{CanvasModel, ObjectStyle, Tool},
+        model::{CanvasModel, Color, ObjectStyle, Tool},
         render::{BackgroundClearMode, LayeredRenderer, RenderFrameBuffer},
         service::MonitorRect,
         settings::{DrawColor, DrawSettings, LiveBackgroundMode},
+        toolbar::ToolbarCommand,
     };
 
     fn draw_state(tool: Tool) -> DrawInputState {
