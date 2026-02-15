@@ -5,9 +5,7 @@ use crate::draw::input::{
 use crate::draw::keyboard_hook::{KeyEvent, KeyboardHook};
 use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain, SaveResult};
 use crate::draw::model::{Color, ObjectStyle, StrokeStyle, Tool};
-use crate::draw::render::{
-    convert_rgba_to_dib_bgra, render_canvas_to_rgba, BackgroundClearMode, RenderSettings,
-};
+use crate::draw::render::{BackgroundClearMode, DirtyRect, RenderFrameBuffer, RenderSettings};
 use crate::draw::service::MonitorRect;
 use crate::draw::settings::{
     default_debug_hud_toggle_hotkey_value, default_toolbar_toggle_hotkey_value, DrawColor,
@@ -17,7 +15,7 @@ use crate::hotkey::{parse_hotkey, Hotkey, Key};
 use anyhow::{anyhow, Result};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitDialogState {
@@ -200,13 +198,27 @@ fn rerender_and_repaint(
     draw_input: &DrawInputState,
     settings: &DrawSettings,
     overlay_state: &mut OverlayThreadState,
+    framebuffer: &mut RenderFrameBuffer,
+    dirty: Option<DirtyRect>,
+    force_full_redraw: bool,
 ) {
     let canvas = draw_input.canvas_with_active();
-    let mut rgba = render_canvas_to_rgba(
+    let window_size = window.bitmap_size();
+    let requires_full_overlay = overlay_state.toolbar_visible || overlay_state.debug_hud_visible;
+
+    framebuffer.render(
         &canvas,
         live_render_settings(settings),
-        window.bitmap_size(),
+        window_size,
+        if requires_full_overlay { None } else { dirty },
+        force_full_redraw || requires_full_overlay,
     );
+
+    let mut rgba = if requires_full_overlay {
+        framebuffer_clone_rgba(framebuffer)
+    } else {
+        Vec::new()
+    };
     if overlay_state.toolbar_visible {
         draw_compact_toolbar_panel(&mut rgba, window.bitmap_size(), draw_input);
     }
@@ -218,14 +230,41 @@ fn rerender_and_repaint(
             &overlay_state.diagnostics,
         );
     }
-    window.with_bitmap_mut(|dib, width, height| {
-        if width == 0 || height == 0 || dib.len() != rgba.len() {
-            return;
-        }
-        convert_rgba_to_dib_bgra(&rgba, dib);
-    });
+    if requires_full_overlay {
+        window.with_bitmap_mut(|dib, width, height| {
+            if width == 0 || height == 0 || dib.len() != rgba.len() {
+                return;
+            }
+            crate::draw::render::convert_rgba_to_dib_bgra(&rgba, dib);
+        });
+    } else {
+        framebuffer.copy_to_window(window);
+    }
     overlay_state.diagnostics.paint_count += 1;
     window.request_paint();
+}
+
+fn framebuffer_clone_rgba(framebuffer: &RenderFrameBuffer) -> Vec<u8> {
+    framebuffer.rgba_pixels().to_vec()
+}
+
+fn coalesce_pointer_events(events: Vec<OverlayPointerSample>) -> Vec<OverlayPointerSample> {
+    let mut coalesced = Vec::with_capacity(events.len());
+    let mut pending_move: Option<OverlayPointerSample> = None;
+    for event in events {
+        if matches!(event.event, OverlayPointerEvent::Move) {
+            pending_move = Some(event);
+            continue;
+        }
+        if let Some(move_event) = pending_move.take() {
+            coalesced.push(move_event);
+        }
+        coalesced.push(event);
+    }
+    if let Some(move_event) = pending_move {
+        coalesced.push(move_event);
+    }
+    coalesced
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -518,20 +557,25 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                     fill: None,
                 },
             );
+            let mut framebuffer = RenderFrameBuffer::default();
+            let frame_interval = Duration::from_micros(8_333);
+            let mut next_frame = Instant::now();
+            let mut needs_redraw = true;
+            let mut forced_full_redraw = true;
+
             loop {
                 #[cfg(windows)]
                 pump_overlay_messages();
 
+                let mut had_work = false;
+
                 for key_event in keyboard_hook.drain_events() {
+                    had_work = true;
                     if handle_toolbar_toggle_hotkey_event(&mut overlay_state, key_event)
                         || handle_debug_hud_toggle_hotkey_event(&mut overlay_state, key_event)
                     {
-                        rerender_and_repaint(
-                            &mut window,
-                            &draw_input,
-                            &active_settings,
-                            &mut overlay_state,
-                        );
+                        needs_redraw = true;
+                        forced_full_redraw = true;
                         continue;
                     }
 
@@ -542,18 +586,15 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                     );
                     if dispatch.handled {
                         overlay_state.apply_key_dispatch(dispatch.command);
+                        needs_redraw = true;
                     }
-                    if dispatch.should_repaint || overlay_state.debug_hud_visible {
-                        rerender_and_repaint(
-                            &mut window,
-                            &draw_input,
-                            &active_settings,
-                            &mut overlay_state,
-                        );
+                    if dispatch.should_repaint {
+                        forced_full_redraw = true;
                     }
                 }
 
-                for pointer_event in window.drain_pointer_events() {
+                for pointer_event in coalesce_pointer_events(window.drain_pointer_events()) {
+                    had_work = true;
                     let handled = forward_pointer_event_to_draw_input(
                         &mut draw_input,
                         ExitDialogState::Hidden,
@@ -563,57 +604,83 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                     );
                     if handled {
                         overlay_state.apply_pointer_event(pointer_event.event);
-                        rerender_and_repaint(
-                            &mut window,
-                            &draw_input,
-                            &active_settings,
-                            &mut overlay_state,
-                        );
+                        needs_redraw = true;
                     }
                 }
 
-                match main_to_overlay_rx.recv_timeout(Duration::from_millis(16)) {
-                    Ok(MainToOverlay::Start) => {
-                        did_start = true;
-                        if let Err(err) = keyboard_hook.activate() {
-                            tracing::warn!(?err, "failed to activate draw keyboard hook");
+                loop {
+                    match main_to_overlay_rx.try_recv() {
+                        Ok(MainToOverlay::Start) => {
+                            had_work = true;
+                            did_start = true;
+                            if let Err(err) = keyboard_hook.activate() {
+                                tracing::warn!(?err, "failed to activate draw keyboard hook");
+                            }
+                            window.show();
+                            needs_redraw = true;
+                            forced_full_redraw = true;
                         }
-                        window.show();
-                        rerender_and_repaint(
-                            &mut window,
-                            &draw_input,
-                            &active_settings,
-                            &mut overlay_state,
-                        );
+                        Ok(MainToOverlay::UpdateSettings) => {
+                            had_work = true;
+                            active_settings = crate::draw::runtime().settings_snapshot();
+                            overlay_state.update_from_settings(&active_settings);
+                            draw_input.set_tool(map_draw_tool(active_settings.last_tool));
+                            draw_input.set_style(ObjectStyle {
+                                stroke: StrokeStyle {
+                                    width: active_settings.last_width.max(1),
+                                    color: map_draw_color(active_settings.last_color),
+                                },
+                                fill: None,
+                            });
+                            needs_redraw = true;
+                            forced_full_redraw = true;
+                            let _ = overlay_to_main_tx.send(OverlayToMain::SaveProgress {
+                                canvas: draw_input.history().canvas(),
+                            });
+                        }
+                        Ok(MainToOverlay::RequestExit { reason }) => {
+                            exit_reason = Some(reason);
+                            break;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            exit_reason = Some(ExitReason::OverlayFailure);
+                            break;
+                        }
                     }
-                    Ok(MainToOverlay::UpdateSettings) => {
-                        active_settings = crate::draw::runtime().settings_snapshot();
-                        overlay_state.update_from_settings(&active_settings);
-                        draw_input.set_tool(map_draw_tool(active_settings.last_tool));
-                        draw_input.set_style(ObjectStyle {
-                            stroke: StrokeStyle {
-                                width: active_settings.last_width.max(1),
-                                color: map_draw_color(active_settings.last_color),
-                            },
-                            fill: None,
-                        });
-                        rerender_and_repaint(
-                            &mut window,
-                            &draw_input,
-                            &active_settings,
-                            &mut overlay_state,
-                        );
-                        let _ = overlay_to_main_tx.send(OverlayToMain::SaveProgress {
-                            canvas: draw_input.history().canvas(),
-                        });
+                }
+
+                if exit_reason.is_some() {
+                    break;
+                }
+
+                let now = Instant::now();
+                if needs_redraw && now >= next_frame {
+                    let dirty = draw_input.take_dirty_rect();
+                    forced_full_redraw |= draw_input.take_full_redraw_request();
+                    rerender_and_repaint(
+                        &mut window,
+                        &draw_input,
+                        &active_settings,
+                        &mut overlay_state,
+                        &mut framebuffer,
+                        dirty,
+                        forced_full_redraw,
+                    );
+                    needs_redraw = false;
+                    forced_full_redraw = false;
+                    while next_frame <= now {
+                        next_frame += frame_interval;
                     }
-                    Ok(MainToOverlay::RequestExit { reason }) => {
-                        exit_reason = Some(reason);
-                        break;
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        break;
+                }
+
+                if !had_work {
+                    let now = Instant::now();
+                    if now < next_frame {
+                        let sleep_for = (next_frame - now).min(Duration::from_millis(2));
+                        thread::sleep(sleep_for);
+                    } else {
+                        thread::yield_now();
                     }
                 }
             }
@@ -1317,7 +1384,7 @@ impl OverlayWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_requests_repaint, forward_key_event_to_draw_input,
+        coalesce_pointer_events, command_requests_repaint, forward_key_event_to_draw_input,
         forward_pointer_event_to_draw_input, global_to_local, handle_debug_hud_toggle_hotkey_event,
         handle_toolbar_toggle_hotkey_event, live_render_settings, monitor_contains_point,
         monitor_local_point_for_global, parse_debug_hud_hotkey_with_fallback,
@@ -1330,7 +1397,7 @@ mod tests {
     use crate::draw::{
         input::DrawInputState,
         model::{CanvasModel, ObjectStyle, Tool},
-        render::BackgroundClearMode,
+        render::{BackgroundClearMode, RenderFrameBuffer},
         service::MonitorRect,
         settings::{DrawColor, DrawSettings, LiveBackgroundMode},
     };
@@ -1627,9 +1694,52 @@ mod tests {
             height: 1080,
         })
         .expect("overlay window test stub");
+        let mut framebuffer = RenderFrameBuffer::default();
 
-        rerender_and_repaint(&mut window, &mut input, &settings, &mut state);
+        rerender_and_repaint(
+            &mut window,
+            &mut input,
+            &settings,
+            &mut state,
+            &mut framebuffer,
+            None,
+            true,
+        );
         assert_eq!(state.diagnostics.paint_count, 1);
+    }
+
+    #[test]
+    fn coalesces_pointer_moves_while_preserving_last_sample() {
+        let events = vec![
+            super::OverlayPointerSample {
+                global_point: (10, 10),
+                event: OverlayPointerEvent::LeftDown {
+                    modifiers: Default::default(),
+                },
+            },
+            super::OverlayPointerSample {
+                global_point: (11, 10),
+                event: OverlayPointerEvent::Move,
+            },
+            super::OverlayPointerSample {
+                global_point: (14, 10),
+                event: OverlayPointerEvent::Move,
+            },
+            super::OverlayPointerSample {
+                global_point: (18, 10),
+                event: OverlayPointerEvent::Move,
+            },
+            super::OverlayPointerSample {
+                global_point: (22, 10),
+                event: OverlayPointerEvent::LeftUp,
+            },
+        ];
+
+        let coalesced = coalesce_pointer_events(events);
+        assert_eq!(coalesced.len(), 3);
+        assert_eq!(coalesced[1].event, OverlayPointerEvent::Move);
+        assert_eq!(coalesced[1].global_point, (18, 10));
+        assert_eq!(coalesced[2].event, OverlayPointerEvent::LeftUp);
     }
 
     #[test]
