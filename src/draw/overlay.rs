@@ -2614,6 +2614,7 @@ mod tests {
     #[test]
     fn toolbar_hit_test_tool_region_updates_active_tool() {
         let mut state = OverlayThreadState::from_settings(&DrawSettings::default());
+        state.toolbar_state.visible = true;
         let mut input = draw_state(Tool::Pen);
         let layout = crate::draw::toolbar::ToolbarLayout::for_state(
             (800, 600),
@@ -2646,6 +2647,7 @@ mod tests {
             DrawColor::rgba(1, 2, 3, 255),
         ];
         let mut state = OverlayThreadState::from_settings(&settings);
+        state.toolbar_state.visible = true;
         let mut input = draw_state(Tool::Pen);
         let layout = crate::draw::toolbar::ToolbarLayout::for_state(
             (800, 600),
@@ -2743,7 +2745,8 @@ mod tests {
             DrawColor::rgba(2, 220, 40, 255),
             DrawColor::rgba(10, 20, 200, 255),
         ];
-        let state = OverlayThreadState::from_settings(&settings);
+        let mut state = OverlayThreadState::from_settings(&settings);
+        state.toolbar_state.visible = true;
         let mut input = draw_state(Tool::Pen);
         input.set_style(ObjectStyle {
             stroke: StrokeStyle {
@@ -2798,6 +2801,7 @@ mod tests {
     fn toolbar_action_buttons_use_icons_instead_of_unique_fill_colors() {
         let settings = DrawSettings::default();
         let mut state = OverlayThreadState::from_settings(&settings);
+        state.toolbar_state.visible = true;
         let input = draw_state(Tool::Pen);
         let layout = crate::draw::toolbar::ToolbarLayout::for_state(
             (800, 600),
@@ -2865,6 +2869,7 @@ mod tests {
     #[test]
     fn update_settings_refreshes_quick_colors_and_selection_uses_new_palette() {
         let mut state = OverlayThreadState::from_settings(&DrawSettings::default());
+        state.toolbar_state.visible = true;
         let mut input = draw_state(Tool::Pen);
         let mut settings = DrawSettings::default();
         settings.quick_colors = vec![
@@ -2993,6 +2998,17 @@ mod tests {
         let dirty = DirtyRect::from_points((10, 12), (40, 48), 2)
             .clamp(800, 600)
             .expect("dirty rect in bounds");
+
+        rerender_and_repaint(
+            &mut window,
+            &input,
+            &settings,
+            &mut state,
+            &mut framebuffer,
+            &mut layered_renderer,
+            None,
+            true,
+        );
 
         rerender_and_repaint(
             &mut window,
