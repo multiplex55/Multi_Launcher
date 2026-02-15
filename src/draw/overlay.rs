@@ -4,7 +4,7 @@ use crate::draw::input::{
     bridge_mouse_move_to_runtime, DrawInputState, InputCommand, PointerModifiers,
 };
 use crate::draw::keyboard_hook::{KeyEvent, KeyboardHook};
-use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain, SaveResult};
+use crate::draw::messages::{ExitReason, MainToOverlay, OverlayCommand, OverlayToMain, SaveResult};
 use crate::draw::model::{Color, ObjectStyle, StrokeStyle, Tool};
 use crate::draw::monitor;
 use crate::draw::render::{
@@ -15,6 +15,7 @@ use crate::draw::settings::{
     default_debug_hud_toggle_hotkey_value, default_toolbar_toggle_hotkey_value, DrawColor,
     DrawSettings, DrawTool, LiveBackgroundMode,
 };
+use crate::draw::toolbar::{self, ToolbarCommand, ToolbarPointerEvent, ToolbarState};
 use crate::hotkey::{parse_hotkey, Hotkey, Key};
 use anyhow::{anyhow, Result};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -62,7 +63,7 @@ pub struct OverlayDiagnostics {
 
 #[derive(Debug, Clone)]
 struct OverlayThreadState {
-    toolbar_visible: bool,
+    toolbar_state: ToolbarState,
     toolbar_toggle_hotkey: Hotkey,
     debug_hud_visible: bool,
     debug_hud_toggle_hotkey: Hotkey,
@@ -73,7 +74,11 @@ struct OverlayThreadState {
 impl OverlayThreadState {
     fn from_settings(settings: &DrawSettings) -> Self {
         Self {
-            toolbar_visible: !settings.toolbar_collapsed,
+            toolbar_state: ToolbarState::new(
+                !settings.toolbar_collapsed,
+                settings.toolbar_collapsed,
+                (settings.toolbar_origin_x, settings.toolbar_origin_y),
+            ),
             toolbar_toggle_hotkey: parse_toolbar_hotkey_with_fallback(
                 &settings.toolbar_toggle_hotkey,
             ),
@@ -89,6 +94,8 @@ impl OverlayThreadState {
     fn update_from_settings(&mut self, settings: &DrawSettings) {
         self.toolbar_toggle_hotkey =
             parse_toolbar_hotkey_with_fallback(&settings.toolbar_toggle_hotkey);
+        self.toolbar_state.collapsed = settings.toolbar_collapsed;
+        self.toolbar_state.position = (settings.toolbar_origin_x, settings.toolbar_origin_y);
         self.debug_hud_toggle_hotkey =
             parse_debug_hud_hotkey_with_fallback(&settings.debug_hud_toggle_hotkey);
         self.quick_colors = settings.quick_colors.clone();
@@ -149,7 +156,9 @@ fn handle_toolbar_toggle_hotkey_event(state: &mut OverlayThreadState, event: Key
     if !key_event_matches_hotkey(event, state.toolbar_toggle_hotkey) {
         return false;
     }
-    state.toolbar_visible = !state.toolbar_visible;
+    state
+        .toolbar_state
+        .apply_command(ToolbarCommand::ToggleVisibility);
     true
 }
 
@@ -258,6 +267,23 @@ fn map_draw_color(color: DrawColor) -> Color {
     Color::rgba(color.r, color.g, color.b, color.a)
 }
 
+fn map_overlay_command_to_toolbar(command: OverlayCommand) -> Option<ToolbarCommand> {
+    Some(match command {
+        OverlayCommand::SelectTool(tool) => ToolbarCommand::SelectTool(tool),
+        OverlayCommand::SetStrokeWidth(width) => ToolbarCommand::SetStrokeWidth(width),
+        OverlayCommand::SetColor(color) => ToolbarCommand::SetColor(color),
+        OverlayCommand::SetFillEnabled(enabled) => ToolbarCommand::SetFillEnabled(enabled),
+        OverlayCommand::SetFillColor(color) => ToolbarCommand::SetFillColor(color),
+        OverlayCommand::Undo => ToolbarCommand::Undo,
+        OverlayCommand::Redo => ToolbarCommand::Redo,
+        OverlayCommand::Save => ToolbarCommand::Save,
+        OverlayCommand::ToggleToolbarVisibility => ToolbarCommand::ToggleVisibility,
+        OverlayCommand::ToggleToolbarCollapsed => ToolbarCommand::ToggleCollapsed,
+        OverlayCommand::SetToolbarPosition { x, y } => ToolbarCommand::SetPosition { x, y },
+        OverlayCommand::Exit => ToolbarCommand::Exit,
+    })
+}
+
 fn live_render_settings(settings: &DrawSettings) -> RenderSettings {
     let clear_mode = match settings.live_background_mode {
         LiveBackgroundMode::Transparent => BackgroundClearMode::Transparent,
@@ -280,7 +306,8 @@ fn rerender_and_repaint(
     force_full_redraw: bool,
 ) {
     let window_size = window.bitmap_size();
-    let requires_full_overlay = overlay_state.toolbar_visible || overlay_state.debug_hud_visible;
+    let requires_full_overlay =
+        overlay_state.toolbar_state.visible || overlay_state.debug_hud_visible;
 
     if !requires_full_overlay {
         let active_object = draw_input.active_object();
@@ -318,12 +345,13 @@ fn rerender_and_repaint(
     } else {
         Vec::new()
     };
-    if overlay_state.toolbar_visible {
+    if overlay_state.toolbar_state.visible {
         draw_compact_toolbar_panel(
             &mut rgba,
             window.bitmap_size(),
             draw_input,
             &overlay_state.quick_colors,
+            &overlay_state.toolbar_state,
         );
     }
     if overlay_state.debug_hud_visible {
@@ -377,163 +405,52 @@ pub struct OverlayPointerSample {
     pub event: OverlayPointerEvent,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ToolbarRect {
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-}
-
-impl ToolbarRect {
-    fn contains(self, point: (i32, i32)) -> bool {
-        point.0 >= self.x
-            && point.0 < self.x + self.w
-            && point.1 >= self.y
-            && point.1 < self.y + self.h
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToolbarKeyAction {
-    Undo,
-    Redo,
-    Exit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToolbarHitTarget {
-    Tool(Tool),
-    QuickColor(usize),
-    KeyAction(ToolbarKeyAction),
-}
-
-#[derive(Debug, Clone)]
-struct ToolbarLayout {
-    panel: ToolbarRect,
-    tool_rects: Vec<(Tool, ToolbarRect)>,
-    quick_color_rects: Vec<(usize, ToolbarRect)>,
-    key_action_rects: Vec<(ToolbarKeyAction, ToolbarRect)>,
-}
-
-impl ToolbarLayout {
-    fn for_state(size: (u32, u32), quick_colors: usize) -> Option<Self> {
-        let (width, height) = size;
-        if width < 280 || height < 120 {
-            return None;
-        }
-        let panel = ToolbarRect {
-            x: 16,
-            y: 16,
-            w: 372,
-            h: 92,
-        };
-        let tools = [
-            Tool::Pen,
-            Tool::Line,
-            Tool::Rect,
-            Tool::Ellipse,
-            Tool::Eraser,
-        ];
-        let tool_rects = tools
-            .into_iter()
-            .enumerate()
-            .map(|(idx, tool)| {
-                (
-                    tool,
-                    ToolbarRect {
-                        x: panel.x + 8 + (idx as i32 * 28),
-                        y: panel.y + 8,
-                        w: 22,
-                        h: 22,
-                    },
-                )
-            })
-            .collect();
-
-        let quick_color_rects = (0..quick_colors)
-            .map(|idx| {
-                (
-                    idx,
-                    ToolbarRect {
-                        x: panel.x + 8 + (idx as i32 * 22),
-                        y: panel.y + 40,
-                        w: 18,
-                        h: 18,
-                    },
-                )
-            })
-            .collect();
-
-        let key_action_rects = [
-            ToolbarKeyAction::Undo,
-            ToolbarKeyAction::Redo,
-            ToolbarKeyAction::Exit,
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(idx, action)| {
-            (
-                action,
-                ToolbarRect {
-                    x: panel.x + 238 + (idx as i32 * 42),
-                    y: panel.y + 8,
-                    w: 34,
-                    h: 22,
-                },
-            )
-        })
-        .collect();
-
-        Some(Self {
-            panel,
-            tool_rects,
-            quick_color_rects,
-            key_action_rects,
-        })
-    }
-
-    fn hit_test(&self, point: (i32, i32)) -> Option<ToolbarHitTarget> {
-        for (tool, rect) in &self.tool_rects {
-            if rect.contains(point) {
-                return Some(ToolbarHitTarget::Tool(*tool));
-            }
-        }
-        for (idx, rect) in &self.quick_color_rects {
-            if rect.contains(point) {
-                return Some(ToolbarHitTarget::QuickColor(*idx));
-            }
-        }
-        for (action, rect) in &self.key_action_rects {
-            if rect.contains(point) {
-                return Some(ToolbarHitTarget::KeyAction(*action));
-            }
-        }
-        None
-    }
-}
-
-fn apply_toolbar_hit_target(
+fn apply_toolbar_command(
     draw_input: &mut DrawInputState,
-    overlay_state: &OverlayThreadState,
-    target: ToolbarHitTarget,
+    overlay_state: &mut OverlayThreadState,
+    command: ToolbarCommand,
 ) {
-    match target {
-        ToolbarHitTarget::Tool(tool) => draw_input.set_tool(tool),
-        ToolbarHitTarget::QuickColor(index) => {
-            if let Some(color) = overlay_state.quick_colors.get(index).copied() {
-                let mut style = draw_input.current_style();
-                style.stroke.color = map_draw_color(color);
-                draw_input.set_style(style);
-            }
+    match command {
+        ToolbarCommand::SelectTool(tool) => draw_input.set_tool(tool),
+        ToolbarCommand::SetStrokeWidth(width) => {
+            let mut style = draw_input.current_style();
+            style.stroke.width = width.max(1);
+            draw_input.set_style(style);
         }
-        ToolbarHitTarget::KeyAction(action) => {
-            let event = match action {
-                ToolbarKeyAction::Undo => KeyEvent {
+        ToolbarCommand::SetColor(color) => {
+            let mut style = draw_input.current_style();
+            style.stroke.color = color;
+            draw_input.set_style(style);
+        }
+        ToolbarCommand::SetFillEnabled(enabled) => {
+            let mut style = draw_input.current_style();
+            style.fill = if enabled {
+                Some(crate::draw::model::FillStyle {
+                    color: style.stroke.color,
+                })
+            } else {
+                None
+            };
+            draw_input.set_style(style);
+        }
+        ToolbarCommand::SetFillColor(color) => {
+            let mut style = draw_input.current_style();
+            style.fill = Some(crate::draw::model::FillStyle { color });
+            draw_input.set_style(style);
+        }
+        ToolbarCommand::Undo => {
+            let _ = bridge_key_event_to_runtime(
+                draw_input,
+                KeyEvent {
                     key: crate::draw::keyboard_hook::KeyCode::U,
                     modifiers: Default::default(),
                 },
-                ToolbarKeyAction::Redo => KeyEvent {
+            );
+        }
+        ToolbarCommand::Redo => {
+            let _ = bridge_key_event_to_runtime(
+                draw_input,
+                KeyEvent {
                     key: crate::draw::keyboard_hook::KeyCode::KeyR,
                     modifiers: crate::draw::keyboard_hook::KeyModifiers {
                         ctrl: true,
@@ -542,37 +459,107 @@ fn apply_toolbar_hit_target(
                         win: false,
                     },
                 },
-                ToolbarKeyAction::Exit => KeyEvent {
+            );
+        }
+        ToolbarCommand::Exit => {
+            let _ = bridge_key_event_to_runtime(
+                draw_input,
+                KeyEvent {
                     key: crate::draw::keyboard_hook::KeyCode::Escape,
                     modifiers: Default::default(),
                 },
-            };
-            let _ = bridge_key_event_to_runtime(draw_input, event);
+            );
+        }
+        ToolbarCommand::ToggleCollapsed => {
+            overlay_state
+                .toolbar_state
+                .apply_command(ToolbarCommand::ToggleCollapsed);
+        }
+        ToolbarCommand::SetPosition { x, y } => {
+            overlay_state
+                .toolbar_state
+                .apply_command(ToolbarCommand::SetPosition { x, y });
+            let mut settings = crate::draw::runtime().settings_snapshot();
+            settings.toolbar_origin_x = x;
+            settings.toolbar_origin_y = y;
+            settings.toolbar_collapsed = overlay_state.toolbar_state.collapsed;
+            crate::draw::runtime().apply_settings(settings);
+        }
+        ToolbarCommand::Save => {
+            let _ = crate::draw::runtime().request_exit(ExitReason::UserRequest);
+        }
+        ToolbarCommand::ToggleVisibility => {
+            overlay_state
+                .toolbar_state
+                .apply_command(ToolbarCommand::ToggleVisibility);
         }
     }
 }
 
 fn handle_toolbar_pointer_event(
     draw_input: &mut DrawInputState,
-    overlay_state: &OverlayThreadState,
+    overlay_state: &mut OverlayThreadState,
     local_point: (i32, i32),
     event: OverlayPointerEvent,
     window_size: (u32, u32),
 ) -> bool {
-    if !overlay_state.toolbar_visible || !matches!(event, OverlayPointerEvent::LeftDown { .. }) {
-        return false;
-    }
-    let Some(layout) = ToolbarLayout::for_state(window_size, overlay_state.quick_colors.len())
-    else {
+    let pointer_event = match event {
+        OverlayPointerEvent::LeftDown { .. } => ToolbarPointerEvent::LeftDown,
+        OverlayPointerEvent::Move => ToolbarPointerEvent::Move,
+        OverlayPointerEvent::LeftUp => ToolbarPointerEvent::LeftUp,
+    };
+    let Some(layout) = toolbar::ToolbarLayout::for_state(
+        window_size,
+        &overlay_state.toolbar_state,
+        overlay_state.quick_colors.len(),
+    ) else {
         return false;
     };
-    if !layout.panel.contains(local_point) {
+
+    if !layout.panel.contains(local_point) && !overlay_state.toolbar_state.dragging {
+        overlay_state.toolbar_state.focused = false;
         return false;
     }
-    if let Some(target) = layout.hit_test(local_point) {
-        apply_toolbar_hit_target(draw_input, overlay_state, target);
+
+    if matches!(pointer_event, ToolbarPointerEvent::LeftDown) {
+        overlay_state.toolbar_state.focused = true;
+        if let Some(target) = layout.hit_test(local_point, overlay_state.toolbar_state.collapsed) {
+            if matches!(target, toolbar::ToolbarHitTarget::Header) {
+                overlay_state.toolbar_state.dragging = true;
+                overlay_state.toolbar_state.drag_anchor = (
+                    local_point.0 - overlay_state.toolbar_state.position.0,
+                    local_point.1 - overlay_state.toolbar_state.position.1,
+                );
+                return true;
+            }
+            if let Some(command) = toolbar::map_hit_to_command(
+                target,
+                draw_input.current_style(),
+                &overlay_state.quick_colors,
+            ) {
+                apply_toolbar_command(draw_input, overlay_state, command);
+            }
+            return true;
+        }
+    }
+
+    if matches!(pointer_event, ToolbarPointerEvent::Move) && overlay_state.toolbar_state.dragging {
+        apply_toolbar_command(
+            draw_input,
+            overlay_state,
+            ToolbarCommand::SetPosition {
+                x: local_point.0 - overlay_state.toolbar_state.drag_anchor.0,
+                y: local_point.1 - overlay_state.toolbar_state.drag_anchor.1,
+            },
+        );
         return true;
     }
+
+    if matches!(pointer_event, ToolbarPointerEvent::LeftUp) {
+        overlay_state.toolbar_state.dragging = false;
+        return layout.panel.contains(local_point);
+    }
+
     true
 }
 
@@ -581,9 +568,11 @@ fn draw_compact_toolbar_panel(
     size: (u32, u32),
     draw_input: &DrawInputState,
     quick_colors: &[DrawColor],
+    toolbar_state: &ToolbarState,
 ) {
     let (width, height) = size;
-    let Some(layout) = ToolbarLayout::for_state(size, quick_colors.len()) else {
+    let Some(layout) = toolbar::ToolbarLayout::for_state(size, toolbar_state, quick_colors.len())
+    else {
         return;
     };
 
@@ -597,10 +586,33 @@ fn draw_compact_toolbar_panel(
         layout.panel.h,
         [24, 24, 24, 200],
     );
+    fill_rect(
+        rgba,
+        width,
+        height,
+        layout.header.x,
+        layout.header.y,
+        layout.header.w,
+        layout.header.h,
+        [36, 36, 36, 220],
+    );
+    fill_rect(
+        rgba,
+        width,
+        height,
+        layout.collapse_toggle.x,
+        layout.collapse_toggle.y,
+        layout.collapse_toggle.w,
+        layout.collapse_toggle.h,
+        [84, 84, 84, 255],
+    );
+
+    if toolbar_state.collapsed {
+        return;
+    }
 
     for (tool, rect) in &layout.tool_rects {
-        let selected = draw_input.current_tool() == *tool;
-        let color = if selected {
+        let color = if draw_input.current_tool() == *tool {
             [220, 220, 220, 255]
         } else {
             [84, 84, 84, 255]
@@ -610,45 +622,102 @@ fn draw_compact_toolbar_panel(
 
     let active_color = draw_input.current_style().stroke.color;
     for (idx, rect) in &layout.quick_color_rects {
-        let Some(color) = quick_colors.get(*idx) else {
-            continue;
-        };
-        fill_rect(
-            rgba,
-            width,
-            height,
-            rect.x,
-            rect.y,
-            rect.w,
-            rect.h,
-            [color.r, color.g, color.b, 255],
-        );
-        let is_active = active_color.r == color.r
-            && active_color.g == color.g
-            && active_color.b == color.b
-            && active_color.a == color.a;
-        if is_active {
+        if let Some(color) = quick_colors.get(*idx) {
             fill_rect(
                 rgba,
                 width,
                 height,
-                rect.x - 1,
-                rect.y - 1,
-                rect.w + 2,
-                1,
-                [255, 255, 255, 255],
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
+                [color.r, color.g, color.b, 255],
             );
+            if active_color.r == color.r && active_color.g == color.g && active_color.b == color.b {
+                fill_rect(
+                    rgba,
+                    width,
+                    height,
+                    rect.x - 1,
+                    rect.y - 1,
+                    rect.w + 2,
+                    1,
+                    [255, 255, 255, 255],
+                );
+            }
         }
     }
 
-    for (action, rect) in &layout.key_action_rects {
-        let color = match action {
-            ToolbarKeyAction::Undo => [98, 144, 255, 255],
-            ToolbarKeyAction::Redo => [98, 220, 144, 255],
-            ToolbarKeyAction::Exit => [255, 120, 120, 255],
-        };
-        fill_rect(rgba, width, height, rect.x, rect.y, rect.w, rect.h, color);
-    }
+    fill_rect(
+        rgba,
+        width,
+        height,
+        layout.width_down_rect.x,
+        layout.width_down_rect.y,
+        layout.width_down_rect.w,
+        layout.width_down_rect.h,
+        [120, 120, 120, 255],
+    );
+    fill_rect(
+        rgba,
+        width,
+        height,
+        layout.width_up_rect.x,
+        layout.width_up_rect.y,
+        layout.width_up_rect.w,
+        layout.width_up_rect.h,
+        [150, 150, 150, 255],
+    );
+    fill_rect(
+        rgba,
+        width,
+        height,
+        layout.fill_toggle_rect.x,
+        layout.fill_toggle_rect.y,
+        layout.fill_toggle_rect.w,
+        layout.fill_toggle_rect.h,
+        [130, 110, 180, 255],
+    );
+    fill_rect(
+        rgba,
+        width,
+        height,
+        layout.undo_rect.x,
+        layout.undo_rect.y,
+        layout.undo_rect.w,
+        layout.undo_rect.h,
+        [98, 144, 255, 255],
+    );
+    fill_rect(
+        rgba,
+        width,
+        height,
+        layout.redo_rect.x,
+        layout.redo_rect.y,
+        layout.redo_rect.w,
+        layout.redo_rect.h,
+        [98, 220, 144, 255],
+    );
+    fill_rect(
+        rgba,
+        width,
+        height,
+        layout.save_rect.x,
+        layout.save_rect.y,
+        layout.save_rect.w,
+        layout.save_rect.h,
+        [220, 182, 98, 255],
+    );
+    fill_rect(
+        rgba,
+        width,
+        height,
+        layout.exit_rect.x,
+        layout.exit_rect.y,
+        layout.exit_rect.w,
+        layout.exit_rect.h,
+        [255, 120, 120, 255],
+    );
 }
 
 fn draw_debug_hud_panel(
@@ -903,7 +972,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                     );
                     let handled = if handle_toolbar_pointer_event(
                         &mut draw_input,
-                        &overlay_state,
+                        &mut overlay_state,
                         local_point,
                         pointer_event.event,
                         window.bitmap_size(),
@@ -924,25 +993,38 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                     }
                 }
 
-                controller.pump_runtime_messages(|| {
-                    active_settings = crate::draw::runtime().settings_snapshot();
-                    overlay_state.update_from_settings(&active_settings);
-                    keyboard_hook
-                        .set_toolbar_toggle_hotkey(Some(overlay_state.toolbar_toggle_hotkey));
-                    draw_input.set_tool(map_draw_tool(active_settings.last_tool));
-                    draw_input.set_style(ObjectStyle {
-                        stroke: StrokeStyle {
-                            width: active_settings.last_width.max(1),
-                            color: map_draw_color(active_settings.last_color),
-                        },
-                        fill: None,
-                    });
+                let mut queued_commands = Vec::new();
+                controller.pump_runtime_messages(
+                    || {
+                        active_settings = crate::draw::runtime().settings_snapshot();
+                        overlay_state.update_from_settings(&active_settings);
+                        keyboard_hook
+                            .set_toolbar_toggle_hotkey(Some(overlay_state.toolbar_toggle_hotkey));
+                        draw_input.set_tool(map_draw_tool(active_settings.last_tool));
+                        draw_input.set_style(ObjectStyle {
+                            stroke: StrokeStyle {
+                                width: active_settings.last_width.max(1),
+                                color: map_draw_color(active_settings.last_color),
+                            },
+                            fill: None,
+                        });
+                        needs_redraw = true;
+                        forced_full_redraw = true;
+                        let _ = controller_tx.send(OverlayToMain::SaveProgress {
+                            canvas: draw_input.history().canvas(),
+                        });
+                    },
+                    |command| {
+                        queued_commands.push(command);
+                    },
+                );
+                for command in queued_commands {
+                    if let Some(mapped) = map_overlay_command_to_toolbar(command) {
+                        apply_toolbar_command(&mut draw_input, &mut overlay_state, mapped);
+                    }
                     needs_redraw = true;
                     forced_full_redraw = true;
-                    let _ = controller_tx.send(OverlayToMain::SaveProgress {
-                        canvas: draw_input.history().canvas(),
-                    });
-                });
+                }
 
                 if controller.lifecycle() == crate::draw::controller::ControllerLifecycle::Active
                     && !did_start
@@ -1680,22 +1762,24 @@ impl OverlayWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        coalesce_pointer_events, command_requests_repaint, forward_key_event_to_draw_input,
-        forward_pointer_event_to_draw_input, global_to_local, handle_debug_hud_toggle_hotkey_event,
-        handle_toolbar_pointer_event, handle_toolbar_toggle_hotkey_event, live_render_settings,
+        apply_toolbar_command, coalesce_pointer_events, command_requests_repaint,
+        forward_key_event_to_draw_input, forward_pointer_event_to_draw_input, global_to_local,
+        handle_debug_hud_toggle_hotkey_event, handle_toolbar_pointer_event,
+        handle_toolbar_toggle_hotkey_event, live_render_settings, map_overlay_command_to_toolbar,
         monitor_contains_point, monitor_local_point_for_global,
         parse_debug_hud_hotkey_with_fallback, parse_toolbar_hotkey_with_fallback,
         rerender_and_repaint, select_monitor_for_point, send_exit_after_cleanup, ExitDialogState,
         OverlayPointerEvent, OverlayThreadState, OverlayWindow,
     };
     use crate::draw::keyboard_hook::{KeyCode, KeyEvent, KeyModifiers};
-    use crate::draw::messages::{ExitReason, OverlayToMain, SaveResult};
+    use crate::draw::messages::{ExitReason, OverlayCommand, OverlayToMain, SaveResult};
     use crate::draw::{
         input::DrawInputState,
-        model::{CanvasModel, ObjectStyle, Tool},
+        model::{CanvasModel, Color, ObjectStyle, Tool},
         render::{BackgroundClearMode, LayeredRenderer, RenderFrameBuffer},
         service::MonitorRect,
         settings::{DrawColor, DrawSettings, LiveBackgroundMode},
+        toolbar::ToolbarCommand,
     };
 
     fn draw_state(tool: Tool) -> DrawInputState {
@@ -1902,9 +1986,21 @@ mod tests {
     }
 
     #[test]
+    fn overlay_command_maps_to_toolbar_command() {
+        assert_eq!(
+            map_overlay_command_to_toolbar(OverlayCommand::SetStrokeWidth(5)),
+            Some(ToolbarCommand::SetStrokeWidth(5))
+        );
+        assert_eq!(
+            map_overlay_command_to_toolbar(OverlayCommand::SelectTool(Tool::Rect)),
+            Some(ToolbarCommand::SelectTool(Tool::Rect))
+        );
+    }
+
+    #[test]
     fn toolbar_toggle_hotkey_flips_visibility_and_requests_repaint() {
         let mut state = OverlayThreadState::from_settings(&DrawSettings::default());
-        state.toolbar_visible = true;
+        state.toolbar_state.visible = true;
         state.toolbar_toggle_hotkey = parse_toolbar_hotkey_with_fallback("Ctrl+Shift+D");
 
         let toggled = handle_toolbar_toggle_hotkey_event(
@@ -1921,13 +2017,13 @@ mod tests {
         );
 
         assert!(toggled);
-        assert!(!state.toolbar_visible);
+        assert!(!state.toolbar_state.visible);
     }
 
     #[test]
     fn toolbar_toggle_supports_non_default_alt_hotkey() {
         let mut state = OverlayThreadState::from_settings(&DrawSettings::default());
-        state.toolbar_visible = true;
+        state.toolbar_state.visible = true;
         state.toolbar_toggle_hotkey = parse_toolbar_hotkey_with_fallback("Ctrl+Alt+1");
 
         let toggled = handle_toolbar_toggle_hotkey_event(
@@ -1944,21 +2040,25 @@ mod tests {
         );
 
         assert!(toggled);
-        assert!(!state.toolbar_visible);
+        assert!(!state.toolbar_state.visible);
     }
 
     #[test]
     fn toolbar_hit_test_tool_region_updates_active_tool() {
-        let state = OverlayThreadState::from_settings(&DrawSettings::default());
+        let mut state = OverlayThreadState::from_settings(&DrawSettings::default());
         let mut input = draw_state(Tool::Pen);
-        let layout = super::ToolbarLayout::for_state((800, 600), state.quick_colors.len())
-            .expect("toolbar layout available");
+        let layout = crate::draw::toolbar::ToolbarLayout::for_state(
+            (800, 600),
+            &state.toolbar_state,
+            state.quick_colors.len(),
+        )
+        .expect("toolbar layout available");
         let (_, rect) = layout.tool_rects[2]; // rect tool
         let click_point = (rect.x + 2, rect.y + 2);
 
         let handled = handle_toolbar_pointer_event(
             &mut input,
-            &state,
+            &mut state,
             click_point,
             OverlayPointerEvent::LeftDown {
                 modifiers: Default::default(),
@@ -1977,15 +2077,19 @@ mod tests {
             DrawColor::rgba(17, 34, 51, 255),
             DrawColor::rgba(1, 2, 3, 255),
         ];
-        let state = OverlayThreadState::from_settings(&settings);
+        let mut state = OverlayThreadState::from_settings(&settings);
         let mut input = draw_state(Tool::Pen);
-        let layout = super::ToolbarLayout::for_state((800, 600), state.quick_colors.len())
-            .expect("toolbar layout available");
+        let layout = crate::draw::toolbar::ToolbarLayout::for_state(
+            (800, 600),
+            &state.toolbar_state,
+            state.quick_colors.len(),
+        )
+        .expect("toolbar layout available");
         let (_, rect) = layout.quick_color_rects[0];
 
         let handled = handle_toolbar_pointer_event(
             &mut input,
-            &state,
+            &mut state,
             (rect.x + 1, rect.y + 1),
             OverlayPointerEvent::LeftDown {
                 modifiers: Default::default(),
@@ -1996,6 +2100,29 @@ mod tests {
         assert!(handled);
         let stroke = input.current_style().stroke.color;
         assert_eq!((stroke.r, stroke.g, stroke.b, stroke.a), (17, 34, 51, 255));
+    }
+
+    #[test]
+    fn toolbar_command_reducer_updates_tool_color_and_width() {
+        let mut state = OverlayThreadState::from_settings(&DrawSettings::default());
+        let mut input = draw_state(Tool::Pen);
+
+        apply_toolbar_command(
+            &mut input,
+            &mut state,
+            ToolbarCommand::SelectTool(Tool::Ellipse),
+        );
+        apply_toolbar_command(&mut input, &mut state, ToolbarCommand::SetStrokeWidth(9));
+        apply_toolbar_command(
+            &mut input,
+            &mut state,
+            ToolbarCommand::SetColor(Color::rgba(10, 20, 30, 255)),
+        );
+
+        assert_eq!(input.current_tool(), Tool::Ellipse);
+        assert_eq!(input.current_style().stroke.width, 9);
+        let color = input.current_style().stroke.color;
+        assert_eq!((color.r, color.g, color.b, color.a), (10, 20, 30, 255));
     }
 
     #[test]
@@ -2011,12 +2138,16 @@ mod tests {
 
         assert_eq!(state.quick_colors, settings.quick_colors);
 
-        let layout = super::ToolbarLayout::for_state((800, 600), state.quick_colors.len())
-            .expect("toolbar layout available");
+        let layout = crate::draw::toolbar::ToolbarLayout::for_state(
+            (800, 600),
+            &state.toolbar_state,
+            state.quick_colors.len(),
+        )
+        .expect("toolbar layout available");
         let (_, rect) = layout.quick_color_rects[1];
         assert!(handle_toolbar_pointer_event(
             &mut input,
-            &state,
+            &mut state,
             (rect.x + 1, rect.y + 1),
             OverlayPointerEvent::LeftDown {
                 modifiers: Default::default(),
@@ -2028,7 +2159,13 @@ mod tests {
         assert_eq!((stroke.r, stroke.g, stroke.b, stroke.a), (2, 220, 40, 255));
 
         let mut rgba = vec![0; 800 * 600 * 4];
-        super::draw_compact_toolbar_panel(&mut rgba, (800, 600), &input, &state.quick_colors);
+        super::draw_compact_toolbar_panel(
+            &mut rgba,
+            (800, 600),
+            &input,
+            &state.quick_colors,
+            &state.toolbar_state,
+        );
         let sample = layout.quick_color_rects[1].1;
         let idx = (((sample.y + 2) as usize * 800 + (sample.x + 2) as usize) * 4) as usize;
         assert_eq!(&rgba[idx..idx + 3], &[2, 220, 40]);
@@ -2038,10 +2175,18 @@ mod tests {
     fn initial_toolbar_state_respects_toolbar_collapsed_setting() {
         let mut settings = DrawSettings::default();
         settings.toolbar_collapsed = true;
-        assert!(!OverlayThreadState::from_settings(&settings).toolbar_visible);
+        assert!(
+            !OverlayThreadState::from_settings(&settings)
+                .toolbar_state
+                .visible
+        );
 
         settings.toolbar_collapsed = false;
-        assert!(OverlayThreadState::from_settings(&settings).toolbar_visible);
+        assert!(
+            OverlayThreadState::from_settings(&settings)
+                .toolbar_state
+                .visible
+        );
     }
 
     #[test]

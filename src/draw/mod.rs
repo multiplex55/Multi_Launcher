@@ -14,6 +14,7 @@ pub mod settings;
 pub mod settings_store;
 pub mod settings_ui;
 pub mod state;
+pub mod toolbar;
 
 pub use service::{
     runtime, set_runtime_restore_hook, set_runtime_spawn_hook, set_runtime_start_hook, DrawRuntime,

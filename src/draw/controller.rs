@@ -37,9 +37,10 @@ impl OverlayController {
         self.exit_reason.clone()
     }
 
-    pub fn pump_runtime_messages<F>(&mut self, mut on_update_settings: F)
+    pub fn pump_runtime_messages<F, C>(&mut self, mut on_update_settings: F, mut on_command: C)
     where
         F: FnMut(),
+        C: FnMut(crate::draw::messages::OverlayCommand),
     {
         loop {
             match self.main_to_overlay_rx.try_recv() {
@@ -54,6 +55,9 @@ impl OverlayController {
                     let _ = self.overlay_to_main_tx.send(OverlayToMain::LifecycleEvent(
                         OverlayLifecycleEvent::SettingsApplied,
                     ));
+                }
+                Ok(MainToOverlay::DispatchCommand { command }) => {
+                    on_command(command);
                 }
                 Ok(MainToOverlay::RequestExit { reason }) => {
                     self.lifecycle = ControllerLifecycle::ExitRequested;
@@ -95,7 +99,7 @@ mod tests {
             })
             .expect("request exit send");
 
-        controller.pump_runtime_messages(|| {});
+        controller.pump_runtime_messages(|| {}, |_| {});
         assert_eq!(controller.lifecycle(), ControllerLifecycle::ExitRequested);
         assert_eq!(controller.exit_reason(), Some(ExitReason::UserRequest));
         assert_eq!(
@@ -118,9 +122,10 @@ mod tests {
             .send(MainToOverlay::UpdateSettings)
             .expect("update settings send");
 
-        controller.pump_runtime_messages(move || {
-            called_clone.store(true, std::sync::atomic::Ordering::SeqCst)
-        });
+        controller.pump_runtime_messages(
+            move || called_clone.store(true, std::sync::atomic::Ordering::SeqCst),
+            |_| {},
+        );
 
         assert!(called.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(
