@@ -117,13 +117,18 @@ impl Plugin for DrawPlugin {
         if let Some(error) = form_result.toolbar_hotkey_error.as_ref() {
             ui.colored_label(egui::Color32::RED, error);
         }
+        if let Some(error) = form_result.fixed_save_folder_error.as_ref() {
+            ui.colored_label(egui::Color32::RED, error);
+        }
 
         if ui.button("Reset Draw Settings").clicked() {
             self.reset_settings(value);
             return;
         }
 
-        if form_result.toolbar_hotkey_error.is_none() {
+        if form_result.toolbar_hotkey_error.is_none()
+            && form_result.fixed_save_folder_error.is_none()
+        {
             self.persist_settings(value, settings);
         }
     }

@@ -1,11 +1,27 @@
+use crate::draw::save::validate_fixed_save_folder_display;
 use crate::draw::settings::{
     CanvasBackgroundMode, DrawColor, DrawSettings, DrawTool, ToolbarPosition,
 };
 use eframe::egui;
+use rfd::FileDialog;
 
 pub struct DrawSettingsFormResult {
     pub changed: bool,
     pub toolbar_hotkey_error: Option<String>,
+    pub fixed_save_folder_error: Option<String>,
+}
+
+#[cfg(test)]
+fn select_canvas_background_mode(
+    current: &mut CanvasBackgroundMode,
+    next: CanvasBackgroundMode,
+) -> bool {
+    if *current == next {
+        false
+    } else {
+        *current = next;
+        true
+    }
 }
 
 pub fn render_draw_settings_form(
@@ -135,13 +151,29 @@ pub fn render_draw_settings_form(
         )
         .changed();
 
+    let mut fixed_save_folder_error = None;
     ui.horizontal(|ui| {
         ui.label("Fixed save folder");
-        ui.add_enabled(
-            false,
-            egui::TextEdit::singleline(&mut settings.fixed_save_folder_display),
-        );
+        changed |= ui
+            .add(
+                egui::TextEdit::singleline(&mut settings.fixed_save_folder_display)
+                    .desired_width(320.0),
+            )
+            .changed();
+        if ui.button("Browse…").clicked() {
+            if let Some(path) = FileDialog::new().pick_folder() {
+                let selected = path.to_string_lossy().to_string();
+                if settings.fixed_save_folder_display != selected {
+                    settings.fixed_save_folder_display = selected;
+                    changed = true;
+                }
+            }
+        }
     });
+    if let Err(error) = validate_fixed_save_folder_display(&settings.fixed_save_folder_display) {
+        fixed_save_folder_error = Some(error.to_string());
+        ui.colored_label(egui::Color32::RED, error.to_string());
+    }
 
     ui.separator();
     ui.label("Colors");
@@ -167,29 +199,22 @@ pub fn render_draw_settings_form(
     changed |= edit_color(ui, "Default fill", &mut settings.default_fill_color);
     ui.separator();
     ui.label("Live drawing background");
-    let is_transparent = matches!(
-        settings.canvas_background_mode,
-        CanvasBackgroundMode::Transparent
-    );
-    if ui
-        .radio(is_transparent, "Draw on desktop (transparent overlay)")
-        .changed()
-        && !is_transparent
-    {
-        settings.canvas_background_mode = CanvasBackgroundMode::Transparent;
-        changed = true;
-    }
+    changed |= ui
+        .radio_value(
+            &mut settings.canvas_background_mode,
+            CanvasBackgroundMode::Transparent,
+            "Draw on desktop (transparent overlay)",
+        )
+        .changed();
 
     let mut blank_color = settings.canvas_solid_background_color;
-    let is_blank = matches!(settings.canvas_background_mode, CanvasBackgroundMode::Solid);
-    if ui
-        .radio(is_blank, "Draw on blank canvas (solid background)")
-        .changed()
-        && !is_blank
-    {
-        settings.canvas_background_mode = CanvasBackgroundMode::Solid;
-        changed = true;
-    }
+    changed |= ui
+        .radio_value(
+            &mut settings.canvas_background_mode,
+            CanvasBackgroundMode::Solid,
+            "Draw on blank canvas (solid background)",
+        )
+        .changed();
 
     if matches!(settings.canvas_background_mode, CanvasBackgroundMode::Solid) {
         changed |= edit_color(ui, "Live blank color", &mut blank_color);
@@ -211,5 +236,21 @@ pub fn render_draw_settings_form(
     DrawSettingsFormResult {
         changed,
         toolbar_hotkey_error,
+        fixed_save_folder_error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_canvas_background_mode;
+    use crate::draw::settings::CanvasBackgroundMode;
+
+    #[test]
+    fn blank_canvas_mode_can_be_selected_from_transparent_state() {
+        let mut mode = CanvasBackgroundMode::Transparent;
+        let changed = select_canvas_background_mode(&mut mode, CanvasBackgroundMode::Solid);
+
+        assert!(changed);
+        assert_eq!(mode, CanvasBackgroundMode::Solid);
     }
 }
