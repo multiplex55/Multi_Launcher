@@ -508,14 +508,14 @@ impl DrawRuntime {
             self.set_exit_prompt_error(error);
         }
         if let Some(reason) = terminal_reason {
-            self.complete_save_flow(reason)?;
+            self.complete_save_flow(&reason)?;
             self.restore_pipeline(reason, "overlay exited notification")?;
         }
 
         Ok(())
     }
 
-    fn complete_save_flow(&self, reason: ExitReason) -> Result<()> {
+    fn complete_save_flow(&self, reason: &ExitReason) -> Result<()> {
         let (choice, canvas, settings, monitor_rect) = {
             let mut state = self
                 .state

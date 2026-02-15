@@ -45,7 +45,7 @@ pub fn capture_monitor_rgba(rect: MonitorRect) -> Result<RgbaBuffer> {
             rect.y,
             SRCCOPY,
         )
-        .as_bool();
+        .is_ok();
 
         if !ok {
             let _ = SelectObject(mem_dc, old_obj);
