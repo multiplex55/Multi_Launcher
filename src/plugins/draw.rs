@@ -1,6 +1,7 @@
 use crate::actions::Action;
 use crate::draw::service::runtime;
 use crate::draw::settings::DrawSettings;
+use crate::draw::settings_store;
 use crate::draw::settings_ui::render_draw_settings_form;
 use crate::plugin::Plugin;
 use eframe::egui;
@@ -13,9 +14,10 @@ pub struct DrawPlugin {
 
 impl Default for DrawPlugin {
     fn default() -> Self {
-        Self {
-            settings: DrawSettings::default(),
-        }
+        let mut settings = settings_store::load("settings.json").unwrap_or_default();
+        settings.sanitize_for_first_pass_transparency();
+        runtime().apply_settings(settings.clone());
+        Self { settings }
     }
 }
 
@@ -27,6 +29,7 @@ impl DrawPlugin {
         if let Ok(serialized) = serde_json::to_value(&settings) {
             *value = serialized;
         }
+        let _ = settings_store::save(&settings);
     }
 
     fn reset_settings(&mut self, value: &mut serde_json::Value) {
@@ -93,16 +96,16 @@ impl Plugin for DrawPlugin {
     }
 
     fn apply_settings(&mut self, value: &serde_json::Value) {
-        if let Ok(mut settings) = serde_json::from_value::<DrawSettings>(value.clone()) {
-            settings.sanitize_for_first_pass_transparency();
-            self.settings = settings.clone();
-            runtime().apply_settings(settings);
-        }
+        let mut settings = settings_store::load("settings.json")
+            .or_else(|_| serde_json::from_value::<DrawSettings>(value.clone()).map_err(Into::into))
+            .unwrap_or_else(|_| DrawSettings::default());
+        settings.sanitize_for_first_pass_transparency();
+        self.settings = settings.clone();
+        runtime().apply_settings(settings);
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
-        let mut settings: DrawSettings =
-            serde_json::from_value(value.clone()).unwrap_or_else(|_| self.settings.clone());
+        let mut settings = self.settings.clone();
 
         let form_result = render_draw_settings_form(ui, &mut settings, "draw_plugin");
         if let Some(error) = form_result.toolbar_hotkey_error.as_ref() {
@@ -125,7 +128,12 @@ mod tests {
     use super::DrawPlugin;
     use crate::draw::service::runtime;
     use crate::draw::settings::{DrawColor, DrawSettings};
+    use crate::draw::settings_store;
     use crate::plugin::Plugin;
+    use once_cell::sync::Lazy;
+    use std::sync::Mutex;
+
+    static DRAW_SETTINGS_TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     #[test]
     fn search_draw_returns_enter_action() {
@@ -160,6 +168,7 @@ mod tests {
 
     #[test]
     fn settings_roundtrip_default_apply() {
+        let _lock = DRAW_SETTINGS_TEST_MUTEX.lock().expect("lock");
         let mut plugin = DrawPlugin::default();
         let default_value = plugin.default_settings().expect("default settings");
         plugin.apply_settings(&default_value);
@@ -170,6 +179,7 @@ mod tests {
 
     #[test]
     fn reset_action_restores_defaults_after_customization() {
+        let _lock = DRAW_SETTINGS_TEST_MUTEX.lock().expect("lock");
         let mut plugin = DrawPlugin::default();
         let mut settings = DrawSettings::default();
         settings.exit_timeout_seconds = 42;
@@ -186,6 +196,7 @@ mod tests {
 
     #[test]
     fn apply_settings_updates_runtime_settings() {
+        let _lock = DRAW_SETTINGS_TEST_MUTEX.lock().expect("lock");
         let rt = runtime();
         rt.reset_for_test();
 
@@ -202,6 +213,7 @@ mod tests {
 
     #[test]
     fn apply_settings_resolves_colorkey_collision_before_runtime_update() {
+        let _lock = DRAW_SETTINGS_TEST_MUTEX.lock().expect("lock");
         let rt = runtime();
         rt.reset_for_test();
 
@@ -218,6 +230,83 @@ mod tests {
             plugin.settings.last_color,
             DrawColor::rgba(254, 0, 255, 255)
         );
+        rt.reset_for_test();
+    }
+
+    #[test]
+    fn apply_settings_prefers_dedicated_store_when_present() {
+        let _lock = DRAW_SETTINGS_TEST_MUTEX.lock().expect("lock");
+        let rt = runtime();
+        rt.reset_for_test();
+
+        let draw_settings_path = settings_store::resolve_settings_path().expect("path");
+        let draw_settings_backup = std::fs::read(&draw_settings_path).ok();
+
+        let mut dedicated = DrawSettings::default();
+        dedicated.last_width = 93;
+        settings_store::save(&dedicated).expect("save dedicated settings");
+
+        let mut legacy = DrawSettings::default();
+        legacy.last_width = 11;
+        let legacy_value = serde_json::to_value(&legacy).expect("serialize legacy value");
+
+        let mut plugin = DrawPlugin::default();
+        plugin.apply_settings(&legacy_value);
+
+        assert_eq!(plugin.settings.last_width, 93);
+        assert_eq!(
+            rt.settings_for_test().expect("runtime settings").last_width,
+            93
+        );
+
+        if let Some(bytes) = draw_settings_backup {
+            std::fs::write(&draw_settings_path, bytes).expect("restore backup");
+        } else {
+            let _ = std::fs::remove_file(&draw_settings_path);
+        }
+        rt.reset_for_test();
+    }
+
+    #[test]
+    fn apply_settings_migrates_from_legacy_plugin_settings_when_dedicated_missing() {
+        let _lock = DRAW_SETTINGS_TEST_MUTEX.lock().expect("lock");
+        let rt = runtime();
+        rt.reset_for_test();
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let draw_settings_path = settings_store::resolve_settings_path().expect("path");
+        let draw_settings_backup = std::fs::read(&draw_settings_path).ok();
+        let _ = std::fs::remove_file(&draw_settings_path);
+
+        let orig_dir = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(dir.path()).expect("set cwd");
+
+        let mut legacy = crate::settings::Settings::default();
+        let mut expected = DrawSettings::default();
+        expected.exit_timeout_seconds = 909;
+        legacy.plugin_settings.insert(
+            "draw".to_string(),
+            serde_json::to_value(&expected).expect("serialize legacy settings"),
+        );
+        legacy.save("settings.json").expect("save settings.json");
+
+        let mut plugin = DrawPlugin::default();
+        plugin.apply_settings(&serde_json::Value::Null);
+
+        assert_eq!(plugin.settings.exit_timeout_seconds, 909);
+        assert_eq!(
+            rt.settings_for_test()
+                .expect("runtime settings")
+                .exit_timeout_seconds,
+            909
+        );
+
+        std::env::set_current_dir(orig_dir).expect("restore cwd");
+        if let Some(bytes) = draw_settings_backup {
+            std::fs::write(&draw_settings_path, bytes).expect("restore backup");
+        } else {
+            let _ = std::fs::remove_file(&draw_settings_path);
+        }
         rt.reset_for_test();
     }
 }

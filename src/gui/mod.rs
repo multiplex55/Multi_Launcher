@@ -5151,7 +5151,7 @@ mod tests {
         common::slug::reset_slug_lookup,
         dashboard::config::OverflowMode,
         dashboard::layout::NormalizedSlot,
-        draw::{service::runtime, settings::DrawSettings},
+        draw::{service::runtime, settings::DrawSettings, settings_store},
         plugin::{Plugin, PluginManager},
         plugins::draw::DrawPlugin,
         plugins::note::{append_note, load_notes, save_notes, NotePlugin},
@@ -5608,12 +5608,15 @@ mod tests {
     }
 
     #[test]
-    fn draw_dialog_save_persists_plugin_settings_and_applies_runtime() {
+    fn draw_dialog_save_persists_dedicated_draw_settings_and_applies_runtime() {
         let _lock = TEST_MUTEX.lock().unwrap();
         let rt = runtime();
         rt.reset_for_test();
 
         let dir = tempdir().unwrap();
+        let draw_settings_path = settings_store::resolve_settings_path().unwrap();
+        let draw_settings_backup = std::fs::read(&draw_settings_path).ok();
+        let _ = std::fs::remove_file(&draw_settings_path);
         let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         std::env::set_current_dir(dir.path()).unwrap();
         Settings::default().save("settings.json").unwrap();
@@ -5628,23 +5631,20 @@ mod tests {
         app.draw_dialog_set_settings_for_test(edited.clone());
         app.draw_dialog_save_for_test();
 
+        let saved = settings_store::load("settings.json").unwrap();
         let persisted = Settings::load("settings.json").unwrap();
-        let payload = persisted
-            .plugin_settings
-            .get("draw")
-            .cloned()
-            .expect("draw settings payload");
-        let saved: DrawSettings = serde_json::from_value(payload.clone()).unwrap();
 
         assert_eq!(saved, edited);
         assert_eq!(rt.settings_for_test(), Some(edited.clone()));
-        assert_eq!(
-            app.settings_editor.get_plugin_setting_value("draw"),
-            Some(&payload)
-        );
+        assert!(persisted.plugin_settings.contains_key("draw"));
 
         rt.reset_for_test();
         std::env::set_current_dir(orig_dir).unwrap();
+        if let Some(bytes) = draw_settings_backup {
+            std::fs::write(&draw_settings_path, bytes).unwrap();
+        } else {
+            let _ = std::fs::remove_file(&draw_settings_path);
+        }
     }
 
     #[test]
@@ -5689,6 +5689,9 @@ mod tests {
         rt.reset_for_test();
 
         let dir = tempdir().unwrap();
+        let draw_settings_path = settings_store::resolve_settings_path().unwrap();
+        let draw_settings_backup = std::fs::read(&draw_settings_path).ok();
+        let _ = std::fs::remove_file(&draw_settings_path);
         let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         std::env::set_current_dir(dir.path()).unwrap();
         Settings::default().save("settings.json").unwrap();
@@ -5704,19 +5707,51 @@ mod tests {
         app.draw_dialog_save_for_test();
         app.draw_dialog_reset_for_test();
 
-        let persisted = Settings::load("settings.json").unwrap();
-        let payload = persisted
-            .plugin_settings
-            .get("draw")
-            .cloned()
-            .expect("draw settings payload");
-        let saved: DrawSettings = serde_json::from_value(payload).unwrap();
+        let saved = settings_store::load("settings.json").unwrap();
 
         assert_eq!(saved, DrawSettings::default());
         assert_eq!(rt.settings_for_test(), Some(DrawSettings::default()));
 
         rt.reset_for_test();
         std::env::set_current_dir(orig_dir).unwrap();
+        if let Some(bytes) = draw_settings_backup {
+            std::fs::write(&draw_settings_path, bytes).unwrap();
+        } else {
+            let _ = std::fs::remove_file(&draw_settings_path);
+        }
+    }
+
+    #[test]
+    fn draw_dialog_loads_from_legacy_plugin_settings_when_dedicated_file_missing() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let draw_settings_path = settings_store::resolve_settings_path().unwrap();
+        let draw_settings_backup = std::fs::read(&draw_settings_path).ok();
+        let _ = std::fs::remove_file(&draw_settings_path);
+        let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let mut legacy_settings = Settings::default();
+        let mut expected = DrawSettings::default();
+        expected.last_width = 64;
+        expected.enable_pressure = false;
+        legacy_settings
+            .plugin_settings
+            .insert("draw".to_string(), serde_json::to_value(&expected).unwrap());
+        legacy_settings.save("settings.json").unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.open_draw_settings_dialog();
+
+        assert_eq!(app.draw_dialog_settings_for_test(), expected);
+
+        std::env::set_current_dir(orig_dir).unwrap();
+        if let Some(bytes) = draw_settings_backup {
+            std::fs::write(&draw_settings_path, bytes).unwrap();
+        } else {
+            let _ = std::fs::remove_file(&draw_settings_path);
+        }
     }
 
     #[test]
