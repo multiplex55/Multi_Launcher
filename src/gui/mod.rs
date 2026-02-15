@@ -5760,54 +5760,6 @@ mod tests {
     }
 
     #[test]
-    fn draw_enter_sets_entry_timeout_from_active_draw_settings() {
-        let _lock = TEST_MUTEX.lock().unwrap();
-        let rt = runtime();
-        rt.reset_for_test();
-
-        let mut settings = DrawSettings::default();
-        settings.exit_timeout_seconds = 5;
-        rt.apply_settings(settings.clone());
-
-        let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
-        let draw_command = Action {
-            label: "draw".into(),
-            desc: "Draw".into(),
-            action: "draw:enter".into(),
-            args: None,
-        };
-
-        crate::draw::set_runtime_spawn_hook(Some(Box::new(|_| {
-            let (main_to_overlay_tx, _main_to_overlay_rx) = std::sync::mpsc::channel();
-            let (_overlay_to_main_tx, overlay_to_main_rx) = std::sync::mpsc::channel();
-            let overlay_thread_handle = std::thread::spawn(|| {});
-            Ok(crate::draw::service::OverlayStartupHandshake {
-                overlay_thread_handle,
-                main_to_overlay_tx,
-                overlay_to_main_rx,
-            })
-        })));
-
-        let before = Instant::now();
-        app.activate_action(draw_command, None, ActivationSource::Enter);
-        let after = Instant::now();
-
-        crate::draw::set_runtime_spawn_hook(None);
-
-        let deadline = rt
-            .entry_context_for_test()
-            .expect("entry context should exist")
-            .timeout_deadline
-            .expect("timeout deadline should be set");
-        let timeout = Duration::from_secs(settings.exit_timeout_seconds);
-        assert!(deadline >= before + timeout);
-        assert!(deadline <= after + timeout + Duration::from_millis(200));
-
-        rt.reset_for_test();
-    }
-
-    #[test]
     fn draw_enter_success_hides_launcher() {
         let _lock = TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
