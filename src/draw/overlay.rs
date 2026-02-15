@@ -672,8 +672,12 @@ fn handle_toolbar_pointer_event(
 
     if !layout.panel.contains(local_point) && !overlay_state.toolbar_state.dragging {
         overlay_state.toolbar_state.focused = false;
+        overlay_state.toolbar_state.hovered_target = None;
         return false;
     }
+
+    overlay_state.toolbar_state.hovered_target =
+        layout.hit_test(local_point, overlay_state.toolbar_state.collapsed);
 
     if matches!(pointer_event, ToolbarPointerEvent::LeftDown) {
         overlay_state.toolbar_state.focused = true;
@@ -717,6 +721,76 @@ fn handle_toolbar_pointer_event(
     true
 }
 
+#[derive(Clone, Copy)]
+struct ButtonVisualState {
+    active: bool,
+    hovered: bool,
+    disabled: bool,
+}
+
+fn draw_icon_button(
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+    rect: crate::draw::toolbar::ToolbarRect,
+    target: toolbar::ToolbarHitTarget,
+    toolbar_state: &ToolbarState,
+    visual: ButtonVisualState,
+) {
+    let bg = if visual.disabled {
+        [52, 52, 52, 255]
+    } else if visual.active {
+        [110, 132, 160, 255]
+    } else if visual.hovered {
+        [96, 96, 96, 255]
+    } else {
+        [76, 76, 76, 255]
+    };
+    fill_rect(rgba, width, height, rect.x, rect.y, rect.w, rect.h, bg);
+
+    if let Some(icon) = toolbar::hit_target_icon(target, toolbar_state.collapsed) {
+        let color = if visual.disabled {
+            [120, 120, 120, 255]
+        } else if visual.active {
+            [240, 245, 255, 255]
+        } else {
+            [220, 220, 220, 255]
+        };
+        draw_icon_glyph(rgba, width, height, rect, icon, color);
+    }
+}
+
+fn draw_icon_glyph(
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+    rect: crate::draw::toolbar::ToolbarRect,
+    icon: crate::draw::toolbar_icons::ToolbarIcon,
+    color: [u8; 4],
+) {
+    let glyph = crate::draw::toolbar_icons::icon_bitmap(icon);
+    let glyph_h = glyph.len() as i32;
+    let glyph_w = glyph.iter().map(|row| row.len()).max().unwrap_or(0) as i32;
+    let x0 = rect.x + (rect.w - glyph_w) / 2;
+    let y0 = rect.y + (rect.h - glyph_h) / 2;
+    for (row_idx, row) in glyph.iter().enumerate() {
+        for (col_idx, pixel) in row.as_bytes().iter().enumerate() {
+            if *pixel == b'1' {
+                fill_rect(
+                    rgba,
+                    width,
+                    height,
+                    x0 + col_idx as i32,
+                    y0 + row_idx as i32,
+                    1,
+                    1,
+                    color,
+                );
+            }
+        }
+    }
+}
+
 fn draw_compact_toolbar_panel(
     rgba: &mut [u8],
     size: (u32, u32),
@@ -750,15 +824,20 @@ fn draw_compact_toolbar_panel(
         layout.header.h,
         [36, 36, 36, 220],
     );
-    fill_rect(
+
+    draw_icon_button(
         rgba,
         width,
         height,
-        layout.collapse_toggle.x,
-        layout.collapse_toggle.y,
-        layout.collapse_toggle.w,
-        layout.collapse_toggle.h,
-        [84, 84, 84, 255],
+        layout.collapse_toggle,
+        toolbar::ToolbarHitTarget::ToggleCollapse,
+        toolbar_state,
+        ButtonVisualState {
+            active: toolbar_state.collapsed,
+            hovered: toolbar_state.hovered_target
+                == Some(toolbar::ToolbarHitTarget::ToggleCollapse),
+            disabled: false,
+        },
     );
 
     if toolbar_state.collapsed {
@@ -766,15 +845,24 @@ fn draw_compact_toolbar_panel(
     }
 
     for (tool, rect) in &layout.tool_rects {
-        let color = if draw_input.current_tool() == *tool {
-            [220, 220, 220, 255]
-        } else {
-            [84, 84, 84, 255]
-        };
-        fill_rect(rgba, width, height, rect.x, rect.y, rect.w, rect.h, color);
+        draw_icon_button(
+            rgba,
+            width,
+            height,
+            *rect,
+            toolbar::ToolbarHitTarget::Tool(*tool),
+            toolbar_state,
+            ButtonVisualState {
+                active: draw_input.current_tool() == *tool,
+                hovered: toolbar_state.hovered_target
+                    == Some(toolbar::ToolbarHitTarget::Tool(*tool)),
+                disabled: false,
+            },
+        );
     }
 
-    let active_color = draw_input.current_style().stroke.color;
+    let style = draw_input.current_style();
+    let active_color = style.stroke.color;
     for (idx, rect) in &layout.quick_color_rects {
         if let Some(color) = quick_colors.get(*idx) {
             fill_rect(
@@ -802,76 +890,126 @@ fn draw_compact_toolbar_panel(
         }
     }
 
-    fill_rect(
-        rgba,
-        width,
-        height,
-        layout.width_down_rect.x,
-        layout.width_down_rect.y,
-        layout.width_down_rect.w,
-        layout.width_down_rect.h,
-        [120, 120, 120, 255],
-    );
-    fill_rect(
-        rgba,
-        width,
-        height,
-        layout.width_up_rect.x,
-        layout.width_up_rect.y,
-        layout.width_up_rect.w,
-        layout.width_up_rect.h,
-        [150, 150, 150, 255],
-    );
-    fill_rect(
-        rgba,
-        width,
-        height,
-        layout.fill_toggle_rect.x,
-        layout.fill_toggle_rect.y,
-        layout.fill_toggle_rect.w,
-        layout.fill_toggle_rect.h,
-        [130, 110, 180, 255],
-    );
-    fill_rect(
-        rgba,
-        width,
-        height,
-        layout.undo_rect.x,
-        layout.undo_rect.y,
-        layout.undo_rect.w,
-        layout.undo_rect.h,
-        [98, 144, 255, 255],
-    );
-    fill_rect(
-        rgba,
-        width,
-        height,
-        layout.redo_rect.x,
-        layout.redo_rect.y,
-        layout.redo_rect.w,
-        layout.redo_rect.h,
-        [98, 220, 144, 255],
-    );
-    fill_rect(
-        rgba,
-        width,
-        height,
-        layout.save_rect.x,
-        layout.save_rect.y,
-        layout.save_rect.w,
-        layout.save_rect.h,
-        [220, 182, 98, 255],
-    );
-    fill_rect(
-        rgba,
-        width,
-        height,
-        layout.exit_rect.x,
-        layout.exit_rect.y,
-        layout.exit_rect.w,
-        layout.exit_rect.h,
-        [255, 120, 120, 255],
-    );
+    if let Some(fill_color) = style.fill.map(|f| f.color) {
+        for (idx, rect) in &layout.fill_color_rects {
+            if let Some(color) = quick_colors.get(*idx) {
+                fill_rect(
+                    rgba,
+                    width,
+                    height,
+                    rect.x,
+                    rect.y,
+                    rect.w,
+                    rect.h,
+                    [color.r, color.g, color.b, 255],
+                );
+                if fill_color.r == color.r && fill_color.g == color.g && fill_color.b == color.b {
+                    fill_rect(
+                        rgba,
+                        width,
+                        height,
+                        rect.x - 1,
+                        rect.y - 1,
+                        rect.w + 2,
+                        1,
+                        [255, 255, 255, 255],
+                    );
+                }
+            }
+        }
+    } else {
+        for (idx, rect) in &layout.fill_color_rects {
+            if let Some(color) = quick_colors.get(*idx) {
+                fill_rect(
+                    rgba,
+                    width,
+                    height,
+                    rect.x,
+                    rect.y,
+                    rect.w,
+                    rect.h,
+                    [color.r, color.g, color.b, 255],
+                );
+            }
+        }
+    }
+
+    let undo_disabled = draw_input.history().undo_len() == 0;
+    let redo_disabled = draw_input.history().redo_len() == 0;
+    let stroke_down_disabled = style.stroke.width <= 1;
+
+    let controls = [
+        (
+            layout.width_down_rect,
+            toolbar::ToolbarHitTarget::StrokeWidthDown,
+            ButtonVisualState {
+                active: false,
+                hovered: toolbar_state.hovered_target
+                    == Some(toolbar::ToolbarHitTarget::StrokeWidthDown),
+                disabled: stroke_down_disabled,
+            },
+        ),
+        (
+            layout.width_up_rect,
+            toolbar::ToolbarHitTarget::StrokeWidthUp,
+            ButtonVisualState {
+                active: false,
+                hovered: toolbar_state.hovered_target
+                    == Some(toolbar::ToolbarHitTarget::StrokeWidthUp),
+                disabled: false,
+            },
+        ),
+        (
+            layout.fill_toggle_rect,
+            toolbar::ToolbarHitTarget::FillToggle,
+            ButtonVisualState {
+                active: style.fill.is_some(),
+                hovered: toolbar_state.hovered_target
+                    == Some(toolbar::ToolbarHitTarget::FillToggle),
+                disabled: false,
+            },
+        ),
+        (
+            layout.undo_rect,
+            toolbar::ToolbarHitTarget::Undo,
+            ButtonVisualState {
+                active: false,
+                hovered: toolbar_state.hovered_target == Some(toolbar::ToolbarHitTarget::Undo),
+                disabled: undo_disabled,
+            },
+        ),
+        (
+            layout.redo_rect,
+            toolbar::ToolbarHitTarget::Redo,
+            ButtonVisualState {
+                active: false,
+                hovered: toolbar_state.hovered_target == Some(toolbar::ToolbarHitTarget::Redo),
+                disabled: redo_disabled,
+            },
+        ),
+        (
+            layout.save_rect,
+            toolbar::ToolbarHitTarget::Save,
+            ButtonVisualState {
+                active: false,
+                hovered: toolbar_state.hovered_target == Some(toolbar::ToolbarHitTarget::Save),
+                disabled: false,
+            },
+        ),
+        (
+            layout.exit_rect,
+            toolbar::ToolbarHitTarget::Exit,
+            ButtonVisualState {
+                active: false,
+                hovered: toolbar_state.hovered_target == Some(toolbar::ToolbarHitTarget::Exit),
+                disabled: false,
+            },
+        ),
+    ];
+
+    for (rect, target, visual) in controls {
+        draw_icon_button(rgba, width, height, rect, target, toolbar_state, visual);
+    }
 }
 
 fn draw_debug_hud_panel(
@@ -2510,6 +2648,133 @@ mod tests {
         apply_toolbar_command(&mut input, &mut state, ToolbarCommand::Redo);
         assert!(input.take_full_redraw_request());
         assert!(input.full_redraw_request_count() > after_undo);
+    }
+
+    #[test]
+    fn toolbar_renders_quick_and_fill_swatches_with_selection_outlines() {
+        let mut settings = DrawSettings::default();
+        settings.quick_colors = vec![
+            DrawColor::rgba(200, 10, 20, 255),
+            DrawColor::rgba(2, 220, 40, 255),
+            DrawColor::rgba(10, 20, 200, 255),
+        ];
+        let state = OverlayThreadState::from_settings(&settings);
+        let mut input = draw_state(Tool::Pen);
+        input.set_style(ObjectStyle {
+            stroke: StrokeStyle {
+                width: input.current_style().stroke.width,
+                color: Color::rgba(2, 220, 40, 255),
+            },
+            fill: Some(crate::draw::model::FillStyle {
+                color: Color::rgba(200, 10, 20, 255),
+            }),
+        });
+
+        let mut rgba = vec![0; 800 * 600 * 4];
+        super::draw_compact_toolbar_panel(
+            &mut rgba,
+            (800, 600),
+            &input,
+            &state.quick_colors,
+            &state.toolbar_state,
+        );
+
+        let layout = crate::draw::toolbar::ToolbarLayout::for_state(
+            (800, 600),
+            &state.toolbar_state,
+            state.quick_colors.len(),
+        )
+        .expect("toolbar layout available");
+        let quick_rect = layout.quick_color_rects[1].1;
+        let fill_rect = layout.fill_color_rects[0].1;
+
+        let quick_idx =
+            (((quick_rect.y + 2) as usize * 800 + (quick_rect.x + 2) as usize) * 4) as usize;
+        assert_eq!(&rgba[quick_idx..quick_idx + 3], &[2, 220, 40]);
+        let quick_outline_idx =
+            ((((quick_rect.y - 1) as usize) * 800 + quick_rect.x as usize) * 4) as usize;
+        assert_eq!(
+            &rgba[quick_outline_idx..quick_outline_idx + 3],
+            &[255, 255, 255]
+        );
+
+        let fill_idx =
+            (((fill_rect.y + 2) as usize * 800 + (fill_rect.x + 2) as usize) * 4) as usize;
+        assert_eq!(&rgba[fill_idx..fill_idx + 3], &[200, 10, 20]);
+        let fill_outline_idx =
+            ((((fill_rect.y - 1) as usize) * 800 + fill_rect.x as usize) * 4) as usize;
+        assert_eq!(
+            &rgba[fill_outline_idx..fill_outline_idx + 3],
+            &[255, 255, 255]
+        );
+    }
+
+    #[test]
+    fn toolbar_action_buttons_use_icons_instead_of_unique_fill_colors() {
+        let settings = DrawSettings::default();
+        let mut state = OverlayThreadState::from_settings(&settings);
+        let input = draw_state(Tool::Pen);
+        let layout = crate::draw::toolbar::ToolbarLayout::for_state(
+            (800, 600),
+            &state.toolbar_state,
+            state.quick_colors.len(),
+        )
+        .expect("toolbar layout available");
+
+        let mut rgba = vec![0; 800 * 600 * 4];
+        super::draw_compact_toolbar_panel(
+            &mut rgba,
+            (800, 600),
+            &input,
+            &state.quick_colors,
+            &state.toolbar_state,
+        );
+
+        let sample = |rect: crate::draw::toolbar::ToolbarRect, dx: i32, dy: i32| -> [u8; 3] {
+            let idx = (((rect.y + dy) as usize * 800 + (rect.x + dx) as usize) * 4) as usize;
+            [rgba[idx], rgba[idx + 1], rgba[idx + 2]]
+        };
+
+        assert_eq!(
+            sample(layout.undo_rect, 1, 1),
+            sample(layout.save_rect, 1, 1)
+        );
+
+        let bg = sample(layout.undo_rect, 1, 1);
+        let mut found_icon_pixel = false;
+        for y in 0..layout.undo_rect.h {
+            for x in 0..layout.undo_rect.w {
+                if sample(layout.undo_rect, x, y) != bg {
+                    found_icon_pixel = true;
+                    break;
+                }
+            }
+            if found_icon_pixel {
+                break;
+            }
+        }
+        assert!(
+            found_icon_pixel,
+            "expected undo icon pixels to alter button interior"
+        );
+
+        state.toolbar_state.hovered_target = Some(toolbar::ToolbarHitTarget::Undo);
+        let mut hovered = vec![0; 800 * 600 * 4];
+        super::draw_compact_toolbar_panel(
+            &mut hovered,
+            (800, 600),
+            &input,
+            &state.quick_colors,
+            &state.toolbar_state,
+        );
+        let hovered_idx = (((layout.undo_rect.y + 1) as usize * 800
+            + (layout.undo_rect.x + 1) as usize)
+            * 4) as usize;
+        assert_ne!(
+            &hovered[hovered_idx..hovered_idx + 3],
+            &rgba[hovered_idx..hovered_idx + 3],
+            "hover state should alter icon button visual"
+        );
     }
 
     #[test]
