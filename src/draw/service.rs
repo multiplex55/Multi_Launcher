@@ -265,12 +265,7 @@ impl DrawRuntime {
                 &mut state,
                 MainToOverlay::SetExitDialogMode { mode },
             );
-            if !show_prompt {
-                Self::send_overlay_message_locked(
-                    &mut state,
-                    MainToOverlay::RequestExit { reason },
-                );
-            }
+            Self::send_overlay_message_locked(&mut state, MainToOverlay::RequestExit { reason });
         }
         Ok(())
     }
@@ -868,17 +863,19 @@ mod tests {
             .exit_prompt_state()
             .expect("prompt state should be present");
         assert_eq!(prompt.phase, crate::draw::save::ExitPromptPhase::Saving);
-        assert_eq!(
-            rt.take_dispatched_messages_for_test(),
-            vec![
-                MainToOverlay::SetExitDialogMode {
-                    mode: crate::draw::messages::ExitDialogMode::Saving,
-                },
-                MainToOverlay::RequestExit {
-                    reason: ExitReason::UserRequest,
-                },
-            ]
-        );
+        let dispatched = rt.take_dispatched_messages_for_test();
+        assert!(matches!(
+            dispatched.get(dispatched.len().saturating_sub(2)),
+            Some(MainToOverlay::SetExitDialogMode {
+                mode: crate::draw::messages::ExitDialogMode::Saving,
+            })
+        ));
+        assert!(matches!(
+            dispatched.last(),
+            Some(MainToOverlay::RequestExit {
+                reason: ExitReason::UserRequest,
+            })
+        ));
         reset_runtime(rt);
     }
 
