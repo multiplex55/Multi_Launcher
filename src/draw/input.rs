@@ -189,10 +189,57 @@ impl DrawInputState {
         match self.active_geometry.as_mut() {
             Some(Geometry::Pen { points }) | Some(Geometry::Eraser { points }) => {
                 if should_append_point(points.last().copied(), point) {
+                    let previous_segment = if points.len() >= 2 {
+                        Some(DirtyRect::from_points(
+                            points[points.len() - 2],
+                            points[points.len() - 1],
+                            pad,
+                        ))
+                    } else {
+                        None
+                    };
                     if let Some(last) = points.last().copied() {
                         dirty = Some(DirtyRect::from_points(last, point, pad));
                     }
                     points.push(point);
+
+                    let geometry = match self.tool {
+                        Tool::Pen => Geometry::Pen {
+                            points: points.clone(),
+                        },
+                        Tool::Eraser => Geometry::Eraser {
+                            points: points.clone(),
+                        },
+                        Tool::Line | Tool::Rect | Tool::Ellipse => {
+                            unreachable!("freehand preview tools only")
+                        }
+                    };
+                    self.preview_buffer = Some(DrawObject {
+                        tool: self.tool,
+                        style: self.style,
+                        geometry: geometry.clone(),
+                    });
+
+                    if let Some(current_bounds) =
+                        geometry_dirty_rect(&geometry, self.style.stroke.width.max(1))
+                    {
+                        let previous_bounds = self.previous_preview_bounds;
+                        self.previous_preview_bounds = Some(current_bounds);
+                        let dirty_with_preview = previous_bounds
+                            .map(|bounds| bounds.union(current_bounds))
+                            .unwrap_or(current_bounds);
+                        dirty = Some(match dirty.take() {
+                            Some(base) => base.union(dirty_with_preview),
+                            None => dirty_with_preview,
+                        });
+                    }
+
+                    if let Some(previous) = previous_segment {
+                        dirty = Some(match dirty.take() {
+                            Some(base) => base.union(previous),
+                            None => previous,
+                        });
+                    }
                 }
             }
             Some(Geometry::Line { start, end })
@@ -433,6 +480,19 @@ mod tests {
                 }
                 other => panic!("unexpected geometry for {tool:?}: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn freehand_active_object_exists_after_move_before_commit() {
+        for tool in [Tool::Pen, Tool::Eraser] {
+            let mut state = draw_state(tool);
+            let _ = state.handle_left_down((0, 0), PointerModifiers::default());
+            state.handle_move((4, 0));
+            assert!(
+                state.active_object().is_some(),
+                "missing preview for {tool:?}"
+            );
         }
     }
 

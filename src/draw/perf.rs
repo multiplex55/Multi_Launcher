@@ -14,6 +14,9 @@ pub struct DrawPerfSnapshot {
     pub input_ingest_ms: f64,
     pub invalidate_to_paint_ms: f64,
     pub points_per_second: f64,
+    pub effective_present_hz: f64,
+    pub input_to_present_ms: f64,
+    pub coalesced_moves: u64,
     pub dirty_pixels: u64,
     pub estimated_pixels_touched: u64,
     pub misuse_count: u64,
@@ -31,6 +34,9 @@ impl Default for DrawPerfSnapshot {
             input_ingest_ms: 0.0,
             invalidate_to_paint_ms: 0.0,
             points_per_second: 0.0,
+            effective_present_hz: 0.0,
+            input_to_present_ms: 0.0,
+            coalesced_moves: 0,
             dirty_pixels: 0,
             estimated_pixels_touched: 0,
             misuse_count: 0,
@@ -53,6 +59,10 @@ pub struct DrawPerfStats {
     pending_raster_spans: HashMap<u64, u64>,
     pending_invalidate: VecDeque<u64>,
     points_window: VecDeque<(u64, u32)>,
+    present_window: VecDeque<u64>,
+    input_to_present_ms_window: VecDeque<f64>,
+    coalesced_moves_total: u64,
+    last_input_micros: Option<u64>,
     dirty_pixels_last: u64,
     pixels_touched_last: u64,
     misuse_count: u64,
@@ -73,6 +83,10 @@ impl DrawPerfStats {
             pending_raster_spans: HashMap::new(),
             pending_invalidate: VecDeque::new(),
             points_window: VecDeque::new(),
+            present_window: VecDeque::new(),
+            input_to_present_ms_window: VecDeque::with_capacity(rolling_window.max(1)),
+            coalesced_moves_total: 0,
+            last_input_micros: None,
             dirty_pixels_last: 0,
             pixels_touched_last: 0,
             misuse_count: 0,
@@ -102,6 +116,10 @@ impl DrawPerfStats {
         self.pending_raster_spans.clear();
         self.pending_invalidate.clear();
         self.points_window.clear();
+        self.present_window.clear();
+        self.input_to_present_ms_window.clear();
+        self.coalesced_moves_total = 0;
+        self.last_input_micros = None;
         self.dirty_pixels_last = 0;
         self.pixels_touched_last = 0;
         self.misuse_count = 0;
@@ -120,6 +138,9 @@ impl DrawPerfStats {
         };
         if let Some(ms) = self.end_span(SpanKind::Input, span_id) {
             Self::push_window(&mut self.input_ms_window, ms, self.window_size);
+        }
+        if points_ingested > 0 {
+            self.last_input_micros = Some(self.now_micros());
         }
         self.record_points(points_ingested);
     }
@@ -164,9 +185,27 @@ impl DrawPerfStats {
         if !self.enabled {
             return;
         }
+        let now = self.now_micros();
         self.dirty_pixels_last = dirty_pixels;
         Self::push_window(&mut self.frame_ms_window, frame_ms, self.window_size);
+        if let Some(last_input) = self.last_input_micros {
+            let latency_ms = (now.saturating_sub(last_input)) as f64 / 1000.0;
+            Self::push_window(
+                &mut self.input_to_present_ms_window,
+                latency_ms,
+                self.window_size,
+            );
+        }
+        self.present_window.push_back(now);
         self.prune_points_window();
+        self.prune_present_window();
+    }
+
+    pub fn mark_coalesced_moves(&mut self, count: u64) {
+        if !self.enabled {
+            return;
+        }
+        self.coalesced_moves_total = self.coalesced_moves_total.saturating_add(count);
     }
 
     pub fn snapshot(&self) -> DrawPerfSnapshot {
@@ -183,6 +222,9 @@ impl DrawPerfStats {
             input_ingest_ms: avg(&self.input_ms_window),
             invalidate_to_paint_ms: avg(&self.invalidate_ms_window),
             points_per_second: self.points_per_second(),
+            effective_present_hz: self.effective_present_hz(),
+            input_to_present_ms: avg(&self.input_to_present_ms_window),
+            coalesced_moves: self.coalesced_moves_total,
             dirty_pixels: self.dirty_pixels_last,
             estimated_pixels_touched: self.pixels_touched_last,
             misuse_count: self.misuse_count,
@@ -245,6 +287,20 @@ impl DrawPerfStats {
                 break;
             }
             let _ = self.points_window.pop_front();
+        }
+    }
+
+    fn effective_present_hz(&self) -> f64 {
+        self.present_window.len() as f64
+    }
+
+    fn prune_present_window(&mut self) {
+        let now = self.now_micros();
+        while let Some(stamp) = self.present_window.front().copied() {
+            if now.saturating_sub(stamp) <= 1_000_000 {
+                break;
+            }
+            let _ = self.present_window.pop_front();
         }
     }
 
@@ -362,6 +418,20 @@ mod tests {
         stats.mark_paint_completed();
         let snap = stats.snapshot();
         assert_eq!(snap.misuse_count, 3);
+    }
+
+    #[test]
+    fn move_to_present_latency_and_present_rate_are_tracked() {
+        let mut stats = DrawPerfStats::new(true, 16);
+        let span = stats.begin_input_ingestion();
+        std::thread::sleep(Duration::from_millis(1));
+        stats.end_input_ingestion(span, 2);
+        stats.mark_coalesced_moves(3);
+        stats.finish_frame(4.0, 50);
+        let snap = stats.snapshot();
+        assert!(snap.input_to_present_ms >= 0.0);
+        assert!(snap.effective_present_hz >= 1.0);
+        assert_eq!(snap.coalesced_moves, 3);
     }
 
     #[test]
