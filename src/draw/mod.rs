@@ -8,6 +8,7 @@ pub mod messages;
 pub mod model;
 pub mod monitor;
 pub mod overlay;
+pub mod perf;
 pub mod render;
 pub mod save;
 pub mod service;

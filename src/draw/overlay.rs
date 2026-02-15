@@ -9,6 +9,7 @@ use crate::draw::messages::{
 };
 use crate::draw::model::{Color, ObjectStyle, StrokeStyle, Tool};
 use crate::draw::monitor;
+use crate::draw::perf::{draw_perf_runtime_enabled, DrawPerfSnapshot, DrawPerfStats};
 use crate::draw::render::{
     BackgroundClearMode, DirtyRect, LayeredRenderer, RenderFrameBuffer, RenderSettings,
 };
@@ -82,6 +83,7 @@ struct OverlayThreadState {
     debug_hud_toggle_hotkey: Hotkey,
     quick_colors: Vec<DrawColor>,
     diagnostics: OverlayDiagnostics,
+    perf_stats: DrawPerfStats,
 }
 
 impl OverlayThreadState {
@@ -101,6 +103,10 @@ impl OverlayThreadState {
             ),
             quick_colors: settings.quick_colors.clone(),
             diagnostics: OverlayDiagnostics::default(),
+            perf_stats: DrawPerfStats::new(
+                draw_perf_runtime_enabled(settings.draw_perf_debug),
+                120,
+            ),
         }
     }
 
@@ -112,6 +118,8 @@ impl OverlayThreadState {
         self.debug_hud_toggle_hotkey =
             parse_debug_hud_hotkey_with_fallback(&settings.debug_hud_toggle_hotkey);
         self.quick_colors = settings.quick_colors.clone();
+        self.perf_stats
+            .set_enabled(draw_perf_runtime_enabled(settings.draw_perf_debug));
     }
 
     fn apply_pointer_event(&mut self, event: OverlayPointerEvent) {
@@ -318,10 +326,16 @@ fn rerender_and_repaint(
     dirty: Option<DirtyRect>,
     force_full_redraw: bool,
 ) {
+    let frame_start = Instant::now();
     let window_size = window.bitmap_size();
+    let dirty_pixels = dirty
+        .and_then(|rect| rect.clamp(window_size.0, window_size.1))
+        .map(|rect| (rect.width.max(0) as u64).saturating_mul(rect.height.max(0) as u64))
+        .unwrap_or_else(|| window_size.0 as u64 * window_size.1 as u64);
     let requires_full_overlay =
         overlay_state.toolbar_state.visible || overlay_state.debug_hud_visible;
 
+    let raster_span = overlay_state.perf_stats.begin_raster();
     if !requires_full_overlay {
         let active_object = draw_input.active_object();
         layered_renderer.render_to_window(
@@ -334,59 +348,60 @@ fn rerender_and_repaint(
             force_full_redraw,
             draw_input.committed_revision(),
         );
-        overlay_state.diagnostics.paint_count += 1;
-        window.request_paint();
-        return;
-    }
-
-    let canvas = draw_input.committed_canvas();
-    let mut canvas = canvas;
-    if let Some(active) = draw_input.active_object() {
-        canvas.objects.push(active);
-    }
-
-    framebuffer.render(
-        &canvas,
-        live_render_settings(settings),
-        window_size,
-        if requires_full_overlay { None } else { dirty },
-        force_full_redraw || requires_full_overlay,
-    );
-
-    let mut rgba = if requires_full_overlay {
-        framebuffer_clone_rgba(framebuffer)
     } else {
-        Vec::new()
-    };
-    if overlay_state.toolbar_state.visible {
-        draw_compact_toolbar_panel(
-            &mut rgba,
-            window.bitmap_size(),
-            draw_input,
-            &overlay_state.quick_colors,
-            &overlay_state.toolbar_state,
+        let canvas = draw_input.committed_canvas();
+        let mut canvas = canvas;
+        if let Some(active) = draw_input.active_object() {
+            canvas.objects.push(active);
+        }
+
+        framebuffer.render(
+            &canvas,
+            live_render_settings(settings),
+            window_size,
+            None,
+            force_full_redraw || requires_full_overlay,
         );
-    }
-    if overlay_state.debug_hud_visible {
-        draw_debug_hud_panel(
-            &mut rgba,
-            window.bitmap_size(),
-            draw_input,
-            &overlay_state.diagnostics,
-        );
-    }
-    if requires_full_overlay {
+
+        let mut rgba = framebuffer_clone_rgba(framebuffer);
+        if overlay_state.toolbar_state.visible {
+            draw_compact_toolbar_panel(
+                &mut rgba,
+                window.bitmap_size(),
+                draw_input,
+                &overlay_state.quick_colors,
+                &overlay_state.toolbar_state,
+            );
+        }
+        if overlay_state.debug_hud_visible {
+            let perf_snapshot = overlay_state.perf_stats.snapshot();
+            draw_debug_hud_panel(
+                &mut rgba,
+                window.bitmap_size(),
+                draw_input,
+                &overlay_state.diagnostics,
+                perf_snapshot,
+            );
+        }
         window.with_bitmap_mut(|dib, width, height| {
             if width == 0 || height == 0 || dib.len() != rgba.len() {
                 return;
             }
             crate::draw::render::convert_rgba_to_dib_bgra(&rgba, dib);
         });
-    } else {
-        framebuffer.copy_to_window(window);
     }
+    overlay_state
+        .perf_stats
+        .end_raster(raster_span, dirty_pixels.max(1));
+
     overlay_state.diagnostics.paint_count += 1;
+    overlay_state.perf_stats.mark_invalidate_requested();
     window.request_paint();
+    overlay_state.perf_stats.mark_paint_completed();
+    overlay_state.perf_stats.finish_frame(
+        frame_start.elapsed().as_secs_f64() * 1000.0,
+        dirty_pixels.max(1),
+    );
 }
 
 fn framebuffer_clone_rgba(framebuffer: &RenderFrameBuffer) -> Vec<u8> {
@@ -738,14 +753,15 @@ fn draw_debug_hud_panel(
     size: (u32, u32),
     draw_input: &DrawInputState,
     diagnostics: &OverlayDiagnostics,
+    perf: DrawPerfSnapshot,
 ) {
     let (width, height) = size;
-    if width < 240 || height < 140 {
+    if width < 280 || height < 180 {
         return;
     }
 
-    let panel_w = 300;
-    let panel_h = 112;
+    let panel_w = 360;
+    let panel_h = 148;
     let panel_x = width as i32 - panel_w - 16;
     let panel_y = 16;
     fill_rect(
@@ -775,11 +791,16 @@ fn draw_debug_hud_panel(
             diagnostics.pointer_up_count
         ),
         format!(
-            "KEY {} U {} R {} P {}",
-            diagnostics.key_event_count,
-            diagnostics.undo_count,
-            diagnostics.redo_count,
-            diagnostics.paint_count
+            "avg_ms {:.2} worst_ms {:.2} p95_ms {:.2}",
+            perf.avg_ms, perf.worst_ms, perf.p95_ms
+        ),
+        format!(
+            "pps {:.0} dirty_pixels {} inv_to_paint {:.2}ms",
+            perf.points_per_second, perf.dirty_pixels, perf.invalidate_to_paint_ms
+        ),
+        format!(
+            "raster {:.2}ms touched {}",
+            perf.raster_ms, perf.estimated_pixels_touched
         ),
     ];
 
@@ -980,6 +1001,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
 
                 for pointer_event in coalesce_pointer_events(window.drain_pointer_events()) {
                     had_work = true;
+                    let input_span = overlay_state.perf_stats.begin_input_ingestion();
                     let local_point = global_to_local(
                         pointer_event.global_point,
                         (window.monitor_rect().x, window.monitor_rect().y),
@@ -1003,7 +1025,10 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                     };
                     if handled {
                         overlay_state.apply_pointer_event(pointer_event.event);
+                        overlay_state.perf_stats.end_input_ingestion(input_span, 1);
                         needs_redraw = true;
+                    } else {
+                        overlay_state.perf_stats.end_input_ingestion(input_span, 0);
                     }
                 }
 
@@ -1056,6 +1081,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                         tracing::warn!(?err, "failed to activate draw keyboard hook");
                     }
                     window.show();
+                    overlay_state.perf_stats.reset();
                     needs_redraw = true;
                     forced_full_redraw = true;
                 }
