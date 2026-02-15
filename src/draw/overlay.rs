@@ -2735,15 +2735,15 @@ mod tests {
         };
 
         assert_eq!(
-            sample(layout.undo_rect, 1, 1),
-            sample(layout.save_rect, 1, 1)
+            sample(layout.save_rect, 1, 1),
+            sample(layout.exit_rect, 1, 1)
         );
 
-        let bg = sample(layout.undo_rect, 1, 1);
+        let bg = sample(layout.save_rect, 1, 1);
         let mut found_icon_pixel = false;
-        for y in 0..layout.undo_rect.h {
-            for x in 0..layout.undo_rect.w {
-                if sample(layout.undo_rect, x, y) != bg {
+        for y in 0..layout.save_rect.h {
+            for x in 0..layout.save_rect.w {
+                if sample(layout.save_rect, x, y) != bg {
                     found_icon_pixel = true;
                     break;
                 }
@@ -2754,10 +2754,10 @@ mod tests {
         }
         assert!(
             found_icon_pixel,
-            "expected undo icon pixels to alter button interior"
+            "expected save icon pixels to alter button interior"
         );
 
-        state.toolbar_state.hovered_target = Some(ToolbarHitTarget::Undo);
+        state.toolbar_state.hovered_target = Some(ToolbarHitTarget::Save);
         let mut hovered = vec![0; 800 * 600 * 4];
         super::draw_compact_toolbar_panel(
             &mut hovered,
@@ -2766,8 +2766,8 @@ mod tests {
             &state.quick_colors,
             &state.toolbar_state,
         );
-        let hovered_idx = (((layout.undo_rect.y + 1) as usize * 800
-            + (layout.undo_rect.x + 1) as usize)
+        let hovered_idx = (((layout.save_rect.y + 1) as usize * 800
+            + (layout.save_rect.x + 1) as usize)
             * 4) as usize;
         assert_ne!(
             &hovered[hovered_idx..hovered_idx + 3],
