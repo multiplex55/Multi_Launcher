@@ -111,6 +111,23 @@ pub fn render_draw_settings_form(
             .changed();
     });
 
+    ui.horizontal(|ui| {
+        ui.label("Render target Hz");
+        changed |= ui
+            .add(egui::DragValue::new(&mut settings.render_target_hz).clamp_range(30..=240))
+            .changed();
+        ui.label("Fallback Hz");
+        changed |= ui
+            .add(egui::DragValue::new(&mut settings.render_fallback_hz).clamp_range(30..=120))
+            .changed();
+    });
+    changed |= ui
+        .checkbox(
+            &mut settings.drop_intermediate_move_points_on_lag,
+            "Drop intermediate move points when render falls behind",
+        )
+        .changed();
+
     changed |= ui
         .checkbox(
             &mut settings.offer_save_without_desktop,

@@ -21,6 +21,7 @@ use crate::draw::settings::{
 use crate::draw::toolbar::{self, ToolbarCommand, ToolbarPointerEvent, ToolbarState};
 use crate::hotkey::{parse_hotkey, Hotkey, Key};
 use anyhow::{anyhow, Result};
+use std::collections::VecDeque;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -72,6 +73,11 @@ pub struct OverlayDiagnostics {
     pub undo_count: u64,
     pub redo_count: u64,
     pub paint_count: u64,
+    pub queue_depth: usize,
+    pub dropped_events: u64,
+    pub coalesced_events: u64,
+    pub frame_misses: u64,
+    pub tick_budget_overruns: u64,
     pub last_input_event_summary: String,
 }
 
@@ -82,6 +88,7 @@ struct OverlayThreadState {
     debug_hud_visible: bool,
     debug_hud_toggle_hotkey: Hotkey,
     quick_colors: Vec<DrawColor>,
+    tick_interval: Duration,
     diagnostics: OverlayDiagnostics,
     perf_stats: DrawPerfStats,
 }
@@ -102,6 +109,7 @@ impl OverlayThreadState {
                 &settings.debug_hud_toggle_hotkey,
             ),
             quick_colors: settings.quick_colors.clone(),
+            tick_interval: settings.tick_interval(),
             diagnostics: OverlayDiagnostics::default(),
             perf_stats: DrawPerfStats::new(
                 draw_perf_runtime_enabled(settings.draw_perf_debug),
@@ -118,6 +126,7 @@ impl OverlayThreadState {
         self.debug_hud_toggle_hotkey =
             parse_debug_hud_hotkey_with_fallback(&settings.debug_hud_toggle_hotkey);
         self.quick_colors = settings.quick_colors.clone();
+        self.tick_interval = settings.tick_interval();
         self.perf_stats
             .set_enabled(draw_perf_runtime_enabled(settings.draw_perf_debug));
     }
@@ -137,6 +146,13 @@ impl OverlayThreadState {
                 self.diagnostics.last_input_event_summary = "pointer_up".to_string();
             }
         }
+    }
+
+    fn apply_queue_metrics(&mut self, depth: usize, dropped: u64, coalesced: u64) {
+        self.diagnostics.queue_depth = depth;
+        self.diagnostics.dropped_events = self.diagnostics.dropped_events.saturating_add(dropped);
+        self.diagnostics.coalesced_events =
+            self.diagnostics.coalesced_events.saturating_add(coalesced);
     }
 
     fn apply_key_dispatch(&mut self, command: Option<InputCommand>) {
@@ -414,11 +430,40 @@ fn framebuffer_clone_rgba(framebuffer: &RenderFrameBuffer) -> Vec<u8> {
     framebuffer.rgba_pixels().to_vec()
 }
 
-fn coalesce_pointer_events(events: Vec<OverlayPointerSample>) -> Vec<OverlayPointerSample> {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OverlayInputDrain {
+    pub queue_depth: usize,
+    pub dropped_events: u64,
+    pub coalesced_events: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayPointerSample {
+    pub global_point: (i32, i32),
+    pub event: OverlayPointerEvent,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PointerDrainBatch {
+    pub events: Vec<OverlayPointerSample>,
+    pub diagnostics: OverlayInputDrain,
+}
+
+#[derive(Debug, Clone)]
+struct CoalesceOutcome {
+    events: Vec<OverlayPointerSample>,
+    coalesced_count: u64,
+}
+
+fn coalesce_pointer_events(events: Vec<OverlayPointerSample>) -> CoalesceOutcome {
     let mut coalesced = Vec::with_capacity(events.len());
     let mut pending_move: Option<OverlayPointerSample> = None;
+    let mut coalesced_count = 0_u64;
     for event in events {
         if matches!(event.event, OverlayPointerEvent::Move) {
+            if pending_move.is_some() {
+                coalesced_count = coalesced_count.saturating_add(1);
+            }
             pending_move = Some(event);
             continue;
         }
@@ -430,13 +475,10 @@ fn coalesce_pointer_events(events: Vec<OverlayPointerSample>) -> Vec<OverlayPoin
     if let Some(move_event) = pending_move {
         coalesced.push(move_event);
     }
-    coalesced
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OverlayPointerSample {
-    pub global_point: (i32, i32),
-    pub event: OverlayPointerEvent,
+    CoalesceOutcome {
+        events: coalesced,
+        coalesced_count,
+    }
 }
 
 fn apply_toolbar_command(
@@ -767,7 +809,7 @@ fn draw_debug_hud_panel(
     }
 
     let panel_w = 360;
-    let panel_h = 148;
+    let panel_h = 168;
     let panel_x = width as i32 - panel_w - 16;
     let panel_y = 16;
     fill_rect(
@@ -807,6 +849,13 @@ fn draw_debug_hud_panel(
         format!(
             "raster {:.2}ms touched {}",
             perf.raster_ms, perf.estimated_pixels_touched
+        ),
+        format!(
+            "q {} drop {} coal {} miss {}",
+            diagnostics.queue_depth,
+            diagnostics.dropped_events,
+            diagnostics.coalesced_events,
+            diagnostics.frame_misses
         ),
     ];
 
@@ -970,8 +1019,8 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
             let mut framebuffer = RenderFrameBuffer::default();
             let mut layered_renderer = LayeredRenderer::default();
             let mut last_reported_revision = draw_input.committed_revision();
-            let frame_interval = Duration::from_micros(8_333);
             let mut next_frame = Instant::now();
+            let mut consecutive_tick_misses = 0_u32;
             let mut needs_redraw = true;
             let mut forced_full_redraw = true;
 
@@ -1005,7 +1054,18 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                     }
                 }
 
-                for pointer_event in coalesce_pointer_events(window.drain_pointer_events()) {
+                let drained_pointer_events = window.drain_pointer_events();
+                let coalesced = coalesce_pointer_events(drained_pointer_events.events);
+                overlay_state.apply_queue_metrics(
+                    drained_pointer_events.diagnostics.queue_depth,
+                    drained_pointer_events.diagnostics.dropped_events,
+                    drained_pointer_events
+                        .diagnostics
+                        .coalesced_events
+                        .saturating_add(coalesced.coalesced_count),
+                );
+
+                for pointer_event in coalesced.events {
                     had_work = true;
                     let input_span = overlay_state.perf_stats.begin_input_ingestion();
                     let local_point = global_to_local(
@@ -1100,6 +1160,14 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
 
                 let now = Instant::now();
                 if needs_redraw && now >= next_frame {
+                    if now > next_frame + overlay_state.tick_interval {
+                        consecutive_tick_misses = consecutive_tick_misses.saturating_add(1);
+                        overlay_state.diagnostics.frame_misses =
+                            overlay_state.diagnostics.frame_misses.saturating_add(1);
+                    } else {
+                        consecutive_tick_misses = 0;
+                    }
+                    let tick_start = Instant::now();
                     let dirty = draw_input.take_dirty_rect();
                     forced_full_redraw |= draw_input.take_full_redraw_request();
                     rerender_and_repaint(
@@ -1115,14 +1183,32 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                     needs_redraw = false;
                     forced_full_redraw = false;
                     while next_frame <= now {
-                        next_frame += frame_interval;
+                        next_frame += overlay_state.tick_interval;
+                    }
+                    if active_settings.drop_intermediate_move_points_on_lag
+                        && consecutive_tick_misses >= 3
+                    {
+                        overlay_state.diagnostics.last_input_event_summary =
+                            "lag_drop_intermediate_moves".to_string();
+                    }
+                    if cfg!(debug_assertions) && tick_start.elapsed() > overlay_state.tick_interval
+                    {
+                        overlay_state.diagnostics.tick_budget_overruns = overlay_state
+                            .diagnostics
+                            .tick_budget_overruns
+                            .saturating_add(1);
+                        tracing::warn!(
+                            elapsed_ms = tick_start.elapsed().as_secs_f64() * 1000.0,
+                            budget_ms = overlay_state.tick_interval.as_secs_f64() * 1000.0,
+                            "draw overlay tick budget exceeded"
+                        );
                     }
                 }
 
                 if !had_work {
                     let now = Instant::now();
                     if now < next_frame {
-                        let sleep_for = (next_frame - now).min(Duration::from_millis(2));
+                        let sleep_for = (next_frame - now).min(Duration::from_millis(1));
                         thread::sleep(sleep_for);
                     } else {
                         thread::yield_now();
@@ -1289,15 +1375,14 @@ pub fn command_requests_repaint(command: Option<InputCommand>) -> bool {
 }
 #[cfg(windows)]
 mod platform {
-    use super::{global_to_local, OverlayPointerEvent, OverlayPointerSample};
+    use super::{global_to_local, OverlayInputDrain, OverlayPointerEvent, OverlayPointerSample};
     use crate::draw::service::MonitorRect;
     use once_cell::sync::Lazy;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::mem;
     use std::ptr;
-    use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-    use std::sync::Mutex;
     use std::sync::Once;
+    use std::sync::{Arc, Mutex};
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
         BOOL, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
@@ -1319,10 +1404,67 @@ mod platform {
         WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
 
-    static POINTER_SENDERS: Lazy<Mutex<HashMap<isize, Sender<OverlayPointerSample>>>> =
+    static POINTER_QUEUES: Lazy<Mutex<HashMap<isize, Arc<Mutex<PointerEventQueue>>>>> =
         Lazy::new(|| Mutex::new(HashMap::new()));
     static WINDOW_ORIGINS: Lazy<Mutex<HashMap<isize, (i32, i32)>>> =
         Lazy::new(|| Mutex::new(HashMap::new()));
+
+    const POINTER_QUEUE_CAPACITY: usize = 2048;
+
+    #[derive(Debug, Default)]
+    struct PointerEventQueue {
+        events: VecDeque<OverlayPointerSample>,
+        dropped_events: u64,
+        coalesced_events: u64,
+    }
+
+    impl PointerEventQueue {
+        fn enqueue(&mut self, event: OverlayPointerSample) {
+            if matches!(event.event, OverlayPointerEvent::Move)
+                && matches!(
+                    self.events.back().map(|sample| sample.event),
+                    Some(OverlayPointerEvent::Move)
+                )
+            {
+                let _ = self.events.pop_back();
+                self.events.push_back(event);
+                self.coalesced_events = self.coalesced_events.saturating_add(1);
+                return;
+            }
+
+            if self.events.len() >= POINTER_QUEUE_CAPACITY {
+                self.dropped_events = self.dropped_events.saturating_add(1);
+                if matches!(event.event, OverlayPointerEvent::Move) {
+                    if let Some(last) = self.events.back_mut() {
+                        if matches!(last.event, OverlayPointerEvent::Move) {
+                            *last = event;
+                            self.coalesced_events = self.coalesced_events.saturating_add(1);
+                            return;
+                        }
+                    }
+                }
+                return;
+            }
+
+            self.events.push_back(event);
+        }
+
+        fn drain(&mut self) -> (Vec<OverlayPointerSample>, OverlayInputDrain) {
+            let queued = self.events.len();
+            let mut drained = Vec::with_capacity(queued);
+            while let Some(event) = self.events.pop_front() {
+                drained.push(event);
+            }
+            (
+                drained,
+                OverlayInputDrain {
+                    queue_depth: queued,
+                    dropped_events: std::mem::take(&mut self.dropped_events),
+                    coalesced_events: std::mem::take(&mut self.coalesced_events),
+                },
+            )
+        }
+    }
 
     fn hwnd_key(hwnd: HWND) -> isize {
         hwnd.0 as isize
@@ -1450,10 +1592,9 @@ mod platform {
 
                 let local_x = (lparam.0 & 0xffff) as i16 as i32;
                 let local_y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
-                if let (Ok(origins), Ok(senders)) = (WINDOW_ORIGINS.lock(), POINTER_SENDERS.lock())
-                {
+                if let (Ok(origins), Ok(queues)) = (WINDOW_ORIGINS.lock(), POINTER_QUEUES.lock()) {
                     if let (Some(origin), Some(tx)) =
-                        (origins.get(&hwnd_key(hwnd)), senders.get(&hwnd_key(hwnd)))
+                        (origins.get(&hwnd_key(hwnd)), queues.get(&hwnd_key(hwnd)))
                     {
                         let event = match msg {
                             WM_LBUTTONDOWN => OverlayPointerEvent::LeftDown {
@@ -1463,10 +1604,12 @@ mod platform {
                             WM_LBUTTONUP => OverlayPointerEvent::LeftUp,
                             _ => unreachable!(),
                         };
-                        let _ = tx.send(OverlayPointerSample {
-                            global_point: (origin.0 + local_x, origin.1 + local_y),
-                            event,
-                        });
+                        if let Ok(mut queue) = tx.lock() {
+                            queue.enqueue(OverlayPointerSample {
+                                global_point: (origin.0 + local_x, origin.1 + local_y),
+                                event,
+                            });
+                        }
                     }
                 }
                 LRESULT(0)
@@ -1485,7 +1628,7 @@ mod platform {
         size_bytes: usize,
         monitor_rect: MonitorRect,
         origin: (i32, i32),
-        pointer_rx: Receiver<OverlayPointerSample>,
+        pointer_queue: Arc<Mutex<PointerEventQueue>>,
     }
 
     unsafe impl Send for OverlayWindow {}
@@ -1583,9 +1726,9 @@ mod platform {
                 let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, mem_dc.0 as isize);
             }
 
-            let (pointer_tx, pointer_rx) = channel::<OverlayPointerSample>();
-            if let Ok(mut senders) = POINTER_SENDERS.lock() {
-                senders.insert(hwnd_key(hwnd), pointer_tx);
+            let pointer_queue = Arc::new(Mutex::new(PointerEventQueue::default()));
+            if let Ok(mut senders) = POINTER_QUEUES.lock() {
+                senders.insert(hwnd_key(hwnd), Arc::clone(&pointer_queue));
             }
             if let Ok(mut origins) = WINDOW_ORIGINS.lock() {
                 origins.insert(hwnd_key(hwnd), (monitor_rect.x, monitor_rect.y));
@@ -1604,19 +1747,19 @@ mod platform {
                 size_bytes,
                 monitor_rect,
                 origin: (monitor_rect.x, monitor_rect.y),
-                pointer_rx,
+                pointer_queue,
             })
         }
 
-        pub fn drain_pointer_events(&self) -> Vec<OverlayPointerSample> {
-            let mut events = Vec::new();
-            loop {
-                match self.pointer_rx.try_recv() {
-                    Ok(event) => events.push(event),
-                    Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-                }
+        pub fn drain_pointer_events(&self) -> super::PointerDrainBatch {
+            if let Ok(mut queue) = self.pointer_queue.lock() {
+                let (events, diagnostics) = queue.drain();
+                return super::PointerDrainBatch {
+                    events,
+                    diagnostics,
+                };
             }
-            events
+            super::PointerDrainBatch::default()
         }
 
         pub fn monitor_rect(&self) -> MonitorRect {
@@ -1723,7 +1866,7 @@ mod platform {
                     self.mem_dc = HDC::default();
                 }
                 if !self.hwnd.0.is_null() {
-                    if let Ok(mut senders) = POINTER_SENDERS.lock() {
+                    if let Ok(mut senders) = POINTER_QUEUES.lock() {
                         senders.remove(&hwnd_key(self.hwnd));
                     }
                     if let Ok(mut origins) = WINDOW_ORIGINS.lock() {
@@ -1803,8 +1946,8 @@ impl OverlayWindow {
         (0, 0)
     }
 
-    pub fn drain_pointer_events(&self) -> Vec<OverlayPointerSample> {
-        Vec::new()
+    pub fn drain_pointer_events(&self) -> PointerDrainBatch {
+        PointerDrainBatch::default()
     }
 
     pub fn with_bitmap_mut<F>(&mut self, mut f: F)
@@ -2365,10 +2508,11 @@ mod tests {
         ];
 
         let coalesced = coalesce_pointer_events(events);
-        assert_eq!(coalesced.len(), 3);
-        assert_eq!(coalesced[1].event, OverlayPointerEvent::Move);
-        assert_eq!(coalesced[1].global_point, (18, 10));
-        assert_eq!(coalesced[2].event, OverlayPointerEvent::LeftUp);
+        assert_eq!(coalesced.events.len(), 3);
+        assert_eq!(coalesced.events[1].event, OverlayPointerEvent::Move);
+        assert_eq!(coalesced.events[1].global_point, (18, 10));
+        assert_eq!(coalesced.events[2].event, OverlayPointerEvent::LeftUp);
+        assert_eq!(coalesced.coalesced_count, 2);
     }
 
     #[test]

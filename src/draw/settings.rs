@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use crate::hotkey::Hotkey;
 
@@ -101,6 +102,12 @@ pub struct DrawSettings {
     pub debug_hud_toggle_hotkey: String,
     #[serde(default)]
     pub draw_perf_debug: bool,
+    #[serde(default = "default_render_target_hz")]
+    pub render_target_hz: u32,
+    #[serde(default = "default_render_fallback_hz")]
+    pub render_fallback_hz: u32,
+    #[serde(default = "default_drop_intermediate_move_points_on_lag")]
+    pub drop_intermediate_move_points_on_lag: bool,
     #[serde(default = "default_quick_colors")]
     pub quick_colors: Vec<DrawColor>,
     #[serde(default = "default_last_tool")]
@@ -148,6 +155,12 @@ struct DrawSettingsDe {
     debug_hud_toggle_hotkey: String,
     #[serde(default)]
     draw_perf_debug: bool,
+    #[serde(default = "default_render_target_hz")]
+    render_target_hz: u32,
+    #[serde(default = "default_render_fallback_hz")]
+    render_fallback_hz: u32,
+    #[serde(default = "default_drop_intermediate_move_points_on_lag")]
+    drop_intermediate_move_points_on_lag: bool,
     #[serde(default = "default_quick_colors")]
     quick_colors: Vec<DrawColor>,
     #[serde(default = "default_last_tool")]
@@ -212,6 +225,9 @@ impl<'de> Deserialize<'de> for DrawSettings {
             debug_hud_enabled: decoded.debug_hud_enabled,
             debug_hud_toggle_hotkey: decoded.debug_hud_toggle_hotkey,
             draw_perf_debug: decoded.draw_perf_debug,
+            render_target_hz: decoded.render_target_hz,
+            render_fallback_hz: decoded.render_fallback_hz,
+            drop_intermediate_move_points_on_lag: decoded.drop_intermediate_move_points_on_lag,
             quick_colors: decoded.quick_colors,
             last_tool: decoded.last_tool,
             last_color: decoded.last_color,
@@ -263,6 +279,18 @@ pub fn default_debug_hud_toggle_hotkey_value() -> String {
 
 fn default_last_tool() -> DrawTool {
     DrawTool::Pen
+}
+
+fn default_render_target_hz() -> u32 {
+    120
+}
+
+fn default_render_fallback_hz() -> u32 {
+    60
+}
+
+fn default_drop_intermediate_move_points_on_lag() -> bool {
+    true
 }
 
 fn default_last_color() -> DrawColor {
@@ -330,6 +358,9 @@ impl Default for DrawSettings {
             debug_hud_enabled: false,
             debug_hud_toggle_hotkey: default_debug_hud_toggle_hotkey(),
             draw_perf_debug: false,
+            render_target_hz: default_render_target_hz(),
+            render_fallback_hz: default_render_fallback_hz(),
+            drop_intermediate_move_points_on_lag: default_drop_intermediate_move_points_on_lag(),
             quick_colors: default_quick_colors(),
             last_tool: default_last_tool(),
             last_color: default_last_color(),
@@ -347,6 +378,21 @@ impl Default for DrawSettings {
 }
 
 impl DrawSettings {
+    pub fn resolved_render_hz(&self) -> u32 {
+        let target = self.render_target_hz.min(240);
+        let fallback = self.render_fallback_hz.max(1).min(240);
+        if target == 0 {
+            fallback
+        } else {
+            target.max(1)
+        }
+    }
+
+    pub fn tick_interval(&self) -> Duration {
+        let hz = self.resolved_render_hz().max(1);
+        Duration::from_secs_f64(1.0 / hz as f64)
+    }
+
     pub fn parse_toolbar_toggle_hotkey(&self) -> Result<Hotkey, String> {
         crate::hotkey::parse_hotkey(&self.toolbar_toggle_hotkey)
             .ok_or_else(|| "Invalid hotkey format (example: Ctrl+Shift+D).".to_string())
@@ -410,6 +456,9 @@ mod tests {
         assert_eq!(settings.toolbar_toggle_hotkey, "Ctrl+Shift+D");
         assert!(!settings.debug_hud_enabled);
         assert_eq!(settings.debug_hud_toggle_hotkey, "Ctrl+Shift+H");
+        assert_eq!(settings.render_target_hz, 120);
+        assert_eq!(settings.render_fallback_hz, 60);
+        assert!(settings.drop_intermediate_move_points_on_lag);
         assert!(settings.offer_save_without_desktop);
         assert_eq!(
             settings.fixed_save_folder_display,
