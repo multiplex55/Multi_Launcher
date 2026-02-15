@@ -21,7 +21,6 @@ use crate::draw::settings::{
 use crate::draw::toolbar::{self, ToolbarCommand, ToolbarPointerEvent, ToolbarState};
 use crate::hotkey::{parse_hotkey, Hotkey, Key};
 use anyhow::{anyhow, Result};
-use std::collections::VecDeque;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -2243,11 +2242,11 @@ mod tests {
     use crate::draw::messages::{ExitReason, OverlayCommand, OverlayToMain, SaveResult};
     use crate::draw::{
         input::DrawInputState,
-        model::{CanvasModel, Color, ObjectStyle, Tool},
+        model::{CanvasModel, Color, ObjectStyle, StrokeStyle, Tool},
         render::{BackgroundClearMode, LayeredRenderer, RenderFrameBuffer},
         service::MonitorRect,
         settings::{CanvasBackgroundMode, DrawColor, DrawSettings},
-        toolbar::ToolbarCommand,
+        toolbar::{ToolbarCommand, ToolbarHitTarget},
     };
 
     fn draw_state(tool: Tool) -> DrawInputState {
@@ -2758,7 +2757,7 @@ mod tests {
             "expected undo icon pixels to alter button interior"
         );
 
-        state.toolbar_state.hovered_target = Some(toolbar::ToolbarHitTarget::Undo);
+        state.toolbar_state.hovered_target = Some(ToolbarHitTarget::Undo);
         let mut hovered = vec![0; 800 * 600 * 4];
         super::draw_compact_toolbar_panel(
             &mut hovered,
