@@ -1323,6 +1323,7 @@ mod tests {
         monitor_local_point_for_global, parse_debug_hud_hotkey_with_fallback,
         parse_toolbar_hotkey_with_fallback, rerender_and_repaint, select_monitor_for_point,
         send_exit_after_cleanup, ExitDialogState, OverlayPointerEvent, OverlayThreadState,
+        OverlayWindow,
     };
     use crate::draw::keyboard_hook::{KeyCode, KeyEvent, KeyModifiers};
     use crate::draw::messages::{ExitReason, OverlayToMain, SaveResult};
@@ -1652,10 +1653,12 @@ mod tests {
 
         assert!(toggled);
         assert!(state.debug_hud_visible);
-        assert_eq!(
-            state.debug_hud_toggle_hotkey,
-            parse_debug_hud_hotkey_with_fallback("Ctrl+Shift+H")
-        );
+        let expected = parse_debug_hud_hotkey_with_fallback("Ctrl+Shift+H");
+        assert_eq!(state.debug_hud_toggle_hotkey.key, expected.key);
+        assert_eq!(state.debug_hud_toggle_hotkey.ctrl, expected.ctrl);
+        assert_eq!(state.debug_hud_toggle_hotkey.shift, expected.shift);
+        assert_eq!(state.debug_hud_toggle_hotkey.alt, expected.alt);
+        assert_eq!(state.debug_hud_toggle_hotkey.win, expected.win);
     }
 
     #[test]
