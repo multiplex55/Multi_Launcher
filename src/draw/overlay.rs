@@ -396,7 +396,13 @@ fn rerender_and_repaint(
 
     overlay_state.diagnostics.paint_count += 1;
     overlay_state.perf_stats.mark_invalidate_requested();
-    window.request_paint();
+    if requires_full_overlay || force_full_redraw {
+        window.request_paint();
+    } else if let Some(rect) = dirty.and_then(|d| d.clamp(window_size.0, window_size.1)) {
+        window.request_paint_rect(rect);
+    } else {
+        window.request_paint();
+    }
     overlay_state.perf_stats.mark_paint_completed();
     overlay_state.perf_stats.finish_frame(
         frame_start.elapsed().as_secs_f64() * 1000.0,
@@ -1676,6 +1682,10 @@ mod platform {
             self.present();
         }
 
+        pub fn request_paint_rect(&self, _rect: crate::draw::render::DirtyRect) {
+            self.present();
+        }
+
         pub fn bitmap_size(&self) -> (u32, u32) {
             (
                 self.monitor_rect.width as u32,
@@ -1786,6 +1796,8 @@ impl OverlayWindow {
     pub fn show(&self) {}
 
     pub fn request_paint(&self) {}
+
+    pub fn request_paint_rect(&self, _rect: crate::draw::render::DirtyRect) {}
 
     pub fn bitmap_size(&self) -> (u32, u32) {
         (0, 0)

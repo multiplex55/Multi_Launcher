@@ -1,7 +1,7 @@
 use crate::draw::history::DrawHistory;
 use crate::draw::keyboard_hook::{map_key_event_to_command, KeyCommand, KeyEvent};
 use crate::draw::messages::ExitReason;
-use crate::draw::model::{DrawObject, Geometry, ObjectStyle, Tool};
+use crate::draw::model::{CanvasModel, DrawObject, Geometry, ObjectStyle, Tool};
 use crate::draw::render::DirtyRect;
 use crate::draw::runtime;
 
@@ -25,7 +25,11 @@ pub struct DrawInputState {
     tool: Tool,
     style: ObjectStyle,
     active_geometry: Option<Geometry>,
+    preview_origin: Option<(i32, i32)>,
+    previous_preview_bounds: Option<DirtyRect>,
     history: DrawHistory,
+    committed_buffer: CanvasModel,
+    preview_buffer: Option<DrawObject>,
     committed_revision: u64,
     dirty_rect: Option<DirtyRect>,
     full_redraw_requested: bool,
@@ -37,7 +41,11 @@ impl DrawInputState {
             tool,
             style,
             active_geometry: None,
+            preview_origin: None,
+            previous_preview_bounds: None,
             history: DrawHistory::default(),
+            committed_buffer: CanvasModel::default(),
+            preview_buffer: None,
             committed_revision: 0,
             dirty_rect: None,
             full_redraw_requested: true,
@@ -91,15 +99,11 @@ impl DrawInputState {
     }
 
     pub fn committed_canvas(&self) -> crate::draw::model::CanvasModel {
-        self.history.canvas()
+        self.committed_buffer.clone()
     }
 
     pub fn active_object(&self) -> Option<DrawObject> {
-        self.active_geometry.as_ref().map(|geometry| DrawObject {
-            tool: self.tool,
-            style: self.style,
-            geometry: geometry.clone(),
-        })
+        self.preview_buffer.clone()
     }
 
     pub fn handle_left_down(
@@ -132,6 +136,39 @@ impl DrawInputState {
             },
         });
 
+        self.preview_origin = None;
+        self.previous_preview_bounds = None;
+        self.preview_buffer = None;
+
+        if matches!(self.tool, Tool::Line | Tool::Rect | Tool::Ellipse) {
+            self.preview_origin = Some(point);
+            let geometry = match self.tool {
+                Tool::Line => Geometry::Line {
+                    start: point,
+                    end: point,
+                },
+                Tool::Rect => Geometry::Rect {
+                    start: point,
+                    end: point,
+                },
+                Tool::Ellipse => Geometry::Ellipse {
+                    start: point,
+                    end: point,
+                },
+                Tool::Pen | Tool::Eraser => unreachable!("shape tools only"),
+            };
+            self.preview_buffer = Some(DrawObject {
+                tool: self.tool,
+                style: self.style,
+                geometry,
+            });
+            self.previous_preview_bounds = Some(DirtyRect::from_points(
+                point,
+                point,
+                (self.style.stroke.width.max(1) as i32) + 2,
+            ));
+        }
+
         self.mark_dirty(DirtyRect::from_points(
             point,
             point,
@@ -156,11 +193,34 @@ impl DrawInputState {
             Some(Geometry::Line { start, end })
             | Some(Geometry::Rect { start, end })
             | Some(Geometry::Ellipse { start, end }) => {
-                let previous = *end;
-                let before = DirtyRect::from_points(*start, previous, pad);
+                let origin = self.preview_origin.unwrap_or(*start);
+                let previous = self
+                    .previous_preview_bounds
+                    .unwrap_or_else(|| DirtyRect::from_points(origin, *end, pad));
                 *end = point;
-                let after = DirtyRect::from_points(*start, point, pad);
-                dirty = Some(before.union(after));
+                let after = DirtyRect::from_points(origin, point, pad);
+                self.previous_preview_bounds = Some(after);
+                let geometry = match self.tool {
+                    Tool::Line => Geometry::Line {
+                        start: origin,
+                        end: point,
+                    },
+                    Tool::Rect => Geometry::Rect {
+                        start: origin,
+                        end: point,
+                    },
+                    Tool::Ellipse => Geometry::Ellipse {
+                        start: origin,
+                        end: point,
+                    },
+                    Tool::Pen | Tool::Eraser => unreachable!("shape preview tools only"),
+                };
+                self.preview_buffer = Some(DrawObject {
+                    tool: self.tool,
+                    style: self.style,
+                    geometry,
+                });
+                dirty = Some(previous.union(after));
             }
             None => {}
         }
@@ -180,6 +240,10 @@ impl DrawInputState {
                 style: self.style,
                 geometry,
             });
+            self.committed_buffer = self.history.canvas();
+            self.preview_buffer = None;
+            self.preview_origin = None;
+            self.previous_preview_bounds = None;
             self.committed_revision = self.committed_revision.saturating_add(1);
         }
     }
@@ -188,6 +252,7 @@ impl DrawInputState {
         match map_key_event_to_command(true, event, None) {
             Some(KeyCommand::Undo) => {
                 if self.history.undo().is_some() {
+                    self.committed_buffer = self.history.canvas();
                     self.request_full_redraw();
                     self.committed_revision = self.committed_revision.saturating_add(1);
                 }
@@ -195,6 +260,7 @@ impl DrawInputState {
             }
             Some(KeyCommand::Redo) => {
                 if self.history.redo().is_some() {
+                    self.committed_buffer = self.history.canvas();
                     self.request_full_redraw();
                     self.committed_revision = self.committed_revision.saturating_add(1);
                 }
@@ -495,6 +561,38 @@ mod tests {
         }
         rt.reset_for_test();
     }
+
+    #[test]
+    fn pen_incremental_moves_only_mark_segment_dirty_without_full_redraw() {
+        let mut state = draw_state(Tool::Pen);
+        assert!(state.take_full_redraw_request());
+
+        let _ = state.handle_left_down((10, 10), PointerModifiers::default());
+        let _ = state.take_dirty_rect();
+
+        state.handle_move((20, 20));
+        let dirty = state.take_dirty_rect().expect("segment dirty rect");
+        assert!(dirty.width > 0 && dirty.height > 0);
+        assert!(!state.take_full_redraw_request());
+    }
+
+    #[test]
+    fn shape_preview_move_unions_previous_and_new_preview_bounds() {
+        let mut state = draw_state(Tool::Rect);
+        let _ = state.handle_left_down((4, 4), PointerModifiers::default());
+        let _ = state.take_dirty_rect();
+
+        state.handle_move((10, 10));
+        let first = state.take_dirty_rect().expect("first preview dirty");
+        state.handle_move((20, 20));
+        let second = state.take_dirty_rect().expect("second preview dirty");
+
+        assert!(second.x <= first.x);
+        assert!(second.y <= first.y);
+        assert!(second.width >= first.width);
+        assert!(second.height >= first.height);
+    }
+
     #[test]
     fn cancel_gestures_route_request_exit_via_same_runtime_path() {
         let mut state = draw_state(Tool::Pen);
