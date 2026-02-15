@@ -523,12 +523,8 @@ mod tests {
         state.handle_move((1, 0));
         state.handle_left_up((2, 0));
 
-        let object = state
-            .history()
-            .canvas()
-            .objects
-            .first()
-            .expect("single committed object");
+        let canvas = state.history().canvas();
+        let object = canvas.objects.first().expect("single committed object");
         match &object.geometry {
             Geometry::Pen { points } => {
                 assert_eq!(points, &vec![(0, 0), (1, 0), (2, 0)]);
@@ -546,12 +542,8 @@ mod tests {
         }
         state.handle_left_up((240, 24));
 
-        let object = state
-            .history()
-            .canvas()
-            .objects
-            .first()
-            .expect("single committed object");
+        let canvas = state.history().canvas();
+        let object = canvas.objects.first().expect("single committed object");
         match &object.geometry {
             Geometry::Pen { points } => {
                 assert_eq!(points.len(), 7);
