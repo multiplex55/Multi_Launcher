@@ -391,8 +391,8 @@ fn rerender_and_repaint(
     let perf_snapshot = overlay_state.perf_stats.snapshot();
     layered_renderer.render_to_window_with_overlay(
         window,
-        &draw_input.committed_canvas(),
-        active_object.as_ref(),
+        draw_input.committed_canvas(),
+        active_object,
         live_render_settings(settings),
         window_size,
         dirty,
