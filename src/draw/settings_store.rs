@@ -23,6 +23,11 @@ pub fn load(legacy_settings_path: &str) -> Result<DrawSettings> {
     load_from_path(&draw_settings_path, legacy_settings_path)
 }
 
+pub fn load_dedicated() -> Result<Option<DrawSettings>> {
+    let draw_settings_path = resolve_settings_path()?;
+    load_dedicated_from_path(&draw_settings_path)
+}
+
 pub fn save(settings: &DrawSettings) -> Result<PathBuf> {
     let draw_settings_path = resolve_settings_path()?;
     save_to_path(&draw_settings_path, settings)?;
@@ -30,21 +35,7 @@ pub fn save(settings: &DrawSettings) -> Result<PathBuf> {
 }
 
 fn load_from_path(draw_settings_path: &Path, legacy_settings_path: &str) -> Result<DrawSettings> {
-    if draw_settings_path.exists() {
-        let content = std::fs::read_to_string(draw_settings_path)
-            .with_context(|| format!("read draw settings file {}", draw_settings_path.display()))?;
-
-        if content.trim().is_empty() {
-            return Ok(DrawSettings::default());
-        }
-
-        let mut loaded: DrawSettings = serde_json::from_str(&content).with_context(|| {
-            format!(
-                "deserialize draw settings file {}",
-                draw_settings_path.display()
-            )
-        })?;
-        loaded.sanitize_for_first_pass_transparency();
+    if let Some(loaded) = load_dedicated_from_path(draw_settings_path)? {
         return Ok(loaded);
     }
 
@@ -59,6 +50,28 @@ fn load_from_path(draw_settings_path: &Path, legacy_settings_path: &str) -> Resu
         .context("deserialize legacy draw plugin settings payload")?;
     loaded.sanitize_for_first_pass_transparency();
     Ok(loaded)
+}
+
+fn load_dedicated_from_path(draw_settings_path: &Path) -> Result<Option<DrawSettings>> {
+    if !draw_settings_path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(draw_settings_path)
+        .with_context(|| format!("read draw settings file {}", draw_settings_path.display()))?;
+
+    if content.trim().is_empty() {
+        return Ok(Some(DrawSettings::default()));
+    }
+
+    let mut loaded: DrawSettings = serde_json::from_str(&content).with_context(|| {
+        format!(
+            "deserialize draw settings file {}",
+            draw_settings_path.display()
+        )
+    })?;
+    loaded.sanitize_for_first_pass_transparency();
+    Ok(Some(loaded))
 }
 
 fn save_to_path(draw_settings_path: &Path, settings: &DrawSettings) -> Result<()> {
@@ -78,7 +91,8 @@ fn save_to_path(draw_settings_path: &Path, settings: &DrawSettings) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::{
-        load_from_path, save_to_path, settings_path_from_exe_path, DRAW_SETTINGS_FILE_NAME,
+        load_dedicated_from_path, load_from_path, save_to_path, settings_path_from_exe_path,
+        DRAW_SETTINGS_FILE_NAME,
     };
     use crate::draw::settings::{DrawColor, DrawSettings};
     use std::path::Path;
@@ -91,6 +105,15 @@ mod tests {
             path,
             Path::new("/tmp/myapp/bin").join(DRAW_SETTINGS_FILE_NAME)
         );
+    }
+
+    #[test]
+    fn dedicated_load_returns_none_when_file_is_missing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let draw_settings_path = dir.path().join(DRAW_SETTINGS_FILE_NAME);
+
+        let loaded = load_dedicated_from_path(&draw_settings_path).expect("load dedicated");
+        assert_eq!(loaded, None);
     }
 
     #[test]

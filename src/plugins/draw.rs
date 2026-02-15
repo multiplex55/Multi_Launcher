@@ -14,7 +14,10 @@ pub struct DrawPlugin {
 
 impl Default for DrawPlugin {
     fn default() -> Self {
-        let mut settings = settings_store::load("settings.json").unwrap_or_default();
+        let mut settings = settings_store::load_dedicated()
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         settings.sanitize_for_first_pass_transparency();
         runtime().apply_settings(settings.clone());
         Self { settings }
@@ -96,10 +99,11 @@ impl Plugin for DrawPlugin {
     }
 
     fn apply_settings(&mut self, value: &serde_json::Value) {
-        let mut settings = match settings_store::load("settings.json") {
-            Ok(settings) => settings,
-            Err(_) => serde_json::from_value::<DrawSettings>(value.clone()).unwrap_or_default(),
-        };
+        let mut settings = settings_store::load_dedicated()
+            .ok()
+            .flatten()
+            .or_else(|| serde_json::from_value::<DrawSettings>(value.clone()).ok())
+            .unwrap_or_default();
         settings.sanitize_for_first_pass_transparency();
         self.settings = settings.clone();
         runtime().apply_settings(settings);
