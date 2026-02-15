@@ -5771,11 +5771,12 @@ mod tests {
 
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
-        let draw_command = DrawPlugin::default()
-            .commands()
-            .into_iter()
-            .find(|command| command.label == "draw")
-            .expect("draw command");
+        let draw_command = Action {
+            label: "draw".into(),
+            desc: "Draw".into(),
+            action: "draw:enter".into(),
+            args: None,
+        };
 
         crate::draw::set_runtime_spawn_hook(Some(Box::new(|_| {
             let (main_to_overlay_tx, _main_to_overlay_rx) = std::sync::mpsc::channel();
@@ -5811,11 +5812,12 @@ mod tests {
         let _lock = TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
-        let draw_command = DrawPlugin::default()
-            .commands()
-            .into_iter()
-            .find(|command| command.label == "draw")
-            .expect("draw command");
+        let draw_command = Action {
+            label: "draw".into(),
+            desc: "Draw".into(),
+            action: "draw:enter".into(),
+            args: None,
+        };
         let called = Arc::new(AtomicBool::new(false));
         let called_clone = Arc::clone(&called);
         crate::draw::set_runtime_spawn_hook(Some(Box::new(move |_| {
@@ -5842,11 +5844,12 @@ mod tests {
         let _lock = TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
-        let draw_command = DrawPlugin::default()
-            .commands()
-            .into_iter()
-            .find(|command| command.label == "draw")
-            .expect("draw command");
+        let draw_command = Action {
+            label: "draw".into(),
+            desc: "Draw".into(),
+            action: "draw:enter".into(),
+            args: None,
+        };
         crate::draw::set_runtime_spawn_hook(Some(Box::new(|_| anyhow::bail!("draw failed"))));
 
         app.activate_action(draw_command, None, ActivationSource::Enter);
