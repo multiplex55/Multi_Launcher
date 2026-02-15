@@ -9,7 +9,7 @@ use image::RgbaImage;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const DRAW_EXPORT_SUBDIR: &str = "draw_exports";
+pub const DRAW_EXPORT_SUBDIR: &str = "draw_images";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveChoice {
@@ -201,6 +201,11 @@ mod tests {
     use chrono::{Local, TimeZone};
     use image::io::Reader as ImageReader;
     use std::path::Path;
+
+    #[test]
+    fn export_folder_name_matches_draw_images_contract() {
+        assert_eq!(DRAW_EXPORT_SUBDIR, "draw_images");
+    }
 
     #[test]
     fn exe_relative_output_folder_is_sibling_of_exe() {
