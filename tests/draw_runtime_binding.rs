@@ -19,8 +19,14 @@ fn draw_runtime_is_service_backed() {
 #[test]
 fn draw_module_entrypoint_is_directory_mod_rs() {
     let lib_rs = include_str!("../src/lib.rs");
+    let canonical_wiring_present = lib_rs
+        .lines()
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|pair| pair == ["#[path = \"draw/mod.rs\"]", "pub mod draw;"]);
     assert!(
-        lib_rs.contains("#[path = \"draw/mod.rs\"]\npub mod draw;"),
+        canonical_wiring_present,
         "src/lib.rs must keep draw wired through #[path = \"draw/mod.rs\"] pub mod draw;",
     );
     assert!(
