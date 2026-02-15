@@ -377,7 +377,9 @@ pub fn render_incremental_segment_update(
     let dirty = segment_dirty_bounds(start, end, style.stroke.width.max(1)).clamp(width, height)?;
     let color = if matches!(tool, Tool::Eraser) {
         match clear_mode {
-            BackgroundClearMode::Transparent => Color::rgba(0, 0, 0, 0),
+            BackgroundClearMode::Transparent => {
+                crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY
+            }
             BackgroundClearMode::Solid(color) => color,
         }
     } else {
@@ -443,7 +445,7 @@ pub fn render_shape_preview_update(
 
 fn clear_rgba_pixels(pixels: &mut [u8], mode: BackgroundClearMode) {
     let clear = match mode {
-        BackgroundClearMode::Transparent => Color::rgba(0, 0, 0, 0),
+        BackgroundClearMode::Transparent => crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY,
         BackgroundClearMode::Solid(color) => color,
     };
     for px in pixels.chunks_exact_mut(4) {
@@ -462,7 +464,9 @@ fn render_draw_object_rgba(
 ) {
     let color = match object.geometry {
         Geometry::Eraser { .. } => match clear_mode {
-            BackgroundClearMode::Transparent => Color::rgba(0, 0, 0, 0),
+            BackgroundClearMode::Transparent => {
+                crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY
+            }
             BackgroundClearMode::Solid(color) => color,
         },
         _ => object.style.stroke.color,
@@ -958,7 +962,7 @@ fn clear_rect_rgba(
     mode: BackgroundClearMode,
 ) {
     let clear = match mode {
-        BackgroundClearMode::Transparent => Color::rgba(0, 0, 0, 0),
+        BackgroundClearMode::Transparent => crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY,
         BackgroundClearMode::Solid(color) => color,
     };
 
@@ -1041,7 +1045,7 @@ mod tests {
         let pixels = render_canvas_to_rgba(&canvas, super::RenderSettings::default(), (64, 64));
         pixels
             .chunks_exact(4)
-            .filter(|px| px[0] != 0 || px[1] != 0 || px[2] != 0 || px[3] != 0)
+            .filter(|px| *px != [255, 0, 255, 255])
             .count()
     }
 
@@ -1083,7 +1087,7 @@ mod tests {
             },
             (2, 1),
         );
-        assert_eq!(transparent, vec![0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(transparent, vec![255, 0, 255, 255, 255, 0, 255, 255]);
 
         let solid = render_canvas_to_rgba(
             &CanvasModel::default(),
@@ -1108,7 +1112,7 @@ mod tests {
         };
 
         let pixels = render_canvas_to_rgba(&canvas, super::RenderSettings::default(), (16, 16));
-        assert!(pixels.chunks_exact(4).any(|px| px[3] != 0));
+        assert!(pixels.chunks_exact(4).any(|px| px != [255, 0, 255, 255]));
     }
 
     #[test]
@@ -1262,7 +1266,7 @@ mod tests {
 
         let pixels = render_canvas_to_rgba(&canvas, super::RenderSettings::default(), (3, 3));
         let white = [255, 255, 255, 255];
-        let transparent = [0, 0, 0, 0];
+        let transparent = [255, 0, 255, 255];
         let expected = vec![
             white[0],
             white[1],
@@ -1415,7 +1419,7 @@ mod tests {
         assert!(framebuffer
             .rgba_pixels()
             .chunks_exact(4)
-            .all(|px| px == [0, 0, 0, 0]));
+            .all(|px| px == [255, 0, 255, 255]));
     }
 
     #[test]

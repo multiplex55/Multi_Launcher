@@ -15,8 +15,8 @@ use crate::draw::render::{
 };
 use crate::draw::service::MonitorRect;
 use crate::draw::settings::{
-    default_debug_hud_toggle_hotkey_value, default_toolbar_toggle_hotkey_value, DrawColor,
-    DrawSettings, DrawTool, LiveBackgroundMode,
+    default_debug_hud_toggle_hotkey_value, default_toolbar_toggle_hotkey_value,
+    CanvasBackgroundMode, DrawColor, DrawSettings, DrawTool,
 };
 use crate::draw::toolbar::{self, ToolbarCommand, ToolbarPointerEvent, ToolbarState};
 use crate::hotkey::{parse_hotkey, Hotkey, Key};
@@ -322,9 +322,12 @@ fn map_overlay_command_to_toolbar(command: OverlayCommand) -> Option<ToolbarComm
 }
 
 fn live_render_settings(settings: &DrawSettings) -> RenderSettings {
-    let clear_mode = match settings.live_background_mode {
-        LiveBackgroundMode::Transparent => BackgroundClearMode::Transparent,
-        LiveBackgroundMode::Blank { color } => {
+    let clear_mode = match settings.canvas_background_mode {
+        CanvasBackgroundMode::Transparent => BackgroundClearMode::Transparent,
+        CanvasBackgroundMode::Solid => {
+            let color = settings
+                .canvas_solid_background_color
+                .resolve_first_pass_colorkey_collision();
             BackgroundClearMode::Solid(Color::rgba(color.r, color.g, color.b, 255))
         }
     };
@@ -489,6 +492,9 @@ fn apply_toolbar_command(
     overlay_state: &mut OverlayThreadState,
     command: ToolbarCommand,
 ) {
+    #[cfg(debug_assertions)]
+    let full_redraw_count_before = draw_input.full_redraw_request_count();
+
     match command {
         ToolbarCommand::SelectTool(tool) => draw_input.set_tool(tool),
         ToolbarCommand::SetStrokeWidth(width) => {
@@ -571,6 +577,24 @@ fn apply_toolbar_command(
             overlay_state
                 .toolbar_state
                 .apply_command(ToolbarCommand::ToggleVisibility);
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        let full_redraw_count_after = draw_input.full_redraw_request_count();
+        if matches!(
+            command,
+            ToolbarCommand::SelectTool(_)
+                | ToolbarCommand::SetStrokeWidth(_)
+                | ToolbarCommand::SetColor(_)
+                | ToolbarCommand::SetFillEnabled(_)
+                | ToolbarCommand::SetFillColor(_)
+        ) {
+            debug_assert_eq!(
+                full_redraw_count_before, full_redraw_count_after,
+                "tool/color hotkey transition unexpectedly requested full redraw"
+            );
         }
     }
 }
@@ -1104,6 +1128,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                 let mut queued_commands = Vec::new();
                 controller.pump_runtime_messages(
                     || {
+                        let previous = active_settings.clone();
                         active_settings = crate::draw::runtime().settings_snapshot();
                         overlay_state.update_from_settings(&active_settings);
                         keyboard_hook
@@ -1117,7 +1142,11 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                             fill: None,
                         });
                         needs_redraw = true;
-                        forced_full_redraw = true;
+                        if live_render_settings(&previous).clear_mode
+                            != live_render_settings(&active_settings).clear_mode
+                        {
+                            forced_full_redraw = true;
+                        }
                         let _ = controller_tx.send(OverlayToMain::SaveProgress {
                             canvas: draw_input.history().canvas(),
                         });
@@ -1128,10 +1157,12 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                 );
                 for command in queued_commands {
                     if let Some(mapped) = map_overlay_command_to_toolbar(command) {
+                        let should_force_full_redraw =
+                            matches!(mapped, ToolbarCommand::Undo | ToolbarCommand::Redo);
                         apply_toolbar_command(&mut draw_input, &mut overlay_state, mapped);
+                        forced_full_redraw |= should_force_full_redraw;
                     }
                     needs_redraw = true;
-                    forced_full_redraw = true;
                 }
 
                 if draw_input.committed_revision() != last_reported_revision {
@@ -1983,7 +2014,7 @@ mod tests {
         model::{CanvasModel, Color, ObjectStyle, Tool},
         render::{BackgroundClearMode, LayeredRenderer, RenderFrameBuffer},
         service::MonitorRect,
-        settings::{DrawColor, DrawSettings, LiveBackgroundMode},
+        settings::{CanvasBackgroundMode, DrawColor, DrawSettings},
         toolbar::ToolbarCommand,
     };
 
@@ -2346,6 +2377,48 @@ mod tests {
     }
 
     #[test]
+    fn toolbar_tool_and_color_commands_do_not_request_full_redraw() {
+        let mut state = OverlayThreadState::from_settings(&DrawSettings::default());
+        let mut input = draw_state(Tool::Pen);
+        assert!(input.take_full_redraw_request());
+
+        let baseline = input.full_redraw_request_count();
+        apply_toolbar_command(
+            &mut input,
+            &mut state,
+            ToolbarCommand::SelectTool(Tool::Ellipse),
+        );
+        apply_toolbar_command(
+            &mut input,
+            &mut state,
+            ToolbarCommand::SetColor(Color::rgba(10, 20, 30, 255)),
+        );
+
+        assert_eq!(input.full_redraw_request_count(), baseline);
+        assert!(!input.take_full_redraw_request());
+    }
+
+    #[test]
+    fn toolbar_undo_redo_commands_request_full_redraw() {
+        let mut state = OverlayThreadState::from_settings(&DrawSettings::default());
+        let mut input = draw_state(Tool::Pen);
+        assert!(input.take_full_redraw_request());
+
+        let _ = input.handle_left_down((0, 0), Default::default());
+        input.handle_left_up((10, 10));
+
+        let baseline = input.full_redraw_request_count();
+        apply_toolbar_command(&mut input, &mut state, ToolbarCommand::Undo);
+        assert!(input.take_full_redraw_request());
+        assert!(input.full_redraw_request_count() > baseline);
+
+        let after_undo = input.full_redraw_request_count();
+        apply_toolbar_command(&mut input, &mut state, ToolbarCommand::Redo);
+        assert!(input.take_full_redraw_request());
+        assert!(input.full_redraw_request_count() > after_undo);
+    }
+
+    #[test]
     fn update_settings_refreshes_quick_colors_and_selection_uses_new_palette() {
         let mut state = OverlayThreadState::from_settings(&DrawSettings::default());
         let mut input = draw_state(Tool::Pen);
@@ -2552,22 +2625,21 @@ mod tests {
     #[test]
     fn live_render_clear_transparent_vs_blank() {
         let mut settings = DrawSettings::default();
-        settings.live_background_mode = LiveBackgroundMode::Transparent;
+        settings.canvas_background_mode = CanvasBackgroundMode::Transparent;
 
         let transparent = crate::draw::render::render_canvas_to_rgba(
             &CanvasModel::default(),
             live_render_settings(&settings),
             (1, 1),
         );
-        assert_eq!(transparent, vec![0, 0, 0, 0]);
+        assert_eq!(transparent, vec![255, 0, 255, 255]);
         assert_eq!(
             live_render_settings(&settings).clear_mode,
             BackgroundClearMode::Transparent
         );
 
-        settings.live_background_mode = LiveBackgroundMode::Blank {
-            color: DrawColor::rgba(12, 34, 56, 10),
-        };
+        settings.canvas_background_mode = CanvasBackgroundMode::Solid;
+        settings.canvas_solid_background_color = DrawColor::rgba(12, 34, 56, 10);
         let solid = crate::draw::render::render_canvas_to_rgba(
             &CanvasModel::default(),
             live_render_settings(&settings),
@@ -2578,6 +2650,12 @@ mod tests {
         assert_eq!(
             live_render_settings(&settings).clear_mode,
             BackgroundClearMode::Solid(crate::draw::model::Color::rgba(12, 34, 56, 255))
+        );
+
+        settings.canvas_solid_background_color = DrawColor::rgba(255, 0, 255, 3);
+        assert_eq!(
+            live_render_settings(&settings).clear_mode,
+            BackgroundClearMode::Solid(crate::draw::model::Color::rgba(254, 0, 255, 255))
         );
     }
 }

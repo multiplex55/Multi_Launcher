@@ -197,7 +197,7 @@ mod tests {
     };
     use crate::draw::composite::{Rgba, RgbaBuffer};
     use crate::draw::messages::ExitReason;
-    use crate::draw::settings::{DrawColor, DrawSettings, LiveBackgroundMode};
+    use crate::draw::settings::{CanvasBackgroundMode, DrawColor, DrawSettings};
     use chrono::{Local, TimeZone};
     use image::io::Reader as ImageReader;
     use std::path::Path;
@@ -353,9 +353,8 @@ mod tests {
         let desktop_bg = RgbaBuffer::from_pixels(1, 1, vec![9, 99, 199, 255]);
 
         let mut settings = DrawSettings::default();
-        settings.live_background_mode = LiveBackgroundMode::Blank {
-            color: DrawColor::rgba(1, 2, 3, 255),
-        };
+        settings.canvas_background_mode = CanvasBackgroundMode::Solid;
+        settings.canvas_solid_background_color = DrawColor::rgba(1, 2, 3, 255);
         settings.export_blank_background_color = DrawColor::rgba(200, 100, 50, 255);
 
         compose_and_persist_saves(
@@ -384,7 +383,7 @@ mod tests {
         let annotation = RgbaBuffer::from_pixels(1, 1, vec![0, 0, 0, 0]);
 
         let mut settings = DrawSettings::default();
-        settings.live_background_mode = LiveBackgroundMode::Transparent;
+        settings.canvas_background_mode = CanvasBackgroundMode::Transparent;
         settings.export_blank_background_color = DrawColor::rgba(44, 55, 66, 255);
 
         compose_and_persist_saves(

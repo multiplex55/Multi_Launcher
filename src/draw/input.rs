@@ -33,6 +33,7 @@ pub struct DrawInputState {
     committed_revision: u64,
     dirty_rect: Option<DirtyRect>,
     full_redraw_requested: bool,
+    full_redraw_request_count: u64,
 }
 
 impl DrawInputState {
@@ -49,6 +50,7 @@ impl DrawInputState {
             committed_revision: 0,
             dirty_rect: None,
             full_redraw_requested: true,
+            full_redraw_request_count: 1,
         }
     }
 
@@ -70,12 +72,10 @@ impl DrawInputState {
 
     pub fn set_tool(&mut self, tool: Tool) {
         self.tool = tool;
-        self.request_full_redraw();
     }
 
     pub fn set_style(&mut self, style: ObjectStyle) {
         self.style = style;
-        self.request_full_redraw();
     }
 
     pub fn take_dirty_rect(&mut self) -> Option<DirtyRect> {
@@ -95,7 +95,12 @@ impl DrawInputState {
 
     fn request_full_redraw(&mut self) {
         self.full_redraw_requested = true;
+        self.full_redraw_request_count = self.full_redraw_request_count.saturating_add(1);
         self.dirty_rect = None;
+    }
+
+    pub fn full_redraw_request_count(&self) -> u64 {
+        self.full_redraw_request_count
     }
 
     pub fn committed_canvas(&self) -> crate::draw::model::CanvasModel {
@@ -639,6 +644,51 @@ mod tests {
                 ExitReason::UserRequest,
             ]
         );
+    }
+
+    #[test]
+    fn tool_and_style_changes_do_not_request_full_redraw() {
+        let mut state = draw_state(Tool::Pen);
+        assert!(state.take_full_redraw_request());
+        let baseline = state.full_redraw_request_count();
+
+        state.set_tool(Tool::Rect);
+        let mut style = state.current_style();
+        style.stroke.color = crate::draw::model::Color::rgba(9, 8, 7, 255);
+        state.set_style(style);
+
+        assert_eq!(state.full_redraw_request_count(), baseline);
+        assert!(!state.take_full_redraw_request());
+    }
+
+    #[test]
+    fn undo_redo_are_the_only_hotkey_paths_requesting_full_redraw() {
+        let mut state = draw_state(Tool::Line);
+        assert!(state.take_full_redraw_request());
+
+        let _ = state.handle_left_down((0, 0), PointerModifiers::default());
+        state.handle_left_up((10, 10));
+        let baseline = state.full_redraw_request_count();
+
+        let _ = state.handle_key_event(KeyEvent {
+            key: KeyCode::U,
+            modifiers: KeyModifiers::default(),
+        });
+        assert!(state.take_full_redraw_request());
+        assert!(state.full_redraw_request_count() > baseline);
+
+        let after_undo = state.full_redraw_request_count();
+        let _ = state.handle_key_event(KeyEvent {
+            key: KeyCode::KeyR,
+            modifiers: KeyModifiers {
+                ctrl: true,
+                shift: false,
+                alt: false,
+                win: false,
+            },
+        });
+        assert!(state.take_full_redraw_request());
+        assert!(state.full_redraw_request_count() > after_undo);
     }
 
     #[test]
