@@ -1456,6 +1456,13 @@ impl LauncherApp {
         app.update_command_cache();
         app.search();
         crate::plugins::mouse_gestures::sync_enabled_plugins(app.enabled_plugins.as_ref());
+
+        #[cfg(not(test))]
+        {
+            crate::draw::set_runtime_start_hook(Some(Box::new(|| Ok(()))));
+            crate::draw::set_runtime_restore_hook(Some(Box::new(|| Ok(()))));
+        }
+
         app
     }
 

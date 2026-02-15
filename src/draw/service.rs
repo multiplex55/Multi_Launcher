@@ -95,6 +95,7 @@ type Hook = Box<dyn Fn() -> Result<()> + Send + Sync>;
 type LauncherRestoreHook = Box<dyn Fn(Option<String>) -> Result<()> + Send + Sync>;
 type SpawnHook = Box<dyn Fn(&EntryContext) -> Result<OverlayStartupHandshake> + Send + Sync>;
 static DRAW_SPAWN_HOOK: Lazy<Mutex<Option<SpawnHook>>> = Lazy::new(|| Mutex::new(None));
+static DRAW_START_HOOK: Lazy<Mutex<Option<Hook>>> = Lazy::new(|| Mutex::new(None));
 static DRAW_RESTORE_HOOK: Lazy<Mutex<Option<Hook>>> = Lazy::new(|| Mutex::new(None));
 static DRAW_LAUNCHER_RESTORE_HOOK: Lazy<Mutex<Option<LauncherRestoreHook>>> =
     Lazy::new(|| Mutex::new(None));
@@ -118,6 +119,12 @@ pub fn set_runtime_spawn_hook(hook: Option<SpawnHook>) {
 
 pub fn set_runtime_restore_hook(hook: Option<Hook>) {
     if let Ok(mut guard) = DRAW_RESTORE_HOOK.lock() {
+        *guard = hook;
+    }
+}
+
+pub fn set_runtime_start_hook(hook: Option<Hook>) {
+    if let Ok(mut guard) = DRAW_START_HOOK.lock() {
         *guard = hook;
     }
 }
@@ -183,6 +190,11 @@ impl DrawRuntime {
                 return Err(err);
             }
         };
+
+        if let Err(err) = self.call_hook(&DRAW_START_HOOK) {
+            let _ = self.restore_pipeline(ExitReason::StartFailure, "draw start hook failure");
+            return Err(err);
+        }
 
         let mut state = self
             .state
@@ -399,6 +411,9 @@ impl DrawRuntime {
                             tracing::error!(error = %error, "draw overlay save error");
                             save_error = Some(error);
                         }
+                        Ok(OverlayToMain::LifecycleEvent(event)) => {
+                            tracing::debug!(?event, "draw overlay lifecycle event");
+                        }
                         Err(std::sync::mpsc::TryRecvError::Empty) => break,
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                             terminal_reason = Some(ExitReason::OverlayFailure);
@@ -589,7 +604,7 @@ impl DrawRuntime {
 mod tests {
     use super::{
         runtime, set_runtime_launcher_restore_hook, set_runtime_restore_hook,
-        set_runtime_spawn_hook, DrawRuntime, EntryContext, StartOutcome,
+        set_runtime_spawn_hook, set_runtime_start_hook, DrawRuntime, EntryContext, StartOutcome,
     };
     use crate::draw::messages::{ExitReason, MainToOverlay, OverlayToMain, SaveResult};
     use crate::draw::settings::DrawSettings;
@@ -605,6 +620,7 @@ mod tests {
 
     fn reset_runtime(rt: &DrawRuntime) {
         set_runtime_spawn_hook(None);
+        set_runtime_start_hook(None);
         set_runtime_restore_hook(None);
         set_runtime_launcher_restore_hook(None);
         rt.reset_for_test();
@@ -625,6 +641,43 @@ mod tests {
         assert_eq!(rt.lifecycle(), DrawLifecycle::Active);
         assert!(rt.startup_handles_present_for_test());
         rt.reset_for_test();
+    }
+
+    #[test]
+    fn draw_runtime_start_calls_start_hook_in_production_path() {
+        let rt = runtime();
+        reset_runtime(rt);
+        let called = Arc::new(AtomicBool::new(false));
+        let called_clone = Arc::clone(&called);
+        set_runtime_start_hook(Some(Box::new(move || {
+            called_clone.store(true, Ordering::SeqCst);
+            Ok(())
+        })));
+
+        rt.start().expect("start should succeed");
+        assert!(called.load(Ordering::SeqCst));
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn draw_runtime_restore_hook_runs_when_exit_requested() {
+        let rt = runtime();
+        reset_runtime(rt);
+        let restored = Arc::new(AtomicBool::new(false));
+        let restored_clone = Arc::clone(&restored);
+        set_runtime_restore_hook(Some(Box::new(move || {
+            restored_clone.store(true, Ordering::SeqCst);
+            Ok(())
+        })));
+
+        rt.start().expect("start should succeed");
+        rt.request_exit(ExitReason::UserRequest)
+            .expect("request exit should succeed");
+        rt.notify_overlay_exit(ExitReason::UserRequest)
+            .expect("restore should execute");
+
+        assert!(restored.load(Ordering::SeqCst));
+        reset_runtime(rt);
     }
 
     #[test]
@@ -1087,6 +1140,23 @@ mod tests {
 
         assert_eq!(restore_count.load(Ordering::SeqCst), 2);
         assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
+        reset_runtime(rt);
+    }
+
+    #[test]
+    fn draw_lifecycle_exit_restores_idle_and_mouse_gesture_state() {
+        let rt = runtime();
+        reset_runtime(rt);
+        restore_draw_prior_effective_state(true);
+
+        rt.start().expect("start should succeed");
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Active);
+
+        rt.notify_overlay_exit(ExitReason::OverlayFailure)
+            .expect("overlay failure restore should succeed");
+
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
+        assert!(draw_effective_enabled());
         reset_runtime(rt);
     }
 

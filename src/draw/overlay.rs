@@ -1,3 +1,4 @@
+use crate::draw::controller::OverlayController;
 use crate::draw::input::{
     bridge_key_event_to_runtime, bridge_left_down_to_runtime, bridge_left_up_to_runtime,
     bridge_mouse_move_to_runtime, DrawInputState, InputCommand, PointerModifiers,
@@ -803,15 +804,16 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
     let overlay_thread_handle = thread::Builder::new()
         .name("draw-overlay".to_string())
         .spawn(move || {
-            let mut exit_reason: Option<ExitReason> = None;
+            let controller_tx = overlay_to_main_tx.clone();
+            let mut controller = OverlayController::new(main_to_overlay_rx, overlay_to_main_tx);
             let mut did_start = false;
             let mut window = match OverlayWindow::create_for_monitor(monitor_rect) {
                 Some(window) => window,
                 None => {
-                    let _ = overlay_to_main_tx.send(OverlayToMain::SaveError {
+                    let _ = controller_tx.send(OverlayToMain::SaveError {
                         error: "unable to initialize draw overlay window".to_string(),
                     });
-                    let _ = overlay_to_main_tx.send(OverlayToMain::Exited {
+                    let _ = controller_tx.send(OverlayToMain::Exited {
                         reason: ExitReason::StartFailure,
                         save_result: SaveResult::Skipped,
                     });
@@ -897,47 +899,38 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                     }
                 }
 
-                loop {
-                    match main_to_overlay_rx.try_recv() {
-                        Ok(MainToOverlay::Start) => {
-                            had_work = true;
-                            did_start = true;
-                            if let Err(err) = keyboard_hook.activate() {
-                                tracing::warn!(?err, "failed to activate draw keyboard hook");
-                            }
-                            window.show();
-                            needs_redraw = true;
-                            forced_full_redraw = true;
-                        }
-                        Ok(MainToOverlay::UpdateSettings) => {
-                            had_work = true;
-                            active_settings = crate::draw::runtime().settings_snapshot();
-                            overlay_state.update_from_settings(&active_settings);
-                            draw_input.set_tool(map_draw_tool(active_settings.last_tool));
-                            draw_input.set_style(ObjectStyle {
-                                stroke: StrokeStyle {
-                                    width: active_settings.last_width.max(1),
-                                    color: map_draw_color(active_settings.last_color),
-                                },
-                                fill: None,
-                            });
-                            needs_redraw = true;
-                            forced_full_redraw = true;
-                            let _ = overlay_to_main_tx.send(OverlayToMain::SaveProgress {
-                                canvas: draw_input.history().canvas(),
-                            });
-                        }
-                        Ok(MainToOverlay::RequestExit { reason }) => {
-                            exit_reason = Some(reason);
-                            break;
-                        }
-                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                            exit_reason = Some(ExitReason::OverlayFailure);
-                            break;
-                        }
+                controller.pump_runtime_messages(|| {
+                    active_settings = crate::draw::runtime().settings_snapshot();
+                    overlay_state.update_from_settings(&active_settings);
+                    draw_input.set_tool(map_draw_tool(active_settings.last_tool));
+                    draw_input.set_style(ObjectStyle {
+                        stroke: StrokeStyle {
+                            width: active_settings.last_width.max(1),
+                            color: map_draw_color(active_settings.last_color),
+                        },
+                        fill: None,
+                    });
+                    needs_redraw = true;
+                    forced_full_redraw = true;
+                    let _ = controller_tx.send(OverlayToMain::SaveProgress {
+                        canvas: draw_input.history().canvas(),
+                    });
+                });
+
+                if controller.lifecycle() == crate::draw::controller::ControllerLifecycle::Active
+                    && !did_start
+                {
+                    had_work = true;
+                    did_start = true;
+                    if let Err(err) = keyboard_hook.activate() {
+                        tracing::warn!(?err, "failed to activate draw keyboard hook");
                     }
+                    window.show();
+                    needs_redraw = true;
+                    forced_full_redraw = true;
                 }
+
+                let exit_reason = controller.exit_reason();
 
                 if exit_reason.is_some() {
                     break;
@@ -975,7 +968,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
             }
 
             if !did_start {
-                let _ = overlay_to_main_tx.send(OverlayToMain::SaveError {
+                let _ = controller_tx.send(OverlayToMain::SaveError {
                     error: "overlay exited before start command".to_string(),
                 });
             }
@@ -984,10 +977,13 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                     keyboard_hook.deactivate();
                     window.shutdown();
                 },
-                &overlay_to_main_tx,
-                exit_reason.unwrap_or(ExitReason::OverlayFailure),
+                &controller_tx,
+                controller
+                    .exit_reason()
+                    .unwrap_or(ExitReason::OverlayFailure),
                 SaveResult::Skipped,
             );
+            controller.mark_exited();
         })
         .map_err(|err| anyhow!("failed to spawn draw overlay thread: {err}"))?;
 
