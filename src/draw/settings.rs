@@ -99,6 +99,8 @@ pub struct DrawSettings {
     pub debug_hud_enabled: bool,
     #[serde(default = "default_debug_hud_toggle_hotkey")]
     pub debug_hud_toggle_hotkey: String,
+    #[serde(default)]
+    pub draw_perf_debug: bool,
     #[serde(default = "default_quick_colors")]
     pub quick_colors: Vec<DrawColor>,
     #[serde(default = "default_last_tool")]
@@ -144,6 +146,8 @@ struct DrawSettingsDe {
     debug_hud_enabled: bool,
     #[serde(default = "default_debug_hud_toggle_hotkey")]
     debug_hud_toggle_hotkey: String,
+    #[serde(default)]
+    draw_perf_debug: bool,
     #[serde(default = "default_quick_colors")]
     quick_colors: Vec<DrawColor>,
     #[serde(default = "default_last_tool")]
@@ -207,6 +211,7 @@ impl<'de> Deserialize<'de> for DrawSettings {
             toolbar_toggle_hotkey: decoded.toolbar_toggle_hotkey,
             debug_hud_enabled: decoded.debug_hud_enabled,
             debug_hud_toggle_hotkey: decoded.debug_hud_toggle_hotkey,
+            draw_perf_debug: decoded.draw_perf_debug,
             quick_colors: decoded.quick_colors,
             last_tool: decoded.last_tool,
             last_color: decoded.last_color,
@@ -324,6 +329,7 @@ impl Default for DrawSettings {
             toolbar_toggle_hotkey: default_toolbar_toggle_hotkey(),
             debug_hud_enabled: false,
             debug_hud_toggle_hotkey: default_debug_hud_toggle_hotkey(),
+            draw_perf_debug: false,
             quick_colors: default_quick_colors(),
             last_tool: default_last_tool(),
             last_color: default_last_color(),

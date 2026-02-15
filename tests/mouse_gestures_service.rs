@@ -378,6 +378,7 @@ fn no_match_noop_does_not_send_right_click() {
 
 #[test]
 fn hint_text_includes_best_guess_and_match_type() {
+    let _guard = TEST_MUTEX.lock().expect("test mutex");
     let (backend, handle) = MockHookBackend::new();
     let hint_state = Arc::new(HintRecordingState::default());
     let overlay_factory: Arc<dyn OverlayFactory> = Arc::new(HintRecordingFactory {
@@ -425,14 +426,28 @@ fn hint_text_includes_best_guess_and_match_type() {
     assert!(handle.emit(HookEvent::RButtonDown));
     sleep(Duration::from_millis(5));
     cursor_provider.set_position((50.0, 0.0));
-    sleep(Duration::from_millis(50));
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let expected =
+        "R\nWheel: cycle • 1-9: select • Release: run • Esc: cancel\nClosest: Open Browser [prefix]";
 
-    let hints = hint_state.hints.lock().expect("lock hints");
-    let last = hints.last().expect("hint text");
-    assert_eq!(
-        last,
-        "R\nWheel: cycle • 1-9: select • Release: run • Esc: cancel\nClosest: Open Browser [prefix]"
-    );
+    let last = loop {
+        {
+            let hints = hint_state.hints.lock().expect("lock hints");
+            if let Some(last) = hints.last() {
+                if last == expected {
+                    break last.clone();
+                }
+            }
+        }
+
+        if Instant::now() >= deadline {
+            let hints = hint_state.hints.lock().expect("lock hints");
+            panic!("hint text: {:?}", hints.last());
+        }
+        sleep(Duration::from_millis(10));
+    };
+
+    assert_eq!(last, expected);
 
     service.stop();
 }
