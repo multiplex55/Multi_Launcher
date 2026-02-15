@@ -140,7 +140,10 @@ pub struct DrawSettings {
     pub export_blank_background_color: DrawColor,
     #[serde(default = "default_offer_save_without_desktop")]
     pub offer_save_without_desktop: bool,
-    #[serde(default = "default_fixed_save_folder_display")]
+    #[serde(
+        default = "default_fixed_save_folder_display",
+        alias = "fixed_save_folder"
+    )]
     pub fixed_save_folder_display: String,
 }
 
@@ -203,7 +206,10 @@ struct DrawSettingsDe {
     blank_background_color: Option<DrawColor>,
     #[serde(default = "default_offer_save_without_desktop")]
     offer_save_without_desktop: bool,
-    #[serde(default = "default_fixed_save_folder_display")]
+    #[serde(
+        default = "default_fixed_save_folder_display",
+        alias = "fixed_save_folder"
+    )]
     fixed_save_folder_display: String,
 }
 
@@ -561,6 +567,34 @@ mod tests {
             decoded.export_blank_background_color,
             DrawColor::rgba(1, 2, 3, 255)
         );
+    }
+
+    #[test]
+    fn serde_roundtrip_preserves_fixed_folder_and_background_mode_values() {
+        let mut settings = DrawSettings::default();
+        settings.fixed_save_folder_display = "~/Pictures/Annotated".to_string();
+        settings.canvas_background_mode = CanvasBackgroundMode::Solid;
+        settings.canvas_solid_background_color = DrawColor::rgba(5, 15, 25, 255);
+
+        let json = serde_json::to_string(&settings).expect("serialize draw settings");
+        let decoded: DrawSettings = serde_json::from_str(&json).expect("deserialize draw settings");
+
+        assert_eq!(decoded.fixed_save_folder_display, "~/Pictures/Annotated");
+        assert_eq!(decoded.canvas_background_mode, CanvasBackgroundMode::Solid);
+        assert_eq!(
+            decoded.canvas_solid_background_color,
+            DrawColor::rgba(5, 15, 25, 255)
+        );
+    }
+
+    #[test]
+    fn deserialize_legacy_fixed_save_folder_alias() {
+        let decoded: DrawSettings = serde_json::from_value(serde_json::json!({
+            "fixed_save_folder": "C:/Temp/Draw"
+        }))
+        .expect("deserialize draw settings");
+
+        assert_eq!(decoded.fixed_save_folder_display, "C:/Temp/Draw");
     }
 
     #[test]

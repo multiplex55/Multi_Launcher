@@ -109,6 +109,55 @@ pub fn ensure_output_folder() -> Result<PathBuf> {
     Ok(output)
 }
 
+fn normalize_fixed_save_folder_display(display: &str) -> Result<Option<PathBuf>> {
+    let trimmed = display.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let expanded = if trimmed == "~" {
+        dirs::home_dir().ok_or_else(|| anyhow!("home directory is unavailable"))?
+    } else if let Some(stripped) = trimmed.strip_prefix("~/") {
+        dirs::home_dir()
+            .ok_or_else(|| anyhow!("home directory is unavailable"))?
+            .join(stripped)
+    } else {
+        PathBuf::from(trimmed)
+    };
+
+    if expanded.is_absolute() {
+        Ok(Some(expanded))
+    } else {
+        let home = dirs::home_dir().ok_or_else(|| anyhow!("home directory is unavailable"))?;
+        Ok(Some(home.join(expanded)))
+    }
+}
+
+pub fn validate_fixed_save_folder_display(display: &str) -> Result<Option<PathBuf>> {
+    let Some(path) = normalize_fixed_save_folder_display(display)? else {
+        return Ok(None);
+    };
+
+    if path.exists() && !path.is_dir() {
+        return Err(anyhow!(
+            "configured save folder is not a directory: {}",
+            path.display()
+        ));
+    }
+
+    Ok(Some(path))
+}
+
+pub fn resolve_output_folder(fixed_save_folder_display: &str) -> Result<PathBuf> {
+    let configured = validate_fixed_save_folder_display(fixed_save_folder_display);
+    if let Ok(Some(path)) = configured {
+        if fs::create_dir_all(&path).is_ok() {
+            return Ok(path);
+        }
+    }
+    ensure_output_folder()
+}
+
 pub fn timestamped_stem(now: chrono::DateTime<Local>) -> String {
     now.format("%Y%m%d_%H%M%S").to_string()
 }
@@ -192,7 +241,8 @@ fn save_rgba_buffer_png(path: &Path, buffer: &RgbaBuffer) -> Result<()> {
 mod tests {
     use super::{
         build_filename, compose_and_persist_saves, dispatch_save_choice,
-        exe_relative_output_folder_from_path, ExitPromptPhase, ExitPromptState, SaveChoice,
+        exe_relative_output_folder_from_path, resolve_output_folder,
+        validate_fixed_save_folder_display, ExitPromptPhase, ExitPromptState, SaveChoice,
         SaveConfig, SaveDispatchOutcome, SaveTargets, DRAW_EXPORT_SUBDIR,
     };
     use crate::draw::composite::{Rgba, RgbaBuffer};
@@ -205,6 +255,41 @@ mod tests {
     #[test]
     fn export_folder_name_matches_draw_images_contract() {
         assert_eq!(DRAW_EXPORT_SUBDIR, "draw_images");
+    }
+
+    #[test]
+    fn configured_fixed_folder_is_used_for_output_resolution() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let configured = dir.path().join("custom_draw_exports");
+
+        let resolved =
+            resolve_output_folder(configured.to_string_lossy().as_ref()).expect("resolve output");
+
+        assert_eq!(resolved, configured);
+        assert!(resolved.exists());
+    }
+
+    #[test]
+    fn invalid_fixed_folder_falls_back_to_exe_relative_folder() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("not_a_directory");
+        std::fs::write(&file, b"x").expect("create placeholder file");
+
+        let resolved =
+            resolve_output_folder(file.to_string_lossy().as_ref()).expect("resolve with fallback");
+
+        assert!(resolved.ends_with(DRAW_EXPORT_SUBDIR));
+    }
+
+    #[test]
+    fn fixed_folder_validation_rejects_file_paths() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("invalid_target");
+        std::fs::write(&file, b"x").expect("create file");
+
+        let err = validate_fixed_save_folder_display(file.to_string_lossy().as_ref())
+            .expect_err("expected invalid folder error");
+        assert!(err.to_string().contains("not a directory"));
     }
 
     #[test]

@@ -7,7 +7,7 @@ use crate::draw::model::CanvasModel;
 use crate::draw::monitor::resolve_monitor_from_cursor;
 use crate::draw::overlay::spawn_overlay_for_monitor;
 use crate::draw::save::{
-    compose_and_persist_saves, dispatch_save_choice, ensure_output_folder, ExitPromptPhase,
+    compose_and_persist_saves, dispatch_save_choice, resolve_output_folder, ExitPromptPhase,
     ExitPromptState, SaveChoice, SaveConfig, SaveDispatchOutcome,
 };
 use crate::draw::settings::DrawSettings;
@@ -395,6 +395,11 @@ impl DrawRuntime {
         self.state.lock().ok().and_then(|s| s.exit_prompt.clone())
     }
 
+    #[cfg(test)]
+    pub fn pending_save_choice_for_test(&self) -> Option<SaveChoice> {
+        self.state.lock().ok().and_then(|s| s.pending_save_choice)
+    }
+
     pub fn set_exit_prompt_error(&self, error: impl Into<String>) {
         if let Ok(mut state) = self.state.lock() {
             if let Some(prompt) = state.exit_prompt.as_mut() {
@@ -532,7 +537,7 @@ impl DrawRuntime {
             return Ok(());
         }
 
-        let output_dir = ensure_output_folder()?;
+        let output_dir = resolve_output_folder(&settings.fixed_save_folder_display)?;
         let SaveDispatchOutcome::Save(targets) =
             dispatch_save_choice(choice, &output_dir, chrono::Local::now())
         else {
@@ -821,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn request_exit_transitions_to_exiting() {
+    fn request_exit_with_offer_save_without_desktop_shows_prompt_and_waits_for_choice() {
         let rt = runtime();
         reset_runtime(rt);
         rt.force_lifecycle_for_test(DrawLifecycle::Active);
@@ -837,6 +842,7 @@ mod tests {
             crate::draw::save::ExitPromptPhase::PromptVisible
         );
         assert_eq!(prompt.reason, ExitReason::UserRequest);
+        assert_eq!(rt.pending_save_choice_for_test(), None);
         assert_eq!(
             rt.take_dispatched_messages_for_test(),
             vec![
@@ -852,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn request_exit_without_prompt_config_enters_saving_phase_immediately() {
+    fn request_exit_without_offer_save_without_desktop_bypasses_prompt_with_default_choice() {
         let rt = runtime();
         reset_runtime(rt);
         rt.force_lifecycle_for_test(DrawLifecycle::Active);
@@ -868,6 +874,7 @@ mod tests {
             .exit_prompt_state()
             .expect("prompt state should be present");
         assert_eq!(prompt.phase, crate::draw::save::ExitPromptPhase::Saving);
+        assert_eq!(rt.pending_save_choice_for_test(), Some(SaveChoice::Desktop));
         let dispatched = rt.take_dispatched_messages_for_test();
         assert!(matches!(
             dispatched.get(dispatched.len().saturating_sub(2)),
@@ -901,6 +908,7 @@ mod tests {
 
             rt.submit_exit_choice(choice)
                 .expect("submit_exit_choice should succeed");
+            assert_eq!(rt.pending_save_choice_for_test(), Some(choice));
 
             let dispatched = rt.take_dispatched_messages_for_test();
             assert_eq!(

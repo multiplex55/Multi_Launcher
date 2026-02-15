@@ -115,7 +115,9 @@ impl DrawSettingsDialog {
 
                 let form_result = render_draw_settings_form(ui, &mut self.settings, "draw_dialog");
                 self.dirty |= form_result.changed;
-                self.hotkey_validation_error = form_result.toolbar_hotkey_error;
+                self.hotkey_validation_error = form_result
+                    .toolbar_hotkey_error
+                    .or(form_result.fixed_save_folder_error);
 
                 if let Some(err) = self.hotkey_validation_error.as_ref() {
                     ui.colored_label(egui::Color32::RED, err);
