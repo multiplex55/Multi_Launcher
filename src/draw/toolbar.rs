@@ -1,5 +1,6 @@
 use crate::draw::model::{Color, ObjectStyle, Tool};
 use crate::draw::settings::DrawColor;
+use crate::draw::toolbar_icons::ToolbarIcon;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolbarCommand {
@@ -32,6 +33,7 @@ pub struct ToolbarState {
     pub position: (i32, i32),
     pub dragging: bool,
     pub drag_anchor: (i32, i32),
+    pub hovered_target: Option<ToolbarHitTarget>,
 }
 
 impl ToolbarState {
@@ -43,6 +45,7 @@ impl ToolbarState {
             position,
             dragging: false,
             drag_anchor: (0, 0),
+            hovered_target: None,
         }
     }
 
@@ -325,6 +328,10 @@ pub fn reduce_toolbar_state(state: &mut ToolbarState, command: ToolbarCommand) {
     }
 }
 
+pub fn hit_target_icon(target: ToolbarHitTarget, collapsed: bool) -> Option<ToolbarIcon> {
+    crate::draw::toolbar_icons::icon_for_hit_target(target, collapsed)
+}
+
 fn draw_color_to_model(color: DrawColor) -> Color {
     Color::rgba(color.r, color.g, color.b, color.a)
 }
@@ -375,5 +382,35 @@ mod tests {
 
         reduce_toolbar_state(&mut state, ToolbarCommand::ToggleVisibility);
         assert!(state.visible);
+    }
+
+    #[test]
+    fn every_non_color_hit_target_maps_to_icon() {
+        let targets = [
+            ToolbarHitTarget::ToggleCollapse,
+            ToolbarHitTarget::Tool(Tool::Pen),
+            ToolbarHitTarget::Tool(Tool::Line),
+            ToolbarHitTarget::Tool(Tool::Rect),
+            ToolbarHitTarget::Tool(Tool::Ellipse),
+            ToolbarHitTarget::Tool(Tool::Eraser),
+            ToolbarHitTarget::StrokeWidthDown,
+            ToolbarHitTarget::StrokeWidthUp,
+            ToolbarHitTarget::FillToggle,
+            ToolbarHitTarget::Undo,
+            ToolbarHitTarget::Redo,
+            ToolbarHitTarget::Save,
+            ToolbarHitTarget::Exit,
+        ];
+
+        for collapsed in [false, true] {
+            for target in targets {
+                assert!(
+                    hit_target_icon(target, collapsed).is_some(),
+                    "missing icon mapping for target {target:?}"
+                );
+            }
+        }
+        assert!(hit_target_icon(ToolbarHitTarget::QuickColor(0), false).is_none());
+        assert!(hit_target_icon(ToolbarHitTarget::FillColor(0), false).is_none());
     }
 }
