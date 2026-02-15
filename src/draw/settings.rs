@@ -26,8 +26,15 @@ pub enum DrawTool {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CanvasBackgroundMode {
+    Transparent,
+    Solid,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum LiveBackgroundMode {
+enum LiveBackgroundMode {
     Transparent,
     Blank { color: DrawColor },
 }
@@ -124,8 +131,10 @@ pub struct DrawSettings {
     pub default_outline_color: DrawColor,
     #[serde(default = "default_exit_timeout_seconds")]
     pub exit_timeout_seconds: u64,
-    #[serde(default = "default_live_background_mode")]
-    pub live_background_mode: LiveBackgroundMode,
+    #[serde(default = "default_canvas_background_mode")]
+    pub canvas_background_mode: CanvasBackgroundMode,
+    #[serde(default = "default_blank_background_color")]
+    pub canvas_solid_background_color: DrawColor,
     #[serde(default = "default_blank_background_color")]
     #[serde(alias = "export_background_color")]
     pub export_blank_background_color: DrawColor,
@@ -178,6 +187,10 @@ struct DrawSettingsDe {
     #[serde(default = "default_exit_timeout_seconds")]
     exit_timeout_seconds: u64,
     #[serde(default)]
+    canvas_background_mode: Option<CanvasBackgroundMode>,
+    #[serde(default)]
+    canvas_solid_background_color: Option<DrawColor>,
+    #[serde(default)]
     live_background_mode: Option<LiveBackgroundModeWire>,
     #[serde(default)]
     live_blank_color: Option<DrawColor>,
@@ -201,19 +214,29 @@ impl<'de> Deserialize<'de> for DrawSettings {
     {
         let decoded = DrawSettingsDe::deserialize(deserializer)?;
         let legacy_blank = decoded.blank_background_color;
-        let live_blank = decoded
-            .live_blank_color
+        let mut live_blank = decoded
+            .canvas_solid_background_color
+            .or(decoded.live_blank_color)
             .or(legacy_blank)
             .unwrap_or_else(default_live_blank_color);
-        let live_background_mode = match decoded.live_background_mode {
-            Some(LiveBackgroundModeWire::New(mode)) => mode,
-            Some(LiveBackgroundModeWire::Legacy(LegacyLiveBackgroundMode::DesktopTransparent)) => {
-                LiveBackgroundMode::Transparent
-            }
-            Some(LiveBackgroundModeWire::Legacy(LegacyLiveBackgroundMode::SolidColor)) => {
-                LiveBackgroundMode::Blank { color: live_blank }
-            }
-            None => default_live_background_mode(),
+        let canvas_background_mode = match decoded.canvas_background_mode {
+            Some(mode) => mode,
+            None => match decoded.live_background_mode {
+                Some(LiveBackgroundModeWire::New(mode)) => match mode {
+                    LiveBackgroundMode::Transparent => CanvasBackgroundMode::Transparent,
+                    LiveBackgroundMode::Blank { color } => {
+                        live_blank = color;
+                        CanvasBackgroundMode::Solid
+                    }
+                },
+                Some(LiveBackgroundModeWire::Legacy(
+                    LegacyLiveBackgroundMode::DesktopTransparent,
+                )) => CanvasBackgroundMode::Transparent,
+                Some(LiveBackgroundModeWire::Legacy(LegacyLiveBackgroundMode::SolidColor)) => {
+                    CanvasBackgroundMode::Solid
+                }
+                None => default_canvas_background_mode(),
+            },
         };
         Ok(Self {
             enable_pressure: decoded.enable_pressure,
@@ -236,7 +259,8 @@ impl<'de> Deserialize<'de> for DrawSettings {
             default_fill_color: decoded.default_fill_color,
             default_outline_color: decoded.default_outline_color,
             exit_timeout_seconds: decoded.exit_timeout_seconds,
-            live_background_mode,
+            canvas_background_mode,
+            canvas_solid_background_color: live_blank,
             export_blank_background_color: legacy_blank
                 .unwrap_or(decoded.export_blank_background_color),
             offer_save_without_desktop: decoded.offer_save_without_desktop,
@@ -317,8 +341,8 @@ fn default_blank_background_color() -> DrawColor {
     DrawColor::rgba(15, 18, 24, 255)
 }
 
-fn default_live_background_mode() -> LiveBackgroundMode {
-    LiveBackgroundMode::Transparent
+fn default_canvas_background_mode() -> CanvasBackgroundMode {
+    CanvasBackgroundMode::Transparent
 }
 
 fn default_live_blank_color() -> DrawColor {
@@ -369,7 +393,8 @@ impl Default for DrawSettings {
             default_fill_color: default_fill_color(),
             default_outline_color: default_outline_color(),
             exit_timeout_seconds: default_exit_timeout_seconds(),
-            live_background_mode: default_live_background_mode(),
+            canvas_background_mode: default_canvas_background_mode(),
+            canvas_solid_background_color: default_blank_background_color(),
             export_blank_background_color: default_blank_background_color(),
             offer_save_without_desktop: default_offer_save_without_desktop(),
             fixed_save_folder_display: default_fixed_save_folder_display(),
@@ -419,6 +444,12 @@ impl DrawSettings {
             *quick = next;
         }
 
+        let next = self
+            .canvas_solid_background_color
+            .resolve_first_pass_colorkey_collision();
+        changed |= next != self.canvas_solid_background_color;
+        self.canvas_solid_background_color = next;
+
         changed
     }
 
@@ -437,7 +468,7 @@ impl DrawSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::{DrawColor, DrawSettings, LiveBackgroundMode};
+    use super::{CanvasBackgroundMode, DrawColor, DrawSettings};
     use crate::hotkey::Key;
 
     #[test]
@@ -471,8 +502,12 @@ mod tests {
         let settings = DrawSettings::default();
         assert_eq!(settings.exit_timeout_seconds, 120);
         assert_eq!(
-            settings.live_background_mode,
-            LiveBackgroundMode::Transparent
+            settings.canvas_background_mode,
+            CanvasBackgroundMode::Transparent
+        );
+        assert_eq!(
+            settings.canvas_solid_background_color,
+            super::DrawColor::rgba(15, 18, 24, 255)
         );
         assert_eq!(
             settings.export_blank_background_color,
@@ -508,21 +543,19 @@ mod tests {
     }
 
     #[test]
-    fn settings_roundtrip_live_background_mode_and_color() {
+    fn settings_roundtrip_canvas_background_mode_and_color() {
         let mut settings = DrawSettings::default();
-        settings.live_background_mode = LiveBackgroundMode::Blank {
-            color: DrawColor::rgba(22, 33, 44, 255),
-        };
+        settings.canvas_background_mode = CanvasBackgroundMode::Solid;
+        settings.canvas_solid_background_color = DrawColor::rgba(22, 33, 44, 255);
         settings.export_blank_background_color = DrawColor::rgba(1, 2, 3, 255);
 
         let json = serde_json::to_string(&settings).expect("serialize draw settings");
         let decoded: DrawSettings = serde_json::from_str(&json).expect("deserialize settings");
 
+        assert_eq!(decoded.canvas_background_mode, CanvasBackgroundMode::Solid);
         assert_eq!(
-            decoded.live_background_mode,
-            LiveBackgroundMode::Blank {
-                color: DrawColor::rgba(22, 33, 44, 255)
-            }
+            decoded.canvas_solid_background_color,
+            DrawColor::rgba(22, 33, 44, 255)
         );
         assert_eq!(
             decoded.export_blank_background_color,
@@ -531,34 +564,22 @@ mod tests {
     }
 
     #[test]
-    fn live_background_mode_serializes_with_explicit_kind_and_color() {
-        let transparent = LiveBackgroundMode::Transparent;
-        let blank = LiveBackgroundMode::Blank {
-            color: DrawColor::rgba(1, 2, 3, 255),
-        };
+    fn canvas_background_mode_serializes_as_snake_case_enum() {
+        let transparent_json =
+            serde_json::to_value(CanvasBackgroundMode::Transparent).expect("serialize transparent");
+        let solid_json =
+            serde_json::to_value(CanvasBackgroundMode::Solid).expect("serialize solid");
 
-        let transparent_json = serde_json::to_value(transparent).expect("serialize transparent");
-        let blank_json = serde_json::to_value(blank).expect("serialize blank");
+        assert_eq!(transparent_json, serde_json::json!("transparent"));
+        assert_eq!(solid_json, serde_json::json!("solid"));
 
-        assert_eq!(
-            transparent_json,
-            serde_json::json!({ "kind": "transparent" })
-        );
-        assert_eq!(
-            blank_json,
-            serde_json::json!({
-                "kind": "blank",
-                "color": { "r": 1, "g": 2, "b": 3, "a": 255 }
-            })
-        );
-
-        let decoded_transparent: LiveBackgroundMode =
+        let decoded_transparent: CanvasBackgroundMode =
             serde_json::from_value(transparent_json).expect("deserialize transparent");
-        let decoded_blank: LiveBackgroundMode =
-            serde_json::from_value(blank_json).expect("deserialize blank");
+        let decoded_solid: CanvasBackgroundMode =
+            serde_json::from_value(solid_json).expect("deserialize solid");
 
-        assert_eq!(decoded_transparent, LiveBackgroundMode::Transparent);
-        assert_eq!(decoded_blank, blank);
+        assert_eq!(decoded_transparent, CanvasBackgroundMode::Transparent);
+        assert_eq!(decoded_solid, CanvasBackgroundMode::Solid);
     }
 
     #[test]
@@ -569,12 +590,33 @@ mod tests {
         .expect("deserialize legacy draw settings");
 
         assert_eq!(
-            decoded.live_background_mode,
-            LiveBackgroundMode::Transparent
+            decoded.canvas_background_mode,
+            CanvasBackgroundMode::Transparent
+        );
+        assert_eq!(
+            decoded.canvas_solid_background_color,
+            DrawColor::rgba(9, 8, 7, 255)
         );
         assert_eq!(
             decoded.export_blank_background_color,
             DrawColor::rgba(9, 8, 7, 255)
+        );
+    }
+
+    #[test]
+    fn deserialize_tagged_live_background_mode_blank_preserves_color() {
+        let decoded: DrawSettings = serde_json::from_value(serde_json::json!({
+            "live_background_mode": {
+                "kind": "blank",
+                "color": { "r": 44, "g": 55, "b": 66, "a": 255 }
+            }
+        }))
+        .expect("deserialize legacy tagged draw settings");
+
+        assert_eq!(decoded.canvas_background_mode, CanvasBackgroundMode::Solid);
+        assert_eq!(
+            decoded.canvas_solid_background_color,
+            DrawColor::rgba(44, 55, 66, 255)
         );
     }
 
@@ -586,11 +628,10 @@ mod tests {
         }))
         .expect("deserialize legacy draw settings");
 
+        assert_eq!(decoded.canvas_background_mode, CanvasBackgroundMode::Solid);
         assert_eq!(
-            decoded.live_background_mode,
-            LiveBackgroundMode::Blank {
-                color: DrawColor::rgba(12, 34, 56, 255)
-            }
+            decoded.canvas_solid_background_color,
+            DrawColor::rgba(12, 34, 56, 255)
         );
     }
 

@@ -1,5 +1,5 @@
 use crate::draw::settings::{
-    DrawColor, DrawSettings, DrawTool, LiveBackgroundMode, ToolbarPosition,
+    CanvasBackgroundMode, DrawColor, DrawSettings, DrawTool, ToolbarPosition,
 };
 use eframe::egui;
 
@@ -168,41 +168,32 @@ pub fn render_draw_settings_form(
     ui.separator();
     ui.label("Live drawing background");
     let is_transparent = matches!(
-        settings.live_background_mode,
-        LiveBackgroundMode::Transparent
+        settings.canvas_background_mode,
+        CanvasBackgroundMode::Transparent
     );
     if ui
         .radio(is_transparent, "Draw on desktop (transparent overlay)")
         .changed()
         && !is_transparent
     {
-        settings.live_background_mode = LiveBackgroundMode::Transparent;
+        settings.canvas_background_mode = CanvasBackgroundMode::Transparent;
         changed = true;
     }
 
-    let mut blank_color = match settings.live_background_mode {
-        LiveBackgroundMode::Blank { color } => color,
-        LiveBackgroundMode::Transparent => DrawColor::rgba(15, 18, 24, 255),
-    };
-    let is_blank = matches!(
-        settings.live_background_mode,
-        LiveBackgroundMode::Blank { .. }
-    );
+    let mut blank_color = settings.canvas_solid_background_color;
+    let is_blank = matches!(settings.canvas_background_mode, CanvasBackgroundMode::Solid);
     if ui
         .radio(is_blank, "Draw on blank canvas (solid background)")
         .changed()
         && !is_blank
     {
-        settings.live_background_mode = LiveBackgroundMode::Blank { color: blank_color };
+        settings.canvas_background_mode = CanvasBackgroundMode::Solid;
         changed = true;
     }
 
-    if matches!(
-        settings.live_background_mode,
-        LiveBackgroundMode::Blank { .. }
-    ) {
+    if matches!(settings.canvas_background_mode, CanvasBackgroundMode::Solid) {
         changed |= edit_color(ui, "Live blank color", &mut blank_color);
-        settings.live_background_mode = LiveBackgroundMode::Blank { color: blank_color };
+        settings.canvas_solid_background_color = blank_color;
     }
 
     ui.separator();

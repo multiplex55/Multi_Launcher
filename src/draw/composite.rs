@@ -62,7 +62,16 @@ impl RgbaBuffer {
 }
 
 pub fn annotation_from_canvas(canvas: &CanvasModel, width: u32, height: u32) -> RgbaBuffer {
-    let rgba = render_canvas_to_rgba(canvas, RenderSettings::default(), (width, height));
+    let mut rgba = render_canvas_to_rgba(canvas, RenderSettings::default(), (width, height));
+    let key = crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY;
+    for px in rgba.chunks_exact_mut(4) {
+        if px[0] == key.r && px[1] == key.g && px[2] == key.b {
+            px[0] = 0;
+            px[1] = 0;
+            px[2] = 0;
+            px[3] = 0;
+        }
+    }
     RgbaBuffer::from_pixels(width, height, rgba)
 }
 
