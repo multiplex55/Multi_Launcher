@@ -782,8 +782,100 @@ fn draw_segment(
     height: u32,
     clip_rect: Option<DirtyRect>,
 ) {
-    let wide = stroke_width >= wide_stroke_threshold;
     let started = Instant::now();
+    let path = select_segment_render_path(start, end, stroke_width, wide_stroke_threshold);
+    let operations = match path {
+        SegmentRenderPath::LegacyDense => draw_segment_dense_stamped(
+            start,
+            end,
+            color,
+            stroke_width,
+            pixels,
+            width,
+            height,
+            clip_rect,
+        ),
+        SegmentRenderPath::AdaptiveStamp => draw_segment_adaptive_stamped(
+            start,
+            end,
+            color,
+            stroke_width,
+            pixels,
+            width,
+            height,
+            clip_rect,
+        ),
+        SegmentRenderPath::CapsuleRaster => draw_segment_capsule(
+            start,
+            end,
+            color,
+            stroke_width,
+            pixels,
+            width,
+            height,
+            clip_rect,
+        ),
+    };
+    record_segment_cost(
+        stroke_width,
+        path,
+        started.elapsed().as_nanos() as u64,
+        operations,
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SegmentRenderPath {
+    LegacyDense,
+    AdaptiveStamp,
+    CapsuleRaster,
+}
+
+impl SegmentRenderPath {
+    fn as_label(self) -> &'static str {
+        match self {
+            SegmentRenderPath::LegacyDense => "legacy_dense",
+            SegmentRenderPath::AdaptiveStamp => "adaptive_stamp",
+            SegmentRenderPath::CapsuleRaster => "capsule_raster",
+        }
+    }
+}
+
+fn select_segment_render_path(
+    start: (i32, i32),
+    end: (i32, i32),
+    stroke_width: u32,
+    wide_stroke_threshold: u32,
+) -> SegmentRenderPath {
+    if stroke_width < wide_stroke_threshold {
+        return SegmentRenderPath::LegacyDense;
+    }
+
+    let dx = (end.0 - start.0) as i64;
+    let dy = (end.1 - start.1) as i64;
+    let length_sq = dx * dx + dy * dy;
+    if length_sq <= 2 {
+        return SegmentRenderPath::LegacyDense;
+    }
+
+    if stroke_width >= 14 || length_sq >= (stroke_width as i64).saturating_mul(12) {
+        SegmentRenderPath::CapsuleRaster
+    } else {
+        SegmentRenderPath::AdaptiveStamp
+    }
+}
+
+fn draw_segment_dense_stamped(
+    start: (i32, i32),
+    end: (i32, i32),
+    color: Color,
+    stroke_width: u32,
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    clip_rect: Option<DirtyRect>,
+) -> u64 {
+    let use_mask_cache = stroke_width >= 4;
     let mut x0 = start.0;
     let mut y0 = start.1;
     let x1 = end.0;
@@ -794,18 +886,19 @@ fn draw_segment(
     let dy = -(y1 - y0).abs();
     let sy = if y0 < y1 { 1 } else { -1 };
     let mut err = dx + dy;
+    let mut operations = 0;
 
     loop {
-        draw_brush(
+        operations = operations.saturating_add(draw_brush(
             (x0, y0),
             color,
             stroke_width,
-            wide,
+            use_mask_cache,
             pixels,
             width,
             height,
             clip_rect,
-        );
+        ));
         if x0 == x1 && y0 == y1 {
             break;
         }
@@ -819,7 +912,126 @@ fn draw_segment(
             y0 += sy;
         }
     }
-    record_segment_cost(stroke_width, started.elapsed().as_nanos() as u64);
+    operations
+}
+
+fn draw_segment_adaptive_stamped(
+    start: (i32, i32),
+    end: (i32, i32),
+    color: Color,
+    stroke_width: u32,
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    clip_rect: Option<DirtyRect>,
+) -> u64 {
+    let radius = (stroke_width.saturating_sub(1) / 2).max(1) as f32;
+    let spacing = radius.max(1.0);
+    let dx = (end.0 - start.0) as f32;
+    let dy = (end.1 - start.1) as f32;
+    let distance = (dx * dx + dy * dy).sqrt();
+    let steps = (distance / spacing).ceil().max(1.0) as i32;
+    let mut operations = 0;
+    let mut last = (i32::MIN, i32::MIN);
+
+    for step in 0..=steps {
+        let t = step as f32 / steps as f32;
+        let point = (
+            (start.0 as f32 + dx * t).round() as i32,
+            (start.1 as f32 + dy * t).round() as i32,
+        );
+        if point == last {
+            continue;
+        }
+        last = point;
+        operations = operations.saturating_add(draw_brush(
+            point,
+            color,
+            stroke_width,
+            true,
+            pixels,
+            width,
+            height,
+            clip_rect,
+        ));
+    }
+
+    operations
+}
+
+fn draw_segment_capsule(
+    start: (i32, i32),
+    end: (i32, i32),
+    color: Color,
+    stroke_width: u32,
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    clip_rect: Option<DirtyRect>,
+) -> u64 {
+    let radius = (stroke_width.saturating_sub(1) / 2) as f32;
+    let pad = radius.ceil() as i32 + 1;
+    let bounds = DirtyRect::from_points(start, end, pad);
+    let clip = clip_rect
+        .and_then(|clip| intersect_dirty_rect(bounds, clip))
+        .unwrap_or(bounds)
+        .clamp(width, height);
+    let Some(clip) = clip else {
+        return 0;
+    };
+
+    let radius_sq = radius * radius;
+    let mut operations = 0;
+    for y in clip.y..(clip.y + clip.height) {
+        for x in clip.x..(clip.x + clip.width) {
+            if point_segment_distance_sq((x, y), start, end) <= radius_sq {
+                set_pixel_rgba(pixels, width, height, x, y, color, clip_rect);
+                operations = operations.saturating_add(1);
+            }
+        }
+    }
+    operations
+}
+
+fn intersect_dirty_rect(a: DirtyRect, b: DirtyRect) -> Option<DirtyRect> {
+    let x0 = a.x.max(b.x);
+    let y0 = a.y.max(b.y);
+    let x1 = (a.x + a.width).min(b.x + b.width);
+    let y1 = (a.y + a.height).min(b.y + b.height);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some(DirtyRect {
+        x: x0,
+        y: y0,
+        width: x1 - x0,
+        height: y1 - y0,
+    })
+}
+
+fn point_segment_distance_sq(point: (i32, i32), start: (i32, i32), end: (i32, i32)) -> f32 {
+    let px = point.0 as f32;
+    let py = point.1 as f32;
+    let x0 = start.0 as f32;
+    let y0 = start.1 as f32;
+    let x1 = end.0 as f32;
+    let y1 = end.1 as f32;
+    let vx = x1 - x0;
+    let vy = y1 - y0;
+    let wx = px - x0;
+    let wy = py - y0;
+    let len_sq = vx * vx + vy * vy;
+    if len_sq <= f32::EPSILON {
+        let dx = px - x0;
+        let dy = py - y0;
+        return dx * dx + dy * dy;
+    }
+    let t = ((wx * vx + wy * vy) / len_sq).clamp(0.0, 1.0);
+    let cx = x0 + vx * t;
+    let cy = y0 + vy * t;
+    let dx = px - cx;
+    let dy = py - cy;
+    dx * dx + dy * dy
 }
 
 fn draw_brush(
@@ -831,10 +1043,10 @@ fn draw_brush(
     width: u32,
     height: u32,
     clip_rect: Option<DirtyRect>,
-) {
+) -> u64 {
     let radius = (stroke_width.saturating_sub(1) / 2) as i32;
     if use_mask_cache {
-        draw_brush_mask(
+        return draw_brush_mask(
             center,
             color,
             stroke_width,
@@ -843,17 +1055,19 @@ fn draw_brush(
             height,
             clip_rect,
         );
-        return;
     }
+    let mut writes = 0;
     for y in (center.1 - radius)..=(center.1 + radius) {
         for x in (center.0 - radius)..=(center.0 + radius) {
             let dx = x - center.0;
             let dy = y - center.1;
             if dx * dx + dy * dy <= radius * radius {
                 set_pixel_rgba(pixels, width, height, x, y, color, clip_rect);
+                writes = writes.saturating_add(1);
             }
         }
     }
+    writes
 }
 
 #[derive(Clone)]
@@ -911,7 +1125,7 @@ fn draw_brush_mask(
     width: u32,
     height: u32,
     clip_rect: Option<DirtyRect>,
-) {
+) -> u64 {
     let mask = get_brush_mask(stroke_width);
     let clip = clip_rect.unwrap_or(DirtyRect {
         x: 0,
@@ -920,7 +1134,7 @@ fn draw_brush_mask(
         height: height as i32,
     });
     let Some(clip) = clip.clamp(width, height) else {
-        return;
+        return 0;
     };
 
     let clip_x0 = clip.x;
@@ -928,6 +1142,7 @@ fn draw_brush_mask(
     let clip_y0 = clip.y;
     let clip_y1 = clip.y + clip.height - 1;
 
+    let mut writes = 0;
     for row in &mask.rows {
         let y = center.1 + row.dy;
         if y < clip_y0 || y > clip_y1 {
@@ -945,22 +1160,31 @@ fn draw_brush_mask(
             pixels[idx + 1] = color.g;
             pixels[idx + 2] = color.b;
             pixels[idx + 3] = color.a;
+            writes = writes.saturating_add(1);
         }
     }
+    writes
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StrokeWidthBucketStat {
     pub count: u64,
     pub total_ns: u64,
+    pub total_ops: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SegmentBenchmarkSnapshot {
     pub buckets: Vec<(String, StrokeWidthBucketStat)>,
+    pub paths: Vec<(String, StrokeWidthBucketStat)>,
 }
 
 fn segment_bench_store() -> &'static Mutex<HashMap<&'static str, StrokeWidthBucketStat>> {
+    static STORE: OnceLock<Mutex<HashMap<&'static str, StrokeWidthBucketStat>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn segment_path_store() -> &'static Mutex<HashMap<&'static str, StrokeWidthBucketStat>> {
     static STORE: OnceLock<Mutex<HashMap<&'static str, StrokeWidthBucketStat>>> = OnceLock::new();
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -975,7 +1199,7 @@ fn segment_bucket(width: u32) -> &'static str {
     }
 }
 
-fn record_segment_cost(width: u32, cost_ns: u64) {
+fn record_segment_cost(width: u32, path: SegmentRenderPath, cost_ns: u64, operations: u64) {
     if !crate::draw::perf::draw_perf_runtime_enabled(false) {
         return;
     }
@@ -983,23 +1207,40 @@ fn record_segment_cost(width: u32, cost_ns: u64) {
         let entry = store.entry(segment_bucket(width)).or_default();
         entry.count = entry.count.saturating_add(1);
         entry.total_ns = entry.total_ns.saturating_add(cost_ns);
+        entry.total_ops = entry.total_ops.saturating_add(operations);
+    }
+    if let Ok(mut store) = segment_path_store().lock() {
+        let entry = store.entry(path.as_label()).or_default();
+        entry.count = entry.count.saturating_add(1);
+        entry.total_ns = entry.total_ns.saturating_add(cost_ns);
+        entry.total_ops = entry.total_ops.saturating_add(operations);
     }
 }
 
 pub fn stroke_segment_benchmark_snapshot() -> SegmentBenchmarkSnapshot {
     let mut buckets = Vec::new();
+    let mut paths = Vec::new();
     if let Ok(store) = segment_bench_store().lock() {
         for (name, stats) in store.iter() {
             buckets.push(((*name).to_string(), *stats));
         }
     }
+    if let Ok(store) = segment_path_store().lock() {
+        for (name, stats) in store.iter() {
+            paths.push(((*name).to_string(), *stats));
+        }
+    }
     buckets.sort_by(|a, b| a.0.cmp(&b.0));
-    SegmentBenchmarkSnapshot { buckets }
+    paths.sort_by(|a, b| a.0.cmp(&b.0));
+    SegmentBenchmarkSnapshot { buckets, paths }
 }
 
 #[cfg(test)]
 fn reset_stroke_segment_benchmark() {
     if let Ok(mut store) = segment_bench_store().lock() {
+        store.clear();
+    }
+    if let Ok(mut store) = segment_path_store().lock() {
         store.clear();
     }
 }
@@ -1818,14 +2059,17 @@ mod tests {
     }
 
     #[test]
-    fn wide_and_thin_paths_match_pixels_for_representative_widths_and_angles() {
-        let widths = [1, 3, 7, 11, 17];
+    fn narrow_strokes_remain_equivalent_with_legacy_and_heuristic_paths() {
+        let widths = [1, 2, 3, 4];
         let segments = [((2, 2), (50, 2)), ((2, 2), (40, 30)), ((30, 3), (4, 40))];
         for width in widths {
             for (start, end) in segments {
-                let thin = render_line_canvas(width, u32::MAX, start, end);
-                let wide = render_line_canvas(width, 1, start, end);
-                assert_eq!(thin, wide, "width={width} start={start:?} end={end:?}");
+                let legacy = render_line_canvas(width, u32::MAX, start, end);
+                let heuristic = render_line_canvas(width, 1, start, end);
+                assert_eq!(
+                    legacy, heuristic,
+                    "width={width} start={start:?} end={end:?}"
+                );
             }
         }
     }
@@ -1881,6 +2125,34 @@ mod tests {
     }
 
     #[test]
+    fn offscreen_wide_segment_dirty_bounds_are_clamped_to_canvas() {
+        let mut pixels = vec![0u8; 32 * 24 * 4];
+        let dirty = render_incremental_segment_update(
+            &mut pixels,
+            32,
+            24,
+            Tool::Pen,
+            ObjectStyle {
+                stroke: StrokeStyle {
+                    width: 28,
+                    color: Color::rgba(9, 10, 11, 255),
+                },
+                fill: None,
+            },
+            (-200, 10),
+            (90, 10),
+            super::BackgroundClearMode::Transparent,
+        )
+        .expect("dirty bounds");
+
+        assert_eq!(dirty.x, 0);
+        assert_eq!(dirty.y, 0);
+        assert_eq!(dirty.width, 32);
+        assert_eq!(dirty.height, 24);
+        assert!(pixels.chunks_exact(4).any(|px| px == [9, 10, 11, 255]));
+    }
+
+    #[test]
     fn wide_polyline_has_round_join_continuity_without_gaps() {
         let canvas = CanvasModel {
             objects: vec![object_with_width(
@@ -1893,7 +2165,11 @@ mod tests {
         };
         let pixels = render_canvas_to_rgba(&canvas, super::RenderSettings::default(), (64, 64));
         let join_idx = ((20 * 64 + 30) * 4 + 3) as usize;
+        let cap_a_idx = ((45 * 64 + 10) * 4 + 3) as usize;
+        let cap_b_idx = ((45 * 64 + 52) * 4 + 3) as usize;
         assert!(pixels[join_idx] > 0);
+        assert!(pixels[cap_a_idx] > 0);
+        assert!(pixels[cap_b_idx] > 0);
     }
 
     #[test]
@@ -1903,6 +2179,36 @@ mod tests {
         let _ = render_line_canvas(14, 1, (2, 2), (50, 30));
         let snapshot = stroke_segment_benchmark_snapshot();
         assert!(snapshot.buckets.iter().any(|(_, stats)| stats.count > 0));
+        assert!(snapshot.paths.iter().any(|(_, stats)| stats.count > 0));
+        std::env::remove_var(crate::draw::perf::DRAW_PERF_DEBUG_ENV);
+    }
+
+    #[test]
+    fn wide_segment_heuristic_reports_lower_structural_ops_than_legacy_dense() {
+        std::env::set_var(crate::draw::perf::DRAW_PERF_DEBUG_ENV, "1");
+        super::reset_stroke_segment_benchmark();
+        let _ = render_line_canvas(18, u32::MAX, (2, 2), (58, 40));
+        let legacy = stroke_segment_benchmark_snapshot();
+        let legacy_ops = legacy
+            .paths
+            .iter()
+            .find(|(name, _)| name == "legacy_dense")
+            .map(|(_, stats)| stats.total_ops)
+            .unwrap_or_default();
+
+        super::reset_stroke_segment_benchmark();
+        let _ = render_line_canvas(18, 1, (2, 2), (58, 40));
+        let heuristic = stroke_segment_benchmark_snapshot();
+        let heuristic_ops = heuristic
+            .paths
+            .iter()
+            .find(|(name, _)| name == "capsule_raster" || name == "adaptive_stamp")
+            .map(|(_, stats)| stats.total_ops)
+            .sum::<u64>();
+
+        assert!(legacy_ops > 0);
+        assert!(heuristic_ops > 0);
+        assert!(heuristic_ops < legacy_ops);
         std::env::remove_var(crate::draw::perf::DRAW_PERF_DEBUG_ENV);
     }
 }
