@@ -2450,6 +2450,8 @@ mod tests {
     };
     use crate::draw::keyboard_hook::{KeyCode, KeyEvent, KeyModifiers};
     use crate::draw::messages::{ExitReason, OverlayCommand, OverlayToMain, SaveResult};
+    use std::time::Duration;
+
     use crate::draw::{
         input::DrawInputState,
         model::{CanvasModel, Color, ObjectStyle, StrokeStyle, Tool},
