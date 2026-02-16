@@ -1857,6 +1857,7 @@ pub fn command_requests_repaint(command: Option<InputCommand>) -> bool {
 mod platform {
     use super::{global_to_local, OverlayInputDrain, OverlayPointerEvent, OverlayPointerSample};
     use crate::draw::service::MonitorRect;
+    use crate::draw::settings::TransparencyMethod;
     use once_cell::sync::Lazy;
     use std::collections::{HashMap, VecDeque};
     use std::mem;
@@ -1878,11 +1879,11 @@ mod platform {
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW,
         RegisterClassW, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
-        UpdateLayeredWindow, GWLP_USERDATA, HWND_TOPMOST, LWA_ALPHA, LWA_COLORKEY, SWP_NOACTIVATE,
-        SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, ULW_ALPHA, WINDOW_EX_STYLE, WINDOW_STYLE,
-        WM_ACTIVATE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
-        WM_SHOWWINDOW, WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+        UpdateLayeredWindow, GWLP_USERDATA, HWND_TOPMOST, LAYERED_WINDOW_ATTRIBUTES_FLAGS,
+        LWA_ALPHA, LWA_COLORKEY, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, ULW_ALPHA,
+        WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        WM_MOUSEMOVE, WM_PAINT, WM_SHOWWINDOW, WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_LAYERED,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
 
     static POINTER_QUEUES: Lazy<Mutex<HashMap<isize, Arc<Mutex<PointerEventQueue>>>>> =
@@ -1961,7 +1962,7 @@ mod platform {
     pub struct LayeredWindowTransparencyConfig {
         pub colorkey: COLORREF,
         pub alpha: u8,
-        pub flags: u32,
+        pub flags: LAYERED_WINDOW_ATTRIBUTES_FLAGS,
     }
 
     pub fn layered_window_transparency_config(
@@ -1985,13 +1986,13 @@ mod platform {
     ) -> windows::core::Result<LayeredWindowTransparencyConfig> {
         let config = layered_window_transparency_config(method);
         unsafe {
-            SetLayeredWindowAttributes(hwnd, config.colorkey, config.alpha, config.flags).ok()?;
+            SetLayeredWindowAttributes(hwnd, config.colorkey, config.alpha, config.flags)?;
         }
         tracing::debug!(
             ?method,
             colorkey = config.colorkey.0,
             alpha = config.alpha,
-            flags = config.flags,
+            flags = config.flags.0,
             "configured draw overlay layered window transparency"
         );
         Ok(config)
@@ -2570,7 +2571,7 @@ mod tests {
         model::{CanvasModel, Color, ObjectStyle, StrokeStyle, Tool},
         render::{BackgroundClearMode, DirtyRect, LayeredRenderer, RenderFrameBuffer},
         service::MonitorRect,
-        settings::{CanvasBackgroundMode, DrawColor, DrawSettings},
+        settings::{CanvasBackgroundMode, DrawColor, DrawSettings, TransparencyMethod},
         toolbar::{ToolbarCommand, ToolbarHitTarget, ToolbarLayout},
     };
 
@@ -3410,12 +3411,15 @@ mod tests {
         let settings = DrawSettings::default();
         let mut state = OverlayThreadState::from_settings(&settings);
         let mut input = draw_state(Tool::Pen);
-        let mut window = OverlayWindow::create_for_monitor(MonitorRect {
-            x: 0,
-            y: 0,
-            width: 1920,
-            height: 1080,
-        })
+        let mut window = OverlayWindow::create_for_monitor(
+            MonitorRect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            TransparencyMethod::Colorkey,
+        )
         .expect("overlay window test stub");
         let mut framebuffer = RenderFrameBuffer::default();
         let mut layered_renderer = LayeredRenderer::default();

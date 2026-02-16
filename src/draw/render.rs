@@ -325,6 +325,7 @@ impl LayeredRenderer {
                 render_draw_object_rgba(
                     active,
                     settings.clear_mode,
+                    settings.transparency_method,
                     active_wide_stroke_threshold(settings),
                     &mut self.composed.rgba,
                     size.0,
@@ -369,6 +370,7 @@ impl LayeredRenderer {
                     render_draw_object_rgba(
                         active,
                         settings.clear_mode,
+                        settings.transparency_method,
                         active_wide_stroke_threshold(settings),
                         &mut self.composed.rgba,
                         size.0,
@@ -2425,6 +2427,7 @@ mod tests {
             (-200, 10),
             (90, 10),
             super::BackgroundClearMode::Transparent,
+            TransparencyMethod::Colorkey,
         )
         .expect("dirty bounds");
 
