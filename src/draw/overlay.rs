@@ -3260,7 +3260,24 @@ mod tests {
         );
 
         assert_eq!(layered_renderer.committed_rebuild_count(), 1);
-        assert_eq!(layered_renderer.last_presented_dirty(), Some(ui_dirty));
+        let expected_presented = toolbar::ToolbarLayout::for_state(
+            (800, 600),
+            &state.toolbar_state,
+            state.quick_colors.len(),
+        )
+        .map(|layout| {
+            ui_dirty.union(DirtyRect {
+                x: layout.panel.x,
+                y: layout.panel.y,
+                width: layout.panel.w,
+                height: layout.panel.h,
+            })
+        })
+        .unwrap_or(ui_dirty);
+        assert_eq!(
+            layered_renderer.last_presented_dirty(),
+            Some(expected_presented)
+        );
     }
     #[test]
     fn toolbar_visibility_roundtrip_and_legacy_decode_survive_toggle_transitions() {
