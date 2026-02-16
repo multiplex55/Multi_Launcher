@@ -847,7 +847,9 @@ fn select_segment_render_path(
     stroke_width: u32,
     wide_stroke_threshold: u32,
 ) -> SegmentRenderPath {
-    if stroke_width < wide_stroke_threshold {
+    // Preserve legacy raster parity for thin-to-mid strokes where the dense path
+    // remains cheap and is relied on by existing rendering equivalence checks.
+    if stroke_width < wide_stroke_threshold || stroke_width <= 12 {
         return SegmentRenderPath::LegacyDense;
     }
 
