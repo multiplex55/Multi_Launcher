@@ -515,6 +515,10 @@ fn flush_move_run(
     }
 
     let max_points = max_points_per_frame.max(1);
+    if run.len() <= max_points {
+        out.extend(run.drain(..));
+        return;
+    }
     let max_gap_sq = (max_gap_px.max(1) as i64).pow(2);
     let mut kept: Vec<OverlayPointerSample> = Vec::with_capacity(run.len().min(max_points));
 
