@@ -52,7 +52,7 @@ fn load_from_path(draw_settings_path: &Path, legacy_settings_path: &str) -> Resu
 
     let mut loaded: DrawSettings = serde_json::from_value(value.clone())
         .context("deserialize legacy draw plugin settings payload")?;
-    loaded.sanitize_for_first_pass_transparency();
+    loaded.sanitize_for_configured_transparency();
     Ok(loaded)
 }
 
@@ -74,7 +74,7 @@ fn load_dedicated_from_path(draw_settings_path: &Path) -> Result<Option<DrawSett
             draw_settings_path.display()
         )
     })?;
-    loaded.sanitize_for_first_pass_transparency();
+    loaded.sanitize_for_configured_transparency();
     Ok(Some(loaded))
 }
 
@@ -85,7 +85,7 @@ fn save_to_path(draw_settings_path: &Path, settings: &DrawSettings) -> Result<()
     }
 
     let mut sanitized = settings.clone();
-    sanitized.sanitize_for_first_pass_transparency();
+    sanitized.sanitize_for_configured_transparency();
     let json = serde_json::to_string_pretty(&sanitized)
         .context("serialize draw settings for dedicated draw settings file")?;
     std::fs::write(draw_settings_path, json)

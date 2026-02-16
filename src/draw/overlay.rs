@@ -16,7 +16,7 @@ use crate::draw::render::{
 use crate::draw::service::MonitorRect;
 use crate::draw::settings::{
     default_debug_hud_toggle_hotkey_value, default_toolbar_toggle_hotkey_value,
-    CanvasBackgroundMode, DrawColor, DrawSettings, DrawTool,
+    CanvasBackgroundMode, DrawColor, DrawSettings, DrawTool, TransparencyMethod,
 };
 use crate::draw::toolbar::{
     self, ToolbarCommand, ToolbarLayout, ToolbarPointerEvent, ToolbarState,
@@ -429,6 +429,30 @@ fn map_overlay_command_to_toolbar(command: OverlayCommand) -> Option<ToolbarComm
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayeredWindowAttributesSelection {
+    pub color_key_bgr: u32,
+    pub alpha: u8,
+    pub flags: u32,
+}
+
+pub fn select_layered_window_attributes(
+    method: TransparencyMethod,
+) -> LayeredWindowAttributesSelection {
+    match method {
+        TransparencyMethod::Colorkey => LayeredWindowAttributesSelection {
+            color_key_bgr: 0x00FF00FF,
+            alpha: 0,
+            flags: 0x0000_0001,
+        },
+        TransparencyMethod::Alpha => LayeredWindowAttributesSelection {
+            color_key_bgr: 0,
+            alpha: 255,
+            flags: 0x0000_0002,
+        },
+    }
+}
+
 fn live_render_settings(settings: &DrawSettings) -> RenderSettings {
     let clear_mode = match settings.canvas_background_mode {
         CanvasBackgroundMode::Transparent => BackgroundClearMode::Transparent,
@@ -442,6 +466,7 @@ fn live_render_settings(settings: &DrawSettings) -> RenderSettings {
 
     RenderSettings {
         clear_mode,
+        transparency_method: settings.transparency_method,
         wide_stroke_threshold: 10,
         incremental_stroke_render: settings.incremental_stroke_render,
     }
@@ -1322,7 +1347,15 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
             let controller_tx = overlay_to_main_tx.clone();
             let mut controller = OverlayController::new(main_to_overlay_rx, overlay_to_main_tx);
             let mut did_start = false;
-            let mut window = match OverlayWindow::create_for_monitor(monitor_rect) {
+            let mut active_settings = crate::draw::runtime().settings_snapshot();
+            tracing::debug!(
+                ?active_settings.transparency_method,
+                "draw overlay startup transparency mode"
+            );
+            let mut window = match OverlayWindow::create_for_monitor(
+                monitor_rect,
+                active_settings.transparency_method,
+            ) {
                 Some(window) => window,
                 None => {
                     let _ = controller_tx.send(OverlayToMain::SaveError {
@@ -1336,7 +1369,6 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                 }
             };
 
-            let mut active_settings = crate::draw::runtime().settings_snapshot();
             let mut overlay_state = OverlayThreadState::from_settings(&active_settings);
             let mut keyboard_hook = KeyboardHook::default();
             keyboard_hook.set_toolbar_toggle_hotkey(Some(overlay_state.toolbar_toggle_hotkey));
@@ -1501,10 +1533,21 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                             fill: None,
                         });
                         needs_redraw = true;
-                        if live_render_settings(&previous).clear_mode
-                            != live_render_settings(&active_settings).clear_mode
+                        let previous_render = live_render_settings(&previous);
+                        let next_render = live_render_settings(&active_settings);
+                        if previous_render.clear_mode != next_render.clear_mode
+                            || previous_render.transparency_method
+                                != next_render.transparency_method
                         {
                             forced_full_redraw = true;
+                        }
+                        if previous.transparency_method != active_settings.transparency_method {
+                            tracing::debug!(
+                                old_method = ?previous.transparency_method,
+                                new_method = ?active_settings.transparency_method,
+                                "draw overlay transparency mode updated"
+                            );
+                            window.set_transparency_method(active_settings.transparency_method);
                         }
                         let _ = controller_tx.send(OverlayToMain::SaveProgress {
                             canvas: draw_input.history().canvas(),
@@ -1814,6 +1857,7 @@ pub fn command_requests_repaint(command: Option<InputCommand>) -> bool {
 mod platform {
     use super::{global_to_local, OverlayInputDrain, OverlayPointerEvent, OverlayPointerSample};
     use crate::draw::service::MonitorRect;
+    use crate::draw::settings::TransparencyMethod;
     use once_cell::sync::Lazy;
     use std::collections::{HashMap, VecDeque};
     use std::mem;
@@ -1834,8 +1878,9 @@ mod platform {
     use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW,
-        RegisterClassW, SetWindowLongPtrW, SetWindowPos, UpdateLayeredWindow, GWLP_USERDATA,
-        HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, ULW_ALPHA,
+        RegisterClassW, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+        UpdateLayeredWindow, GWLP_USERDATA, HWND_TOPMOST, LAYERED_WINDOW_ATTRIBUTES_FLAGS,
+        LWA_ALPHA, LWA_COLORKEY, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, ULW_ALPHA,
         WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
         WM_MOUSEMOVE, WM_PAINT, WM_SHOWWINDOW, WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_LAYERED,
         WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
@@ -1913,8 +1958,44 @@ mod platform {
         WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
     }
 
-    pub fn configure_layered_window_transparency(_hwnd: HWND) -> windows::core::Result<()> {
-        Ok(())
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct LayeredWindowTransparencyConfig {
+        pub colorkey: COLORREF,
+        pub alpha: u8,
+        pub flags: LAYERED_WINDOW_ATTRIBUTES_FLAGS,
+    }
+
+    pub fn layered_window_transparency_config(
+        method: TransparencyMethod,
+    ) -> LayeredWindowTransparencyConfig {
+        let selection = super::select_layered_window_attributes(method);
+        LayeredWindowTransparencyConfig {
+            colorkey: COLORREF(selection.color_key_bgr),
+            alpha: selection.alpha,
+            flags: if selection.flags == 0x0000_0001 {
+                LWA_COLORKEY
+            } else {
+                LWA_ALPHA
+            },
+        }
+    }
+
+    pub fn configure_layered_window_transparency(
+        hwnd: HWND,
+        method: TransparencyMethod,
+    ) -> windows::core::Result<LayeredWindowTransparencyConfig> {
+        let config = layered_window_transparency_config(method);
+        unsafe {
+            SetLayeredWindowAttributes(hwnd, config.colorkey, config.alpha, config.flags)?;
+        }
+        tracing::debug!(
+            ?method,
+            colorkey = config.colorkey.0,
+            alpha = config.alpha,
+            flags = config.flags.0,
+            "configured draw overlay layered window transparency"
+        );
+        Ok(config)
     }
 
     fn widestring(value: &str) -> Vec<u16> {
@@ -2069,6 +2150,7 @@ mod platform {
         origin: (i32, i32),
         pointer_queue: Arc<Mutex<PointerEventQueue>>,
         present_backend: super::PresentBackend,
+        transparency_method: TransparencyMethod,
     }
 
     unsafe impl Send for OverlayWindow {}
@@ -2079,10 +2161,13 @@ mod platform {
             let monitors = enumerate_monitors();
             let monitor_rect = super::select_monitor_for_point(&monitors, cursor)
                 .or_else(|| monitors.first().copied())?;
-            Self::create_for_monitor(monitor_rect)
+            Self::create_for_monitor(monitor_rect, TransparencyMethod::Colorkey)
         }
 
-        pub fn create_for_monitor(monitor_rect: MonitorRect) -> Option<Self> {
+        pub fn create_for_monitor(
+            monitor_rect: MonitorRect,
+            transparency_method: TransparencyMethod,
+        ) -> Option<Self> {
             static REGISTER_CLASS: Once = Once::new();
             let class_name = widestring("MultiLauncherDrawOverlay");
             let hinstance = unsafe { GetModuleHandleW(PCWSTR::null()) }.ok()?;
@@ -2115,7 +2200,7 @@ mod platform {
                 .ok()?
             };
 
-            if configure_layered_window_transparency(hwnd).is_err() {
+            if configure_layered_window_transparency(hwnd, transparency_method).is_err() {
                 unsafe {
                     let _ = DestroyWindow(hwnd);
                 }
@@ -2189,6 +2274,7 @@ mod platform {
                 origin: (monitor_rect.x, monitor_rect.y),
                 pointer_queue,
                 present_backend: super::select_present_backend(),
+                transparency_method,
             })
         }
 
@@ -2265,6 +2351,15 @@ mod platform {
 
         pub fn present_backend(&self) -> super::PresentBackend {
             self.present_backend
+        }
+
+        pub fn set_transparency_method(&mut self, method: TransparencyMethod) {
+            if self.transparency_method == method {
+                return;
+            }
+            if configure_layered_window_transparency(self.hwnd, method).is_ok() {
+                self.transparency_method = method;
+            }
         }
 
         pub fn show(&self) {
@@ -2350,8 +2445,8 @@ mod platform {
 
     #[cfg(test)]
     mod windows_tests {
-        use super::{compose_overlay_window_ex_style, configure_layered_window_transparency};
-        use windows::Win32::Foundation::HWND;
+        use super::{compose_overlay_window_ex_style, layered_window_transparency_config};
+        use crate::draw::settings::TransparencyMethod;
         use windows::Win32::UI::WindowsAndMessaging::{
             WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
         };
@@ -2366,8 +2461,9 @@ mod platform {
 
         #[test]
         fn layered_window_configuration_accepts_per_pixel_alpha_pipeline() {
-            let result = configure_layered_window_transparency(HWND::default());
-            assert!(result.is_ok());
+            let alpha = layered_window_transparency_config(TransparencyMethod::Alpha);
+            let colorkey = layered_window_transparency_config(TransparencyMethod::Colorkey);
+            assert_ne!(alpha.flags, colorkey.flags);
         }
     }
 }
@@ -2379,6 +2475,7 @@ pub use platform::OverlayWindow;
 #[derive(Debug, Default)]
 pub struct OverlayWindow {
     present_backend: PresentBackend,
+    transparency_method: TransparencyMethod,
 }
 
 #[cfg(not(windows))]
@@ -2387,9 +2484,13 @@ impl OverlayWindow {
         Some(Self)
     }
 
-    pub fn create_for_monitor(_monitor_rect: MonitorRect) -> Option<Self> {
+    pub fn create_for_monitor(
+        _monitor_rect: MonitorRect,
+        transparency_method: TransparencyMethod,
+    ) -> Option<Self> {
         Some(Self {
             present_backend: select_present_backend(),
+            transparency_method,
         })
     }
 
@@ -2410,6 +2511,10 @@ impl OverlayWindow {
     pub fn request_paint(&self) {}
 
     pub fn request_paint_rect(&self, _rect: crate::draw::render::DirtyRect) {}
+
+    pub fn set_transparency_method(&mut self, method: TransparencyMethod) {
+        self.transparency_method = method;
+    }
 
     pub fn bitmap_size(&self) -> (u32, u32) {
         (0, 0)
@@ -2466,7 +2571,7 @@ mod tests {
         model::{CanvasModel, Color, ObjectStyle, StrokeStyle, Tool},
         render::{BackgroundClearMode, DirtyRect, LayeredRenderer, RenderFrameBuffer},
         service::MonitorRect,
-        settings::{CanvasBackgroundMode, DrawColor, DrawSettings},
+        settings::{CanvasBackgroundMode, DrawColor, DrawSettings, TransparencyMethod},
         toolbar::{ToolbarCommand, ToolbarHitTarget, ToolbarLayout},
     };
 
@@ -3155,12 +3260,15 @@ mod tests {
 
         let mut state = OverlayThreadState::from_settings(&settings);
         let input = draw_state(Tool::Pen);
-        let mut window = OverlayWindow::create_for_monitor(MonitorRect {
-            x: 0,
-            y: 0,
-            width: 800,
-            height: 600,
-        })
+        let mut window = OverlayWindow::create_for_monitor(
+            MonitorRect {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
+            TransparencyMethod::Colorkey,
+        )
         .expect("overlay window test stub");
         let mut framebuffer = RenderFrameBuffer::default();
         let mut layered_renderer = LayeredRenderer::default();
@@ -3204,12 +3312,15 @@ mod tests {
 
         let mut state = OverlayThreadState::from_settings(&settings);
         let input = draw_state(Tool::Pen);
-        let mut window = OverlayWindow::create_for_monitor(MonitorRect {
-            x: 0,
-            y: 0,
-            width: 800,
-            height: 600,
-        })
+        let mut window = OverlayWindow::create_for_monitor(
+            MonitorRect {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
+            TransparencyMethod::Colorkey,
+        )
         .expect("overlay window test stub");
         let mut framebuffer = RenderFrameBuffer::default();
         let mut layered_renderer = LayeredRenderer::default();
@@ -3300,12 +3411,15 @@ mod tests {
         let settings = DrawSettings::default();
         let mut state = OverlayThreadState::from_settings(&settings);
         let mut input = draw_state(Tool::Pen);
-        let mut window = OverlayWindow::create_for_monitor(MonitorRect {
-            x: 0,
-            y: 0,
-            width: 1920,
-            height: 1080,
-        })
+        let mut window = OverlayWindow::create_for_monitor(
+            MonitorRect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            TransparencyMethod::Colorkey,
+        )
         .expect("overlay window test stub");
         let mut framebuffer = RenderFrameBuffer::default();
         let mut layered_renderer = LayeredRenderer::default();

@@ -328,7 +328,7 @@ impl DrawRuntime {
     }
 
     pub fn apply_settings(&self, mut settings: DrawSettings) {
-        settings.sanitize_for_first_pass_transparency();
+        settings.sanitize_for_configured_transparency();
         if let Ok(mut state) = self.state.lock() {
             if settings.parse_toolbar_toggle_hotkey().is_err() {
                 let warning =

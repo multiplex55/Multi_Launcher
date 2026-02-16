@@ -32,6 +32,19 @@ pub enum CanvasBackgroundMode {
     Solid,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TransparencyMethod {
+    Colorkey,
+    Alpha,
+}
+
+impl Default for TransparencyMethod {
+    fn default() -> Self {
+        Self::Colorkey
+    }
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum LiveBackgroundMode {
@@ -155,6 +168,8 @@ pub struct DrawSettings {
     pub exit_timeout_seconds: u64,
     #[serde(default = "default_canvas_background_mode")]
     pub canvas_background_mode: CanvasBackgroundMode,
+    #[serde(default = "default_transparency_method")]
+    pub transparency_method: TransparencyMethod,
     #[serde(default = "default_blank_background_color")]
     pub canvas_solid_background_color: DrawColor,
     #[serde(default = "default_blank_background_color")]
@@ -221,6 +236,8 @@ struct DrawSettingsDe {
     exit_timeout_seconds: u64,
     #[serde(default)]
     canvas_background_mode: Option<CanvasBackgroundMode>,
+    #[serde(default = "default_transparency_method")]
+    transparency_method: TransparencyMethod,
     #[serde(default)]
     canvas_solid_background_color: Option<DrawColor>,
     #[serde(default)]
@@ -302,6 +319,7 @@ impl<'de> Deserialize<'de> for DrawSettings {
             default_outline_color: decoded.default_outline_color,
             exit_timeout_seconds: decoded.exit_timeout_seconds,
             canvas_background_mode,
+            transparency_method: decoded.transparency_method,
             canvas_solid_background_color: live_blank,
             export_blank_background_color: legacy_blank
                 .unwrap_or(decoded.export_blank_background_color),
@@ -415,6 +433,10 @@ fn default_canvas_background_mode() -> CanvasBackgroundMode {
     CanvasBackgroundMode::Transparent
 }
 
+fn default_transparency_method() -> TransparencyMethod {
+    TransparencyMethod::Colorkey
+}
+
 fn default_live_blank_color() -> DrawColor {
     default_blank_background_color()
 }
@@ -468,6 +490,7 @@ impl Default for DrawSettings {
             default_outline_color: default_outline_color(),
             exit_timeout_seconds: default_exit_timeout_seconds(),
             canvas_background_mode: default_canvas_background_mode(),
+            transparency_method: default_transparency_method(),
             canvas_solid_background_color: default_blank_background_color(),
             export_blank_background_color: default_blank_background_color(),
             offer_save_without_desktop: default_offer_save_without_desktop(),
@@ -538,9 +561,19 @@ impl DrawSettings {
             .ok_or_else(|| "Invalid hotkey format (example: Ctrl+Shift+D).".to_string())
     }
 
+    pub fn sanitize_for_configured_transparency(&mut self) -> bool {
+        match self.transparency_method {
+            TransparencyMethod::Colorkey => self.sanitize_for_first_pass_transparency(),
+            TransparencyMethod::Alpha => false,
+        }
+    }
+
     /// Live desktop transparency guard: selected pen colors must not collide with
     /// the reserved color key used by the legacy first-pass overlay pipeline.
     pub fn sanitize_for_first_pass_transparency(&mut self) -> bool {
+        if !matches!(self.transparency_method, TransparencyMethod::Colorkey) {
+            return false;
+        }
         let mut changed = false;
 
         let next = self.last_color.resolve_first_pass_colorkey_collision();
