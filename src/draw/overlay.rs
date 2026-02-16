@@ -441,6 +441,24 @@ fn live_render_settings(settings: &DrawSettings) -> RenderSettings {
     RenderSettings {
         clear_mode,
         wide_stroke_threshold: 10,
+        incremental_stroke_render: settings.incremental_stroke_render,
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RenderDirtyDomains {
+    canvas_dirty: Option<DirtyRect>,
+    ui_dirty: Option<DirtyRect>,
+}
+
+impl RenderDirtyDomains {
+    fn combined(self) -> Option<DirtyRect> {
+        match (self.canvas_dirty, self.ui_dirty) {
+            (Some(a), Some(b)) => Some(a.union(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
     }
 }
 
@@ -451,19 +469,20 @@ fn rerender_and_repaint(
     overlay_state: &mut OverlayThreadState,
     _framebuffer: &mut RenderFrameBuffer,
     layered_renderer: &mut LayeredRenderer,
-    dirty: Option<DirtyRect>,
+    dirty: RenderDirtyDomains,
     force_full_redraw: bool,
 ) {
     let frame_start = Instant::now();
     let window_size = window.bitmap_size();
-    let dirty_pixels = dirty
+    let combined_dirty = dirty.combined();
+    let dirty_pixels = combined_dirty
         .and_then(|rect| rect.clamp(window_size.0, window_size.1))
         .map(|rect| (rect.width.max(0) as u64).saturating_mul(rect.height.max(0) as u64))
         .unwrap_or_else(|| window_size.0 as u64 * window_size.1 as u64);
 
     let raster_span = overlay_state.perf_stats.begin_raster();
     let active_object = draw_input.active_object();
-    let force_full_frame = force_full_redraw || overlay_state.debug_hud_visible;
+    let force_full_frame = force_full_redraw;
     let debug_hud_visible = overlay_state.debug_hud_visible;
     let toolbar_visible = overlay_state.toolbar_state.visible;
     let toolbar_state = overlay_state.toolbar_state;
@@ -476,7 +495,7 @@ fn rerender_and_repaint(
         active_object,
         live_render_settings(settings),
         window_size,
-        dirty,
+        combined_dirty,
         force_full_frame,
         draw_input.committed_revision(),
         |rgba, size| {
@@ -512,23 +531,8 @@ fn rerender_and_repaint(
     overlay_state.diagnostics.paint_count += 1;
     overlay_state.perf_stats.mark_invalidate_requested();
     let dirty_present_rect = dirty
-        .and_then(|d| d.clamp(window_size.0, window_size.1))
-        .map(|rect| {
-            if toolbar_visible {
-                toolbar::ToolbarLayout::for_state(window_size, &toolbar_state, quick_colors.len())
-                    .map(|layout| {
-                        rect.union(DirtyRect {
-                            x: layout.panel.x,
-                            y: layout.panel.y,
-                            width: layout.panel.w,
-                            height: layout.panel.h,
-                        })
-                    })
-                    .unwrap_or(rect)
-            } else {
-                rect
-            }
-        });
+        .combined()
+        .and_then(|d| d.clamp(window_size.0, window_size.1));
     issue_present_request(
         window,
         PresentRequest {
@@ -582,17 +586,10 @@ struct CoalesceOutcome {
     coalesced_count: u64,
 }
 
-fn dist_sq(a: (i32, i32), b: (i32, i32)) -> i64 {
-    let dx = b.0 as i64 - a.0 as i64;
-    let dy = b.1 as i64 - a.1 as i64;
-    dx * dx + dy * dy
-}
-
 fn flush_move_run(
     run: &mut Vec<OverlayPointerSample>,
     out: &mut Vec<OverlayPointerSample>,
     max_points_per_frame: usize,
-    max_gap_px: i32,
     coalesced_count: &mut u64,
 ) {
     if run.is_empty() {
@@ -600,47 +597,22 @@ fn flush_move_run(
     }
 
     let max_points = max_points_per_frame.max(1);
-    if run.len() <= max_points {
-        out.extend(run.drain(..));
+    if run.len() > max_points {
+        let dropped = run.len().saturating_sub(max_points);
+        *coalesced_count = coalesced_count.saturating_add(dropped as u64);
+        let keep_from = run.len() - max_points;
+        out.extend(run.drain(keep_from..));
+        run.clear();
         return;
     }
-    let max_gap_sq = (max_gap_px.max(1) as i64).pow(2);
-    let mut kept: Vec<OverlayPointerSample> = Vec::with_capacity(run.len().min(max_points));
 
-    let mut reverse_kept: Vec<OverlayPointerSample> = Vec::with_capacity(run.len().min(max_points));
-    let mut last_kept = run[run.len() - 1];
-    reverse_kept.push(last_kept);
-    for sample in run.iter().copied().rev().skip(1) {
-        if reverse_kept.len() >= max_points {
-            break;
-        }
-        if dist_sq(sample.global_point, last_kept.global_point) >= max_gap_sq {
-            reverse_kept.push(sample);
-            last_kept = sample;
-        }
-    }
-
-    reverse_kept.reverse();
-    kept.extend(reverse_kept);
-
-    if kept.first().map(|sample| sample.global_point)
-        != run.first().map(|sample| sample.global_point)
-        && kept.len() < max_points
-        && !run.is_empty()
-    {
-        kept.insert(0, run[0]);
-    }
-
-    let dropped = run.len().saturating_sub(kept.len()) as u64;
-    *coalesced_count = coalesced_count.saturating_add(dropped);
-    out.extend(kept);
-    run.clear();
+    out.extend(run.drain(..));
 }
 
 fn coalesce_pointer_events(
     events: Vec<OverlayPointerSample>,
     max_points_per_frame: usize,
-    max_gap_px: i32,
+    _max_gap_px: i32,
 ) -> CoalesceOutcome {
     let mut coalesced = Vec::with_capacity(events.len());
     let mut move_run: Vec<OverlayPointerSample> = Vec::new();
@@ -654,7 +626,6 @@ fn coalesce_pointer_events(
             &mut move_run,
             &mut coalesced,
             max_points_per_frame,
-            max_gap_px,
             &mut coalesced_count,
         );
         coalesced.push(event);
@@ -663,7 +634,6 @@ fn coalesce_pointer_events(
         &mut move_run,
         &mut coalesced,
         max_points_per_frame,
-        max_gap_px,
         &mut coalesced_count,
     );
     CoalesceOutcome {
@@ -1387,7 +1357,8 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
             let mut consecutive_tick_misses = 0_u32;
             let mut needs_redraw = true;
             let mut forced_full_redraw = true;
-            let mut pending_dirty: Option<DirtyRect> = None;
+            let mut pending_canvas_dirty: Option<DirtyRect> = None;
+            let mut pending_ui_dirty: Option<DirtyRect> = None;
 
             loop {
                 #[cfg(windows)]
@@ -1401,7 +1372,17 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                         || handle_debug_hud_toggle_hotkey_event(&mut overlay_state, key_event)
                     {
                         needs_redraw = true;
-                        forced_full_redraw = true;
+                        let size = window.bitmap_size();
+                        let full_ui = DirtyRect {
+                            x: 0,
+                            y: 0,
+                            width: size.0 as i32,
+                            height: size.1 as i32,
+                        };
+                        pending_ui_dirty = Some(match pending_ui_dirty {
+                            Some(rect) => rect.union(full_ui),
+                            None => full_ui,
+                        });
                         continue;
                     }
 
@@ -1430,11 +1411,18 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                     sampling.max_points_per_frame = sampling.max_points_per_frame.min(2).max(1);
                     sampling.max_gap_px = sampling.max_gap_px.max(4);
                 }
-                let coalesced = coalesce_pointer_events(
-                    drained_pointer_events.events,
-                    sampling.max_points_per_frame,
-                    sampling.max_gap_px,
-                );
+                let coalesced = if active_settings.bounded_move_coalescing {
+                    coalesce_pointer_events(
+                        drained_pointer_events.events,
+                        sampling.max_points_per_frame,
+                        sampling.max_gap_px,
+                    )
+                } else {
+                    CoalesceOutcome {
+                        events: drained_pointer_events.events,
+                        coalesced_count: 0,
+                    }
+                };
                 let combined_coalesced = drained_pointer_events
                     .diagnostics
                     .coalesced_events
@@ -1476,6 +1464,19 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                         overlay_state.apply_pointer_event(pointer_event.event);
                         overlay_state.perf_stats.end_input_ingestion(input_span, 1);
                         needs_redraw = true;
+                        if overlay_state.toolbar_state.visible || overlay_state.debug_hud_visible {
+                            let size = window.bitmap_size();
+                            let full_ui = DirtyRect {
+                                x: 0,
+                                y: 0,
+                                width: size.0 as i32,
+                                height: size.1 as i32,
+                            };
+                            pending_ui_dirty = Some(match pending_ui_dirty {
+                                Some(rect) => rect.union(full_ui),
+                                None => full_ui,
+                            });
+                        }
                     } else {
                         overlay_state.perf_stats.end_input_ingestion(input_span, 0);
                     }
@@ -1553,15 +1554,19 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                 let elapsed = now.saturating_duration_since(overlay_start);
                 if needs_redraw {
                     if let Some(dirty) = draw_input.take_dirty_rect() {
-                        pending_dirty = Some(match pending_dirty {
+                        pending_canvas_dirty = Some(match pending_canvas_dirty {
                             Some(current) => current.union(dirty),
                             None => dirty,
                         });
                     }
                     forced_full_redraw |= draw_input.take_full_redraw_request();
 
+                    let dirty_domains = RenderDirtyDomains {
+                        canvas_dirty: pending_canvas_dirty,
+                        ui_dirty: pending_ui_dirty,
+                    };
                     let has_dirty_state =
-                        has_presentable_changes(forced_full_redraw, pending_dirty);
+                        has_presentable_changes(forced_full_redraw, dirty_domains.combined());
                     if !has_dirty_state {
                         // No visual changes to publish: suppress redundant paint requests.
                         needs_redraw = false;
@@ -1574,7 +1579,10 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                             consecutive_tick_misses = 0;
                         }
                         let tick_start = Instant::now();
-                        let dirty = pending_dirty.take();
+                        let dirty = RenderDirtyDomains {
+                            canvas_dirty: pending_canvas_dirty.take(),
+                            ui_dirty: pending_ui_dirty.take(),
+                        };
                         rerender_and_repaint(
                             &mut window,
                             &draw_input,
@@ -3181,7 +3189,7 @@ mod tests {
             &mut state,
             &mut framebuffer,
             &mut layered_renderer,
-            None,
+            RenderDirtyDomains::default(),
             true,
         );
 
@@ -3192,13 +3200,68 @@ mod tests {
             &mut state,
             &mut framebuffer,
             &mut layered_renderer,
-            Some(dirty),
+            RenderDirtyDomains {
+                canvas_dirty: Some(dirty),
+                ui_dirty: None,
+            },
             false,
         );
 
         assert_eq!(layered_renderer.last_presented_dirty(), Some(dirty));
     }
 
+    #[test]
+    fn ui_dirty_does_not_force_full_canvas_redraw() {
+        let mut settings = DrawSettings::default();
+        settings.toolbar_visible = true;
+        settings.debug_hud_enabled = false;
+
+        let mut state = OverlayThreadState::from_settings(&settings);
+        let input = draw_state(Tool::Pen);
+        let mut window = OverlayWindow::create_for_monitor(MonitorRect {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        })
+        .expect("overlay window test stub");
+        let mut framebuffer = RenderFrameBuffer::default();
+        let mut layered_renderer = LayeredRenderer::default();
+
+        rerender_and_repaint(
+            &mut window,
+            &input,
+            &settings,
+            &mut state,
+            &mut framebuffer,
+            &mut layered_renderer,
+            RenderDirtyDomains::default(),
+            true,
+        );
+
+        let ui_dirty = DirtyRect {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 80,
+        };
+        rerender_and_repaint(
+            &mut window,
+            &input,
+            &settings,
+            &mut state,
+            &mut framebuffer,
+            &mut layered_renderer,
+            RenderDirtyDomains {
+                canvas_dirty: None,
+                ui_dirty: Some(ui_dirty),
+            },
+            false,
+        );
+
+        assert_eq!(layered_renderer.committed_rebuild_count(), 1);
+        assert_eq!(layered_renderer.last_presented_dirty(), Some(ui_dirty));
+    }
     #[test]
     fn toolbar_visibility_roundtrip_and_legacy_decode_survive_toggle_transitions() {
         let mut settings = DrawSettings::default();
@@ -3254,14 +3317,14 @@ mod tests {
             &mut state,
             &mut framebuffer,
             &mut layered_renderer,
-            None,
+            RenderDirtyDomains::default(),
             true,
         );
         assert_eq!(state.diagnostics.paint_count, 1);
     }
 
     #[test]
-    fn coalesces_pointer_moves_while_preserving_last_sample() {
+    fn coalesces_pointer_moves_with_bounded_queue_and_preserves_order() {
         let events = vec![
             super::OverlayPointerSample {
                 global_point: (10, 10),

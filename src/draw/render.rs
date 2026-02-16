@@ -180,10 +180,21 @@ pub struct LayeredRenderer {
     committed: RenderFrameBuffer,
     composed: RenderFrameBuffer,
     last_committed_revision: Option<u64>,
+    active_stroke_raster: RenderFrameBuffer,
+    active_stroke_meta: Option<ActiveStrokeMeta>,
     #[cfg(test)]
     committed_rebuild_count: usize,
     #[cfg(test)]
     last_presented_dirty: Option<DirtyRect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ActiveStrokeMeta {
+    tool: Tool,
+    style: ObjectStyle,
+    first_point: (i32, i32),
+    last_point: (i32, i32),
+    point_count: usize,
 }
 
 impl LayeredRenderer {
@@ -240,6 +251,7 @@ impl LayeredRenderer {
         }
 
         self.composed.ensure_size(size);
+        self.update_active_stroke_layer(active_object, settings, size);
         let full_redraw = force_full_redraw || committed_changed || dirty.is_none();
         let dirty = dirty.and_then(|d| d.clamp(size.0, size.1));
 
@@ -252,7 +264,33 @@ impl LayeredRenderer {
         }
 
         let mut presented_dirty = dirty;
-        if let Some(active) = active_object {
+        if settings.incremental_stroke_render {
+            if full_redraw {
+                composite_layer_over(
+                    &self.active_stroke_raster.rgba,
+                    &mut self.composed.rgba,
+                    size.0,
+                    size.1,
+                    None,
+                );
+                convert_rgba_to_dib_bgra(&self.composed.rgba, &mut self.composed.bgra);
+            } else if let Some(rect) = dirty {
+                composite_layer_over(
+                    &self.active_stroke_raster.rgba,
+                    &mut self.composed.rgba,
+                    size.0,
+                    size.1,
+                    Some(rect),
+                );
+                convert_rgba_to_bgra_rect(
+                    &self.composed.rgba,
+                    &mut self.composed.bgra,
+                    size.0,
+                    size.1,
+                    rect,
+                );
+            }
+        } else if let Some(active) = active_object {
             if full_redraw {
                 render_draw_object_rgba(
                     active,
@@ -351,6 +389,126 @@ impl LayeredRenderer {
     }
 }
 
+impl LayeredRenderer {
+    fn update_active_stroke_layer(
+        &mut self,
+        active_object: Option<&DrawObject>,
+        settings: RenderSettings,
+        size: (u32, u32),
+    ) {
+        self.active_stroke_raster.ensure_size(size);
+        let Some((tool, style, points)) = extract_freehand_active(active_object) else {
+            if self.active_stroke_meta.is_some() {
+                clear_rgba_pixels(
+                    &mut self.active_stroke_raster.rgba,
+                    BackgroundClearMode::Solid(Color::rgba(0, 0, 0, 0)),
+                );
+                convert_rgba_to_dib_bgra(
+                    &self.active_stroke_raster.rgba,
+                    &mut self.active_stroke_raster.bgra,
+                );
+                self.active_stroke_meta = None;
+            }
+            return;
+        };
+
+        let rebuild = match self.active_stroke_meta {
+            Some(meta) => {
+                meta.tool != tool
+                    || meta.style != style
+                    || points.len() < meta.point_count
+                    || points.first().copied() != Some(meta.first_point)
+            }
+            None => true,
+        };
+
+        if rebuild {
+            clear_rgba_pixels(
+                &mut self.active_stroke_raster.rgba,
+                BackgroundClearMode::Solid(Color::rgba(0, 0, 0, 0)),
+            );
+            for segment in points.windows(2) {
+                let _ = render_incremental_segment_update(
+                    &mut self.active_stroke_raster.rgba,
+                    size.0,
+                    size.1,
+                    tool,
+                    style,
+                    segment[0],
+                    segment[1],
+                    settings.clear_mode,
+                );
+            }
+        } else if let Some(meta) = self.active_stroke_meta {
+            if points.len() > meta.point_count {
+                let mut last = meta.last_point;
+                for point in points.iter().copied().skip(meta.point_count) {
+                    let _ = render_incremental_segment_update(
+                        &mut self.active_stroke_raster.rgba,
+                        size.0,
+                        size.1,
+                        tool,
+                        style,
+                        last,
+                        point,
+                        settings.clear_mode,
+                    );
+                    last = point;
+                }
+            }
+        }
+
+        convert_rgba_to_dib_bgra(
+            &self.active_stroke_raster.rgba,
+            &mut self.active_stroke_raster.bgra,
+        );
+        self.active_stroke_meta = points.last().copied().map(|last_point| ActiveStrokeMeta {
+            tool,
+            style,
+            first_point: points.first().copied().unwrap_or(last_point),
+            last_point,
+            point_count: points.len(),
+        });
+    }
+}
+
+fn extract_freehand_active(
+    active_object: Option<&DrawObject>,
+) -> Option<(Tool, ObjectStyle, &[(i32, i32)])> {
+    let active = active_object?;
+    match &active.geometry {
+        Geometry::Pen { points } | Geometry::Eraser { points } => {
+            Some((active.tool, active.style, points.as_slice()))
+        }
+        _ => None,
+    }
+}
+
+fn composite_layer_over(
+    src: &[u8],
+    dst: &mut [u8],
+    width: u32,
+    height: u32,
+    clip_rect: Option<DirtyRect>,
+) {
+    let rect = clip_rect.unwrap_or(DirtyRect {
+        x: 0,
+        y: 0,
+        width: width as i32,
+        height: height as i32,
+    });
+    if let Some(rect) = rect.clamp(width, height) {
+        for y in rect.y..(rect.y + rect.height) {
+            for x in rect.x..(rect.x + rect.width) {
+                let idx = ((y as u32 * width + x as u32) * 4) as usize;
+                if src[idx + 3] > 0 {
+                    dst[idx..idx + 4].copy_from_slice(&src[idx..idx + 4]);
+                }
+            }
+        }
+    }
+}
+
 fn freehand_preview_segment(
     active: &DrawObject,
 ) -> Option<(Tool, ObjectStyle, (i32, i32), (i32, i32))> {
@@ -386,6 +544,7 @@ pub enum BackgroundClearMode {
 pub struct RenderSettings {
     pub clear_mode: BackgroundClearMode,
     pub wide_stroke_threshold: u32,
+    pub incremental_stroke_render: bool,
 }
 
 impl Default for RenderSettings {
@@ -393,6 +552,7 @@ impl Default for RenderSettings {
         Self {
             clear_mode: BackgroundClearMode::Transparent,
             wide_stroke_threshold: DEFAULT_WIDE_STROKE_THRESHOLD,
+            incremental_stroke_render: true,
         }
     }
 }
