@@ -886,7 +886,7 @@ fn draw_segment_dense_stamped(
     let dy = -(y1 - y0).abs();
     let sy = if y0 < y1 { 1 } else { -1 };
     let mut err = dx + dy;
-    let mut operations = 0;
+    let mut operations: u64 = 0;
 
     loop {
         operations = operations.saturating_add(draw_brush(
@@ -931,7 +931,7 @@ fn draw_segment_adaptive_stamped(
     let dy = (end.1 - start.1) as f32;
     let distance = (dx * dx + dy * dy).sqrt();
     let steps = (distance / spacing).ceil().max(1.0) as i32;
-    let mut operations = 0;
+    let mut operations: u64 = 0;
     let mut last = (i32::MIN, i32::MIN);
 
     for step in 0..=steps {
@@ -981,7 +981,7 @@ fn draw_segment_capsule(
     };
 
     let radius_sq = radius * radius;
-    let mut operations = 0;
+    let mut operations: u64 = 0;
     for y in clip.y..(clip.y + clip.height) {
         for x in clip.x..(clip.x + clip.width) {
             if point_segment_distance_sq((x, y), start, end) <= radius_sq {
@@ -1056,7 +1056,7 @@ fn draw_brush(
             clip_rect,
         );
     }
-    let mut writes = 0;
+    let mut writes: u64 = 0;
     for y in (center.1 - radius)..=(center.1 + radius) {
         for x in (center.0 - radius)..=(center.0 + radius) {
             let dx = x - center.0;
@@ -1142,7 +1142,7 @@ fn draw_brush_mask(
     let clip_y0 = clip.y;
     let clip_y1 = clip.y + clip.height - 1;
 
-    let mut writes = 0;
+    let mut writes: u64 = 0;
     for row in &mask.rows {
         let y = center.1 + row.dy;
         if y < clip_y0 || y > clip_y1 {
