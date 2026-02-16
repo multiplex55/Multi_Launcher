@@ -503,7 +503,7 @@ fn rerender_and_repaint(
             if toolbar_visible {
                 draw_compact_toolbar_panel(rgba, size, draw_input, &quick_colors, &toolbar_state);
                 if let Some(layout) =
-                    toolbar::ToolbarLayout::for_state(size, &toolbar_state, quick_colors.len())
+                    ToolbarLayout::for_state(size, &toolbar_state, quick_colors.len())
                 {
                     overlay_dirty = Some(DirtyRect {
                         x: layout.panel.x,
@@ -775,7 +775,7 @@ fn handle_toolbar_pointer_event(
         OverlayPointerEvent::Move => ToolbarPointerEvent::Move,
         OverlayPointerEvent::LeftUp => ToolbarPointerEvent::LeftUp,
     };
-    let Some(layout) = toolbar::ToolbarLayout::for_state(
+    let Some(layout) = ToolbarLayout::for_state(
         window_size,
         &overlay_state.toolbar_state,
         overlay_state.quick_colors.len(),
@@ -912,8 +912,7 @@ fn draw_compact_toolbar_panel(
     toolbar_state: &ToolbarState,
 ) {
     let (width, height) = size;
-    let Some(layout) = toolbar::ToolbarLayout::for_state(size, toolbar_state, quick_colors.len())
-    else {
+    let Some(layout) = ToolbarLayout::for_state(size, toolbar_state, quick_colors.len()) else {
         return;
     };
 
@@ -2466,7 +2465,7 @@ mod tests {
         render::{BackgroundClearMode, DirtyRect, LayeredRenderer, RenderFrameBuffer},
         service::MonitorRect,
         settings::{CanvasBackgroundMode, DrawColor, DrawSettings},
-        toolbar::{ToolbarCommand, ToolbarHitTarget},
+        toolbar::{ToolbarCommand, ToolbarHitTarget, ToolbarLayout},
     };
 
     fn draw_state(tool: Tool) -> DrawInputState {
@@ -2796,7 +2795,7 @@ mod tests {
         let mut state = OverlayThreadState::from_settings(&DrawSettings::default());
         state.toolbar_state.visible = true;
         let mut input = draw_state(Tool::Pen);
-        let layout = crate::draw::toolbar::ToolbarLayout::for_state(
+        let layout = crate::draw::ToolbarLayout::for_state(
             (800, 600),
             &state.toolbar_state,
             state.quick_colors.len(),
@@ -2830,7 +2829,7 @@ mod tests {
         let mut state = OverlayThreadState::from_settings(&settings);
         state.toolbar_state.visible = true;
         let mut input = draw_state(Tool::Pen);
-        let layout = crate::draw::toolbar::ToolbarLayout::for_state(
+        let layout = crate::draw::ToolbarLayout::for_state(
             (800, 600),
             &state.toolbar_state,
             state.quick_colors.len(),
@@ -2949,7 +2948,7 @@ mod tests {
             &state.toolbar_state,
         );
 
-        let layout = crate::draw::toolbar::ToolbarLayout::for_state(
+        let layout = crate::draw::ToolbarLayout::for_state(
             (800, 600),
             &state.toolbar_state,
             state.quick_colors.len(),
@@ -2985,7 +2984,7 @@ mod tests {
         let mut state = OverlayThreadState::from_settings(&settings);
         state.toolbar_state.visible = true;
         let input = draw_state(Tool::Pen);
-        let layout = crate::draw::toolbar::ToolbarLayout::for_state(
+        let layout = crate::draw::ToolbarLayout::for_state(
             (800, 600),
             &state.toolbar_state,
             state.quick_colors.len(),
@@ -3063,7 +3062,7 @@ mod tests {
 
         assert_eq!(state.quick_colors, settings.quick_colors);
 
-        let layout = crate::draw::toolbar::ToolbarLayout::for_state(
+        let layout = crate::draw::ToolbarLayout::for_state(
             (800, 600),
             &state.toolbar_state,
             state.quick_colors.len(),
@@ -3260,20 +3259,17 @@ mod tests {
         );
 
         assert_eq!(layered_renderer.committed_rebuild_count(), 1);
-        let expected_presented = toolbar::ToolbarLayout::for_state(
-            (800, 600),
-            &state.toolbar_state,
-            state.quick_colors.len(),
-        )
-        .map(|layout| {
-            ui_dirty.union(DirtyRect {
-                x: layout.panel.x,
-                y: layout.panel.y,
-                width: layout.panel.w,
-                height: layout.panel.h,
-            })
-        })
-        .unwrap_or(ui_dirty);
+        let expected_presented =
+            ToolbarLayout::for_state((800, 600), &state.toolbar_state, state.quick_colors.len())
+                .map(|layout| {
+                    ui_dirty.union(DirtyRect {
+                        x: layout.panel.x,
+                        y: layout.panel.y,
+                        width: layout.panel.w,
+                        height: layout.panel.h,
+                    })
+                })
+                .unwrap_or(ui_dirty);
         assert_eq!(
             layered_renderer.last_presented_dirty(),
             Some(expected_presented)
