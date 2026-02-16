@@ -1,5 +1,6 @@
 use crate::draw::model::{CanvasModel, Color, DrawObject, Geometry, ObjectStyle, Tool};
 use crate::draw::overlay::OverlayWindow;
+use crate::draw::settings::TransparencyMethod;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -104,11 +105,16 @@ impl RenderFrameBuffer {
         let full_redraw = force_full_redraw || resized || !self.initialized || dirty.is_none();
 
         if full_redraw {
-            clear_rgba_pixels(&mut self.rgba, settings.clear_mode);
+            clear_rgba_pixels(
+                &mut self.rgba,
+                settings.clear_mode,
+                settings.transparency_method,
+            );
             for object in &canvas.objects {
                 render_draw_object_rgba(
                     object,
                     settings.clear_mode,
+                    settings.transparency_method,
                     active_wide_stroke_threshold(settings),
                     &mut self.rgba,
                     size.0,
@@ -116,17 +122,29 @@ impl RenderFrameBuffer {
                     None,
                 );
             }
-            convert_rgba_to_dib_bgra(&self.rgba, &mut self.bgra);
+            convert_rgba_to_dib_bgra_with_transparency(
+                &self.rgba,
+                &mut self.bgra,
+                settings.transparency_method,
+            );
             self.initialized = true;
             return;
         }
 
         if let Some(dirty) = dirty.and_then(|d| d.clamp(size.0, size.1)) {
-            clear_rect_rgba(&mut self.rgba, size.0, size.1, dirty, settings.clear_mode);
+            clear_rect_rgba(
+                &mut self.rgba,
+                size.0,
+                size.1,
+                dirty,
+                settings.clear_mode,
+                settings.transparency_method,
+            );
             for object in &canvas.objects {
                 render_draw_object_rgba(
                     object,
                     settings.clear_mode,
+                    settings.transparency_method,
                     active_wide_stroke_threshold(settings),
                     &mut self.rgba,
                     size.0,
@@ -134,7 +152,14 @@ impl RenderFrameBuffer {
                     Some(dirty),
                 );
             }
-            convert_rgba_to_bgra_rect(&self.rgba, &mut self.bgra, size.0, size.1, dirty);
+            convert_rgba_to_bgra_rect(
+                &self.rgba,
+                &mut self.bgra,
+                size.0,
+                size.1,
+                dirty,
+                settings.transparency_method,
+            );
             self.initialized = true;
         }
     }
@@ -273,7 +298,11 @@ impl LayeredRenderer {
                     size.1,
                     None,
                 );
-                convert_rgba_to_dib_bgra(&self.composed.rgba, &mut self.composed.bgra);
+                convert_rgba_to_dib_bgra_with_transparency(
+                    &self.composed.rgba,
+                    &mut self.composed.bgra,
+                    settings.transparency_method,
+                );
             } else if let Some(rect) = dirty {
                 composite_layer_over(
                     &self.active_stroke_raster.rgba,
@@ -288,6 +317,7 @@ impl LayeredRenderer {
                     size.0,
                     size.1,
                     rect,
+                    settings.transparency_method,
                 );
             }
         } else if let Some(active) = active_object {
@@ -301,7 +331,11 @@ impl LayeredRenderer {
                     size.1,
                     None,
                 );
-                convert_rgba_to_dib_bgra(&self.composed.rgba, &mut self.composed.bgra);
+                convert_rgba_to_dib_bgra_with_transparency(
+                    &self.composed.rgba,
+                    &mut self.composed.bgra,
+                    settings.transparency_method,
+                );
             } else if let Some(rect) = dirty {
                 if let Some((tool, style, start, end)) = freehand_preview_segment(active) {
                     let segment_dirty = render_incremental_segment_update(
@@ -313,6 +347,7 @@ impl LayeredRenderer {
                         start,
                         end,
                         settings.clear_mode,
+                        settings.transparency_method,
                     );
                     if let Some(segment_dirty) = segment_dirty {
                         let merged = rect.union(segment_dirty).clamp(size.0, size.1);
@@ -323,6 +358,7 @@ impl LayeredRenderer {
                                 size.0,
                                 size.1,
                                 merged,
+                                settings.transparency_method,
                             );
                             presented_dirty = Some(merged);
                         }
@@ -345,6 +381,7 @@ impl LayeredRenderer {
                         size.0,
                         size.1,
                         rect,
+                        settings.transparency_method,
                     );
                 }
             }
@@ -362,7 +399,11 @@ impl LayeredRenderer {
 
         if full_redraw {
             if overlay_dirty.is_some() {
-                convert_rgba_to_dib_bgra(&self.composed.rgba, &mut self.composed.bgra);
+                convert_rgba_to_dib_bgra_with_transparency(
+                    &self.composed.rgba,
+                    &mut self.composed.bgra,
+                    settings.transparency_method,
+                );
             }
             self.composed.copy_to_window(window);
             #[cfg(test)]
@@ -402,10 +443,12 @@ impl LayeredRenderer {
                 clear_rgba_pixels(
                     &mut self.active_stroke_raster.rgba,
                     BackgroundClearMode::Solid(Color::rgba(0, 0, 0, 0)),
+                    settings.transparency_method,
                 );
-                convert_rgba_to_dib_bgra(
+                convert_rgba_to_dib_bgra_with_transparency(
                     &self.active_stroke_raster.rgba,
                     &mut self.active_stroke_raster.bgra,
+                    settings.transparency_method,
                 );
                 self.active_stroke_meta = None;
             }
@@ -426,6 +469,7 @@ impl LayeredRenderer {
             clear_rgba_pixels(
                 &mut self.active_stroke_raster.rgba,
                 BackgroundClearMode::Solid(Color::rgba(0, 0, 0, 0)),
+                settings.transparency_method,
             );
             for segment in points.windows(2) {
                 let _ = render_incremental_segment_update(
@@ -437,6 +481,7 @@ impl LayeredRenderer {
                     segment[0],
                     segment[1],
                     settings.clear_mode,
+                    settings.transparency_method,
                 );
             }
         } else if let Some(meta) = self.active_stroke_meta {
@@ -452,15 +497,17 @@ impl LayeredRenderer {
                         last,
                         point,
                         settings.clear_mode,
+                        settings.transparency_method,
                     );
                     last = point;
                 }
             }
         }
 
-        convert_rgba_to_dib_bgra(
+        convert_rgba_to_dib_bgra_with_transparency(
             &self.active_stroke_raster.rgba,
             &mut self.active_stroke_raster.bgra,
+            settings.transparency_method,
         );
         self.active_stroke_meta = points.last().copied().map(|last_point| ActiveStrokeMeta {
             tool,
@@ -543,6 +590,7 @@ pub enum BackgroundClearMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderSettings {
     pub clear_mode: BackgroundClearMode,
+    pub transparency_method: TransparencyMethod,
     pub wide_stroke_threshold: u32,
     pub incremental_stroke_render: bool,
 }
@@ -551,6 +599,7 @@ impl Default for RenderSettings {
     fn default() -> Self {
         Self {
             clear_mode: BackgroundClearMode::Transparent,
+            transparency_method: TransparencyMethod::Colorkey,
             wide_stroke_threshold: DEFAULT_WIDE_STROKE_THRESHOLD,
             incremental_stroke_render: true,
         }
@@ -570,12 +619,32 @@ fn active_wide_stroke_threshold(settings: RenderSettings) -> u32 {
 }
 
 pub fn convert_rgba_to_dib_bgra(rgba: &[u8], dib_bgra: &mut [u8]) {
+    convert_rgba_to_dib_bgra_with_transparency(rgba, dib_bgra, TransparencyMethod::Colorkey)
+}
+
+pub fn convert_rgba_to_dib_bgra_with_transparency(
+    rgba: &[u8],
+    dib_bgra: &mut [u8],
+    method: TransparencyMethod,
+) {
     assert_eq!(rgba.len(), dib_bgra.len());
     for (src, dst) in rgba.chunks_exact(4).zip(dib_bgra.chunks_exact_mut(4)) {
-        dst[0] = src[2];
-        dst[1] = src[1];
-        dst[2] = src[0];
-        dst[3] = src[3];
+        let (r, g, b, a) = (src[0], src[1], src[2], src[3]);
+        match method {
+            TransparencyMethod::Colorkey => {
+                dst[0] = b;
+                dst[1] = g;
+                dst[2] = r;
+                dst[3] = a;
+            }
+            TransparencyMethod::Alpha => {
+                let alpha = a as u16;
+                dst[0] = ((b as u16 * alpha + 127) / 255) as u8;
+                dst[1] = ((g as u16 * alpha + 127) / 255) as u8;
+                dst[2] = ((r as u16 * alpha + 127) / 255) as u8;
+                dst[3] = a;
+            }
+        }
     }
 }
 
@@ -586,11 +655,16 @@ pub fn render_canvas_to_rgba(
 ) -> Vec<u8> {
     let (width, height) = size;
     let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
-    clear_rgba_pixels(&mut pixels, settings.clear_mode);
+    clear_rgba_pixels(
+        &mut pixels,
+        settings.clear_mode,
+        settings.transparency_method,
+    );
     for object in &canvas.objects {
         render_draw_object_rgba(
             object,
             settings.clear_mode,
+            settings.transparency_method,
             active_wide_stroke_threshold(settings),
             &mut pixels,
             width,
@@ -630,6 +704,7 @@ pub fn render_incremental_segment_update(
     start: (i32, i32),
     end: (i32, i32),
     clear_mode: BackgroundClearMode,
+    transparency_method: TransparencyMethod,
 ) -> Option<DirtyRect> {
     if width == 0 || height == 0 {
         return None;
@@ -637,9 +712,7 @@ pub fn render_incremental_segment_update(
     let dirty = segment_dirty_bounds(start, end, style.stroke.width.max(1)).clamp(width, height)?;
     let color = if matches!(tool, Tool::Eraser) {
         match clear_mode {
-            BackgroundClearMode::Transparent => {
-                crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY
-            }
+            BackgroundClearMode::Transparent => transparent_clear_color(transparency_method),
             BackgroundClearMode::Solid(color) => color,
         }
     } else {
@@ -677,11 +750,13 @@ pub fn render_shape_preview_update(
             height,
             old,
             BackgroundClearMode::Solid(Color::rgba(0, 0, 0, 0)),
+            TransparencyMethod::Colorkey,
         );
         let dirty = old.union(next_bounds).clamp(width, height)?;
         render_draw_object_rgba(
             object,
             clear_mode,
+            TransparencyMethod::Colorkey,
             WIDE_STROKE_THRESHOLD.load(Ordering::Relaxed),
             preview_pixels,
             width,
@@ -694,6 +769,7 @@ pub fn render_shape_preview_update(
     render_draw_object_rgba(
         object,
         clear_mode,
+        TransparencyMethod::Colorkey,
         WIDE_STROKE_THRESHOLD.load(Ordering::Relaxed),
         preview_pixels,
         width,
@@ -703,9 +779,13 @@ pub fn render_shape_preview_update(
     Some(next_bounds)
 }
 
-fn clear_rgba_pixels(pixels: &mut [u8], mode: BackgroundClearMode) {
+fn clear_rgba_pixels(
+    pixels: &mut [u8],
+    mode: BackgroundClearMode,
+    transparency_method: TransparencyMethod,
+) {
     let clear = match mode {
-        BackgroundClearMode::Transparent => crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY,
+        BackgroundClearMode::Transparent => transparent_clear_color(transparency_method),
         BackgroundClearMode::Solid(color) => color,
     };
     for px in pixels.chunks_exact_mut(4) {
@@ -716,6 +796,7 @@ fn clear_rgba_pixels(pixels: &mut [u8], mode: BackgroundClearMode) {
 fn render_draw_object_rgba(
     object: &DrawObject,
     clear_mode: BackgroundClearMode,
+    transparency_method: TransparencyMethod,
     wide_stroke_threshold: u32,
     pixels: &mut [u8],
     width: u32,
@@ -724,9 +805,7 @@ fn render_draw_object_rgba(
 ) {
     let color = match object.geometry {
         Geometry::Eraser { .. } => match clear_mode {
-            BackgroundClearMode::Transparent => {
-                crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY
-            }
+            BackgroundClearMode::Transparent => transparent_clear_color(transparency_method),
             BackgroundClearMode::Solid(color) => color,
         },
         _ => object.style.stroke.color,
@@ -1463,9 +1542,10 @@ fn clear_rect_rgba(
     height: u32,
     rect: DirtyRect,
     mode: BackgroundClearMode,
+    transparency_method: TransparencyMethod,
 ) {
     let clear = match mode {
-        BackgroundClearMode::Transparent => crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY,
+        BackgroundClearMode::Transparent => transparent_clear_color(transparency_method),
         BackgroundClearMode::Solid(color) => color,
     };
 
@@ -1479,12 +1559,20 @@ fn clear_rect_rgba(
     }
 }
 
+fn transparent_clear_color(method: TransparencyMethod) -> Color {
+    match method {
+        TransparencyMethod::Colorkey => crate::draw::model::FIRST_PASS_TRANSPARENCY_COLORKEY,
+        TransparencyMethod::Alpha => Color::rgba(0, 0, 0, 0),
+    }
+}
+
 fn convert_rgba_to_bgra_rect(
     rgba: &[u8],
     bgra: &mut [u8],
     width: u32,
     height: u32,
     rect: DirtyRect,
+    method: TransparencyMethod,
 ) {
     let Some(rect) = rect.clamp(width, height) else {
         return;
@@ -1492,10 +1580,25 @@ fn convert_rgba_to_bgra_rect(
     for y in rect.y..(rect.y + rect.height) {
         for x in rect.x..(rect.x + rect.width) {
             let idx = ((y as u32 * width + x as u32) * 4) as usize;
-            bgra[idx] = rgba[idx + 2];
-            bgra[idx + 1] = rgba[idx + 1];
-            bgra[idx + 2] = rgba[idx];
-            bgra[idx + 3] = rgba[idx + 3];
+            let r = rgba[idx];
+            let g = rgba[idx + 1];
+            let b = rgba[idx + 2];
+            let a = rgba[idx + 3];
+            match method {
+                TransparencyMethod::Colorkey => {
+                    bgra[idx] = b;
+                    bgra[idx + 1] = g;
+                    bgra[idx + 2] = r;
+                    bgra[idx + 3] = a;
+                }
+                TransparencyMethod::Alpha => {
+                    let alpha = a as u16;
+                    bgra[idx] = ((b as u16 * alpha + 127) / 255) as u8;
+                    bgra[idx + 1] = ((g as u16 * alpha + 127) / 255) as u8;
+                    bgra[idx + 2] = ((r as u16 * alpha + 127) / 255) as u8;
+                    bgra[idx + 3] = a;
+                }
+            };
         }
     }
 }
@@ -1512,6 +1615,7 @@ mod tests {
         input::{DrawInputState, PointerModifiers},
         model::{CanvasModel, Color, DrawObject, Geometry, ObjectStyle, StrokeStyle, Tool},
         overlay::OverlayWindow,
+        settings::TransparencyMethod,
     };
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -1574,6 +1678,7 @@ mod tests {
             },
             super::RenderSettings {
                 clear_mode: super::BackgroundClearMode::Transparent,
+                transparency_method: TransparencyMethod::Colorkey,
                 wide_stroke_threshold: threshold,
                 incremental_stroke_render: true,
             },
@@ -1587,6 +1692,7 @@ mod tests {
             &CanvasModel::default(),
             super::RenderSettings {
                 clear_mode: super::BackgroundClearMode::Transparent,
+                transparency_method: TransparencyMethod::Colorkey,
                 wide_stroke_threshold: super::DEFAULT_WIDE_STROKE_THRESHOLD,
                 incremental_stroke_render: true,
             },
@@ -1598,6 +1704,7 @@ mod tests {
             &CanvasModel::default(),
             super::RenderSettings {
                 clear_mode: super::BackgroundClearMode::Solid(Color::rgba(7, 8, 9, 255)),
+                transparency_method: TransparencyMethod::Colorkey,
                 wide_stroke_threshold: super::DEFAULT_WIDE_STROKE_THRESHOLD,
                 incremental_stroke_render: true,
             },
@@ -1856,6 +1963,7 @@ mod tests {
             &CanvasModel::default(),
             super::RenderSettings {
                 clear_mode: super::BackgroundClearMode::Solid(colorkey),
+                transparency_method: TransparencyMethod::Colorkey,
                 wide_stroke_threshold: super::DEFAULT_WIDE_STROKE_THRESHOLD,
                 incremental_stroke_render: true,
             },
@@ -1916,6 +2024,7 @@ mod tests {
             &CanvasModel::default(),
             super::RenderSettings {
                 clear_mode: super::BackgroundClearMode::Transparent,
+                transparency_method: TransparencyMethod::Colorkey,
                 wide_stroke_threshold: super::DEFAULT_WIDE_STROKE_THRESHOLD,
                 incremental_stroke_render: true,
             },
@@ -1937,6 +2046,7 @@ mod tests {
             &CanvasModel::default(),
             super::RenderSettings {
                 clear_mode: super::BackgroundClearMode::Solid(Color::rgba(9, 8, 7, 255)),
+                transparency_method: TransparencyMethod::Colorkey,
                 wide_stroke_threshold: super::DEFAULT_WIDE_STROKE_THRESHOLD,
                 incremental_stroke_render: true,
             },
@@ -2050,6 +2160,7 @@ mod tests {
             (2, 2),
             (20, 20),
             super::BackgroundClearMode::Transparent,
+            TransparencyMethod::Colorkey,
         );
 
         assert!(dirty.is_some());
@@ -2059,12 +2170,15 @@ mod tests {
     fn make_test_overlay_window() -> OverlayWindow {
         #[cfg(windows)]
         {
-            OverlayWindow::create_for_monitor(crate::draw::service::MonitorRect {
-                x: 0,
-                y: 0,
-                width: 64,
-                height: 64,
-            })
+            OverlayWindow::create_for_monitor(
+                crate::draw::service::MonitorRect {
+                    x: 0,
+                    y: 0,
+                    width: 64,
+                    height: 64,
+                },
+                TransparencyMethod::Colorkey,
+            )
             .expect("create test overlay window")
         }
 
@@ -2286,6 +2400,7 @@ mod tests {
             (-30, -30),
             (40, 40),
             super::BackgroundClearMode::Transparent,
+            TransparencyMethod::Colorkey,
         );
         assert!(dirty.is_some());
         assert_eq!(pixels.len(), 16 * 16 * 4);
