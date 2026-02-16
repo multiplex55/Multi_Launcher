@@ -1,5 +1,5 @@
 use anyhow::Result;
-use multi_launcher::draw::messages::{ExitReason, MainToOverlay, OverlayToMain};
+use multi_launcher::draw::messages::{ExitReason, MainToOverlay, OverlayToMain, SaveResult};
 use multi_launcher::draw::model::CanvasModel;
 use multi_launcher::draw::save::SaveChoice;
 use multi_launcher::draw::service::{
@@ -54,6 +54,10 @@ fn selected_choice_sets_pending_then_completes_save_flow() -> Result<()> {
     })?;
     overlay_tx.send(OverlayToMain::SaveChoiceSelected {
         choice: SaveChoice::Blank,
+    })?;
+    overlay_tx.send(OverlayToMain::Exited {
+        reason: ExitReason::UserRequest,
+        save_result: SaveResult::Skipped,
     })?;
 
     rt.tick(std::time::Instant::now())?;
