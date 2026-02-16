@@ -131,6 +131,10 @@ pub struct DrawSettings {
     pub render_fallback_hz: u32,
     #[serde(default = "default_drop_intermediate_move_points_on_lag")]
     pub drop_intermediate_move_points_on_lag: bool,
+    #[serde(default = "default_incremental_stroke_render")]
+    pub incremental_stroke_render: bool,
+    #[serde(default = "default_bounded_move_coalescing")]
+    pub bounded_move_coalescing: bool,
     #[serde(default)]
     pub sampling: DrawSamplingSettings,
     #[serde(default = "default_quick_colors")]
@@ -193,6 +197,10 @@ struct DrawSettingsDe {
     render_fallback_hz: u32,
     #[serde(default = "default_drop_intermediate_move_points_on_lag")]
     drop_intermediate_move_points_on_lag: bool,
+    #[serde(default = "default_incremental_stroke_render")]
+    incremental_stroke_render: bool,
+    #[serde(default = "default_bounded_move_coalescing")]
+    bounded_move_coalescing: bool,
     #[serde(default)]
     sampling: DrawSamplingSettings,
     #[serde(default = "default_quick_colors")]
@@ -282,6 +290,8 @@ impl<'de> Deserialize<'de> for DrawSettings {
             render_target_hz: decoded.render_target_hz,
             render_fallback_hz: decoded.render_fallback_hz,
             drop_intermediate_move_points_on_lag: decoded.drop_intermediate_move_points_on_lag,
+            incremental_stroke_render: decoded.incremental_stroke_render,
+            bounded_move_coalescing: decoded.bounded_move_coalescing,
             sampling: decoded.sampling,
             quick_colors: decoded.quick_colors,
             last_tool: decoded.last_tool,
@@ -369,6 +379,14 @@ fn default_drop_intermediate_move_points_on_lag() -> bool {
     true
 }
 
+fn default_incremental_stroke_render() -> bool {
+    true
+}
+
+fn default_bounded_move_coalescing() -> bool {
+    true
+}
+
 fn default_last_color() -> DrawColor {
     DrawColor::rgba(255, 255, 255, 255)
 }
@@ -438,6 +456,8 @@ impl Default for DrawSettings {
             render_target_hz: default_render_target_hz(),
             render_fallback_hz: default_render_fallback_hz(),
             drop_intermediate_move_points_on_lag: default_drop_intermediate_move_points_on_lag(),
+            incremental_stroke_render: default_incremental_stroke_render(),
+            bounded_move_coalescing: default_bounded_move_coalescing(),
             sampling: DrawSamplingSettings::default(),
             quick_colors: default_quick_colors(),
             last_tool: default_last_tool(),
