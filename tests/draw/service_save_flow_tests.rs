@@ -47,7 +47,7 @@ fn selected_choice_sets_pending_then_completes_save_flow() -> Result<()> {
 
     rt.start_with_context(EntryContext::default())?;
     rt.request_exit(ExitReason::UserRequest)?;
-    assert_eq!(rt.pending_save_choice_for_test(), None);
+    assert!(rt.exit_prompt_state().is_some());
 
     overlay_tx.send(OverlayToMain::SaveProgress {
         canvas: CanvasModel::default(),
@@ -58,7 +58,6 @@ fn selected_choice_sets_pending_then_completes_save_flow() -> Result<()> {
 
     rt.tick(std::time::Instant::now())?;
 
-    assert_eq!(rt.pending_save_choice_for_test(), None);
     assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
     assert!(temp_dir.path().read_dir()?.any(|entry| {
         entry

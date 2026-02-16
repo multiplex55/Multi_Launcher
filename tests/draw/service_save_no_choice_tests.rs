@@ -49,7 +49,7 @@ fn cancel_choice_returns_to_draw_mode_without_save_side_effects() -> Result<()> 
     rt.tick(std::time::Instant::now())?;
 
     assert_eq!(rt.lifecycle(), DrawLifecycle::Active);
-    assert_eq!(rt.pending_save_choice_for_test(), None);
+    assert!(rt.exit_prompt_state().is_none());
     assert!(!temp_dir.path().read_dir()?.any(|e| {
         e.ok()
             .and_then(|x| x.path().extension().map(|ext| ext == "png"))
