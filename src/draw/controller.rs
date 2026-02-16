@@ -71,12 +71,12 @@ impl OverlayController {
                     on_command(command);
                 }
                 Ok(MainToOverlay::RequestExit { reason }) => {
-                    self.lifecycle = ControllerLifecycle::ExitRequested;
-                    self.exit_reason = Some(reason.clone());
+                    if matches!(self.exit_dialog_mode, ExitDialogMode::Hidden) {
+                        self.exit_dialog_mode = ExitDialogMode::PromptVisible;
+                    }
                     let _ = self.overlay_to_main_tx.send(OverlayToMain::LifecycleEvent(
                         OverlayLifecycleEvent::ExitRequested { reason },
                     ));
-                    break;
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -91,6 +91,10 @@ impl OverlayController {
     pub fn mark_exited(&mut self) {
         self.lifecycle = ControllerLifecycle::Exited;
     }
+
+    pub fn set_exit_dialog_mode(&mut self, mode: ExitDialogMode) {
+        self.exit_dialog_mode = mode;
+    }
 }
 
 #[cfg(test)]
@@ -101,7 +105,7 @@ mod tests {
     };
 
     #[test]
-    fn request_exit_message_transitions_controller_state() {
+    fn request_exit_message_enters_prompt_mode_without_exiting() {
         let (main_tx, main_rx) = std::sync::mpsc::channel::<MainToOverlay>();
         let (overlay_tx, overlay_rx) = std::sync::mpsc::channel::<OverlayToMain>();
         let mut controller = OverlayController::new(main_rx, overlay_tx);
@@ -113,8 +117,9 @@ mod tests {
             .expect("request exit send");
 
         controller.pump_runtime_messages(|| {}, |_| {});
-        assert_eq!(controller.lifecycle(), ControllerLifecycle::ExitRequested);
-        assert_eq!(controller.exit_reason(), Some(ExitReason::UserRequest));
+        assert_eq!(controller.lifecycle(), ControllerLifecycle::Starting);
+        assert_eq!(controller.exit_reason(), None);
+        assert_eq!(controller.exit_dialog_mode(), ExitDialogMode::PromptVisible);
         assert_eq!(
             overlay_rx.recv().expect("exit ack"),
             OverlayToMain::LifecycleEvent(OverlayLifecycleEvent::ExitRequested {

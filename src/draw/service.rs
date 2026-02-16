@@ -238,34 +238,50 @@ impl DrawRuntime {
     }
 
     pub fn request_exit(&self, reason: ExitReason) -> Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
+        let mut should_auto_complete = false;
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
 
-        if state.lifecycle == DrawLifecycle::Idle {
-            return Ok(());
+            if state.lifecycle == DrawLifecycle::Idle {
+                return Ok(());
+            }
+
+            if state.lifecycle == DrawLifecycle::Starting
+                || state.lifecycle == DrawLifecycle::Active
+            {
+                self.transition_locked(&mut state, DrawLifecycle::Exiting)?;
+                let show_prompt = state.settings.offer_save_without_desktop;
+                state.pending_exit_reason = Some(reason.clone());
+                state.exit_prompt = Some(ExitPromptState::from_exit_reason(
+                    reason.clone(),
+                    show_prompt,
+                ));
+                let mode = if show_prompt {
+                    ExitDialogMode::PromptVisible
+                } else {
+                    state.pending_save_choice = Some(SaveChoice::Desktop);
+                    should_auto_complete = true;
+                    ExitDialogMode::Saving
+                };
+                Self::send_overlay_message_locked(
+                    &mut state,
+                    MainToOverlay::SetExitDialogMode { mode },
+                );
+                Self::send_overlay_message_locked(
+                    &mut state,
+                    MainToOverlay::RequestExit {
+                        reason: reason.clone(),
+                    },
+                );
+            }
         }
 
-        if state.lifecycle == DrawLifecycle::Starting || state.lifecycle == DrawLifecycle::Active {
-            self.transition_locked(&mut state, DrawLifecycle::Exiting)?;
-            let show_prompt = state.settings.offer_save_without_desktop;
-            state.pending_exit_reason = Some(reason.clone());
-            state.exit_prompt = Some(ExitPromptState::from_exit_reason(
-                reason.clone(),
-                show_prompt,
-            ));
-            let mode = if show_prompt {
-                ExitDialogMode::PromptVisible
-            } else {
-                state.pending_save_choice = Some(SaveChoice::Desktop);
-                ExitDialogMode::Saving
-            };
-            Self::send_overlay_message_locked(
-                &mut state,
-                MainToOverlay::SetExitDialogMode { mode },
-            );
-            Self::send_overlay_message_locked(&mut state, MainToOverlay::RequestExit { reason });
+        if should_auto_complete {
+            self.complete_save_flow()?;
+            self.restore_pipeline(reason, "auto save exit")?;
         }
         Ok(())
     }
@@ -296,8 +312,9 @@ impl DrawRuntime {
         );
 
         state.pending_save_choice = Some(choice);
-        Self::send_overlay_message_locked(&mut state, MainToOverlay::RequestExit { reason });
-        Ok(())
+        drop(state);
+        self.complete_save_flow()?;
+        self.restore_pipeline(reason, "submit exit choice")
     }
     pub fn notify_overlay_exit(&self, reason: ExitReason) -> Result<()> {
         self.restore_pipeline(reason, "overlay exit notification")
@@ -463,6 +480,8 @@ impl DrawRuntime {
         let mut terminal_reason = None;
         let mut save_error = None;
         let mut latest_canvas = None;
+        let mut selected_choice = None;
+        let mut dialog_canceled = false;
 
         {
             let state = self
@@ -484,6 +503,12 @@ impl DrawRuntime {
                         Ok(OverlayToMain::SaveError { error }) => {
                             tracing::error!(error = %error, "draw overlay save error");
                             save_error = Some(error);
+                        }
+                        Ok(OverlayToMain::SaveChoiceSelected { choice }) => {
+                            selected_choice = Some(choice);
+                        }
+                        Ok(OverlayToMain::ExitDialogCanceled) => {
+                            dialog_canceled = true;
                         }
                         Ok(OverlayToMain::LifecycleEvent(event)) => {
                             tracing::debug!(?event, "draw overlay lifecycle event");
@@ -507,25 +532,94 @@ impl DrawRuntime {
         if let Some(error) = save_error {
             self.set_exit_prompt_error(error);
         }
+        if dialog_canceled {
+            self.cancel_exit_prompt()?;
+        }
+        if let Some(choice) = selected_choice {
+            self.handle_save_choice_selected(choice)?;
+        }
         if let Some(reason) = terminal_reason {
-            self.complete_save_flow(&reason)?;
             self.restore_pipeline(reason, "overlay exited notification")?;
         }
 
         Ok(())
     }
 
-    fn complete_save_flow(&self, reason: &ExitReason) -> Result<()> {
+    fn cancel_exit_prompt(&self) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
+        if state.lifecycle != DrawLifecycle::Exiting {
+            return Ok(());
+        }
+
+        state.pending_save_choice = None;
+        state.pending_exit_reason = None;
+        state.exit_prompt = None;
+        state.lifecycle = DrawLifecycle::Active;
+        Self::send_overlay_message_locked(
+            &mut state,
+            MainToOverlay::SetExitDialogMode {
+                mode: ExitDialogMode::Hidden,
+            },
+        );
+        Ok(())
+    }
+
+    fn handle_save_choice_selected(&self, choice: SaveChoice) -> Result<()> {
+        let reason = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
+            if state.lifecycle != DrawLifecycle::Exiting {
+                return Ok(());
+            }
+            state.pending_save_choice = Some(choice);
+            if let Some(prompt) = state.exit_prompt.as_mut() {
+                prompt.phase = ExitPromptPhase::Saving;
+                prompt.frozen_input = true;
+            }
+            Self::send_overlay_message_locked(
+                &mut state,
+                MainToOverlay::SetExitDialogMode {
+                    mode: ExitDialogMode::Saving,
+                },
+            );
+            state
+                .pending_exit_reason
+                .clone()
+                .unwrap_or(ExitReason::UserRequest)
+        };
+
+        match self.complete_save_flow() {
+            Ok(()) => self.restore_pipeline(reason, "save choice selected"),
+            Err(err) => {
+                self.set_exit_prompt_error(format!("save failed after {reason:?}: {err}"));
+                if let Ok(mut state) = self.state.lock() {
+                    Self::send_overlay_message_locked(
+                        &mut state,
+                        MainToOverlay::SetExitDialogMode {
+                            mode: ExitDialogMode::ErrorVisible,
+                        },
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn complete_save_flow(&self) -> Result<()> {
         let (choice, canvas, settings, monitor_rect) = {
             let mut state = self
                 .state
                 .lock()
                 .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
-            let choice = state.pending_save_choice.take();
+            let choice = state.pending_save_choice;
             let canvas = state.latest_canvas.clone();
             let settings = state.settings.clone();
             let monitor_rect = state.entry_context.as_ref().map(|ctx| ctx.monitor_rect);
-            state.pending_exit_reason = None;
             (choice, canvas, settings, monitor_rect)
         };
 
@@ -534,6 +628,10 @@ impl DrawRuntime {
         };
 
         if matches!(choice, SaveChoice::Discard) {
+            if let Ok(mut state) = self.state.lock() {
+                state.pending_save_choice = None;
+                state.pending_exit_reason = None;
+            }
             return Ok(());
         }
 
@@ -557,11 +655,12 @@ impl DrawRuntime {
                 let rect = monitor_rect.unwrap_or_default();
                 capture_monitor_rgba(rect)
             },
-        )
-        .map_err(|err| {
-            self.set_exit_prompt_error(format!("save failed after {reason:?}: {err}"));
-            err
-        })?;
+        )?;
+
+        if let Ok(mut state) = self.state.lock() {
+            state.pending_save_choice = None;
+            state.pending_exit_reason = None;
+        }
         Ok(())
     }
 
@@ -870,11 +969,8 @@ mod tests {
         rt.request_exit(ExitReason::UserRequest)
             .expect("request_exit should succeed");
 
-        let prompt = rt
-            .exit_prompt_state()
-            .expect("prompt state should be present");
-        assert_eq!(prompt.phase, crate::draw::save::ExitPromptPhase::Saving);
-        assert_eq!(rt.pending_save_choice_for_test(), Some(SaveChoice::Desktop));
+        assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
+        assert_eq!(rt.pending_save_choice_for_test(), None);
         let dispatched = rt.take_dispatched_messages_for_test();
         assert!(matches!(
             dispatched.get(dispatched.len().saturating_sub(2)),
@@ -908,19 +1004,15 @@ mod tests {
 
             rt.submit_exit_choice(choice)
                 .expect("submit_exit_choice should succeed");
-            assert_eq!(rt.pending_save_choice_for_test(), Some(choice));
+            assert_eq!(rt.pending_save_choice_for_test(), None);
+            assert_eq!(rt.lifecycle(), DrawLifecycle::Idle);
 
             let dispatched = rt.take_dispatched_messages_for_test();
             assert_eq!(
                 dispatched,
-                vec![
-                    MainToOverlay::SetExitDialogMode {
-                        mode: crate::draw::messages::ExitDialogMode::Saving,
-                    },
-                    MainToOverlay::RequestExit {
-                        reason: ExitReason::UserRequest,
-                    },
-                ],
+                vec![MainToOverlay::SetExitDialogMode {
+                    mode: crate::draw::messages::ExitDialogMode::Saving,
+                },],
                 "unexpected message flow for choice {choice:?}"
             );
         }

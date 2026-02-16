@@ -3,7 +3,9 @@ use crate::draw::input::{
     bridge_key_event_to_runtime, bridge_left_down_to_runtime, bridge_left_up_to_runtime,
     bridge_mouse_move_to_runtime, DrawInputState, InputCommand, PointerModifiers,
 };
-use crate::draw::keyboard_hook::{map_key_event_to_command, KeyCommand, KeyEvent, KeyboardHook};
+use crate::draw::keyboard_hook::{
+    map_key_event_to_command, KeyCode, KeyCommand, KeyEvent, KeyboardHook,
+};
 use crate::draw::messages::{
     ExitDialogMode, ExitReason, MainToOverlay, OverlayCommand, OverlayToMain, SaveResult,
 };
@@ -13,6 +15,7 @@ use crate::draw::perf::{draw_perf_runtime_enabled, DrawPerfSnapshot, DrawPerfSta
 use crate::draw::render::{
     BackgroundClearMode, DirtyRect, LayeredRenderer, RenderFrameBuffer, RenderSettings,
 };
+use crate::draw::save::SaveChoice;
 use crate::draw::service::MonitorRect;
 use crate::draw::settings::{
     default_debug_hud_toggle_hotkey_value, default_toolbar_toggle_hotkey_value,
@@ -48,6 +51,109 @@ impl From<ExitDialogMode> for ExitDialogState {
             ExitDialogMode::PromptVisible => Self::PromptVisible,
             ExitDialogMode::Saving => Self::Saving,
             ExitDialogMode::ErrorVisible => Self::ErrorVisible,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitModalAction {
+    Select(SaveChoice),
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExitModalButton {
+    label: &'static str,
+    rect: toolbar::ToolbarRect,
+    action: ExitModalAction,
+}
+
+const EXIT_MODAL_BUTTON_SPECS: [(&str, ExitModalAction); 5] = [
+    (
+        "1 SAVE WITH DESKTOP",
+        ExitModalAction::Select(SaveChoice::Desktop),
+    ),
+    ("2 SAVE BLANK", ExitModalAction::Select(SaveChoice::Blank)),
+    ("3 SAVE BOTH", ExitModalAction::Select(SaveChoice::Both)),
+    ("4 DISCARD", ExitModalAction::Select(SaveChoice::Discard)),
+    ("5 CANCEL", ExitModalAction::Cancel),
+];
+
+fn exit_modal_buttons(size: (u32, u32)) -> Vec<ExitModalButton> {
+    let panel_w = 300;
+    let panel_h = 224;
+    let x = (size.0 as i32 - panel_w) / 2;
+    let y = (size.1 as i32 - panel_h) / 2;
+    let button_w = panel_w - 32;
+    let button_h = 28;
+    let spacing = 8;
+    let first_y = y + 48;
+
+    EXIT_MODAL_BUTTON_SPECS
+        .iter()
+        .enumerate()
+        .map(|(index, (label, action))| ExitModalButton {
+            label,
+            rect: toolbar::ToolbarRect {
+                x: x + 16,
+                y: first_y + index as i32 * (button_h + spacing),
+                w: button_w,
+                h: button_h,
+            },
+            action: *action,
+        })
+        .collect()
+}
+
+pub fn modal_action_for_pointer_event(
+    exit_dialog_state: ExitDialogState,
+    local_point: (i32, i32),
+    event: OverlayPointerEvent,
+    size: (u32, u32),
+) -> Option<ExitModalAction> {
+    if !matches!(exit_dialog_state, ExitDialogState::PromptVisible)
+        || !matches!(event, OverlayPointerEvent::LeftDown { .. })
+    {
+        return None;
+    }
+    exit_modal_buttons(size)
+        .into_iter()
+        .find(|button| button.rect.contains(local_point))
+        .map(|button| button.action)
+}
+
+pub fn modal_action_for_key_event(
+    exit_dialog_state: ExitDialogState,
+    event: KeyEvent,
+) -> Option<ExitModalAction> {
+    if !matches!(exit_dialog_state, ExitDialogState::PromptVisible) {
+        return None;
+    }
+    match event.key {
+        KeyCode::Num1 => Some(ExitModalAction::Select(SaveChoice::Desktop)),
+        KeyCode::Num2 => Some(ExitModalAction::Select(SaveChoice::Blank)),
+        KeyCode::Num3 => Some(ExitModalAction::Select(SaveChoice::Both)),
+        KeyCode::Num4 => Some(ExitModalAction::Select(SaveChoice::Discard)),
+        KeyCode::Num5 => Some(ExitModalAction::Cancel),
+        KeyCode::Enter => Some(ExitModalAction::Select(SaveChoice::Desktop)),
+        KeyCode::Escape => Some(ExitModalAction::Cancel),
+        _ => None,
+    }
+}
+
+pub fn apply_modal_action(
+    controller: &mut OverlayController,
+    overlay_tx: &Sender<OverlayToMain>,
+    action: ExitModalAction,
+) {
+    match action {
+        ExitModalAction::Select(choice) => {
+            controller.set_exit_dialog_mode(ExitDialogMode::Saving);
+            let _ = overlay_tx.send(OverlayToMain::SaveChoiceSelected { choice });
+        }
+        ExitModalAction::Cancel => {
+            controller.set_exit_dialog_mode(ExitDialogMode::Hidden);
+            let _ = overlay_tx.send(OverlayToMain::ExitDialogCanceled);
         }
     }
 }
@@ -494,6 +600,7 @@ fn rerender_and_repaint(
     draw_input: &DrawInputState,
     settings: &DrawSettings,
     overlay_state: &mut OverlayThreadState,
+    exit_dialog_state: ExitDialogState,
     _framebuffer: &mut RenderFrameBuffer,
     layered_renderer: &mut LayeredRenderer,
     dirty: RenderDirtyDomains,
@@ -546,6 +653,19 @@ fn rerender_and_repaint(
                 overlay_dirty = Some(match overlay_dirty {
                     Some(rect) => rect.union(hud_rect),
                     None => hud_rect,
+                });
+            }
+            if !matches!(exit_dialog_state, ExitDialogState::Hidden) {
+                draw_exit_modal_panel(rgba, size, exit_dialog_state);
+                let modal_rect = DirtyRect {
+                    x: (size.0 as i32 - 300) / 2,
+                    y: (size.1 as i32 - 224) / 2,
+                    width: 300,
+                    height: 224,
+                };
+                overlay_dirty = Some(match overlay_dirty {
+                    Some(rect) => rect.union(modal_rect),
+                    None => modal_rect,
                 });
             }
             overlay_dirty
@@ -1322,6 +1442,101 @@ fn fill_rect(
     }
 }
 
+fn draw_exit_modal_panel(rgba: &mut [u8], size: (u32, u32), state: ExitDialogState) {
+    let panel_w = 300;
+    let panel_h = 224;
+    let panel_x = (size.0 as i32 - panel_w) / 2;
+    let panel_y = (size.1 as i32 - panel_h) / 2;
+
+    fill_rect(
+        rgba,
+        size.0,
+        size.1,
+        panel_x,
+        panel_y,
+        panel_w,
+        panel_h,
+        [24, 24, 24, 240],
+    );
+    fill_rect(
+        rgba,
+        size.0,
+        size.1,
+        panel_x,
+        panel_y,
+        panel_w,
+        2,
+        [220, 220, 220, 255],
+    );
+    draw_text(
+        rgba,
+        size.0,
+        size.1,
+        panel_x + 16,
+        panel_y + 14,
+        "EXIT OPTIONS",
+        [255, 255, 255, 255],
+    );
+
+    match state {
+        ExitDialogState::PromptVisible => {
+            for button in exit_modal_buttons(size) {
+                fill_rect(
+                    rgba,
+                    size.0,
+                    size.1,
+                    button.rect.x,
+                    button.rect.y,
+                    button.rect.w,
+                    button.rect.h,
+                    [60, 60, 60, 230],
+                );
+                draw_text(
+                    rgba,
+                    size.0,
+                    size.1,
+                    button.rect.x + 8,
+                    button.rect.y + 10,
+                    button.label,
+                    [230, 230, 230, 255],
+                );
+            }
+        }
+        ExitDialogState::Saving => {
+            draw_text(
+                rgba,
+                size.0,
+                size.1,
+                panel_x + 16,
+                panel_y + 64,
+                "SAVING...",
+                [255, 220, 80, 255],
+            );
+        }
+        ExitDialogState::ErrorVisible => {
+            draw_text(
+                rgba,
+                size.0,
+                size.1,
+                panel_x + 16,
+                panel_y + 64,
+                "SAVE FAILED",
+                [255, 120, 120, 255],
+            );
+            draw_text(
+                rgba,
+                size.0,
+                size.1,
+                panel_x + 16,
+                panel_y + 88,
+                "PRESS ESC",
+                [230, 230, 230, 255],
+            );
+        }
+        ExitDialogState::Hidden => {}
+    }
+}
+
 fn send_exit_after_cleanup<F>(
     cleanup: F,
     overlay_to_main_tx: &Sender<OverlayToMain>,
@@ -1401,6 +1616,17 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
 
                 for key_event in keyboard_hook.drain_events() {
                     had_work = true;
+                    if let Some(action) =
+                        modal_action_for_key_event(controller.exit_dialog_mode().into(), key_event)
+                    {
+                        apply_modal_action(&mut controller, &controller_tx, action);
+                        needs_redraw = true;
+                        forced_full_redraw = true;
+                        continue;
+                    }
+                    if controller.exit_dialog_mode().into().blocks_drawing_input() {
+                        continue;
+                    }
                     if handle_toolbar_toggle_hotkey_event(&mut overlay_state, key_event)
                         || handle_debug_hud_toggle_hotkey_event(&mut overlay_state, key_event)
                     {
@@ -1476,7 +1702,17 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                         pointer_event.global_point,
                         (window.monitor_rect().x, window.monitor_rect().y),
                     );
-                    let handled = if handle_toolbar_pointer_event(
+                    let handled = if let Some(action) = modal_action_for_pointer_event(
+                        controller.exit_dialog_mode().into(),
+                        local_point,
+                        pointer_event.event,
+                        window.bitmap_size(),
+                    ) {
+                        apply_modal_action(&mut controller, &controller_tx, action);
+                        true
+                    } else if controller.exit_dialog_mode().into().blocks_drawing_input() {
+                        false
+                    } else if handle_toolbar_pointer_event(
                         &mut draw_input,
                         &mut overlay_state,
                         local_point,
@@ -1632,6 +1868,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                             &draw_input,
                             &active_settings,
                             &mut overlay_state,
+                            controller.exit_dialog_mode().into(),
                             &mut framebuffer,
                             &mut layered_renderer,
                             dirty,
@@ -3281,6 +3518,7 @@ mod tests {
             &input,
             &settings,
             &mut state,
+            ExitDialogState::Hidden,
             &mut framebuffer,
             &mut layered_renderer,
             super::RenderDirtyDomains::default(),
@@ -3292,6 +3530,7 @@ mod tests {
             &input,
             &settings,
             &mut state,
+            ExitDialogState::Hidden,
             &mut framebuffer,
             &mut layered_renderer,
             super::RenderDirtyDomains {
@@ -3330,6 +3569,7 @@ mod tests {
             &input,
             &settings,
             &mut state,
+            ExitDialogState::Hidden,
             &mut framebuffer,
             &mut layered_renderer,
             super::RenderDirtyDomains::default(),
@@ -3347,6 +3587,7 @@ mod tests {
             &input,
             &settings,
             &mut state,
+            ExitDialogState::Hidden,
             &mut framebuffer,
             &mut layered_renderer,
             super::RenderDirtyDomains {
@@ -3429,6 +3670,7 @@ mod tests {
             &mut input,
             &settings,
             &mut state,
+            ExitDialogState::Hidden,
             &mut framebuffer,
             &mut layered_renderer,
             super::RenderDirtyDomains::default(),

@@ -1,4 +1,5 @@
 use crate::draw::model::{CanvasModel, Color, Tool};
+use crate::draw::save::SaveChoice;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitDialogMode {
@@ -61,6 +62,10 @@ pub enum OverlayToMain {
     SaveError {
         error: String,
     },
+    SaveChoiceSelected {
+        choice: SaveChoice,
+    },
+    ExitDialogCanceled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
