@@ -2202,7 +2202,7 @@ mod tests {
         let heuristic_ops = heuristic
             .paths
             .iter()
-            .find(|(name, _)| name == "capsule_raster" || name == "adaptive_stamp")
+            .filter(|(name, _)| name == "capsule_raster" || name == "adaptive_stamp")
             .map(|(_, stats)| stats.total_ops)
             .sum::<u64>();
 
