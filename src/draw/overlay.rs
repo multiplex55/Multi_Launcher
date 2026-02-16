@@ -1468,7 +1468,7 @@ fn draw_exit_modal_panel(rgba: &mut [u8], size: (u32, u32), state: ExitDialogSta
         2,
         [220, 220, 220, 255],
     );
-    draw_text(
+    draw_tiny_text(
         rgba,
         size.0,
         size.1,
@@ -1491,7 +1491,7 @@ fn draw_exit_modal_panel(rgba: &mut [u8], size: (u32, u32), state: ExitDialogSta
                     button.rect.h,
                     [60, 60, 60, 230],
                 );
-                draw_text(
+                draw_tiny_text(
                     rgba,
                     size.0,
                     size.1,
@@ -1503,7 +1503,7 @@ fn draw_exit_modal_panel(rgba: &mut [u8], size: (u32, u32), state: ExitDialogSta
             }
         }
         ExitDialogState::Saving => {
-            draw_text(
+            draw_tiny_text(
                 rgba,
                 size.0,
                 size.1,
@@ -1514,7 +1514,7 @@ fn draw_exit_modal_panel(rgba: &mut [u8], size: (u32, u32), state: ExitDialogSta
             );
         }
         ExitDialogState::ErrorVisible => {
-            draw_text(
+            draw_tiny_text(
                 rgba,
                 size.0,
                 size.1,
@@ -1523,7 +1523,7 @@ fn draw_exit_modal_panel(rgba: &mut [u8], size: (u32, u32), state: ExitDialogSta
                 "SAVE FAILED",
                 [255, 120, 120, 255],
             );
-            draw_text(
+            draw_tiny_text(
                 rgba,
                 size.0,
                 size.1,
@@ -1624,7 +1624,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                         forced_full_redraw = true;
                         continue;
                     }
-                    if controller.exit_dialog_mode().into().blocks_drawing_input() {
+                    if ExitDialogState::from(controller.exit_dialog_mode()).blocks_drawing_input() {
                         continue;
                     }
                     if handle_toolbar_toggle_hotkey_event(&mut overlay_state, key_event)
@@ -1710,7 +1710,9 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                     ) {
                         apply_modal_action(&mut controller, &controller_tx, action);
                         true
-                    } else if controller.exit_dialog_mode().into().blocks_drawing_input() {
+                    } else if ExitDialogState::from(controller.exit_dialog_mode())
+                        .blocks_drawing_input()
+                    {
                         false
                     } else if handle_toolbar_pointer_event(
                         &mut draw_input,

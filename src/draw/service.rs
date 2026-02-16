@@ -612,7 +612,7 @@ impl DrawRuntime {
 
     fn complete_save_flow(&self) -> Result<()> {
         let (choice, canvas, settings, monitor_rect) = {
-            let mut state = self
+            let state = self
                 .state
                 .lock()
                 .map_err(|_| anyhow!("draw runtime lock poisoned"))?;
