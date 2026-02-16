@@ -69,19 +69,100 @@ pub enum PresentBackend {
     Gpu,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentBackendCapabilities {
+    pub supports_partial_present: bool,
+}
+
+impl PresentBackend {
+    pub fn capabilities(self) -> PresentBackendCapabilities {
+        match self {
+            // Keep legacy behavior for software path: full surface upload on every present.
+            Self::Cpu => PresentBackendCapabilities {
+                supports_partial_present: false,
+            },
+            // GPU/compositor path can accept dirty-region hints. Today we still funnel through
+            // the same platform call, but this flag allows future DirectComposition + D2D/D3D
+            // plumbing to specialize without entangling render composition and present dispatch.
+            Self::Gpu => PresentBackendCapabilities {
+                supports_partial_present: true,
+            },
+        }
+    }
+}
+
+fn select_present_backend_impl(raw: Option<&str>, default_gpu_on_windows: bool) -> PresentBackend {
+    match raw {
+        Some(raw) if raw.trim().eq_ignore_ascii_case("cpu") => PresentBackend::Cpu,
+        Some(raw) if raw.trim().eq_ignore_ascii_case("gpu") => PresentBackend::Gpu,
+        _ if default_gpu_on_windows => PresentBackend::Gpu,
+        _ => PresentBackend::Cpu,
+    }
+}
+
 fn select_present_backend() -> PresentBackend {
-    match std::env::var("ML_DRAW_PRESENT_BACKEND") {
-        Ok(raw) if raw.trim().eq_ignore_ascii_case("cpu") => PresentBackend::Cpu,
-        Ok(raw) if raw.trim().eq_ignore_ascii_case("gpu") => PresentBackend::Gpu,
-        _ => {
-            #[cfg(windows)]
-            {
-                PresentBackend::Gpu
-            }
-            #[cfg(not(windows))]
-            {
-                PresentBackend::Cpu
-            }
+    // Migration plan:
+    // 1) Keep env override compatibility while defaulting to platform-appropriate backend.
+    // 2) Route frame dispatch through `issue_present_request`, which consults backend
+    //    capabilities instead of hard-coding behavior at call sites.
+    // 3) Swap the GPU implementation to a true DirectComposition + D2D/D3D presenter while
+    //    leaving scene composition (`LayeredRenderer`) untouched.
+    select_present_backend_impl(
+        std::env::var("ML_DRAW_PRESENT_BACKEND").ok().as_deref(),
+        cfg!(windows),
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PresentRequest {
+    dirty: Option<DirtyRect>,
+    force_full: bool,
+}
+
+trait PresentTarget {
+    fn present_backend(&self) -> PresentBackend;
+    fn request_paint(&mut self);
+    fn request_paint_rect(&mut self, rect: DirtyRect);
+}
+
+fn issue_present_request(target: &mut impl PresentTarget, request: PresentRequest) {
+    let backend_caps = target.present_backend().capabilities();
+    if request.force_full || request.dirty.is_none() || !backend_caps.supports_partial_present {
+        target.request_paint();
+    } else if let Some(rect) = request.dirty {
+        target.request_paint_rect(rect);
+    }
+}
+
+fn has_presentable_changes(force_full: bool, dirty: Option<DirtyRect>) -> bool {
+    force_full || dirty.is_some()
+}
+
+#[derive(Debug, Clone)]
+struct FramePacer {
+    frame_interval: Duration,
+    next_present_at: Duration,
+}
+
+impl FramePacer {
+    fn new(frame_interval: Duration) -> Self {
+        Self {
+            frame_interval: frame_interval.max(Duration::from_millis(1)),
+            next_present_at: Duration::ZERO,
+        }
+    }
+
+    fn update_interval(&mut self, frame_interval: Duration) {
+        self.frame_interval = frame_interval.max(Duration::from_millis(1));
+    }
+
+    fn should_present(&self, now: Duration, has_dirty_state: bool) -> bool {
+        has_dirty_state && now >= self.next_present_at
+    }
+
+    fn mark_presented(&mut self, now: Duration) {
+        while self.next_present_at <= now {
+            self.next_present_at += self.frame_interval;
         }
     }
 }
@@ -430,27 +511,31 @@ fn rerender_and_repaint(
 
     overlay_state.diagnostics.paint_count += 1;
     overlay_state.perf_stats.mark_invalidate_requested();
-    if force_full_frame {
-        window.request_paint();
-    } else if let Some(rect) = dirty.and_then(|d| d.clamp(window_size.0, window_size.1)) {
-        let upload_dirty = if toolbar_visible {
-            toolbar::ToolbarLayout::for_state(window_size, &toolbar_state, quick_colors.len())
-                .map(|layout| {
-                    rect.union(DirtyRect {
-                        x: layout.panel.x,
-                        y: layout.panel.y,
-                        width: layout.panel.w,
-                        height: layout.panel.h,
+    let dirty_present_rect = dirty
+        .and_then(|d| d.clamp(window_size.0, window_size.1))
+        .map(|rect| {
+            if toolbar_visible {
+                toolbar::ToolbarLayout::for_state(window_size, &toolbar_state, quick_colors.len())
+                    .map(|layout| {
+                        rect.union(DirtyRect {
+                            x: layout.panel.x,
+                            y: layout.panel.y,
+                            width: layout.panel.w,
+                            height: layout.panel.h,
+                        })
                     })
-                })
-                .unwrap_or(rect)
-        } else {
-            rect
-        };
-        window.request_paint_rect(upload_dirty);
-    } else {
-        window.request_paint();
-    }
+                    .unwrap_or(rect)
+            } else {
+                rect
+            }
+        });
+    issue_present_request(
+        window,
+        PresentRequest {
+            dirty: dirty_present_rect,
+            force_full: force_full_frame,
+        },
+    );
     overlay_state.perf_stats.mark_paint_completed();
     overlay_state.perf_stats.finish_frame(
         frame_start.elapsed().as_secs_f64() * 1000.0,
@@ -1297,10 +1382,12 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
             let mut framebuffer = RenderFrameBuffer::default();
             let mut layered_renderer = LayeredRenderer::default();
             let mut last_reported_revision = draw_input.committed_revision();
-            let mut next_frame = Instant::now();
+            let overlay_start = Instant::now();
+            let mut frame_pacer = FramePacer::new(overlay_state.tick_interval);
             let mut consecutive_tick_misses = 0_u32;
             let mut needs_redraw = true;
             let mut forced_full_redraw = true;
+            let mut pending_dirty: Option<DirtyRect> = None;
 
             loop {
                 #[cfg(windows)]
@@ -1400,6 +1487,7 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                         let previous = active_settings.clone();
                         active_settings = crate::draw::runtime().settings_snapshot();
                         overlay_state.update_from_settings(&active_settings);
+                        frame_pacer.update_interval(overlay_state.tick_interval);
                         keyboard_hook
                             .set_toolbar_toggle_hotkey(Some(overlay_state.toolbar_toggle_hotkey));
                         draw_input.set_tool(map_draw_tool(active_settings.last_tool));
@@ -1462,58 +1550,72 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                 }
 
                 let now = Instant::now();
-                let input_interval = overlay_state.tick_interval.min(Duration::from_millis(8));
-                let input_due = now + input_interval >= next_frame;
-                if needs_redraw && (now >= next_frame || input_due) {
-                    if now > next_frame + overlay_state.tick_interval {
-                        consecutive_tick_misses = consecutive_tick_misses.saturating_add(1);
-                        overlay_state.diagnostics.frame_misses =
-                            overlay_state.diagnostics.frame_misses.saturating_add(1);
-                    } else {
-                        consecutive_tick_misses = 0;
+                let elapsed = now.saturating_duration_since(overlay_start);
+                if needs_redraw {
+                    if let Some(dirty) = draw_input.take_dirty_rect() {
+                        pending_dirty = Some(match pending_dirty {
+                            Some(current) => current.union(dirty),
+                            None => dirty,
+                        });
                     }
-                    let tick_start = Instant::now();
-                    let dirty = draw_input.take_dirty_rect();
                     forced_full_redraw |= draw_input.take_full_redraw_request();
-                    rerender_and_repaint(
-                        &mut window,
-                        &draw_input,
-                        &active_settings,
-                        &mut overlay_state,
-                        &mut framebuffer,
-                        &mut layered_renderer,
-                        dirty,
-                        forced_full_redraw,
-                    );
-                    needs_redraw = false;
-                    forced_full_redraw = false;
-                    while next_frame <= now {
-                        next_frame += overlay_state.tick_interval;
-                    }
-                    if active_settings.drop_intermediate_move_points_on_lag
-                        && consecutive_tick_misses >= 3
-                    {
-                        overlay_state.diagnostics.last_input_event_summary =
-                            "lag_drop_intermediate_moves".to_string();
-                    }
-                    if cfg!(debug_assertions) && tick_start.elapsed() > overlay_state.tick_interval
-                    {
-                        overlay_state.diagnostics.tick_budget_overruns = overlay_state
-                            .diagnostics
-                            .tick_budget_overruns
-                            .saturating_add(1);
-                        tracing::warn!(
-                            elapsed_ms = tick_start.elapsed().as_secs_f64() * 1000.0,
-                            budget_ms = overlay_state.tick_interval.as_secs_f64() * 1000.0,
-                            "draw overlay tick budget exceeded"
+
+                    let has_dirty_state =
+                        has_presentable_changes(forced_full_redraw, pending_dirty);
+                    if !has_dirty_state {
+                        // No visual changes to publish: suppress redundant paint requests.
+                        needs_redraw = false;
+                    } else if frame_pacer.should_present(elapsed, has_dirty_state) {
+                        if elapsed > frame_pacer.next_present_at + overlay_state.tick_interval {
+                            consecutive_tick_misses = consecutive_tick_misses.saturating_add(1);
+                            overlay_state.diagnostics.frame_misses =
+                                overlay_state.diagnostics.frame_misses.saturating_add(1);
+                        } else {
+                            consecutive_tick_misses = 0;
+                        }
+                        let tick_start = Instant::now();
+                        let dirty = pending_dirty.take();
+                        rerender_and_repaint(
+                            &mut window,
+                            &draw_input,
+                            &active_settings,
+                            &mut overlay_state,
+                            &mut framebuffer,
+                            &mut layered_renderer,
+                            dirty,
+                            forced_full_redraw,
                         );
+                        needs_redraw = false;
+                        forced_full_redraw = false;
+                        frame_pacer.mark_presented(elapsed);
+                        if active_settings.drop_intermediate_move_points_on_lag
+                            && consecutive_tick_misses >= 3
+                        {
+                            overlay_state.diagnostics.last_input_event_summary =
+                                "lag_drop_intermediate_moves".to_string();
+                        }
+                        if cfg!(debug_assertions)
+                            && tick_start.elapsed() > overlay_state.tick_interval
+                        {
+                            overlay_state.diagnostics.tick_budget_overruns = overlay_state
+                                .diagnostics
+                                .tick_budget_overruns
+                                .saturating_add(1);
+                            tracing::warn!(
+                                elapsed_ms = tick_start.elapsed().as_secs_f64() * 1000.0,
+                                budget_ms = overlay_state.tick_interval.as_secs_f64() * 1000.0,
+                                "draw overlay tick budget exceeded"
+                            );
+                        }
                     }
                 }
 
                 if !had_work {
                     let now = Instant::now();
-                    if now < next_frame {
-                        let sleep_for = (next_frame - now).min(Duration::from_millis(1));
+                    let elapsed = now.saturating_duration_since(overlay_start);
+                    if elapsed < frame_pacer.next_present_at {
+                        let sleep_for =
+                            (frame_pacer.next_present_at - elapsed).min(Duration::from_millis(1));
                         thread::sleep(sleep_for);
                     } else {
                         thread::yield_now();
@@ -2137,8 +2239,11 @@ mod platform {
         }
 
         fn present_gpu(&self) {
-            // Windows compositor path (UpdateLayeredWindow) performs hardware-accelerated blending
-            // once pixels are uploaded to the layered surface.
+            // Migration note:
+            // today the GPU hook delegates to layered-window upload while retaining an explicit
+            // backend split. The next step is to move this path to a dedicated DirectComposition
+            // presenter backed by D2D/D3D surfaces, keeping render composition independent from
+            // the final platform present call.
             self.present_cpu();
         }
 
@@ -2147,6 +2252,10 @@ mod platform {
                 super::PresentBackend::Cpu => self.present_cpu(),
                 super::PresentBackend::Gpu => self.present_gpu(),
             }
+        }
+
+        pub fn present_backend(&self) -> super::PresentBackend {
+            self.present_backend
         }
 
         pub fn show(&self) {
@@ -2285,6 +2394,10 @@ impl OverlayWindow {
 
     pub fn show(&self) {}
 
+    pub fn present_backend(&self) -> PresentBackend {
+        self.present_backend
+    }
+
     pub fn request_paint(&self) {}
 
     pub fn request_paint_rect(&self, _rect: crate::draw::render::DirtyRect) {}
@@ -2308,20 +2421,37 @@ impl OverlayWindow {
     pub fn shutdown(&mut self) {}
 }
 
+impl PresentTarget for OverlayWindow {
+    fn present_backend(&self) -> PresentBackend {
+        self.present_backend()
+    }
+
+    fn request_paint(&mut self) {
+        OverlayWindow::request_paint(self);
+    }
+
+    fn request_paint_rect(&mut self, rect: DirtyRect) {
+        OverlayWindow::request_paint_rect(self, rect);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         apply_toolbar_command, coalesce_pointer_events, command_requests_repaint,
         forward_key_event_to_draw_input, forward_pointer_event_to_draw_input, global_to_local,
         handle_debug_hud_toggle_hotkey_event, handle_toolbar_pointer_event,
-        handle_toolbar_toggle_hotkey_event, live_render_settings, map_overlay_command_to_toolbar,
-        monitor_contains_point, monitor_local_point_for_global,
+        handle_toolbar_toggle_hotkey_event, issue_present_request, live_render_settings,
+        map_overlay_command_to_toolbar, monitor_contains_point, monitor_local_point_for_global,
         parse_debug_hud_hotkey_with_fallback, parse_toolbar_hotkey_with_fallback,
-        rerender_and_repaint, select_monitor_for_point, send_exit_after_cleanup, ExitDialogState,
-        OverlayPointerEvent, OverlayThreadState, OverlayWindow,
+        rerender_and_repaint, select_monitor_for_point, select_present_backend_impl,
+        send_exit_after_cleanup, ExitDialogState, FramePacer, OverlayPointerEvent,
+        OverlayThreadState, OverlayWindow, PresentBackend, PresentRequest, PresentTarget,
     };
     use crate::draw::keyboard_hook::{KeyCode, KeyEvent, KeyModifiers};
     use crate::draw::messages::{ExitReason, OverlayCommand, OverlayToMain, SaveResult};
+    use std::time::Duration;
+
     use crate::draw::{
         input::DrawInputState,
         model::{CanvasModel, Color, ObjectStyle, StrokeStyle, Tool},
@@ -3360,5 +3490,111 @@ mod tests {
             live_render_settings(&settings).clear_mode,
             BackgroundClearMode::Solid(crate::draw::model::Color::rgba(254, 0, 255, 255))
         );
+    }
+
+    #[derive(Debug)]
+    struct MockPresentTarget {
+        backend: PresentBackend,
+        full_paints: usize,
+        partial_paints: Vec<DirtyRect>,
+    }
+
+    impl MockPresentTarget {
+        fn new(backend: PresentBackend) -> Self {
+            Self {
+                backend,
+                full_paints: 0,
+                partial_paints: Vec::new(),
+            }
+        }
+    }
+
+    impl PresentTarget for MockPresentTarget {
+        fn present_backend(&self) -> PresentBackend {
+            self.backend
+        }
+
+        fn request_paint(&mut self) {
+            self.full_paints += 1;
+        }
+
+        fn request_paint_rect(&mut self, rect: DirtyRect) {
+            self.partial_paints.push(rect);
+        }
+    }
+
+    #[test]
+    fn frame_pacer_throttles_paint_requests_with_fake_clock() {
+        let mut pacer = FramePacer::new(Duration::from_millis(16));
+        assert!(pacer.should_present(Duration::from_millis(0), true));
+        pacer.mark_presented(Duration::from_millis(0));
+
+        assert!(!pacer.should_present(Duration::from_millis(10), true));
+        assert!(pacer.should_present(Duration::from_millis(16), true));
+        pacer.mark_presented(Duration::from_millis(16));
+        assert!(!pacer.should_present(Duration::from_millis(20), true));
+        assert!(pacer.should_present(Duration::from_millis(32), true));
+    }
+
+    #[test]
+    fn frame_pacer_ignores_deadlines_without_dirty_state() {
+        let mut pacer = FramePacer::new(Duration::from_millis(16));
+        assert!(!pacer.should_present(Duration::from_millis(20), false));
+        pacer.mark_presented(Duration::from_millis(20));
+        assert!(!pacer.should_present(Duration::from_millis(25), false));
+    }
+
+    #[test]
+    fn no_dirty_and_no_force_full_suppresses_present_work() {
+        assert!(!super::has_presentable_changes(false, None));
+        assert!(super::has_presentable_changes(true, None));
+        assert!(super::has_presentable_changes(
+            false,
+            Some(DirtyRect::from_points((1, 1), (2, 2), 0)),
+        ));
+    }
+
+    #[test]
+    fn present_backend_capabilities_drive_partial_present_path() {
+        let dirty = DirtyRect::from_points((4, 4), (12, 20), 1);
+
+        let mut cpu_target = MockPresentTarget::new(PresentBackend::Cpu);
+        issue_present_request(
+            &mut cpu_target,
+            PresentRequest {
+                dirty: Some(dirty),
+                force_full: false,
+            },
+        );
+        assert_eq!(cpu_target.full_paints, 1);
+        assert!(cpu_target.partial_paints.is_empty());
+
+        let mut gpu_target = MockPresentTarget::new(PresentBackend::Gpu);
+        issue_present_request(
+            &mut gpu_target,
+            PresentRequest {
+                dirty: Some(dirty),
+                force_full: false,
+            },
+        );
+        assert_eq!(gpu_target.full_paints, 0);
+        assert_eq!(gpu_target.partial_paints, vec![dirty]);
+    }
+
+    #[test]
+    fn present_backend_selection_honors_explicit_and_default_values() {
+        assert_eq!(
+            select_present_backend_impl(Some("cpu"), true),
+            PresentBackend::Cpu
+        );
+        assert_eq!(
+            select_present_backend_impl(Some("gpu"), false),
+            PresentBackend::Gpu
+        );
+        assert_eq!(
+            select_present_backend_impl(Some("unknown"), false),
+            PresentBackend::Cpu
+        );
+        assert_eq!(select_present_backend_impl(None, true), PresentBackend::Gpu);
     }
 }
