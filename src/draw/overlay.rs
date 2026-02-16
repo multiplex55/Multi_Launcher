@@ -497,26 +497,65 @@ struct CoalesceOutcome {
     coalesced_count: u64,
 }
 
+fn dist_sq(a: (i32, i32), b: (i32, i32)) -> i64 {
+    let dx = b.0 as i64 - a.0 as i64;
+    let dy = b.1 as i64 - a.1 as i64;
+    dx * dx + dy * dy
+}
+
 fn flush_move_run(
     run: &mut Vec<OverlayPointerSample>,
     out: &mut Vec<OverlayPointerSample>,
-    keep_samples: usize,
+    max_points_per_frame: usize,
+    max_gap_px: i32,
     coalesced_count: &mut u64,
 ) {
     if run.is_empty() {
         return;
     }
-    let keep = keep_samples.max(1).min(run.len());
-    let dropped = run.len().saturating_sub(keep) as u64;
+
+    let max_points = max_points_per_frame.max(1);
+    if run.len() <= max_points {
+        out.extend(run.drain(..));
+        return;
+    }
+    let max_gap_sq = (max_gap_px.max(1) as i64).pow(2);
+    let mut kept: Vec<OverlayPointerSample> = Vec::with_capacity(run.len().min(max_points));
+
+    let mut reverse_kept: Vec<OverlayPointerSample> = Vec::with_capacity(run.len().min(max_points));
+    let mut last_kept = run[run.len() - 1];
+    reverse_kept.push(last_kept);
+    for sample in run.iter().copied().rev().skip(1) {
+        if reverse_kept.len() >= max_points {
+            break;
+        }
+        if dist_sq(sample.global_point, last_kept.global_point) >= max_gap_sq {
+            reverse_kept.push(sample);
+            last_kept = sample;
+        }
+    }
+
+    reverse_kept.reverse();
+    kept.extend(reverse_kept);
+
+    if kept.first().map(|sample| sample.global_point)
+        != run.first().map(|sample| sample.global_point)
+        && kept.len() < max_points
+        && !run.is_empty()
+    {
+        kept.insert(0, run[0]);
+    }
+
+    let dropped = run.len().saturating_sub(kept.len()) as u64;
     *coalesced_count = coalesced_count.saturating_add(dropped);
-    let start = run.len().saturating_sub(keep);
-    out.extend(run.drain(start..));
+    out.extend(kept);
     run.clear();
 }
 
 fn coalesce_pointer_events(
     events: Vec<OverlayPointerSample>,
-    keep_move_samples: usize,
+    max_points_per_frame: usize,
+    max_gap_px: i32,
 ) -> CoalesceOutcome {
     let mut coalesced = Vec::with_capacity(events.len());
     let mut move_run: Vec<OverlayPointerSample> = Vec::new();
@@ -529,7 +568,8 @@ fn coalesce_pointer_events(
         flush_move_run(
             &mut move_run,
             &mut coalesced,
-            keep_move_samples,
+            max_points_per_frame,
+            max_gap_px,
             &mut coalesced_count,
         );
         coalesced.push(event);
@@ -537,7 +577,8 @@ fn coalesce_pointer_events(
     flush_move_run(
         &mut move_run,
         &mut coalesced,
-        keep_move_samples,
+        max_points_per_frame,
+        max_gap_px,
         &mut coalesced_count,
     );
     CoalesceOutcome {
@@ -1295,17 +1336,18 @@ pub fn spawn_overlay_for_monitor(monitor_rect: MonitorRect) -> Result<OverlayHan
                 let drained_pointer_events = window.drain_pointer_events();
                 let lag_drop_mode = active_settings.drop_intermediate_move_points_on_lag
                     && consecutive_tick_misses >= 3;
-                let keep_move_samples = if lag_drop_mode {
-                    1
-                } else if drained_pointer_events.diagnostics.queue_depth >= 512
+                let mut sampling = active_settings.resolved_sampling(lag_drop_mode);
+                if drained_pointer_events.diagnostics.queue_depth >= 512
                     || drained_pointer_events.diagnostics.dropped_events > 0
                 {
-                    2
-                } else {
-                    4
-                };
-                let coalesced =
-                    coalesce_pointer_events(drained_pointer_events.events, keep_move_samples);
+                    sampling.max_points_per_frame = sampling.max_points_per_frame.min(2).max(1);
+                    sampling.max_gap_px = sampling.max_gap_px.max(4);
+                }
+                let coalesced = coalesce_pointer_events(
+                    drained_pointer_events.events,
+                    sampling.max_points_per_frame,
+                    sampling.max_gap_px,
+                );
                 let combined_coalesced = drained_pointer_events
                     .diagnostics
                     .coalesced_events
@@ -3115,7 +3157,7 @@ mod tests {
             },
         ];
 
-        let coalesced = coalesce_pointer_events(events, 1);
+        let coalesced = coalesce_pointer_events(events, 1, 64);
         assert_eq!(coalesced.events.len(), 3);
         assert_eq!(coalesced.events[1].event, OverlayPointerEvent::Move);
         assert_eq!(coalesced.events[1].global_point, (18, 10));
@@ -3144,12 +3186,112 @@ mod tests {
             },
         ];
 
-        let normal = coalesce_pointer_events(events.clone(), 4);
+        let normal = coalesce_pointer_events(events.clone(), 4, 64);
         assert_eq!(normal.events.len(), 4);
 
-        let lag = coalesce_pointer_events(events, 1);
+        let lag = coalesce_pointer_events(events, 1, 64);
         assert_eq!(lag.events.len(), 1);
         assert_eq!(lag.events[0].global_point, (3, 0));
+    }
+
+    #[test]
+    fn fast_move_burst_retains_bounded_intermediate_points() {
+        let mut events = vec![super::OverlayPointerSample {
+            global_point: (0, 0),
+            event: OverlayPointerEvent::LeftDown {
+                modifiers: Default::default(),
+            },
+        }];
+        events.extend((1..=12).map(|x| super::OverlayPointerSample {
+            global_point: (x, 0),
+            event: OverlayPointerEvent::Move,
+        }));
+        events.push(super::OverlayPointerSample {
+            global_point: (13, 0),
+            event: OverlayPointerEvent::LeftUp,
+        });
+
+        let sampled = coalesce_pointer_events(events, 4, 3);
+        let move_points: Vec<(i32, i32)> = sampled
+            .events
+            .iter()
+            .filter_map(|sample| {
+                matches!(sample.event, OverlayPointerEvent::Move).then_some(sample.global_point)
+            })
+            .collect();
+
+        assert!(move_points.len() > 1);
+        assert!(move_points.len() <= 4);
+        assert_eq!(move_points.last().copied(), Some((12, 0)));
+    }
+
+    #[test]
+    fn left_down_and_left_up_order_is_preserved_around_sampled_moves() {
+        let events = vec![
+            super::OverlayPointerSample {
+                global_point: (10, 10),
+                event: OverlayPointerEvent::LeftDown {
+                    modifiers: Default::default(),
+                },
+            },
+            super::OverlayPointerSample {
+                global_point: (11, 10),
+                event: OverlayPointerEvent::Move,
+            },
+            super::OverlayPointerSample {
+                global_point: (13, 10),
+                event: OverlayPointerEvent::Move,
+            },
+            super::OverlayPointerSample {
+                global_point: (16, 10),
+                event: OverlayPointerEvent::Move,
+            },
+            super::OverlayPointerSample {
+                global_point: (20, 10),
+                event: OverlayPointerEvent::LeftUp,
+            },
+        ];
+
+        let sampled = coalesce_pointer_events(events, 2, 2);
+
+        assert!(matches!(
+            sampled.events.first().map(|sample| sample.event),
+            Some(OverlayPointerEvent::LeftDown { .. })
+        ));
+        assert!(matches!(
+            sampled.events.last().map(|sample| sample.event),
+            Some(OverlayPointerEvent::LeftUp)
+        ));
+    }
+
+    #[test]
+    fn coalesced_telemetry_reports_dropped_move_count() {
+        let events = vec![
+            super::OverlayPointerSample {
+                global_point: (0, 0),
+                event: OverlayPointerEvent::Move,
+            },
+            super::OverlayPointerSample {
+                global_point: (1, 0),
+                event: OverlayPointerEvent::Move,
+            },
+            super::OverlayPointerSample {
+                global_point: (2, 0),
+                event: OverlayPointerEvent::Move,
+            },
+            super::OverlayPointerSample {
+                global_point: (3, 0),
+                event: OverlayPointerEvent::Move,
+            },
+            super::OverlayPointerSample {
+                global_point: (4, 0),
+                event: OverlayPointerEvent::Move,
+            },
+        ];
+
+        let sampled = coalesce_pointer_events(events, 2, 2);
+        assert_eq!(sampled.events.len(), 2);
+        assert_eq!(sampled.coalesced_count, 3);
     }
 
     #[test]
