@@ -3189,7 +3189,7 @@ mod tests {
             &mut state,
             &mut framebuffer,
             &mut layered_renderer,
-            RenderDirtyDomains::default(),
+            super::RenderDirtyDomains::default(),
             true,
         );
 
@@ -3200,7 +3200,7 @@ mod tests {
             &mut state,
             &mut framebuffer,
             &mut layered_renderer,
-            RenderDirtyDomains {
+            super::RenderDirtyDomains {
                 canvas_dirty: Some(dirty),
                 ui_dirty: None,
             },
@@ -3235,7 +3235,7 @@ mod tests {
             &mut state,
             &mut framebuffer,
             &mut layered_renderer,
-            RenderDirtyDomains::default(),
+            super::RenderDirtyDomains::default(),
             true,
         );
 
@@ -3252,7 +3252,7 @@ mod tests {
             &mut state,
             &mut framebuffer,
             &mut layered_renderer,
-            RenderDirtyDomains {
+            super::RenderDirtyDomains {
                 canvas_dirty: None,
                 ui_dirty: Some(ui_dirty),
             },
@@ -3317,7 +3317,7 @@ mod tests {
             &mut state,
             &mut framebuffer,
             &mut layered_renderer,
-            RenderDirtyDomains::default(),
+            super::RenderDirtyDomains::default(),
             true,
         );
         assert_eq!(state.diagnostics.paint_count, 1);

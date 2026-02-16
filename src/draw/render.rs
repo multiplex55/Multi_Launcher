@@ -1575,6 +1575,7 @@ mod tests {
             super::RenderSettings {
                 clear_mode: super::BackgroundClearMode::Transparent,
                 wide_stroke_threshold: threshold,
+                incremental_stroke_render: true,
             },
             (64, 64),
         )
@@ -1587,6 +1588,7 @@ mod tests {
             super::RenderSettings {
                 clear_mode: super::BackgroundClearMode::Transparent,
                 wide_stroke_threshold: super::DEFAULT_WIDE_STROKE_THRESHOLD,
+                incremental_stroke_render: true,
             },
             (2, 1),
         );
@@ -1597,6 +1599,7 @@ mod tests {
             super::RenderSettings {
                 clear_mode: super::BackgroundClearMode::Solid(Color::rgba(7, 8, 9, 255)),
                 wide_stroke_threshold: super::DEFAULT_WIDE_STROKE_THRESHOLD,
+                incremental_stroke_render: true,
             },
             (2, 1),
         );
@@ -1854,6 +1857,7 @@ mod tests {
             super::RenderSettings {
                 clear_mode: super::BackgroundClearMode::Solid(colorkey),
                 wide_stroke_threshold: super::DEFAULT_WIDE_STROKE_THRESHOLD,
+                incremental_stroke_render: true,
             },
             (2, 1),
         );
@@ -1913,6 +1917,7 @@ mod tests {
             super::RenderSettings {
                 clear_mode: super::BackgroundClearMode::Transparent,
                 wide_stroke_threshold: super::DEFAULT_WIDE_STROKE_THRESHOLD,
+                incremental_stroke_render: true,
             },
             (3, 2),
             None,
@@ -1933,6 +1938,7 @@ mod tests {
             super::RenderSettings {
                 clear_mode: super::BackgroundClearMode::Solid(Color::rgba(9, 8, 7, 255)),
                 wide_stroke_threshold: super::DEFAULT_WIDE_STROKE_THRESHOLD,
+                incremental_stroke_render: true,
             },
             (2, 2),
             None,
