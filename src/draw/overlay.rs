@@ -18,7 +18,9 @@ use crate::draw::settings::{
     default_debug_hud_toggle_hotkey_value, default_toolbar_toggle_hotkey_value,
     CanvasBackgroundMode, DrawColor, DrawSettings, DrawTool,
 };
-use crate::draw::toolbar::{self, ToolbarCommand, ToolbarPointerEvent, ToolbarState};
+use crate::draw::toolbar::{
+    self, ToolbarCommand, ToolbarLayout, ToolbarPointerEvent, ToolbarState,
+};
 use crate::hotkey::{parse_hotkey, Hotkey, Key};
 use anyhow::{anyhow, Result};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -2795,12 +2797,9 @@ mod tests {
         let mut state = OverlayThreadState::from_settings(&DrawSettings::default());
         state.toolbar_state.visible = true;
         let mut input = draw_state(Tool::Pen);
-        let layout = crate::draw::ToolbarLayout::for_state(
-            (800, 600),
-            &state.toolbar_state,
-            state.quick_colors.len(),
-        )
-        .expect("toolbar layout available");
+        let layout =
+            ToolbarLayout::for_state((800, 600), &state.toolbar_state, state.quick_colors.len())
+                .expect("toolbar layout available");
         let (_, rect) = layout.tool_rects[2]; // rect tool
         let click_point = (rect.x + 2, rect.y + 2);
 
@@ -2829,12 +2828,9 @@ mod tests {
         let mut state = OverlayThreadState::from_settings(&settings);
         state.toolbar_state.visible = true;
         let mut input = draw_state(Tool::Pen);
-        let layout = crate::draw::ToolbarLayout::for_state(
-            (800, 600),
-            &state.toolbar_state,
-            state.quick_colors.len(),
-        )
-        .expect("toolbar layout available");
+        let layout =
+            ToolbarLayout::for_state((800, 600), &state.toolbar_state, state.quick_colors.len())
+                .expect("toolbar layout available");
         let (_, rect) = layout.quick_color_rects[0];
 
         let handled = handle_toolbar_pointer_event(
@@ -2948,12 +2944,9 @@ mod tests {
             &state.toolbar_state,
         );
 
-        let layout = crate::draw::ToolbarLayout::for_state(
-            (800, 600),
-            &state.toolbar_state,
-            state.quick_colors.len(),
-        )
-        .expect("toolbar layout available");
+        let layout =
+            ToolbarLayout::for_state((800, 600), &state.toolbar_state, state.quick_colors.len())
+                .expect("toolbar layout available");
         let quick_rect = layout.quick_color_rects[1].1;
         let fill_rect = layout.fill_color_rects[0].1;
 
@@ -2984,12 +2977,9 @@ mod tests {
         let mut state = OverlayThreadState::from_settings(&settings);
         state.toolbar_state.visible = true;
         let input = draw_state(Tool::Pen);
-        let layout = crate::draw::ToolbarLayout::for_state(
-            (800, 600),
-            &state.toolbar_state,
-            state.quick_colors.len(),
-        )
-        .expect("toolbar layout available");
+        let layout =
+            ToolbarLayout::for_state((800, 600), &state.toolbar_state, state.quick_colors.len())
+                .expect("toolbar layout available");
 
         let mut rgba = vec![0; 800 * 600 * 4];
         super::draw_compact_toolbar_panel(
@@ -3062,12 +3052,9 @@ mod tests {
 
         assert_eq!(state.quick_colors, settings.quick_colors);
 
-        let layout = crate::draw::ToolbarLayout::for_state(
-            (800, 600),
-            &state.toolbar_state,
-            state.quick_colors.len(),
-        )
-        .expect("toolbar layout available");
+        let layout =
+            ToolbarLayout::for_state((800, 600), &state.toolbar_state, state.quick_colors.len())
+                .expect("toolbar layout available");
         let (_, rect) = layout.quick_color_rects[1];
         assert!(handle_toolbar_pointer_event(
             &mut input,
