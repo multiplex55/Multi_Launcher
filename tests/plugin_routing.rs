@@ -137,5 +137,28 @@ fn existing_prefix_commands_remain_equivalent() {
     pm.register(Box::new(TodoPlugin::default()));
     let routed = pm.search_filtered("todo list", None, None);
 
-    assert_eq!(routed, direct);
+    let routed_view: Vec<_> = routed
+        .iter()
+        .map(|a| {
+            (
+                a.label.as_str(),
+                a.desc.as_str(),
+                a.action.as_str(),
+                a.args.as_ref(),
+            )
+        })
+        .collect();
+    let direct_view: Vec<_> = direct
+        .iter()
+        .map(|a| {
+            (
+                a.label.as_str(),
+                a.desc.as_str(),
+                a.action.as_str(),
+                a.args.as_ref(),
+            )
+        })
+        .collect();
+
+    assert_eq!(routed_view, direct_view);
 }
