@@ -353,4 +353,8 @@ impl Plugin for BookmarksPlugin {
             },
         ]
     }
+
+    fn query_prefixes(&self) -> &[&str] {
+        &["bm"]
+    }
 }

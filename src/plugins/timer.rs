@@ -869,4 +869,8 @@ impl Plugin for TimerPlugin {
             },
         ]
     }
+
+    fn query_prefixes(&self) -> &[&str] {
+        &["timer", "alarm"]
+    }
 }

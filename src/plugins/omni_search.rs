@@ -110,6 +110,10 @@ impl Plugin for OmniSearchPlugin {
             },
         ]
     }
+
+    fn query_prefixes(&self) -> &[&str] {
+        &["o"]
+    }
 }
 
 impl OmniSearchPlugin {

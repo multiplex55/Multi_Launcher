@@ -293,4 +293,8 @@ impl Plugin for FoldersPlugin {
             },
         ]
     }
+
+    fn query_prefixes(&self) -> &[&str] {
+        &["f"]
+    }
 }
