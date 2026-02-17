@@ -441,7 +441,9 @@ pub struct LauncherApp {
     pub show_dashboard_editor: bool,
     rx: Receiver<WatchEvent>,
     folder_aliases: HashMap<String, Option<String>>,
+    folder_aliases_lc: HashMap<String, Option<String>>,
     bookmark_aliases: HashMap<String, Option<String>>,
+    bookmark_aliases_lc: HashMap<String, Option<String>>,
     plugin_dirs: Option<Vec<String>>,
     index_paths: Option<Vec<String>>,
     enabled_plugins: Option<HashSet<String>>,
@@ -551,6 +553,53 @@ pub struct LauncherApp {
 }
 
 impl LauncherApp {
+    fn normalize_alias(alias: Option<String>) -> (Option<String>, Option<String>) {
+        let alias_lc = alias.as_ref().map(|text| text.to_lowercase());
+        (alias, alias_lc)
+    }
+
+    fn folder_alias_maps() -> (
+        HashMap<String, Option<String>>,
+        HashMap<String, Option<String>>,
+    ) {
+        let mut aliases = HashMap::new();
+        let mut aliases_lc = HashMap::new();
+        for folder in crate::plugins::folders::load_folders(crate::plugins::folders::FOLDERS_FILE)
+            .unwrap_or_else(|_| crate::plugins::folders::default_folders())
+        {
+            let (alias, alias_lc) = Self::normalize_alias(folder.alias);
+            aliases.insert(folder.path.clone(), alias);
+            aliases_lc.insert(folder.path, alias_lc);
+        }
+        (aliases, aliases_lc)
+    }
+
+    fn bookmark_alias_maps() -> (
+        HashMap<String, Option<String>>,
+        HashMap<String, Option<String>>,
+    ) {
+        let mut aliases = HashMap::new();
+        let mut aliases_lc = HashMap::new();
+        for bookmark in
+            crate::plugins::bookmarks::load_bookmarks(crate::plugins::bookmarks::BOOKMARKS_FILE)
+                .unwrap_or_default()
+        {
+            let (alias, alias_lc) = Self::normalize_alias(bookmark.alias);
+            aliases.insert(bookmark.url.clone(), alias);
+            aliases_lc.insert(bookmark.url, alias_lc);
+        }
+        (aliases, aliases_lc)
+    }
+
+    fn alias_matches_lc(&self, action: &str, query_lc: &str) -> bool {
+        self.folder_aliases_lc
+            .get(action)
+            .or_else(|| self.bookmark_aliases_lc.get(action))
+            .and_then(|v| v.as_ref())
+            .map(|s| s.contains(query_lc))
+            .unwrap_or(false)
+    }
+
     fn has_diagnostics_widget(&self) -> bool {
         self.dashboard
             .slots
@@ -605,22 +654,16 @@ impl LauncherApp {
                     }
                 }
                 WatchEvent::Folders => {
-                    self.folder_aliases = crate::plugins::folders::load_folders(
-                        crate::plugins::folders::FOLDERS_FILE,
-                    )
-                    .unwrap_or_else(|_| crate::plugins::folders::default_folders())
-                    .into_iter()
-                    .map(|f| (f.path, f.alias))
-                    .collect();
+                    let (aliases, aliases_lc) = Self::folder_alias_maps();
+                    self.folder_aliases = aliases;
+                    self.folder_aliases_lc = aliases_lc;
+                    self.search();
                 }
                 WatchEvent::Bookmarks => {
-                    self.bookmark_aliases = crate::plugins::bookmarks::load_bookmarks(
-                        crate::plugins::bookmarks::BOOKMARKS_FILE,
-                    )
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|b| (b.url, b.alias))
-                    .collect();
+                    let (aliases, aliases_lc) = Self::bookmark_alias_maps();
+                    self.bookmark_aliases = aliases;
+                    self.bookmark_aliases_lc = aliases_lc;
+                    self.search();
                 }
                 WatchEvent::Clipboard => {
                     self.dashboard_data_cache.refresh_clipboard();
@@ -1029,18 +1072,8 @@ impl LauncherApp {
         );
         dashboard.attach_watcher();
 
-        let folder_aliases =
-            crate::plugins::folders::load_folders(crate::plugins::folders::FOLDERS_FILE)
-                .unwrap_or_else(|_| crate::plugins::folders::default_folders())
-                .into_iter()
-                .map(|f| (f.path, f.alias))
-                .collect::<HashMap<_, _>>();
-        let bookmark_aliases =
-            crate::plugins::bookmarks::load_bookmarks(crate::plugins::bookmarks::BOOKMARKS_FILE)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|b| (b.url, b.alias))
-                .collect::<HashMap<_, _>>();
+        let (folder_aliases, folder_aliases_lc) = Self::folder_alias_maps();
+        let (bookmark_aliases, bookmark_aliases_lc) = Self::bookmark_alias_maps();
 
         #[cfg(not(test))]
         match watch_file(Path::new(&actions_path), tx.clone(), WatchEvent::Actions) {
@@ -1293,7 +1326,9 @@ impl LauncherApp {
             show_dashboard_editor: false,
             rx,
             folder_aliases,
+            folder_aliases_lc,
             bookmark_aliases,
+            bookmark_aliases_lc,
             plugin_dirs,
             index_paths,
             enabled_plugins,
@@ -1517,13 +1552,7 @@ impl LauncherApp {
             for (i, a) in self.actions.iter().enumerate() {
                 let (ref label_lc, ref desc_lc) = self.action_cache[i];
                 if self.fuzzy_weight <= 0.0 {
-                    let alias_match = self
-                        .folder_aliases
-                        .get(&a.action)
-                        .or_else(|| self.bookmark_aliases.get(&a.action))
-                        .and_then(|v| v.as_ref())
-                        .map(|s| s.to_lowercase().contains(query_lc))
-                        .unwrap_or(false);
+                    let alias_match = self.alias_matches_lc(&a.action, query_lc);
                     let label_match = label_lc.contains(query_lc);
                     let desc_match = desc_lc.contains(query_lc);
                     if label_match || desc_match || alias_match {
@@ -1559,13 +1588,7 @@ impl LauncherApp {
                     if query_term.is_empty() {
                         res.push((a, 0.0));
                     } else {
-                        let alias_match = self
-                            .folder_aliases
-                            .get(&a.action)
-                            .or_else(|| self.bookmark_aliases.get(&a.action))
-                            .and_then(|v| v.as_ref())
-                            .map(|s| s.to_lowercase().contains(query_term))
-                            .unwrap_or(false);
+                        let alias_match = self.alias_matches_lc(&a.action, query_term);
                         let label_match = label_lc.contains(query_term);
                         let desc_match = desc_lc.contains(query_term);
                         if label_match || desc_match || alias_match {
@@ -1603,13 +1626,7 @@ impl LauncherApp {
                 let label_lc = a.label.to_lowercase();
                 let desc_lc = a.desc.to_lowercase();
                 if self.fuzzy_weight <= 0.0 {
-                    let alias_match = self
-                        .folder_aliases
-                        .get(&a.action)
-                        .or_else(|| self.bookmark_aliases.get(&a.action))
-                        .and_then(|v| v.as_ref())
-                        .map(|s| s.to_lowercase().contains(trimmed_lc))
-                        .unwrap_or(false);
+                    let alias_match = self.alias_matches_lc(&a.action, trimmed_lc);
                     let label_match = label_lc.contains(trimmed_lc);
                     let desc_match = desc_lc.contains(trimmed_lc);
                     if label_match || desc_match || alias_match {
@@ -1643,13 +1660,7 @@ impl LauncherApp {
                     if query_term_lc.is_empty() {
                         res.push((a, 0.0));
                     } else {
-                        let alias_match = self
-                            .folder_aliases
-                            .get(&a.action)
-                            .or_else(|| self.bookmark_aliases.get(&a.action))
-                            .and_then(|v| v.as_ref())
-                            .map(|s| s.to_lowercase().contains(&query_term_lc))
-                            .unwrap_or(false);
+                        let alias_match = self.alias_matches_lc(&a.action, &query_term_lc);
                         let label_match = label_lc.contains(&query_term_lc);
                         let desc_match = desc_lc.contains(&query_term_lc);
                         if label_match || desc_match || alias_match {
@@ -5047,6 +5058,116 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn action_search_remains_case_insensitive_with_cached_aliases() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.fuzzy_weight = 0.0;
+        app.actions = Arc::new(vec![Action {
+            label: "Sample Action".into(),
+            desc: "Demo description".into(),
+            action: "demo:action".into(),
+            args: None,
+        }]);
+        app.update_action_cache();
+        app.bookmark_aliases
+            .insert("demo:action".into(), Some("MiXeDCaSe Alias".into()));
+        app.bookmark_aliases_lc
+            .insert("demo:action".into(), Some("mixedcase alias".into()));
+
+        app.query = "app SAMPLE".into();
+        app.search();
+        assert!(app.results.iter().any(|a| a.action == "demo:action"));
+
+        app.query = "app MIXEDCASE".into();
+        app.search();
+        assert!(app.results.iter().any(|a| a.action == "demo:action"));
+    }
+
+    #[test]
+    fn watch_events_refresh_alias_and_lowercase_alias_caches() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let folders_json = serde_json::json!([{
+            "label": "Folder",
+            "path": "/tmp/folder-one",
+            "alias": "MiXeDFolder"
+        }]);
+        std::fs::write(
+            crate::plugins::folders::FOLDERS_FILE,
+            serde_json::to_string_pretty(&folders_json).unwrap(),
+        )
+        .unwrap();
+
+        let bookmarks_json = serde_json::json!([{
+            "url": "https://example.com",
+            "alias": "MiXeDBookmark"
+        }]);
+        std::fs::write(
+            crate::plugins::bookmarks::BOOKMARKS_FILE,
+            serde_json::to_string_pretty(&bookmarks_json).unwrap(),
+        )
+        .unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+
+        assert_eq!(
+            app.folder_aliases_lc.get("/tmp/folder-one"),
+            Some(&Some("mixedfolder".into()))
+        );
+        assert_eq!(
+            app.bookmark_aliases_lc.get("https://example.com"),
+            Some(&Some("mixedbookmark".into()))
+        );
+
+        let updated_folders_json = serde_json::json!([{
+            "label": "Folder",
+            "path": "/tmp/folder-one",
+            "alias": "NewAlias"
+        }]);
+        std::fs::write(
+            crate::plugins::folders::FOLDERS_FILE,
+            serde_json::to_string_pretty(&updated_folders_json).unwrap(),
+        )
+        .unwrap();
+        send_event(WatchEvent::Folders);
+        app.process_watch_events();
+        assert_eq!(
+            app.folder_aliases.get("/tmp/folder-one"),
+            Some(&Some("NewAlias".into()))
+        );
+        assert_eq!(
+            app.folder_aliases_lc.get("/tmp/folder-one"),
+            Some(&Some("newalias".into()))
+        );
+
+        let updated_bookmarks_json = serde_json::json!([{
+            "url": "https://example.com",
+            "alias": "OtherAlias"
+        }]);
+        std::fs::write(
+            crate::plugins::bookmarks::BOOKMARKS_FILE,
+            serde_json::to_string_pretty(&updated_bookmarks_json).unwrap(),
+        )
+        .unwrap();
+        send_event(WatchEvent::Bookmarks);
+        app.process_watch_events();
+        assert_eq!(
+            app.bookmark_aliases.get("https://example.com"),
+            Some(&Some("OtherAlias".into()))
+        );
+        assert_eq!(
+            app.bookmark_aliases_lc.get("https://example.com"),
+            Some(&Some("otheralias".into()))
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]
