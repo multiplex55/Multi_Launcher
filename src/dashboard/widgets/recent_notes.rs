@@ -55,11 +55,25 @@ impl Default for RecentNotesConfig {
 
 pub struct RecentNotesWidget {
     cfg: RecentNotesConfig,
+    cached: Vec<CachedRecentNote>,
+    last_notes_version: u64,
+}
+
+#[derive(Clone)]
+struct CachedRecentNote {
+    title: String,
+    slug: String,
+    tags: Vec<String>,
+    snippet: String,
 }
 
 impl RecentNotesWidget {
     pub fn new(cfg: RecentNotesConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            cached: Vec::new(),
+            last_notes_version: u64::MAX,
+        }
     }
 
     pub fn settings_ui(
@@ -132,11 +146,11 @@ impl RecentNotesWidget {
             .unwrap_or(0)
     }
 
-    fn build_action(&self, note: &Note) -> (Action, Option<String>) {
+    fn build_cached_action(&self, note: &CachedRecentNote) -> (Action, Option<String>) {
         match self.cfg.open_mode {
             NoteOpenMode::Panel => (
                 Action {
-                    label: note.alias.as_ref().unwrap_or(&note.title).clone(),
+                    label: note.title.clone(),
                     desc: "Note".into(),
                     action: format!("note:open:{}", note.slug),
                     args: None,
@@ -159,10 +173,7 @@ impl RecentNotesWidget {
                     action: "query:note open ".into(),
                     args: None,
                 },
-                Some(format!(
-                    "note open {}",
-                    note.alias.as_ref().unwrap_or(&note.title)
-                )),
+                Some(format!("note open {}", note.title)),
             ),
         }
     }
@@ -181,13 +192,46 @@ impl RecentNotesWidget {
             clean.to_string()
         }
     }
+
+    fn refresh_cache(&mut self, ctx: &DashboardContext<'_>) {
+        if self.last_notes_version == ctx.notes_version {
+            return;
+        }
+
+        let snapshot = ctx.data_cache.snapshot();
+        let mut notes_with_ts: Vec<(u64, Note)> = snapshot
+            .notes
+            .as_ref()
+            .iter()
+            .filter(|note| {
+                self.cfg
+                    .filter_tag
+                    .as_ref()
+                    .is_none_or(|tag| note.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
+            })
+            .map(|note| (Self::modified_ts(note), note.clone()))
+            .collect();
+
+        notes_with_ts.sort_by(|a, b| b.0.cmp(&a.0));
+        notes_with_ts.truncate(self.cfg.count);
+
+        self.cached = notes_with_ts
+            .into_iter()
+            .map(|(_, note)| CachedRecentNote {
+                title: note.alias.as_ref().unwrap_or(&note.title).clone(),
+                slug: note.slug,
+                tags: note.tags,
+                snippet: Self::snippet(&note),
+            })
+            .collect();
+
+        self.last_notes_version = ctx.notes_version;
+    }
 }
 
 impl Default for RecentNotesWidget {
     fn default() -> Self {
-        Self {
-            cfg: RecentNotesConfig::default(),
-        }
+        Self::new(RecentNotesConfig::default())
     }
 }
 
@@ -198,15 +242,9 @@ impl Widget for RecentNotesWidget {
         ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        let snapshot = ctx.data_cache.snapshot();
-        let mut notes: Vec<Note> = snapshot.notes.as_ref().clone();
-        if let Some(tag) = &self.cfg.filter_tag {
-            notes.retain(|n| n.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)));
-        }
-        notes.sort_by(|a, b| Self::modified_ts(b).cmp(&Self::modified_ts(a)));
-        notes.truncate(self.cfg.count);
+        self.refresh_cache(ctx);
 
-        if notes.is_empty() {
+        if self.cached.is_empty() {
             ui.label("No notes found");
             return None;
         }
@@ -224,16 +262,15 @@ impl Widget for RecentNotesWidget {
         egui::ScrollArea::both()
             .id_source(scroll_id)
             .auto_shrink([false; 2])
-            .show_rows(ui, row_height, notes.len(), |ui, range| {
-                for note in &notes[range] {
-                    let display = note.alias.as_ref().unwrap_or(&note.title);
-                    let (action, query_override) = self.build_action(note);
+            .show_rows(ui, row_height, self.cached.len(), |ui, range| {
+                for note in &self.cached[range] {
+                    let (action, query_override) = self.build_cached_action(note);
                     let mut clicked_row = false;
                     ui.vertical(|ui| {
-                        clicked_row |= ui.add(egui::Button::new(display).wrap(false)).clicked();
+                        clicked_row |= ui.add(egui::Button::new(&note.title).wrap(false)).clicked();
                         if self.cfg.show_snippet {
                             ui.add(
-                                egui::Label::new(egui::RichText::new(Self::snippet(note)).small())
+                                egui::Label::new(egui::RichText::new(&note.snippet).small())
                                     .wrap(false),
                             );
                         }
@@ -258,5 +295,12 @@ impl Widget for RecentNotesWidget {
             });
 
         clicked
+    }
+
+    fn on_config_updated(&mut self, settings: &serde_json::Value) {
+        if let Ok(cfg) = serde_json::from_value::<RecentNotesConfig>(settings.clone()) {
+            self.cfg = cfg;
+            self.last_notes_version = u64::MAX;
+        }
     }
 }
