@@ -22,6 +22,7 @@ mod gesture_cheat_sheet;
 mod gesture_health;
 mod gesture_recent;
 mod layouts;
+mod note_list_shared;
 mod notes_graph;
 mod notes_recent;
 mod notes_tags;
@@ -361,8 +362,8 @@ impl WidgetRegistry {
         );
         reg.register(
             "notes_recent",
-            WidgetFactory::new(NotesRecentWidget::new)
-                .with_settings_ui(NotesRecentWidget::settings_ui),
+            WidgetFactory::new(RecentNotesWidget::new_legacy)
+                .with_settings_ui(RecentNotesWidget::settings_ui),
         );
         reg.register(
             "notes_tags",

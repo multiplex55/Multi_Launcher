@@ -1,12 +1,11 @@
 use super::{
-    edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+    edit_typed_settings, note_list_shared::render_note_rows, note_list_shared::CachedRecentNotes,
+    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
-use crate::plugins::note::Note;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
-use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -26,20 +25,24 @@ fn default_count() -> usize {
     5
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecentNotesConfig {
-    #[serde(default = "default_count")]
-    pub count: usize,
-    #[serde(default)]
-    pub filter_tag: Option<String>,
-    #[serde(default = "default_show_snippet")]
-    pub show_snippet: bool,
-    #[serde(default)]
-    pub open_mode: NoteOpenMode,
+fn default_true() -> bool {
+    true
 }
 
-fn default_show_snippet() -> bool {
-    true
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentNotesConfig {
+    #[serde(default = "default_count", alias = "limit")]
+    pub count: usize,
+    #[serde(default, alias = "tag")]
+    pub filter_tag: Option<String>,
+    #[serde(default = "default_true")]
+    pub show_snippet: bool,
+    #[serde(default = "default_true")]
+    pub show_tags: bool,
+    #[serde(default)]
+    pub open_mode: NoteOpenMode,
+    #[serde(default, alias = "query_override")]
+    pub query_override_on_open: Option<bool>,
 }
 
 impl Default for RecentNotesConfig {
@@ -47,19 +50,64 @@ impl Default for RecentNotesConfig {
         Self {
             count: default_count(),
             filter_tag: None,
-            show_snippet: default_show_snippet(),
+            show_snippet: true,
+            show_tags: true,
             open_mode: NoteOpenMode::default(),
+            query_override_on_open: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecentNotesProfile {
+    RecentNotes,
+    NotesRecentLegacy,
+}
+
+impl RecentNotesProfile {
+    fn default_query_override_on_open(self) -> bool {
+        match self {
+            RecentNotesProfile::RecentNotes => false,
+            RecentNotesProfile::NotesRecentLegacy => true,
+        }
+    }
+
+    fn no_notes_message(self) -> &'static str {
+        match self {
+            RecentNotesProfile::RecentNotes => "No notes found",
+            RecentNotesProfile::NotesRecentLegacy => "No notes found.",
+        }
+    }
+
+    fn scroll_id(self) -> &'static str {
+        match self {
+            RecentNotesProfile::RecentNotes => "recent_notes_scroll",
+            RecentNotesProfile::NotesRecentLegacy => "notes_recent_scroll",
         }
     }
 }
 
 pub struct RecentNotesWidget {
     cfg: RecentNotesConfig,
+    profile: RecentNotesProfile,
+    cached: CachedRecentNotes,
 }
 
 impl RecentNotesWidget {
     pub fn new(cfg: RecentNotesConfig) -> Self {
-        Self { cfg }
+        Self::new_with_profile(cfg, RecentNotesProfile::RecentNotes)
+    }
+
+    pub fn new_legacy(cfg: RecentNotesConfig) -> Self {
+        Self::new_with_profile(cfg, RecentNotesProfile::NotesRecentLegacy)
+    }
+
+    pub fn new_with_profile(cfg: RecentNotesConfig, profile: RecentNotesProfile) -> Self {
+        Self {
+            cfg,
+            profile,
+            cached: CachedRecentNotes::new(),
+        }
     }
 
     pub fn settings_ui(
@@ -89,6 +137,13 @@ impl RecentNotesWidget {
                 }
             });
             changed |= ui.checkbox(&mut cfg.show_snippet, "Show snippet").changed();
+            changed |= ui.checkbox(&mut cfg.show_tags, "Show tags").changed();
+            changed |= ui
+                .checkbox(
+                    cfg.query_override_on_open.get_or_insert(false),
+                    "Set query to note-open command when clicked",
+                )
+                .changed();
             egui::ComboBox::from_label("Open mode")
                 .selected_text(match cfg.open_mode {
                     NoteOpenMode::Panel => "Open note panel",
@@ -122,26 +177,21 @@ impl RecentNotesWidget {
         })
     }
 
-    fn modified_ts(note: &Note) -> u64 {
-        note.path
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    }
+    fn build_action(&self, note_slug: &str, note_title: &str) -> (Action, Option<String>) {
+        let override_for_panel = self
+            .cfg
+            .query_override_on_open
+            .unwrap_or_else(|| self.profile.default_query_override_on_open());
 
-    fn build_action(&self, note: &Note) -> (Action, Option<String>) {
         match self.cfg.open_mode {
             NoteOpenMode::Panel => (
                 Action {
-                    label: note.alias.as_ref().unwrap_or(&note.title).clone(),
+                    label: note_title.to_string(),
                     desc: "Note".into(),
-                    action: format!("note:open:{}", note.slug),
+                    action: format!("note:open:{note_slug}"),
                     args: None,
                 },
-                None,
+                override_for_panel.then(|| format!("note open {note_slug}")),
             ),
             NoteOpenMode::Dialog => (
                 Action {
@@ -150,7 +200,7 @@ impl RecentNotesWidget {
                     action: "note:dialog".into(),
                     args: None,
                 },
-                Some(format!("note open {}", note.slug)),
+                Some(format!("note open {note_slug}")),
             ),
             NoteOpenMode::Query => (
                 Action {
@@ -159,35 +209,15 @@ impl RecentNotesWidget {
                     action: "query:note open ".into(),
                     args: None,
                 },
-                Some(format!(
-                    "note open {}",
-                    note.alias.as_ref().unwrap_or(&note.title)
-                )),
+                Some(format!("note open {note_title}")),
             ),
-        }
-    }
-
-    fn snippet(note: &Note) -> String {
-        let first_line = note
-            .content
-            .lines()
-            .skip_while(|l| l.starts_with("# ") || l.starts_with("Alias:"))
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or_default();
-        let clean = first_line.trim();
-        if clean.len() > 120 {
-            format!("{}…", &clean[..120])
-        } else {
-            clean.to_string()
         }
     }
 }
 
 impl Default for RecentNotesWidget {
     fn default() -> Self {
-        Self {
-            cfg: RecentNotesConfig::default(),
-        }
+        Self::new(RecentNotesConfig::default())
     }
 }
 
@@ -198,65 +228,30 @@ impl Widget for RecentNotesWidget {
         ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        let snapshot = ctx.data_cache.snapshot();
-        let mut notes: Vec<Note> = snapshot.notes.as_ref().clone();
-        if let Some(tag) = &self.cfg.filter_tag {
-            notes.retain(|n| n.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)));
-        }
-        notes.sort_by(|a, b| Self::modified_ts(b).cmp(&Self::modified_ts(a)));
-        notes.truncate(self.cfg.count);
+        self.cached
+            .refresh(ctx, self.cfg.count, self.cfg.filter_tag.as_deref());
 
-        if notes.is_empty() {
-            ui.label("No notes found");
-            return None;
-        }
-
-        let mut clicked = None;
-        let body_height = ui.text_style_height(&egui::TextStyle::Body);
-        let small_height = ui.text_style_height(&egui::TextStyle::Small);
-        let mut row_height = body_height + ui.spacing().item_spacing.y + 8.0;
-        if self.cfg.show_snippet {
-            row_height += small_height + 2.0;
-        }
-        row_height += small_height + 2.0;
-
-        let scroll_id = ui.id().with("recent_notes_scroll");
-        egui::ScrollArea::both()
-            .id_source(scroll_id)
-            .auto_shrink([false; 2])
-            .show_rows(ui, row_height, notes.len(), |ui, range| {
-                for note in &notes[range] {
-                    let display = note.alias.as_ref().unwrap_or(&note.title);
-                    let (action, query_override) = self.build_action(note);
-                    let mut clicked_row = false;
-                    ui.vertical(|ui| {
-                        clicked_row |= ui.add(egui::Button::new(display).wrap(false)).clicked();
-                        if self.cfg.show_snippet {
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(Self::snippet(note)).small())
-                                    .wrap(false),
-                            );
-                        }
-                        if !note.tags.is_empty() {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(format!("#{}", note.tags.join(" #")))
-                                        .small(),
-                                )
-                                .wrap(false),
-                            );
-                        }
-                        ui.add_space(4.0);
-                    });
-                    if clicked_row {
-                        clicked = Some(WidgetAction {
-                            action,
-                            query_override,
-                        });
-                    }
+        render_note_rows(
+            ui,
+            self.profile.scroll_id(),
+            &self.cached.entries,
+            self.cfg.show_snippet,
+            self.cfg.show_tags,
+            self.profile.no_notes_message(),
+            |note| {
+                let (action, query_override) = self.build_action(&note.slug, &note.title);
+                WidgetAction {
+                    action,
+                    query_override,
                 }
-            });
+            },
+        )
+    }
 
-        clicked
+    fn on_config_updated(&mut self, settings: &serde_json::Value) {
+        if let Ok(cfg) = serde_json::from_value::<RecentNotesConfig>(settings.clone()) {
+            self.cfg = cfg;
+            self.cached.last_notes_version = u64::MAX;
+        }
     }
 }
