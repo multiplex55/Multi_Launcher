@@ -217,11 +217,14 @@ impl RecentNotesWidget {
 
         self.cached = notes_with_ts
             .into_iter()
-            .map(|(_, note)| CachedRecentNote {
-                title: note.alias.as_ref().unwrap_or(&note.title).clone(),
-                slug: note.slug,
-                tags: note.tags,
-                snippet: Self::snippet(&note),
+            .map(|(_, note)| {
+                let snippet = Self::snippet(&note);
+                CachedRecentNote {
+                    title: note.alias.as_ref().unwrap_or(&note.title).clone(),
+                    slug: note.slug,
+                    tags: note.tags,
+                    snippet,
+                }
             })
             .collect();
 
