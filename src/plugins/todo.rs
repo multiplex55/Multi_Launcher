@@ -12,10 +12,10 @@ use crate::common::json_watch::{watch_json, JsonWatcher};
 use crate::common::lru::LruCache;
 use crate::common::query::parse_query_filters;
 use crate::linking::{
-    build_index_from_notes_and_todos, format_link_id, EntityKey, LinkRef, LinkTarget,
+    build_index_from_notes_and_todos, format_link_id, EntityKey, LinkIndex, LinkRef, LinkTarget,
 };
 use crate::plugin::Plugin;
-use crate::plugins::note::load_notes;
+use crate::plugins::note::{load_notes, note_version, Note};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -206,10 +206,68 @@ pub static TODO_DATA: Lazy<Arc<RwLock<Vec<TodoEntry>>>> =
 static TODO_CACHE: Lazy<Arc<RwLock<LruCache<String, Vec<Action>>>>> =
     Lazy::new(|| Arc::new(RwLock::new(LruCache::new(64))));
 
+#[derive(Clone)]
+struct TodoLinksIndexCache {
+    todo_version: u64,
+    note_version: u64,
+    notes: Vec<Note>,
+    index: LinkIndex,
+}
+
+static TODO_LINKS_INDEX_CACHE: Lazy<RwLock<Option<TodoLinksIndexCache>>> =
+    Lazy::new(|| RwLock::new(None));
+
+static TODO_LINKS_INDEX_REBUILD_COUNT: AtomicU64 = AtomicU64::new(0);
+
 fn invalidate_todo_cache() {
     if let Ok(mut cache) = TODO_CACHE.write() {
         cache.clear();
     }
+}
+
+fn invalidate_todo_links_index_cache() {
+    if let Ok(mut cache) = TODO_LINKS_INDEX_CACHE.write() {
+        *cache = None;
+    }
+}
+
+fn get_todo_links_index(notes_todos: &[TodoEntry]) -> (Vec<Note>, LinkIndex) {
+    let todo_ver = todo_version();
+    let note_ver = note_version();
+    if let Ok(cache) = TODO_LINKS_INDEX_CACHE.read() {
+        if let Some(entry) = cache.as_ref() {
+            if entry.todo_version == todo_ver && entry.note_version == note_ver {
+                return (entry.notes.clone(), entry.index.clone());
+            }
+        }
+    }
+
+    let notes = load_notes().unwrap_or_default();
+    let todos = notes_todos.to_vec();
+    let index = build_index_from_notes_and_todos(&notes, &todos);
+    TODO_LINKS_INDEX_REBUILD_COUNT.fetch_add(1, Ordering::SeqCst);
+
+    if let Ok(mut cache) = TODO_LINKS_INDEX_CACHE.write() {
+        *cache = Some(TodoLinksIndexCache {
+            todo_version: todo_ver,
+            note_version: note_ver,
+            notes: notes.clone(),
+            index: index.clone(),
+        });
+    }
+
+    (notes, index)
+}
+
+#[cfg(test)]
+fn reset_todo_links_index_cache_state() {
+    invalidate_todo_links_index_cache();
+    TODO_LINKS_INDEX_REBUILD_COUNT.store(0, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn todo_links_index_rebuild_count() -> u64 {
+    TODO_LINKS_INDEX_REBUILD_COUNT.load(Ordering::SeqCst)
 }
 
 fn bump_todo_version() {
@@ -257,6 +315,7 @@ fn update_cache(list: Vec<TodoEntry>) {
         *lock = list;
     }
     invalidate_todo_cache();
+    invalidate_todo_links_index_cache();
     bump_todo_version();
 }
 
@@ -364,6 +423,7 @@ impl TodoPlugin {
                     if let Ok(mut c) = cache_clone.write() {
                         c.clear();
                     }
+                    invalidate_todo_links_index_cache();
                     bump_todo_version();
                 }
             }
@@ -768,9 +828,8 @@ impl TodoPlugin {
             let Some(todo) = matches.first() else {
                 return Vec::new();
             };
-            let notes = load_notes().unwrap_or_default();
             let todos = guard.clone();
-            let index = build_index_from_notes_and_todos(&notes, &todos);
+            let (notes, index) = get_todo_links_index(&todos);
             let source = EntityKey::new(LinkTarget::Todo, todo.id.clone());
             let mut actions: Vec<Action> = index
                 .get_forward_links(&source)
@@ -1328,6 +1387,52 @@ mod tests {
         if let Ok(mut guard) = TODO_DATA.write() {
             *guard = original;
         }
+    }
+
+    #[test]
+    fn todo_links_reuses_cached_index_between_queries() {
+        reset_todo_links_index_cache_state();
+        let original = set_todos(vec![TodoEntry {
+            id: "t-cache".into(),
+            text: "cache me".into(),
+            done: false,
+            priority: 1,
+            tags: vec![],
+            entity_refs: vec![EntityRef::new(EntityKind::Note, "alpha", None)],
+        }]);
+
+        let plugin = TodoPlugin {
+            matcher: SkimMatcherV2::default(),
+            data: TODO_DATA.clone(),
+            cache: TODO_CACHE.clone(),
+            watcher: None,
+        };
+
+        let first = plugin.search_internal("todo links id:t-cache");
+        assert!(!first.is_empty());
+        assert_eq!(todo_links_index_rebuild_count(), 1);
+
+        let second = plugin.search_internal("todo links id:t-cache");
+        assert!(!second.is_empty());
+        assert_eq!(todo_links_index_rebuild_count(), 1);
+
+        update_cache(vec![TodoEntry {
+            id: "t-cache".into(),
+            text: "cache me updated".into(),
+            done: false,
+            priority: 1,
+            tags: vec![],
+            entity_refs: vec![EntityRef::new(EntityKind::Note, "alpha", None)],
+        }]);
+
+        let third = plugin.search_internal("todo links id:t-cache");
+        assert!(!third.is_empty());
+        assert_eq!(todo_links_index_rebuild_count(), 2);
+
+        if let Ok(mut guard) = TODO_DATA.write() {
+            *guard = original;
+        }
+        reset_todo_links_index_cache_state();
     }
 
     #[test]
