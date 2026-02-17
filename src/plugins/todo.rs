@@ -1036,6 +1036,10 @@ impl Plugin for TodoPlugin {
             },
         ]
     }
+
+    fn query_prefixes(&self) -> &[&str] {
+        &["todo"]
+    }
 }
 
 #[cfg(test)]

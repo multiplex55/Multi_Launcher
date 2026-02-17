@@ -73,6 +73,20 @@ pub trait Plugin: Send + Sync {
         Vec::new()
     }
 
+    /// Optional query head prefixes that should route to this plugin.
+    ///
+    /// Prefix matching is case-insensitive and uses the first token of the
+    /// query. Plugins that return an empty slice are considered global and run
+    /// for all queries.
+    fn query_prefixes(&self) -> &[&str] {
+        &[]
+    }
+
+    /// Opt-out of prefix routing and always run this plugin for searches.
+    fn always_search(&self) -> bool {
+        false
+    }
+
     /// Return default settings for this plugin if any.
     fn default_settings(&self) -> Option<serde_json::Value> {
         None
@@ -295,6 +309,10 @@ impl PluginManager {
         enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
     ) -> Vec<Action> {
         let (filtered_query, filters) = split_action_filters(query);
+        let query_head = filtered_query
+            .split_whitespace()
+            .next()
+            .map(str::to_ascii_lowercase);
         let mut actions = Vec::new();
         for p in &self.plugins {
             let name = p.name();
@@ -310,6 +328,22 @@ impl PluginManager {
                     }
                 }
             }
+
+            if !p.always_search() {
+                let prefixes = p.query_prefixes();
+                if !prefixes.is_empty() {
+                    let Some(head) = query_head.as_deref() else {
+                        continue;
+                    };
+                    if !prefixes
+                        .iter()
+                        .any(|prefix| prefix.eq_ignore_ascii_case(head))
+                    {
+                        continue;
+                    }
+                }
+            }
+
             actions.extend(p.search(&filtered_query));
         }
         if filters.include_kinds.is_empty()

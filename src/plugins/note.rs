@@ -1440,6 +1440,10 @@ impl Plugin for NotePlugin {
         }
         self.external_open = cfg.external_open;
     }
+
+    fn query_prefixes(&self) -> &[&str] {
+        &["note", "notes"]
+    }
 }
 
 #[cfg(test)]
