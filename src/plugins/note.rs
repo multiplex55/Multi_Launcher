@@ -670,14 +670,34 @@ pub fn available_tags() -> Vec<String> {
 pub fn save_note(note: &mut Note, overwrite: bool) -> anyhow::Result<bool> {
     let dir = notes_dir();
     std::fs::create_dir_all(&dir)?;
-    // Ensure slug lookup is aware of existing notes
-    let _ = load_notes();
+    let existing_slugs: HashSet<String> = CACHE
+        .lock()
+        .map(|cache| {
+            cache
+                .notes
+                .iter()
+                .filter(|cached| {
+                    (note.path.as_os_str().is_empty() || cached.path != note.path)
+                        && (note.slug.is_empty() || cached.slug != note.slug)
+                })
+                .map(|cached| cached.slug.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+
     let slug = if note.slug.is_empty() {
+        reset_slug_lookup();
+        for existing in &existing_slugs {
+            register_slug(existing);
+        }
         unique_slug(&note.title)
     } else {
         note.slug.clone()
     };
     let path = dir.join(format!("{slug}.md"));
+    if existing_slugs.contains(&slug) && note.path != path && !overwrite {
+        return Ok(false);
+    }
     if path.exists() && note.path != path && !overwrite {
         return Ok(false);
     }
@@ -2022,5 +2042,110 @@ Body",
         assert_eq!(backlinks[0].slug, "main");
 
         restore_cache(original);
+    }
+
+    #[test]
+    fn save_existing_note_succeeds_without_overwrite() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let prev = std::env::var("ML_NOTES_DIR").ok();
+        std::env::set_var("ML_NOTES_DIR", dir.path());
+
+        let path = dir.path().join("alpha.md");
+        fs::write(&path, "# Alpha\n\nold").unwrap();
+        refresh_cache().unwrap();
+
+        let mut note = Note {
+            title: "Alpha".into(),
+            path: path.clone(),
+            content: "# Alpha\n\nupdated".into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "alpha".into(),
+            alias: None,
+            entity_refs: Vec::new(),
+        };
+
+        let saved = save_note(&mut note, false).unwrap();
+        assert!(saved);
+        assert_eq!(fs::read_to_string(path).unwrap(), "# Alpha\n\nupdated");
+
+        if let Some(p) = prev {
+            std::env::set_var("ML_NOTES_DIR", p);
+        } else {
+            std::env::remove_var("ML_NOTES_DIR");
+        }
+    }
+
+    #[test]
+    fn save_as_new_generates_unique_slug_from_cache() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let prev = std::env::var("ML_NOTES_DIR").ok();
+        std::env::set_var("ML_NOTES_DIR", dir.path());
+
+        std::fs::write(dir.path().join("alpha.md"), "# Alpha\n\nbody").unwrap();
+        refresh_cache().unwrap();
+
+        let mut note = Note {
+            title: "Alpha".into(),
+            path: PathBuf::new(),
+            content: "Body".into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: String::new(),
+            alias: None,
+            entity_refs: Vec::new(),
+        };
+
+        let saved = save_note(&mut note, false).unwrap();
+        assert!(saved);
+        assert_eq!(note.slug, "alpha-1");
+        assert!(dir.path().join("alpha-1.md").exists());
+
+        if let Some(p) = prev {
+            std::env::set_var("ML_NOTES_DIR", p);
+        } else {
+            std::env::remove_var("ML_NOTES_DIR");
+        }
+    }
+
+    #[test]
+    fn save_note_renames_slug_and_path() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let prev = std::env::var("ML_NOTES_DIR").ok();
+        std::env::set_var("ML_NOTES_DIR", dir.path());
+
+        let old_path = dir.path().join("alpha.md");
+        std::fs::write(&old_path, "# Alpha\n\nbody").unwrap();
+        refresh_cache().unwrap();
+
+        let mut note = Note {
+            title: "Alpha renamed".into(),
+            path: old_path.clone(),
+            content: "Body".into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "alpha-renamed".into(),
+            alias: None,
+            entity_refs: Vec::new(),
+        };
+
+        let saved = save_note(&mut note, false).unwrap();
+        assert!(saved);
+        assert!(!old_path.exists());
+        assert_eq!(note.path, dir.path().join("alpha-renamed.md"));
+        assert!(note.path.exists());
+
+        if let Some(p) = prev {
+            std::env::set_var("ML_NOTES_DIR", p);
+        } else {
+            std::env::remove_var("ML_NOTES_DIR");
+        }
     }
 }
