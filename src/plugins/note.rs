@@ -81,6 +81,12 @@ pub struct NoteCache {
     pub index: Vec<String>,
     /// Map of note alias -> note slug for quick lookup.
     pub aliases: HashMap<String, String>,
+    /// Set of canonical note slugs for exact-existence checks.
+    pub slug_set: HashSet<String>,
+    /// Map of lowercased slug -> canonical slug.
+    pub slug_map: HashMap<String, String>,
+    /// Map of lowercased title -> candidate slugs.
+    pub title_map: HashMap<String, Vec<String>>,
 }
 
 impl NoteCache {
@@ -89,6 +95,9 @@ impl NoteCache {
         let mut tag_set: HashSet<String> = HashSet::new();
         let mut link_map: HashMap<String, Vec<String>> = HashMap::new();
         let mut alias_map: HashMap<String, String> = HashMap::new();
+        let mut slug_set: HashSet<String> = HashSet::new();
+        let mut slug_map: HashMap<String, String> = HashMap::new();
+        let mut title_map: HashMap<String, Vec<String>> = HashMap::new();
 
         for n in &mut notes {
             if n.tags.is_empty() {
@@ -99,6 +108,12 @@ impl NoteCache {
             if let Some(a) = &n.alias {
                 alias_map.insert(a.to_lowercase(), n.slug.clone());
             }
+            slug_set.insert(n.slug.clone());
+            slug_map.insert(n.slug.to_lowercase(), n.slug.clone());
+            title_map
+                .entry(n.title.to_lowercase())
+                .or_default()
+                .push(n.slug.clone());
             for t in &n.tags {
                 tag_set.insert(t.clone());
             }
@@ -110,6 +125,9 @@ impl NoteCache {
             links: HashMap::new(),
             index: Vec::new(),
             aliases: alias_map.clone(),
+            slug_set: slug_set.clone(),
+            slug_map: slug_map.clone(),
+            title_map: title_map.clone(),
         };
 
         for n in &mut notes {
@@ -155,6 +173,9 @@ impl NoteCache {
             links: link_map,
             index,
             aliases: alias_map,
+            slug_set,
+            slug_map,
+            title_map,
         }
     }
 }
@@ -266,7 +287,7 @@ fn resolve_target(cache: &NoteCache, query: &str) -> NoteTarget {
     }
     if let Some(slug) = query_lower.strip_prefix("slug:") {
         let slug = slug.trim();
-        return if cache.notes.iter().any(|n| n.slug == slug) {
+        return if cache.slug_set.contains(slug) {
             NoteTarget::Resolved(slug.to_string())
         } else {
             NoteTarget::Broken
@@ -287,28 +308,21 @@ fn resolve_target(cache: &NoteCache, query: &str) -> NoteTarget {
             _ => NoteTarget::Ambiguous(matches),
         };
     }
-    if let Some(note) = cache
-        .notes
-        .iter()
-        .find(|n| n.slug.eq_ignore_ascii_case(query))
-    {
-        return NoteTarget::Resolved(note.slug.clone());
+    if let Some(slug) = cache.slug_map.get(&query_lower) {
+        return NoteTarget::Resolved(slug.clone());
     }
 
-    let title_matches: Vec<String> = cache
-        .notes
-        .iter()
-        .filter(|n| n.title.eq_ignore_ascii_case(query))
-        .map(|n| n.slug.clone())
-        .collect();
-    if title_matches.len() == 1 {
-        return NoteTarget::Resolved(title_matches[0].clone());
+    if let Some(title_matches) = cache.title_map.get(&query_lower) {
+        if title_matches.len() == 1 {
+            return NoteTarget::Resolved(title_matches[0].clone());
+        }
+        if !title_matches.is_empty() {
+            return NoteTarget::Ambiguous(title_matches.clone());
+        }
     }
-    if !title_matches.is_empty() {
-        return NoteTarget::Ambiguous(title_matches);
-    }
+
     let slug = slugify(query);
-    if cache.notes.iter().any(|n| n.slug == slug) {
+    if cache.slug_set.contains(&slug) {
         NoteTarget::Resolved(slug)
     } else {
         NoteTarget::Broken
@@ -1953,11 +1967,21 @@ Body",
             },
             Note {
                 title: "Roadmap".into(),
-                path: PathBuf::from("/tmp/beta-roadmap.md"),
+                path: PathBuf::from("/tmp/team/beta-roadmap.md"),
                 content: String::new(),
                 tags: Vec::new(),
                 links: Vec::new(),
                 slug: "roadmap-beta".into(),
+                alias: None,
+                entity_refs: Vec::new(),
+            },
+            Note {
+                title: "Beta Roadmap".into(),
+                path: PathBuf::from("/tmp/alt/beta-roadmap.md"),
+                content: String::new(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "beta-roadmap-copy".into(),
                 alias: None,
                 entity_refs: Vec::new(),
             },
@@ -1968,13 +1992,22 @@ Body",
             NoteTarget::Ambiguous(_)
         ));
         assert_eq!(
+            resolve_note_query("roadmap-beta"),
+            NoteTarget::Resolved("roadmap-beta".into())
+        );
+        assert_eq!(
             resolve_note_query("slug:roadmap-beta"),
             NoteTarget::Resolved("roadmap-beta".into())
         );
         assert_eq!(
-            resolve_note_query("path:beta-roadmap.md"),
+            resolve_note_query("path:team/beta-roadmap.md"),
             NoteTarget::Resolved("roadmap-beta".into())
         );
+        assert!(matches!(
+            resolve_note_query("path:beta-roadmap.md"),
+            NoteTarget::Ambiguous(slugs)
+                if slugs == vec!["beta-roadmap-copy".to_string(), "roadmap-beta".to_string()]
+        ));
 
         restore_cache(original);
     }
