@@ -3,10 +3,10 @@ use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::plugin::Plugin;
 use crate::plugins::note::{
-    assets_dir, available_tags, image_files, note_cache_snapshot, resolve_note_query, save_note,
-    Note, NoteExternalOpen, NotePlugin, NoteTarget,
+    assets_dir, available_tags, image_files, note_cache_snapshot, note_version, resolve_note_query,
+    save_note, Note, NoteExternalOpen, NotePlugin, NoteTarget,
 };
-use crate::plugins::todo::{load_todos, TODO_FILE};
+use crate::plugins::todo::{load_todos, todo_version, TODO_FILE};
 use eframe::egui::{self, popup, Color32, FontId, Key};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
@@ -23,10 +23,12 @@ use std::process::Command;
 use std::{
     env,
     path::{Path, PathBuf},
+    time::Duration,
 };
 use url::Url;
 
 const BACKLINK_PAGE_SIZE: usize = 12;
+const HEAVY_RECOMPUTE_IDLE_DEBOUNCE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BacklinkTab {
@@ -174,9 +176,13 @@ pub struct NotePanel {
     focus_textedit_next_frame: bool,
     last_textedit_id: Option<egui::Id>,
     derived: NoteDerivedView,
-    derived_dirty: bool,
+    fast_derived_dirty: bool,
+    heavy_recompute_requested: bool,
+    last_edit_at_secs: Option<f64>,
+    last_notes_version: u64,
+    last_todo_revision: u64,
     #[cfg(test)]
-    derived_recompute_count: usize,
+    heavy_recompute_count: usize,
 }
 
 #[derive(Default, Clone)]
@@ -214,11 +220,16 @@ impl NotePanel {
             focus_textedit_next_frame: false,
             last_textedit_id: None,
             derived: NoteDerivedView::default(),
-            derived_dirty: true,
+            fast_derived_dirty: true,
+            heavy_recompute_requested: true,
+            last_edit_at_secs: None,
+            last_notes_version: 0,
+            last_todo_revision: 0,
             #[cfg(test)]
-            derived_recompute_count: 0,
+            heavy_recompute_count: 0,
         };
-        panel.refresh_derived();
+        panel.refresh_fast_derived();
+        panel.refresh_heavy_derived(true);
         panel
     }
 
@@ -230,46 +241,71 @@ impl NotePanel {
         }
     }
 
-    fn refresh_derived(&mut self) {
+    fn refresh_fast_derived(&mut self) {
+        self.derived.tags = extract_tags(&self.note.content);
+        self.derived.wiki_links = extract_wiki_links(&self.note.content)
+            .into_iter()
+            .filter(|l| slugify(l) != self.note.slug)
+            .collect();
+        self.derived.external_links = extract_links(&self.note.content);
+        self.fast_derived_dirty = false;
+    }
+
+    fn refresh_heavy_derived(&mut self, force: bool) {
+        let current_notes_version = note_version();
+        let current_todo_revision = todo_version();
+        if !force
+            && self.last_notes_version == current_notes_version
+            && self.last_todo_revision == current_todo_revision
+        {
+            self.heavy_recompute_requested = false;
+            return;
+        }
+
         let todos = load_todos(TODO_FILE).unwrap_or_default();
-        let todo_label_map = todos
+        self.derived.todo_label_map = todos
             .iter()
             .filter(|t| !t.id.is_empty())
             .map(|t| (t.id.clone(), t.text.clone()))
             .collect::<HashMap<_, _>>();
-        let notes = note_cache_snapshot();
 
-        self.derived = NoteDerivedView {
-            tags: extract_tags(&self.note.content),
-            wiki_links: extract_wiki_links(&self.note.content)
-                .into_iter()
-                .filter(|l| slugify(l) != self.note.slug)
-                .collect(),
-            external_links: extract_links(&self.note.content),
-            backlink_rows_linked_todos: backlink_rows_for_note(
-                &self.note.slug,
-                BacklinkTab::LinkedTodos,
-                &todos,
-                &notes,
-            ),
-            backlink_rows_related_notes: backlink_rows_for_note(
-                &self.note.slug,
-                BacklinkTab::RelatedNotes,
-                &todos,
-                &notes,
-            ),
-            backlink_rows_mentions: backlink_rows_for_note(
-                &self.note.slug,
-                BacklinkTab::Mentions,
-                &todos,
-                &notes,
-            ),
-            todo_label_map,
-        };
-        self.derived_dirty = false;
+        let notes = note_cache_snapshot();
+        self.derived.backlink_rows_linked_todos =
+            backlink_rows_for_note(&self.note.slug, BacklinkTab::LinkedTodos, &todos, &notes);
+        self.derived.backlink_rows_related_notes =
+            backlink_rows_for_note(&self.note.slug, BacklinkTab::RelatedNotes, &todos, &notes);
+        self.derived.backlink_rows_mentions =
+            backlink_rows_for_note(&self.note.slug, BacklinkTab::Mentions, &todos, &notes);
+
+        self.last_notes_version = current_notes_version;
+        self.last_todo_revision = current_todo_revision;
+        self.heavy_recompute_requested = false;
         #[cfg(test)]
         {
-            self.derived_recompute_count += 1;
+            self.heavy_recompute_count += 1;
+        }
+    }
+
+    fn mark_content_changed(&mut self, now_secs: f64) {
+        self.fast_derived_dirty = true;
+        self.heavy_recompute_requested = true;
+        self.last_edit_at_secs = Some(now_secs);
+    }
+
+    fn maybe_refresh_heavy_derived(&mut self, ctx: &egui::Context) {
+        let notes_changed = self.last_notes_version != note_version();
+        let todos_changed = self.last_todo_revision != todo_version();
+        let debounce_elapsed = self
+            .last_edit_at_secs
+            .map(|t| ctx.input(|i| i.time - t) >= HEAVY_RECOMPUTE_IDLE_DEBOUNCE.as_secs_f64())
+            .unwrap_or(false);
+        if notes_changed || todos_changed || debounce_elapsed {
+            self.refresh_heavy_derived(false);
+            return;
+        }
+
+        if self.heavy_recompute_requested {
+            ctx.request_repaint_after(HEAVY_RECOMPUTE_IDLE_DEBOUNCE);
         }
     }
 
@@ -392,9 +428,10 @@ impl NotePanel {
                         app.note_font_size += 1.0;
                     }
                 });
-                if self.derived_dirty {
-                    self.refresh_derived();
+                if self.fast_derived_dirty {
+                    self.refresh_fast_derived();
                 }
+                self.maybe_refresh_heavy_derived(ctx);
                 if !self.derived.tags.is_empty() {
                     let was_focused = self
                         .last_textedit_id
@@ -667,7 +704,7 @@ impl NotePanel {
                             }
                             if modified {
                                 self.markdown_cache.clear_scrollable();
-                                self.derived_dirty = true;
+                                self.mark_content_changed(ctx.input(|i| i.time));
                             }
                             None
                         } else {
@@ -687,7 +724,7 @@ impl NotePanel {
                 if !self.preview_mode {
                     if let Some(resp) = resp.inner {
                         if resp.changed() {
-                            self.derived_dirty = true;
+                            self.mark_content_changed(ctx.input(|i| i.time));
                         }
                         let first_edit_frame = self.last_textedit_id.is_none();
                         self.last_textedit_id = Some(resp.id);
@@ -874,7 +911,8 @@ impl NotePanel {
                             if let Err(e) = save_note(&mut self.note, true) {
                                 app.set_error(format!("Failed to save note: {e}"));
                             } else {
-                                self.refresh_derived();
+                                self.refresh_fast_derived();
+                                self.refresh_heavy_derived(true);
                                 self.finish_save(app);
                                 self.overwrite_prompt = false;
                             }
@@ -885,7 +923,8 @@ impl NotePanel {
                             if let Err(e) = save_note(&mut self.note, true) {
                                 app.set_error(format!("Failed to save note: {e}"));
                             } else {
-                                self.refresh_derived();
+                                self.refresh_fast_derived();
+                                self.refresh_heavy_derived(true);
                                 self.finish_save(app);
                                 self.overwrite_prompt = false;
                             }
@@ -908,7 +947,8 @@ impl NotePanel {
             .map(|l| slugify(&l))
             .filter(|l| l != &self.note.slug)
             .collect();
-        self.derived_dirty = true;
+        self.fast_derived_dirty = true;
+        self.heavy_recompute_requested = true;
         if let Some(first) = self.note.content.lines().next() {
             if let Some(t) = first.strip_prefix("# ") {
                 self.note.title = t.to_string();
@@ -916,7 +956,8 @@ impl NotePanel {
         }
         match save_note(&mut self.note, app.note_always_overwrite) {
             Ok(true) => {
-                self.refresh_derived();
+                self.refresh_fast_derived();
+                self.refresh_heavy_derived(true);
                 self.finish_save(app);
             }
             Ok(false) => {
@@ -2045,14 +2086,41 @@ Body with [[Other]]"
             entity_refs: Vec::new(),
         };
         let mut panel = NotePanel::from_note(note);
-        let initial = panel.derived_recompute_count;
+        let initial = panel.heavy_recompute_count;
         let _ = ctx.run(Default::default(), |ctx| {
             panel.ui(ctx, &mut app);
         });
         let _ = ctx.run(Default::default(), |ctx| {
             panel.ui(ctx, &mut app);
         });
-        assert_eq!(panel.derived_recompute_count, initial);
+        assert_eq!(panel.heavy_recompute_count, initial);
+    }
+
+    #[test]
+    fn edits_do_not_trigger_heavy_recompute_every_frame() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let note = Note {
+            title: "Title".into(),
+            path: std::path::PathBuf::new(),
+            content: "# Title\n\nBody".into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "title".into(),
+            alias: None,
+            entity_refs: Vec::new(),
+        };
+        let mut panel = NotePanel::from_note(note);
+        let initial = panel.heavy_recompute_count;
+        panel.mark_content_changed(f64::MAX);
+
+        for _ in 0..3 {
+            let _ = ctx.run(Default::default(), |ctx| {
+                panel.ui(ctx, &mut app);
+            });
+        }
+
+        assert_eq!(panel.heavy_recompute_count, initial);
     }
 
     #[test]
@@ -2079,15 +2147,16 @@ Body with [[Other]]"
             entity_refs: Vec::new(),
         };
         let mut panel = NotePanel::from_note(note);
-        let before = panel.derived_recompute_count;
+        let before = panel.heavy_recompute_count;
         panel.note.content = "# Source
 
 [[beta]]"
             .into();
-        panel.derived_dirty = true;
+        panel.fast_derived_dirty = true;
+        panel.heavy_recompute_requested = true;
         panel.save(&mut app);
 
-        assert!(panel.derived_recompute_count > before);
+        assert!(panel.heavy_recompute_count > before);
         assert_eq!(panel.note.links, vec!["beta".to_string()]);
 
         if let Some(p) = prev {
