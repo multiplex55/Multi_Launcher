@@ -34,6 +34,7 @@ mod query_list;
 mod quick_tools;
 mod recent_commands;
 mod recent_notes;
+mod recent_notes_shared;
 mod recycle_bin;
 mod scratchpad;
 mod snippets_favorites;
