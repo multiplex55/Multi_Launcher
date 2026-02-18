@@ -64,11 +64,14 @@ pub fn refresh_cached_notes(
 
     *cache = notes_with_ts
         .into_iter()
-        .map(|(_, note)| CachedRecentNote {
-            title: note.alias.as_ref().unwrap_or(&note.title).clone(),
-            slug: note.slug,
-            tags: note.tags,
-            snippet: note_snippet(&note),
+        .map(|(_, note)| {
+            let snippet = note_snippet(&note);
+            CachedRecentNote {
+                title: note.alias.as_ref().unwrap_or(&note.title).clone(),
+                slug: note.slug,
+                tags: note.tags,
+                snippet,
+            }
         })
         .collect();
 
