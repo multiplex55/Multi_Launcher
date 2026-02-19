@@ -73,9 +73,11 @@ pub struct SettingsEditor {
 }
 
 impl SettingsEditor {
-    const SETTINGS_WINDOW_DEFAULT_SIZE: [f32; 2] = [640.0, 720.0];
-    const SETTINGS_WINDOW_MIN_HEIGHT: f32 = 480.0;
+    const SETTINGS_WINDOW_DEFAULT_WIDTH: f32 = 640.0;
+    const SETTINGS_WINDOW_MAX_DEFAULT_HEIGHT: f32 = 720.0;
+    const SETTINGS_WINDOW_MIN_HEIGHT: f32 = 360.0;
     const SETTINGS_CONTENT_MIN_HEIGHT: f32 = 180.0;
+    const SETTINGS_FOOTER_RESERVED_HEIGHT: f32 = 56.0;
 
     fn normalized_static_settings(
         follow_mouse: bool,
@@ -219,16 +221,22 @@ impl SettingsEditor {
         s
     }
 
-    fn settings_window_default_size() -> [f32; 2] {
-        Self::SETTINGS_WINDOW_DEFAULT_SIZE
+    fn settings_window_default_height(available_height: f32) -> f32 {
+        (available_height * 0.5)
+            .max(Self::SETTINGS_WINDOW_MIN_HEIGHT)
+            .min(Self::SETTINGS_WINDOW_MAX_DEFAULT_HEIGHT)
     }
 
-    fn settings_window_min_height() -> f32 {
-        Self::SETTINGS_WINDOW_MIN_HEIGHT
+    fn settings_window_default_size(ctx: &egui::Context) -> [f32; 2] {
+        [
+            Self::SETTINGS_WINDOW_DEFAULT_WIDTH,
+            Self::settings_window_default_height(ctx.available_rect().height()),
+        ]
     }
 
     fn settings_content_height(available_height: f32) -> f32 {
-        available_height.max(Self::SETTINGS_CONTENT_MIN_HEIGHT)
+        (available_height - Self::SETTINGS_FOOTER_RESERVED_HEIGHT)
+            .max(Self::SETTINGS_CONTENT_MIN_HEIGHT)
     }
 
     fn sync_from_plugin_settings(&mut self) {
@@ -371,8 +379,8 @@ impl SettingsEditor {
         let mut open = app.show_settings;
         egui::Window::new("Settings")
             .resizable(true)
-            .default_size(Self::settings_window_default_size())
-            .min_height(Self::settings_window_min_height())
+            .default_size(Self::settings_window_default_size(ctx))
+            .min_height(Self::SETTINGS_WINDOW_MIN_HEIGHT)
             .open(&mut open)
             .show(ctx, |ui| {
                 let settings_content_height = Self::settings_content_height(ui.available_height());
@@ -927,17 +935,24 @@ mod tests {
 
     #[test]
     fn settings_window_sizing_policy_uses_expected_defaults() {
+        assert_eq!(SettingsEditor::SETTINGS_WINDOW_DEFAULT_WIDTH, 640.0);
+        assert_eq!(SettingsEditor::SETTINGS_WINDOW_MIN_HEIGHT, 360.0);
         assert_eq!(
-            SettingsEditor::settings_window_default_size(),
-            [640.0, 720.0]
+            SettingsEditor::settings_window_default_height(100.0),
+            SettingsEditor::SETTINGS_WINDOW_MIN_HEIGHT
         );
-        assert_eq!(SettingsEditor::settings_window_min_height(), 480.0);
+        assert_eq!(
+            SettingsEditor::settings_window_default_height(2000.0),
+            SettingsEditor::SETTINGS_WINDOW_MAX_DEFAULT_HEIGHT
+        );
+        assert_eq!(SettingsEditor::settings_window_default_height(900.0), 450.0);
     }
 
     #[test]
     fn settings_content_height_has_sane_floor() {
         assert_eq!(SettingsEditor::settings_content_height(20.0), 180.0);
-        assert_eq!(SettingsEditor::settings_content_height(320.0), 320.0);
+        assert_eq!(SettingsEditor::settings_content_height(320.0), 264.0);
+        assert_eq!(SettingsEditor::settings_content_height(700.0), 644.0);
     }
 
     #[test]
