@@ -30,7 +30,7 @@ use url::Url;
 const BACKLINK_PAGE_SIZE: usize = 12;
 const HEAVY_RECOMPUTE_IDLE_DEBOUNCE: Duration = Duration::from_millis(250);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BacklinkTab {
     LinkedTodos,
     RelatedNotes,
@@ -161,6 +161,7 @@ pub struct NotePanel {
     image_cache: HashMap<std::path::PathBuf, egui::TextureHandle>,
     overwrite_prompt: bool,
     show_open_with_menu: bool,
+    show_metadata: bool,
     tags_expanded: bool,
     links_expanded: bool,
     backlink_tab: BacklinkTab,
@@ -183,6 +184,17 @@ pub struct NotePanel {
     last_todo_revision: u64,
     #[cfg(test)]
     heavy_recompute_count: usize,
+    #[cfg(test)]
+    last_ui_sections: NotePanelUiSections,
+}
+
+#[cfg(test)]
+#[derive(Default, Clone, Copy)]
+struct NotePanelUiSections {
+    tags_visible: bool,
+    links_visible: bool,
+    backlinks_visible: bool,
+    content_visible: bool,
 }
 
 #[derive(Default, Clone)]
@@ -197,6 +209,14 @@ struct NoteDerivedView {
 }
 
 impl NotePanel {
+    fn details_toggle_label(&self) -> &'static str {
+        if self.show_metadata {
+            "Hide Details"
+        } else {
+            "Show Details"
+        }
+    }
+
     pub fn from_note(note: Note) -> Self {
         let mut panel = Self {
             open: true,
@@ -209,6 +229,7 @@ impl NotePanel {
             image_cache: HashMap::new(),
             overwrite_prompt: false,
             show_open_with_menu: false,
+            show_metadata: true,
             tags_expanded: false,
             links_expanded: false,
             backlink_tab: BacklinkTab::LinkedTodos,
@@ -227,6 +248,8 @@ impl NotePanel {
             last_todo_revision: 0,
             #[cfg(test)]
             heavy_recompute_count: 0,
+            #[cfg(test)]
+            last_ui_sections: NotePanelUiSections::default(),
         };
         panel.refresh_fast_derived();
         panel.refresh_heavy_derived(true);
@@ -340,6 +363,10 @@ impl NotePanel {
             .max_height(max_height)
             .movable(true)
             .show(ctx, |ui| {
+                #[cfg(test)]
+                {
+                    self.last_ui_sections = NotePanelUiSections::default();
+                }
                 if ui
                     .ctx()
                     .input(|i| i.modifiers.ctrl && i.key_pressed(Key::Equals))
@@ -420,6 +447,16 @@ impl NotePanel {
                             ui.ctx().memory_mut(|m| m.surrender_focus(id));
                         }
                     }
+                    if ui.button(self.details_toggle_label()).clicked() {
+                        self.show_metadata = !self.show_metadata;
+                        let was_focused = self
+                            .last_textedit_id
+                            .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
+                            .unwrap_or(false);
+                        if was_focused {
+                            self.focus_textedit_next_frame = true;
+                        }
+                    }
                     ui.separator();
                     if ui.button("A-").clicked() {
                         app.note_font_size = (app.note_font_size - 1.0).max(8.0);
@@ -432,7 +469,11 @@ impl NotePanel {
                     self.refresh_fast_derived();
                 }
                 self.maybe_refresh_heavy_derived(ctx);
-                if !self.derived.tags.is_empty() {
+                if self.show_metadata && !self.derived.tags.is_empty() {
+                    #[cfg(test)]
+                    {
+                        self.last_ui_sections.tags_visible = true;
+                    }
                     let was_focused = self
                         .last_textedit_id
                         .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
@@ -477,7 +518,11 @@ impl NotePanel {
                         .into_iter()
                         .map(|(label, url)| LinkKind::Url(label, url)),
                 );
-                if !all_links.is_empty() {
+                if self.show_metadata && !all_links.is_empty() {
+                    #[cfg(test)]
+                    {
+                        self.last_ui_sections.links_visible = true;
+                    }
                     let was_focused = self
                         .last_textedit_id
                         .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
@@ -513,74 +558,91 @@ impl NotePanel {
                         }
                     });
                 }
-                ui.separator();
-                ui.label("Backlinks");
-                ui.horizontal(|ui| {
-                    for tab in [
-                        BacklinkTab::LinkedTodos,
-                        BacklinkTab::RelatedNotes,
-                        BacklinkTab::Mentions,
-                    ] {
-                        if ui
-                            .selectable_label(self.backlink_tab == tab, tab.label())
-                            .clicked()
-                        {
-                            self.backlink_tab = tab;
-                            self.backlink_page = 0;
-                        }
+                if self.show_metadata {
+                    #[cfg(test)]
+                    {
+                        self.last_ui_sections.backlinks_visible = true;
                     }
-                });
-                let rows = self.backlink_rows_for_active_tab();
-                let total_pages = (rows.len() + BACKLINK_PAGE_SIZE - 1) / BACKLINK_PAGE_SIZE;
-                let page_start = self.backlink_page * BACKLINK_PAGE_SIZE;
-                let page_end = (page_start + BACKLINK_PAGE_SIZE).min(rows.len());
-                if rows.is_empty() {
-                    ui.small("No backlinks in this category.");
-                } else {
-                    for (idx, row) in rows[page_start..page_end].iter().enumerate() {
-                        ui.push_id(("backlink_row", idx, page_start), |ui| {
-                            let resp = ui.selectable_label(false, &row.title);
-                            if resp.clicked() {
-                                if let Some(slug) = &row.note_slug {
-                                    app.open_note_panel(slug, None);
-                                } else if let Some(todo_id) = &row.todo_id {
-                                    let todos = load_todos(TODO_FILE).unwrap_or_default();
-                                    if let Some((todo_idx, _)) =
-                                        todos.iter().enumerate().find(|(_, t)| &t.id == todo_id)
-                                    {
-                                        app.todo_view_dialog.open_edit(todo_idx);
-                                    } else {
-                                        app.todo_view_dialog.open();
+                    ui.separator();
+                    ui.label("Backlinks");
+                    ui.horizontal(|ui| {
+                        for tab in [
+                            BacklinkTab::LinkedTodos,
+                            BacklinkTab::RelatedNotes,
+                            BacklinkTab::Mentions,
+                        ] {
+                            if ui
+                                .selectable_label(self.backlink_tab == tab, tab.label())
+                                .clicked()
+                            {
+                                self.backlink_tab = tab;
+                                self.backlink_page = 0;
+                            }
+                        }
+                    });
+                    let rows = self.backlink_rows_for_active_tab();
+                    let total_pages = (rows.len() + BACKLINK_PAGE_SIZE - 1) / BACKLINK_PAGE_SIZE;
+                    let page_start = self.backlink_page * BACKLINK_PAGE_SIZE;
+                    let page_end = (page_start + BACKLINK_PAGE_SIZE).min(rows.len());
+                    if rows.is_empty() {
+                        ui.small("No backlinks in this category.");
+                    } else {
+                        for (idx, row) in rows[page_start..page_end].iter().enumerate() {
+                            ui.push_id(("backlink_row", idx, page_start), |ui| {
+                                let resp = ui.selectable_label(false, &row.title);
+                                if resp.clicked() {
+                                    if let Some(slug) = &row.note_slug {
+                                        app.open_note_panel(slug, None);
+                                    } else if let Some(todo_id) = &row.todo_id {
+                                        let todos = load_todos(TODO_FILE).unwrap_or_default();
+                                        if let Some((todo_idx, _)) =
+                                            todos.iter().enumerate().find(|(_, t)| &t.id == todo_id)
+                                        {
+                                            app.todo_view_dialog.open_edit(todo_idx);
+                                        } else {
+                                            app.todo_view_dialog.open();
+                                        }
                                     }
                                 }
-                            }
-                            if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                                if let Some(slug) = &row.note_slug {
-                                    app.open_note_panel(slug, None);
+                                if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                {
+                                    if let Some(slug) = &row.note_slug {
+                                        app.open_note_panel(slug, None);
+                                    }
                                 }
-                            }
-                            ui.horizontal_wrapped(|ui| {
-                                ui.small(format!("[{}]", row.type_badge));
-                                ui.small(format!("updated {}", row.updated));
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.small(format!("[{}]", row.type_badge));
+                                    ui.small(format!("updated {}", row.updated));
+                                });
+                                ui.small(&row.snippet);
                             });
-                            ui.small(&row.snippet);
-                        });
-                        ui.separator();
+                            ui.separator();
+                        }
+                        if total_pages > 1 {
+                            ui.horizontal(|ui| {
+                                if ui.button("Prev").clicked() && self.backlink_page > 0 {
+                                    self.backlink_page -= 1;
+                                }
+                                ui.small(format!(
+                                    "Page {}/{}",
+                                    self.backlink_page + 1,
+                                    total_pages
+                                ));
+                                if ui.button("Next").clicked()
+                                    && self.backlink_page + 1 < total_pages
+                                {
+                                    self.backlink_page += 1;
+                                }
+                            });
+                        }
                     }
-                    if total_pages > 1 {
-                        ui.horizontal(|ui| {
-                            if ui.button("Prev").clicked() && self.backlink_page > 0 {
-                                self.backlink_page -= 1;
-                            }
-                            ui.small(format!("Page {}/{}", self.backlink_page + 1, total_pages));
-                            if ui.button("Next").clicked() && self.backlink_page + 1 < total_pages {
-                                self.backlink_page += 1;
-                            }
-                        });
-                    }
+                    ui.separator();
                 }
-                ui.separator();
                 let remaining = ui.available_height();
+                #[cfg(test)]
+                {
+                    self.last_ui_sections.content_visible = true;
+                }
                 let resp = egui::ScrollArea::vertical()
                     .id_source(scroll_id_source)
                     .max_height(remaining)
@@ -1774,6 +1836,12 @@ mod tests {
         }
     }
 
+    fn render_panel_once(ctx: &egui::Context, panel: &mut NotePanel, app: &mut LauncherApp) {
+        let _ = ctx.run(Default::default(), |ctx| {
+            panel.ui(ctx, app);
+        });
+    }
+
     #[test]
     fn wrap_selection_preserves_range() {
         let ctx = egui::Context::default();
@@ -2066,6 +2134,50 @@ mod tests {
         assert_eq!(linked.len(), 1);
         assert_eq!(related.len(), 1);
         assert!(mentions.len() >= 1);
+    }
+
+    #[test]
+    fn toggle_hides_metadata_sections_in_ui() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note(
+            "#tag [[linked-note]] https://example.com\n\nBody visible always",
+        ));
+        panel.preview_mode = false;
+
+        render_panel_once(&ctx, &mut panel, &mut app);
+        assert!(panel.last_ui_sections.tags_visible);
+        assert!(panel.last_ui_sections.links_visible);
+        assert!(panel.last_ui_sections.backlinks_visible);
+        assert!(panel.last_ui_sections.content_visible);
+
+        panel.show_metadata = false;
+        render_panel_once(&ctx, &mut panel, &mut app);
+        assert!(!panel.last_ui_sections.tags_visible);
+        assert!(!panel.last_ui_sections.links_visible);
+        assert!(!panel.last_ui_sections.backlinks_visible);
+        assert!(panel.last_ui_sections.content_visible);
+    }
+
+    #[test]
+    fn toggle_button_label_reflects_state() {
+        let mut panel = NotePanel::from_note(empty_note("body"));
+        assert_eq!(panel.details_toggle_label(), "Hide Details");
+        panel.show_metadata = false;
+        assert_eq!(panel.details_toggle_label(), "Show Details");
+    }
+
+    #[test]
+    fn toggle_preserves_tab_and_pagination_state() {
+        let mut panel = NotePanel::from_note(empty_note("body"));
+        panel.backlink_tab = BacklinkTab::Mentions;
+        panel.backlink_page = 2;
+
+        panel.show_metadata = false;
+        panel.show_metadata = true;
+
+        assert_eq!(panel.backlink_tab, BacklinkTab::Mentions);
+        assert_eq!(panel.backlink_page, 2);
     }
 
     #[test]
