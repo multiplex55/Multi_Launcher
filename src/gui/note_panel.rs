@@ -184,6 +184,17 @@ pub struct NotePanel {
     last_todo_revision: u64,
     #[cfg(test)]
     heavy_recompute_count: usize,
+    #[cfg(test)]
+    last_ui_sections: NotePanelUiSections,
+}
+
+#[cfg(test)]
+#[derive(Default, Clone, Copy)]
+struct NotePanelUiSections {
+    tags_visible: bool,
+    links_visible: bool,
+    backlinks_visible: bool,
+    content_visible: bool,
 }
 
 #[derive(Default, Clone)]
@@ -237,6 +248,8 @@ impl NotePanel {
             last_todo_revision: 0,
             #[cfg(test)]
             heavy_recompute_count: 0,
+            #[cfg(test)]
+            last_ui_sections: NotePanelUiSections::default(),
         };
         panel.refresh_fast_derived();
         panel.refresh_heavy_derived(true);
@@ -350,6 +363,10 @@ impl NotePanel {
             .max_height(max_height)
             .movable(true)
             .show(ctx, |ui| {
+                #[cfg(test)]
+                {
+                    self.last_ui_sections = NotePanelUiSections::default();
+                }
                 if ui
                     .ctx()
                     .input(|i| i.modifiers.ctrl && i.key_pressed(Key::Equals))
@@ -453,6 +470,10 @@ impl NotePanel {
                 }
                 self.maybe_refresh_heavy_derived(ctx);
                 if self.show_metadata && !self.derived.tags.is_empty() {
+                    #[cfg(test)]
+                    {
+                        self.last_ui_sections.tags_visible = true;
+                    }
                     let was_focused = self
                         .last_textedit_id
                         .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
@@ -498,6 +519,10 @@ impl NotePanel {
                         .map(|(label, url)| LinkKind::Url(label, url)),
                 );
                 if self.show_metadata && !all_links.is_empty() {
+                    #[cfg(test)]
+                    {
+                        self.last_ui_sections.links_visible = true;
+                    }
                     let was_focused = self
                         .last_textedit_id
                         .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
@@ -534,6 +559,10 @@ impl NotePanel {
                     });
                 }
                 if self.show_metadata {
+                    #[cfg(test)]
+                    {
+                        self.last_ui_sections.backlinks_visible = true;
+                    }
                     ui.separator();
                     ui.label("Backlinks");
                     ui.horizontal(|ui| {
@@ -610,6 +639,10 @@ impl NotePanel {
                     ui.separator();
                 }
                 let remaining = ui.available_height();
+                #[cfg(test)]
+                {
+                    self.last_ui_sections.content_visible = true;
+                }
                 let resp = egui::ScrollArea::vertical()
                     .id_source(scroll_id_source)
                     .max_height(remaining)
@@ -1803,15 +1836,10 @@ mod tests {
         }
     }
 
-    fn render_panel_and_dump_shapes(
-        ctx: &egui::Context,
-        panel: &mut NotePanel,
-        app: &mut LauncherApp,
-    ) -> String {
-        let output = ctx.run(Default::default(), |ctx| {
+    fn render_panel_once(ctx: &egui::Context, panel: &mut NotePanel, app: &mut LauncherApp) {
+        let _ = ctx.run(Default::default(), |ctx| {
             panel.ui(ctx, app);
         });
-        format!("{:?}", output.shapes)
     }
 
     #[test]
@@ -2117,18 +2145,18 @@ mod tests {
         ));
         panel.preview_mode = false;
 
-        let shown = render_panel_and_dump_shapes(&ctx, &mut panel, &mut app);
-        assert!(shown.contains("Tags:"));
-        assert!(shown.contains("Links:"));
-        assert!(shown.contains("Backlinks"));
-        assert!(shown.contains("Body visible always"));
+        render_panel_once(&ctx, &mut panel, &mut app);
+        assert!(panel.last_ui_sections.tags_visible);
+        assert!(panel.last_ui_sections.links_visible);
+        assert!(panel.last_ui_sections.backlinks_visible);
+        assert!(panel.last_ui_sections.content_visible);
 
         panel.show_metadata = false;
-        let hidden = render_panel_and_dump_shapes(&ctx, &mut panel, &mut app);
-        assert!(!hidden.contains("Tags:"));
-        assert!(!hidden.contains("Links:"));
-        assert!(!hidden.contains("Backlinks"));
-        assert!(hidden.contains("Body visible always"));
+        render_panel_once(&ctx, &mut panel, &mut app);
+        assert!(!panel.last_ui_sections.tags_visible);
+        assert!(!panel.last_ui_sections.links_visible);
+        assert!(!panel.last_ui_sections.backlinks_visible);
+        assert!(panel.last_ui_sections.content_visible);
     }
 
     #[test]
