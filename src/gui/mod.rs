@@ -125,6 +125,7 @@ const SUBCOMMANDS: &[&str] = &[
 /// Prefix used to search user saved applications.
 pub const APP_PREFIX: &str = "app";
 const NOTE_SEARCH_DEBOUNCE: Duration = Duration::from_secs(1);
+const COMPLETION_REBUILD_DEBOUNCE: Duration = Duration::from_millis(120);
 
 fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
@@ -407,6 +408,9 @@ pub struct LauncherApp {
     actions_by_id: HashMap<String, Action>,
     command_cache: Vec<Action>,
     completion_index: Option<Map<Vec<u8>>>,
+    action_completion_dirty: bool,
+    command_completion_dirty: bool,
+    completion_rebuild_after: Option<Instant>,
     suggestions: Vec<String>,
     autocomplete_index: usize,
     pub query: String,
@@ -618,7 +622,8 @@ impl LauncherApp {
             .iter()
             .map(|a| (a.action.clone(), a.clone()))
             .collect();
-        self.update_completion_index();
+        self.action_completion_dirty = true;
+        self.schedule_completion_rebuild();
     }
 
     pub fn update_command_cache(&mut self) {
@@ -627,7 +632,37 @@ impl LauncherApp {
             .commands_filtered(self.enabled_plugins.as_ref());
         cmds.sort_by_cached_key(|a| a.label.to_lowercase());
         self.command_cache = cmds;
-        self.update_completion_index();
+        self.command_completion_dirty = true;
+        self.schedule_completion_rebuild();
+    }
+
+    fn schedule_completion_rebuild(&mut self) {
+        self.completion_rebuild_after = Some(Instant::now() + COMPLETION_REBUILD_DEBOUNCE);
+        self.completion_index = None;
+        self.autocomplete_index = 0;
+        self.suggestions.clear();
+    }
+
+    fn maybe_rebuild_completion_index(&mut self, now: Instant) {
+        let should_rebuild = self
+            .completion_rebuild_after
+            .is_some_and(|scheduled| now >= scheduled)
+            && (self.action_completion_dirty || self.command_completion_dirty);
+        if should_rebuild {
+            self.update_completion_index();
+            self.action_completion_dirty = false;
+            self.command_completion_dirty = false;
+            self.completion_rebuild_after = None;
+        }
+    }
+
+    fn rebuild_completion_index_now(&mut self) {
+        if self.action_completion_dirty || self.command_completion_dirty {
+            self.update_completion_index();
+            self.action_completion_dirty = false;
+            self.command_completion_dirty = false;
+        }
+        self.completion_rebuild_after = None;
     }
 
     pub fn process_watch_events(&mut self) {
@@ -735,6 +770,7 @@ impl LauncherApp {
                 }
             }
         }
+        self.maybe_rebuild_completion_index(Instant::now());
     }
 
     fn update_completion_index(&mut self) {
@@ -1440,6 +1476,9 @@ impl LauncherApp {
             actions_by_id,
             command_cache: Vec::new(),
             completion_index: None,
+            action_completion_dirty: false,
+            command_completion_dirty: false,
+            completion_rebuild_after: None,
             suggestions: Vec::new(),
             autocomplete_index: 0,
             vim_mode: false,
@@ -1476,6 +1515,7 @@ impl LauncherApp {
 
         app.update_action_cache();
         app.update_command_cache();
+        app.rebuild_completion_index_now();
         app.search();
         crate::plugins::mouse_gestures::sync_enabled_plugins(app.enabled_plugins.as_ref());
         app
@@ -5168,6 +5208,107 @@ mod tests {
         );
 
         std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn watch_event_bursts_delay_completion_rebuild_until_debounce_window() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        std::fs::write(
+            "actions.json",
+            serde_json::to_string_pretty(&serde_json::json!([
+                {
+                    "label": "Initial App",
+                    "desc": "demo",
+                    "action": "initial:app",
+                    "args": null
+                }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.rebuild_completion_index_now();
+        assert!(app.completion_index.is_some());
+
+        std::fs::write(
+            "actions.json",
+            serde_json::to_string_pretty(&serde_json::json!([
+                {
+                    "label": "Updated App",
+                    "desc": "demo",
+                    "action": "updated:app",
+                    "args": null
+                }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        send_event(WatchEvent::Actions);
+        send_event(WatchEvent::Actions);
+        app.process_watch_events();
+
+        assert!(app.completion_index.is_none());
+        assert!(app.action_completion_dirty);
+
+        let scheduled = app
+            .completion_rebuild_after
+            .expect("rebuild should be scheduled");
+        app.maybe_rebuild_completion_index(scheduled - Duration::from_millis(1));
+        assert!(app.completion_index.is_none());
+
+        app.maybe_rebuild_completion_index(scheduled + Duration::from_millis(1));
+        assert!(app.completion_index.is_some());
+        assert!(!app.action_completion_dirty);
+        assert!(!app.command_completion_dirty);
+        assert!(app.completion_rebuild_after.is_none());
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn completion_suggestions_clear_until_rebuild_and_match_latest_entries() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query_autocomplete = true;
+
+        app.actions = Arc::new(vec![Action {
+            label: "Old App".into(),
+            desc: "demo".into(),
+            action: "old:app".into(),
+            args: None,
+        }]);
+        app.update_action_cache();
+        app.rebuild_completion_index_now();
+
+        app.query = "app ".into();
+        app.update_suggestions();
+        assert!(app.suggestions.iter().any(|s| s == "app old app"));
+
+        app.actions = Arc::new(vec![Action {
+            label: "New App".into(),
+            desc: "demo".into(),
+            action: "new:app".into(),
+            args: None,
+        }]);
+        app.update_action_cache();
+
+        assert!(app.completion_index.is_none());
+        assert!(app.suggestions.is_empty());
+
+        app.maybe_rebuild_completion_index(
+            Instant::now() + COMPLETION_REBUILD_DEBOUNCE + Duration::from_millis(1),
+        );
+
+        assert!(app.suggestions.iter().all(|s| s != "app old app"));
+        assert!(app.suggestions.iter().any(|s| s == "app new app"));
     }
 
     #[test]
