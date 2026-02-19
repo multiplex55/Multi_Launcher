@@ -5288,7 +5288,7 @@ mod tests {
         app.update_action_cache();
         app.rebuild_completion_index_now();
 
-        app.query = "app o".into();
+        app.query = "app ".into();
         app.update_suggestions();
         assert!(app.suggestions.iter().any(|s| s == "app old app"));
 
