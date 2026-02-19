@@ -30,7 +30,7 @@ use url::Url;
 const BACKLINK_PAGE_SIZE: usize = 12;
 const HEAVY_RECOMPUTE_IDLE_DEBOUNCE: Duration = Duration::from_millis(250);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BacklinkTab {
     LinkedTodos,
     RelatedNotes,
