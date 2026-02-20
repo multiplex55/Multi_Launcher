@@ -59,6 +59,9 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+pub const CAP_GRID_RESULTS_COMPATIBLE: &str = "grid_results_compatible";
+pub const CAP_FORCE_LIST_RESULTS: &str = "force_list_results";
+
 pub trait Plugin: Send + Sync {
     /// Return actions based on the query string
     fn search(&self, query: &str) -> Vec<Action>;

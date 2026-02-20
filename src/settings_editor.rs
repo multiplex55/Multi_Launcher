@@ -3,7 +3,7 @@ use crate::gui::LauncherApp;
 use crate::hotkey::parse_hotkey;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
 use crate::plugins::screenshot::ScreenshotPluginSettings;
-use crate::settings::Settings;
+use crate::settings::{QueryResultsLayoutSettings, Settings};
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 use std::sync::Arc;
@@ -41,6 +41,11 @@ pub struct SettingsEditor {
     fuzzy_weight: f32,
     usage_weight: f32,
     page_jump: usize,
+    query_results_layout_enabled: bool,
+    query_results_layout_rows: usize,
+    query_results_layout_cols: usize,
+    query_results_layout_respect_plugin_capability: bool,
+    query_results_layout_plugin_opt_out: String,
     follow_mouse: bool,
     static_enabled: bool,
     static_x: i32,
@@ -164,6 +169,16 @@ impl SettingsEditor {
             fuzzy_weight: settings.fuzzy_weight,
             usage_weight: settings.usage_weight,
             page_jump: settings.page_jump,
+            query_results_layout_enabled: settings.query_results_layout.enabled,
+            query_results_layout_rows: settings.query_results_layout.rows.max(1),
+            query_results_layout_cols: settings.query_results_layout.cols.max(1),
+            query_results_layout_respect_plugin_capability: settings
+                .query_results_layout
+                .respect_plugin_capability,
+            query_results_layout_plugin_opt_out: settings
+                .query_results_layout
+                .plugin_opt_out
+                .join(", "),
             follow_mouse,
             static_enabled,
             static_x: settings.static_pos.unwrap_or((0, 0)).0,
@@ -329,6 +344,19 @@ impl SettingsEditor {
             fuzzy_weight: self.fuzzy_weight,
             usage_weight: self.usage_weight,
             page_jump: self.page_jump,
+            query_results_layout: QueryResultsLayoutSettings {
+                enabled: self.query_results_layout_enabled,
+                rows: self.query_results_layout_rows.max(1),
+                cols: self.query_results_layout_cols.max(1),
+                respect_plugin_capability: self.query_results_layout_respect_plugin_capability,
+                plugin_opt_out: self
+                    .query_results_layout_plugin_opt_out
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect(),
+            },
             follow_mouse: self.follow_mouse,
             static_location_enabled,
             static_pos,
@@ -523,6 +551,39 @@ impl SettingsEditor {
                                     .clamp_range(1..=100)
                                     .speed(1),
                             );
+                        });
+
+                        ui.checkbox(
+                            &mut self.query_results_layout_enabled,
+                            "Display results in grid layout",
+                        );
+                        ui.add_enabled_ui(self.query_results_layout_enabled, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Grid rows");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.query_results_layout_rows)
+                                        .clamp_range(1..=100)
+                                        .speed(1),
+                                );
+                                ui.label("Columns");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.query_results_layout_cols)
+                                        .clamp_range(1..=100)
+                                        .speed(1),
+                                );
+                            });
+                            self.query_results_layout_rows = self.query_results_layout_rows.max(1);
+                            self.query_results_layout_cols = self.query_results_layout_cols.max(1);
+                            ui.checkbox(
+                                &mut self.query_results_layout_respect_plugin_capability,
+                                "Respect plugin list/grid capability",
+                            );
+                            ui.horizontal(|ui| {
+                                ui.label("Force list for plugins (comma separated)");
+                                ui.text_edit_singleline(
+                                    &mut self.query_results_layout_plugin_opt_out,
+                                );
+                            });
                         });
 
                         ui.horizontal(|ui| {
@@ -857,6 +918,8 @@ impl SettingsEditor {
                         app.clear_query_after_run = new_settings.clear_query_after_run;
                         app.require_confirm_destructive = new_settings.require_confirm_destructive;
                         app.query_autocomplete = new_settings.query_autocomplete;
+                        app.query_results_layout = new_settings.query_results_layout.clone();
+                        app.recompute_query_results_layout();
                         app.net_refresh = new_settings.net_refresh;
                         app.net_unit = new_settings.net_unit;
                         app.screenshot_dir = new_settings.screenshot_dir.clone();
@@ -997,5 +1060,32 @@ mod tests {
         assert!(!saved.static_location_enabled);
         assert_eq!(saved.static_pos, None);
         assert_eq!(saved.static_size, None);
+    }
+
+    #[test]
+    fn query_results_layout_round_trip_editor_conversion() {
+        let mut initial = Settings::default();
+        initial.query_results_layout.enabled = true;
+        initial.query_results_layout.rows = 6;
+        initial.query_results_layout.cols = 4;
+        initial.query_results_layout.respect_plugin_capability = false;
+        initial.query_results_layout.plugin_opt_out = vec!["note".into(), "todo".into()];
+
+        let editor = SettingsEditor::new(&initial);
+        let saved = editor.to_settings(&initial);
+        assert_eq!(saved.query_results_layout, initial.query_results_layout);
+    }
+
+    #[test]
+    fn query_results_layout_clamps_rows_and_cols_to_one() {
+        let initial = Settings::default();
+        let mut editor = SettingsEditor::new(&initial);
+        editor.query_results_layout_enabled = true;
+        editor.query_results_layout_rows = 0;
+        editor.query_results_layout_cols = 0;
+
+        let saved = editor.to_settings(&initial);
+        assert_eq!(saved.query_results_layout.rows, 1);
+        assert_eq!(saved.query_results_layout.cols, 1);
     }
 }

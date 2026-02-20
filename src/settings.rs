@@ -53,6 +53,32 @@ pub struct DashboardSettings {
     pub show_when_query_empty: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct QueryResultsLayoutSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_query_results_layout_rows")]
+    pub rows: usize,
+    #[serde(default = "default_query_results_layout_cols")]
+    pub cols: usize,
+    #[serde(default = "default_true")]
+    pub respect_plugin_capability: bool,
+    #[serde(default)]
+    pub plugin_opt_out: Vec<String>,
+}
+
+impl Default for QueryResultsLayoutSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            rows: default_query_results_layout_rows(),
+            cols: default_query_results_layout_cols(),
+            respect_plugin_capability: true,
+            plugin_opt_out: Vec::new(),
+        }
+    }
+}
+
 fn default_note_graph_max_nodes() -> usize {
     220
 }
@@ -442,6 +468,8 @@ pub struct Settings {
     pub theme: ThemeSettings,
     #[serde(default)]
     pub note_graph: NoteGraphSettings,
+    #[serde(default)]
+    pub query_results_layout: QueryResultsLayoutSettings,
 }
 
 static SETTINGS_PATH: OnceCell<PathBuf> = OnceCell::new();
@@ -533,6 +561,14 @@ fn default_note_more_limit() -> usize {
     5
 }
 
+fn default_query_results_layout_rows() -> usize {
+    3
+}
+
+fn default_query_results_layout_cols() -> usize {
+    2
+}
+
 fn default_log_path() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -608,6 +644,7 @@ impl Default for Settings {
             dashboard: DashboardSettings::default(),
             theme: ThemeSettings::default(),
             note_graph: NoteGraphSettings::default(),
+            query_results_layout: QueryResultsLayoutSettings::default(),
         }
     }
 }
@@ -686,5 +723,33 @@ impl Settings {
             Some(LogFile::Path(p)) => Some(PathBuf::from(p)),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{QueryResultsLayoutSettings, Settings};
+
+    #[test]
+    fn query_results_layout_defaults_are_backward_compatible() {
+        let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
+        assert_eq!(
+            parsed.query_results_layout,
+            QueryResultsLayoutSettings::default()
+        );
+    }
+
+    #[test]
+    fn query_results_layout_round_trip_serialization() {
+        let mut settings = Settings::default();
+        settings.query_results_layout.enabled = true;
+        settings.query_results_layout.rows = 4;
+        settings.query_results_layout.cols = 5;
+        settings.query_results_layout.respect_plugin_capability = false;
+        settings.query_results_layout.plugin_opt_out = vec!["note".into(), "todo".into()];
+
+        let json = serde_json::to_string(&settings).expect("serialize settings");
+        let restored: Settings = serde_json::from_str(&json).expect("deserialize settings");
+        assert_eq!(restored.query_results_layout, settings.query_results_layout);
     }
 }
