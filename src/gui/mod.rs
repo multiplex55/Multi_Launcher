@@ -5389,6 +5389,7 @@ mod tests {
 
         app.query = "app tstng123".into();
         app.match_exact = true;
+        app.last_results_valid = false;
         app.search();
         assert!(!app.results.iter().any(|a| a.action == "demo:action"));
     }
