@@ -1801,20 +1801,13 @@ impl LauncherApp {
             return false;
         }
 
-        let rows = self.query_results_layout.rows.max(1);
-        let cols = self.query_results_layout.cols.max(1);
-        if rows == 0 || cols == 0 {
-            return false;
+        // Global grid mode when capability gating is disabled.
+        if !self.query_results_layout.respect_plugin_capability {
+            return true;
         }
 
         let trimmed = self.query.trim();
-        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case(APP_PREFIX) {
-            return false;
-        }
-        if trimmed
-            .to_ascii_lowercase()
-            .starts_with(&format!("{} ", APP_PREFIX))
-        {
+        if trimmed.is_empty() {
             return false;
         }
 
@@ -1824,35 +1817,40 @@ impl LauncherApp {
             .next()
             .map(str::to_ascii_lowercase);
 
-        let mut matched_plugins = Vec::new();
+        let mut prefixed_matches = Vec::new();
         for plugin in self.plugins.iter() {
             if let Some(enabled) = self.enabled_plugins.as_ref() {
                 if !enabled.contains(plugin.name()) {
                     continue;
                 }
             }
-            if !plugin.always_search() {
-                let prefixes = plugin.query_prefixes();
-                if !prefixes.is_empty() {
-                    let Some(head) = query_head.as_deref() else {
-                        continue;
-                    };
-                    if !prefixes
-                        .iter()
-                        .any(|prefix| prefix.eq_ignore_ascii_case(head))
-                    {
-                        continue;
-                    }
-                }
+
+            let prefixes = plugin.query_prefixes();
+            if prefixes.is_empty() {
+                continue;
             }
-            matched_plugins.push(plugin.as_ref());
+            let Some(head) = query_head.as_deref() else {
+                continue;
+            };
+            if prefixes
+                .iter()
+                .any(|prefix| prefix.eq_ignore_ascii_case(head))
+            {
+                prefixed_matches.push(plugin.as_ref());
+            }
         }
 
-        if matched_plugins.len() != 1 {
+        // No plugin-prefixed context: use the configured grid layout.
+        if prefixed_matches.is_empty() {
+            return true;
+        }
+
+        // Ambiguous/mixed plugin context: safely fall back to list mode.
+        if prefixed_matches.len() != 1 {
             return false;
         }
 
-        let plugin = matched_plugins[0];
+        let plugin = prefixed_matches[0];
         if self
             .query_results_layout
             .plugin_opt_out
@@ -1862,17 +1860,11 @@ impl LauncherApp {
             return false;
         }
 
-        if self.query_results_layout.respect_plugin_capability {
-            let capabilities = plugin.capabilities();
-            if capabilities.contains(&CAP_FORCE_LIST_RESULTS) {
-                return false;
-            }
-            if !capabilities.contains(&CAP_GRID_RESULTS_COMPATIBLE) {
-                return false;
-            }
+        let capabilities = plugin.capabilities();
+        if capabilities.contains(&CAP_FORCE_LIST_RESULTS) {
+            return false;
         }
-
-        true
+        capabilities.contains(&CAP_GRID_RESULTS_COMPATIBLE)
     }
 
     pub fn recompute_query_results_layout(&mut self) {
@@ -4181,6 +4173,9 @@ impl eframe::App for LauncherApp {
                                 .unwrap_or(false);
                             if self.resolved_grid_layout {
                                 let cols = self.query_results_layout.cols.max(1);
+                                let col_width = ((ui.available_width() - ((cols.saturating_sub(1)) as f32 * 8.0))
+                                    / cols as f32)
+                                    .max(160.0);
                                 egui::Grid::new("query_results_grid")
                                     .num_columns(cols)
                                     .spacing([8.0, 6.0])
@@ -4189,7 +4184,7 @@ impl eframe::App for LauncherApp {
                                             let action = self.results[idx].clone();
                                             let text = format!("{}\n{}", action.label, action.desc);
                                             let resp = ui.add_sized(
-                                                [ui.available_width().max(180.0), 44.0],
+                                                [col_width, 44.0],
                                                 egui::SelectableLabel::new(
                                                     self.selected == Some(idx),
                                                     text,
@@ -6028,6 +6023,18 @@ mod tests {
         assert_eq!(app.selected, Some(1));
         app.handle_key(egui::Key::ArrowRight);
         assert_eq!(app.selected, Some(1));
+    }
+
+    #[test]
+    fn grid_layout_defaults_to_enabled_for_non_prefixed_queries() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "hello world".into();
+        app.query_results_layout.enabled = true;
+        app.query_results_layout.respect_plugin_capability = true;
+
+        app.recompute_query_results_layout();
+        assert!(app.resolved_grid_layout);
     }
 
     #[test]
