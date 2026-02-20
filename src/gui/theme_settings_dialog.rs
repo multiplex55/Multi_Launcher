@@ -71,7 +71,7 @@ pub fn ui(
     egui::Window::new("Theme settings")
         .open(&mut keep_open)
         .resizable(true)
-        .default_width(640.0)
+        .default_width(980.0)
         .show(ctx, |ui| {
             if let Some(err) = &state.last_error {
                 ui.colored_label(egui::Color32::RED, err);
@@ -82,19 +82,41 @@ pub fn ui(
             ui.separator();
 
             let mut changed = false;
-            changed |= section_base_mode(ui, &mut state.draft.mode);
-            ui.separator();
-            changed |= section_core_surfaces(ui, &mut state.draft.custom_scheme, state.draft.mode);
-            ui.separator();
-            changed |= section_text_and_links(ui, &mut state.draft.custom_scheme, state.draft.mode);
-            ui.separator();
-            changed |= section_widgets(ui, &mut state.draft.custom_scheme, state.draft.mode);
-            ui.separator();
-            changed |= section_selection(ui, &mut state.draft.custom_scheme, state.draft.mode);
-            ui.separator();
-            changed |= section_semantic(ui, &mut state.draft.custom_scheme, state.draft.mode);
-            ui.separator();
-            preview(ui, &state.draft.custom_scheme);
+            ui.columns(2, |columns| {
+                changed |= section_base_mode(&mut columns[0], &mut state.draft.mode);
+                columns[0].separator();
+                changed |= section_core_surfaces(
+                    &mut columns[0],
+                    &mut state.draft.custom_scheme,
+                    state.draft.mode,
+                );
+                columns[0].separator();
+                changed |= section_text_and_links(
+                    &mut columns[0],
+                    &mut state.draft.custom_scheme,
+                    state.draft.mode,
+                );
+
+                changed |= section_widgets(
+                    &mut columns[1],
+                    &mut state.draft.custom_scheme,
+                    state.draft.mode,
+                );
+                columns[1].separator();
+                changed |= section_selection(
+                    &mut columns[1],
+                    &mut state.draft.custom_scheme,
+                    state.draft.mode,
+                );
+                columns[1].separator();
+                changed |= section_semantic(
+                    &mut columns[1],
+                    &mut state.draft.custom_scheme,
+                    state.draft.mode,
+                );
+                columns[1].separator();
+                preview(&mut columns[1], &state.draft.custom_scheme);
+            });
 
             if changed {
                 state.dirty = true;
@@ -204,9 +226,7 @@ fn section_core_surfaces(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: Them
     changed |= color_row(ui, "Window background", &mut scheme.window_fill);
     changed |= color_row(ui, "Panel background", &mut scheme.panel_fill);
     if ui.small_button("Reset section defaults").clicked() {
-        let defaults = defaults_for_mode(mode);
-        scheme.window_fill = defaults.window_fill;
-        scheme.panel_fill = defaults.panel_fill;
+        reset_core_surfaces_to_mode_defaults(scheme, mode);
         changed = true;
     }
     changed
@@ -218,9 +238,7 @@ fn section_text_and_links(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: The
     changed |= color_row(ui, "Text", &mut scheme.text);
     changed |= color_row(ui, "Hyperlink", &mut scheme.hyperlink);
     if ui.small_button("Reset section defaults").clicked() {
-        let defaults = defaults_for_mode(mode);
-        scheme.text = defaults.text;
-        scheme.hyperlink = defaults.hyperlink;
+        reset_text_and_links_to_mode_defaults(scheme, mode);
         changed = true;
     }
     changed
@@ -236,13 +254,7 @@ fn section_widgets(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode)
     changed |= color_row(ui, "Active fill", &mut scheme.widget_active_fill);
     changed |= color_row(ui, "Active stroke", &mut scheme.widget_active_stroke);
     if ui.small_button("Reset section defaults").clicked() {
-        let defaults = defaults_for_mode(mode);
-        scheme.widget_inactive_fill = defaults.widget_inactive_fill;
-        scheme.widget_inactive_stroke = defaults.widget_inactive_stroke;
-        scheme.widget_hovered_fill = defaults.widget_hovered_fill;
-        scheme.widget_hovered_stroke = defaults.widget_hovered_stroke;
-        scheme.widget_active_fill = defaults.widget_active_fill;
-        scheme.widget_active_stroke = defaults.widget_active_stroke;
+        reset_widgets_to_mode_defaults(scheme, mode);
         changed = true;
     }
     changed
@@ -254,9 +266,7 @@ fn section_selection(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMod
     changed |= color_row(ui, "Selection background", &mut scheme.selection_bg);
     changed |= color_row(ui, "Selection stroke", &mut scheme.selection_stroke);
     if ui.small_button("Reset section defaults").clicked() {
-        let defaults = defaults_for_mode(mode);
-        scheme.selection_bg = defaults.selection_bg;
-        scheme.selection_stroke = defaults.selection_stroke;
+        reset_selection_to_mode_defaults(scheme, mode);
         changed = true;
     }
     changed
@@ -269,19 +279,19 @@ fn section_semantic(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode
     changed |= color_row(ui, "Warning", &mut scheme.warn_accent);
     changed |= color_row(ui, "Error", &mut scheme.error_accent);
     if ui.small_button("Reset section defaults").clicked() {
-        let defaults = defaults_for_mode(mode);
-        scheme.success_accent = defaults.success_accent;
-        scheme.warn_accent = defaults.warn_accent;
-        scheme.error_accent = defaults.error_accent;
+        reset_semantic_to_mode_defaults(scheme, mode);
         changed = true;
     }
     changed
 }
 
 fn color_row(ui: &mut egui::Ui, label: &str, color: &mut ThemeColor) -> bool {
+    const LABEL_WIDTH: f32 = 150.0;
     let mut changed = false;
     ui.horizontal(|ui| {
-        ui.label(label);
+        ui.set_min_height(22.0);
+        ui.add_sized([LABEL_WIDTH, 0.0], egui::Label::new(label));
+        ui.spacing_mut().item_spacing.x = 6.0;
         let mut c = egui::Color32::from_rgba_unmultiplied(color.r, color.g, color.b, color.a);
         if ui.color_edit_button_srgba(&mut c).changed() {
             color.r = c.r();
@@ -292,6 +302,41 @@ fn color_row(ui: &mut egui::Ui, label: &str, color: &mut ThemeColor) -> bool {
         }
     });
     changed
+}
+
+fn reset_core_surfaces_to_mode_defaults(scheme: &mut ColorScheme, mode: ThemeMode) {
+    let defaults = defaults_for_mode(mode);
+    scheme.window_fill = defaults.window_fill;
+    scheme.panel_fill = defaults.panel_fill;
+}
+
+fn reset_text_and_links_to_mode_defaults(scheme: &mut ColorScheme, mode: ThemeMode) {
+    let defaults = defaults_for_mode(mode);
+    scheme.text = defaults.text;
+    scheme.hyperlink = defaults.hyperlink;
+}
+
+fn reset_widgets_to_mode_defaults(scheme: &mut ColorScheme, mode: ThemeMode) {
+    let defaults = defaults_for_mode(mode);
+    scheme.widget_inactive_fill = defaults.widget_inactive_fill;
+    scheme.widget_inactive_stroke = defaults.widget_inactive_stroke;
+    scheme.widget_hovered_fill = defaults.widget_hovered_fill;
+    scheme.widget_hovered_stroke = defaults.widget_hovered_stroke;
+    scheme.widget_active_fill = defaults.widget_active_fill;
+    scheme.widget_active_stroke = defaults.widget_active_stroke;
+}
+
+fn reset_selection_to_mode_defaults(scheme: &mut ColorScheme, mode: ThemeMode) {
+    let defaults = defaults_for_mode(mode);
+    scheme.selection_bg = defaults.selection_bg;
+    scheme.selection_stroke = defaults.selection_stroke;
+}
+
+fn reset_semantic_to_mode_defaults(scheme: &mut ColorScheme, mode: ThemeMode) {
+    let defaults = defaults_for_mode(mode);
+    scheme.success_accent = defaults.success_accent;
+    scheme.warn_accent = defaults.warn_accent;
+    scheme.error_accent = defaults.error_accent;
 }
 
 fn preview(ui: &mut egui::Ui, scheme: &ColorScheme) {
@@ -368,4 +413,92 @@ fn swatch(ui: &mut egui::Ui, label: &str, fill: ThemeColor, stroke: ThemeColor) 
 
 fn to_egui(c: ThemeColor) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(c.r, c.g, c.b, c.a)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_for_mode_returns_expected_scheme() {
+        assert_eq!(defaults_for_mode(ThemeMode::System), ColorScheme::dark());
+        assert_eq!(defaults_for_mode(ThemeMode::Dark), ColorScheme::dark());
+        assert_eq!(defaults_for_mode(ThemeMode::Light), ColorScheme::light());
+        assert_eq!(defaults_for_mode(ThemeMode::Custom), ColorScheme::dark());
+    }
+
+    #[test]
+    fn reset_core_surfaces_only_updates_core_surface_fields() {
+        let mut scheme = ColorScheme::light();
+        let before = scheme.clone();
+        reset_core_surfaces_to_mode_defaults(&mut scheme, ThemeMode::Dark);
+        let expected = ColorScheme::dark();
+
+        assert_eq!(scheme.window_fill, expected.window_fill);
+        assert_eq!(scheme.panel_fill, expected.panel_fill);
+        assert_eq!(scheme.text, before.text);
+        assert_eq!(scheme.hyperlink, before.hyperlink);
+        assert_eq!(scheme.selection_bg, before.selection_bg);
+    }
+
+    #[test]
+    fn reset_widgets_only_updates_widget_fields() {
+        let mut scheme = ColorScheme::light();
+        let before = scheme.clone();
+        reset_widgets_to_mode_defaults(&mut scheme, ThemeMode::Dark);
+        let expected = ColorScheme::dark();
+
+        assert_eq!(scheme.widget_inactive_fill, expected.widget_inactive_fill);
+        assert_eq!(
+            scheme.widget_inactive_stroke,
+            expected.widget_inactive_stroke
+        );
+        assert_eq!(scheme.widget_hovered_fill, expected.widget_hovered_fill);
+        assert_eq!(scheme.widget_hovered_stroke, expected.widget_hovered_stroke);
+        assert_eq!(scheme.widget_active_fill, expected.widget_active_fill);
+        assert_eq!(scheme.widget_active_stroke, expected.widget_active_stroke);
+        assert_eq!(scheme.window_fill, before.window_fill);
+        assert_eq!(scheme.selection_bg, before.selection_bg);
+        assert_eq!(scheme.success_accent, before.success_accent);
+    }
+
+    #[test]
+    fn reset_selection_only_updates_selection_fields() {
+        let mut scheme = ColorScheme::light();
+        let before = scheme.clone();
+        reset_selection_to_mode_defaults(&mut scheme, ThemeMode::Dark);
+        let expected = ColorScheme::dark();
+
+        assert_eq!(scheme.selection_bg, expected.selection_bg);
+        assert_eq!(scheme.selection_stroke, expected.selection_stroke);
+        assert_eq!(scheme.text, before.text);
+        assert_eq!(scheme.warn_accent, before.warn_accent);
+    }
+
+    #[test]
+    fn reset_semantic_only_updates_semantic_fields() {
+        let mut scheme = ColorScheme::light();
+        let before = scheme.clone();
+        reset_semantic_to_mode_defaults(&mut scheme, ThemeMode::Dark);
+        let expected = ColorScheme::dark();
+
+        assert_eq!(scheme.success_accent, expected.success_accent);
+        assert_eq!(scheme.warn_accent, expected.warn_accent);
+        assert_eq!(scheme.error_accent, expected.error_accent);
+        assert_eq!(scheme.window_fill, before.window_fill);
+        assert_eq!(scheme.widget_active_fill, before.widget_active_fill);
+    }
+
+    #[test]
+    fn reset_text_and_links_only_updates_text_fields() {
+        let mut scheme = ColorScheme::light();
+        let before = scheme.clone();
+        reset_text_and_links_to_mode_defaults(&mut scheme, ThemeMode::Dark);
+        let expected = ColorScheme::dark();
+
+        assert_eq!(scheme.text, expected.text);
+        assert_eq!(scheme.hyperlink, expected.hyperlink);
+        assert_eq!(scheme.panel_fill, before.panel_fill);
+        assert_eq!(scheme.selection_stroke, before.selection_stroke);
+    }
 }
