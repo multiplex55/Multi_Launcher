@@ -608,6 +608,19 @@ impl LauncherApp {
             .unwrap_or(false)
     }
 
+    fn is_exact_match_mode(&self) -> bool {
+        // `match_exact` is a strict override: if enabled, we always bypass fuzzy scoring.
+        self.match_exact || self.fuzzy_weight <= 0.0
+    }
+
+    fn matches_exact_display_text(haystack_label: &str, query: &str) -> bool {
+        let query_lc = query.trim().to_lowercase();
+        if query_lc.is_empty() {
+            return true;
+        }
+        haystack_label.to_lowercase().contains(&query_lc)
+    }
+
     fn has_diagnostics_widget(&self) -> bool {
         self.dashboard
             .slots
@@ -1605,10 +1618,12 @@ impl LauncherApp {
             res.extend(self.actions.iter().cloned().map(|a| (a, 0.0)));
         } else {
             for (i, a) in self.actions.iter().enumerate() {
-                let (ref label_lc, ref desc_lc) = self.action_cache[i];
-                if self.fuzzy_weight <= 0.0 {
+                let (_, ref desc_lc) = self.action_cache[i];
+                if self.is_exact_match_mode() {
                     let alias_match = self.alias_matches_lc(&a.action, query_lc);
-                    let label_match = label_lc.contains(query_lc);
+                    let label_match = Self::matches_exact_display_text(&a.label, query);
+                    // Prefer displayed label text, but keep `desc`/aliases as supplemental
+                    // filters for compatibility with existing query behavior.
                     let desc_match = desc_lc.contains(query_lc);
                     if label_match || desc_match || alias_match {
                         let score = if alias_match { 1.0 } else { 0.0 };
@@ -1637,14 +1652,13 @@ impl LauncherApp {
             );
             let query_term = trimmed_lc.splitn(2, ' ').nth(1).unwrap_or("");
             for a in plugin_results {
-                let label_lc = a.label.to_lowercase();
                 let desc_lc = a.desc.to_lowercase();
-                if self.fuzzy_weight <= 0.0 {
+                if self.is_exact_match_mode() {
                     if query_term.is_empty() {
                         res.push((a, 0.0));
                     } else {
                         let alias_match = self.alias_matches_lc(&a.action, query_term);
-                        let label_match = label_lc.contains(query_term);
+                        let label_match = Self::matches_exact_display_text(&a.label, query_term);
                         let desc_match = desc_lc.contains(query_term);
                         if label_match || desc_match || alias_match {
                             let score = if alias_match { 1.0 } else { 0.0 };
@@ -1678,11 +1692,10 @@ impl LauncherApp {
                 .plugins
                 .commands_filtered(self.enabled_plugins.as_ref())
             {
-                let label_lc = a.label.to_lowercase();
                 let desc_lc = a.desc.to_lowercase();
-                if self.fuzzy_weight <= 0.0 {
+                if self.is_exact_match_mode() {
                     let alias_match = self.alias_matches_lc(&a.action, trimmed_lc);
-                    let label_match = label_lc.contains(trimmed_lc);
+                    let label_match = Self::matches_exact_display_text(&a.label, trimmed);
                     let desc_match = desc_lc.contains(trimmed_lc);
                     if label_match || desc_match || alias_match {
                         let score = if alias_match { 1.0 } else { 0.0 };
@@ -1709,14 +1722,13 @@ impl LauncherApp {
             }
             let query_term_lc = query_term.to_lowercase();
             for a in plugin_results {
-                let label_lc = a.label.to_lowercase();
                 let desc_lc = a.desc.to_lowercase();
-                if self.fuzzy_weight <= 0.0 {
+                if self.is_exact_match_mode() {
                     if query_term_lc.is_empty() {
                         res.push((a, 0.0));
                     } else {
                         let alias_match = self.alias_matches_lc(&a.action, &query_term_lc);
-                        let label_match = label_lc.contains(&query_term_lc);
+                        let label_match = Self::matches_exact_display_text(&a.label, &query_term);
                         let desc_match = desc_lc.contains(&query_term_lc);
                         if label_match || desc_match || alias_match {
                             let score = if alias_match { 1.0 } else { 0.0 };
@@ -5341,6 +5353,45 @@ mod tests {
         app.query = "app MIXEDCASE".into();
         app.search();
         assert!(app.results.iter().any(|a| a.action == "demo:action"));
+    }
+
+    #[test]
+    fn exact_display_match_is_case_insensitive_substring() {
+        assert!(LauncherApp::matches_exact_display_text("eve", "Eve"));
+        assert!(LauncherApp::matches_exact_display_text("EVENING", "Eve"));
+        assert!(LauncherApp::matches_exact_display_text(
+            "testingEve123",
+            "eve"
+        ));
+        assert!(!LauncherApp::matches_exact_display_text(
+            "testing123",
+            "Eve"
+        ));
+    }
+
+    #[test]
+    fn match_exact_overrides_fuzzy_scoring() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.fuzzy_weight = 1.0;
+        app.actions = Arc::new(vec![Action {
+            label: "testing123".into(),
+            desc: "Demo description".into(),
+            action: "demo:action".into(),
+            args: None,
+        }]);
+        app.update_action_cache();
+
+        app.query = "app tstng123".into();
+        app.match_exact = false;
+        app.search();
+        assert!(app.results.iter().any(|a| a.action == "demo:action"));
+
+        app.query = "app tstng123".into();
+        app.match_exact = true;
+        app.last_results_valid = false;
+        app.search();
+        assert!(!app.results.iter().any(|a| a.action == "demo:action"));
     }
 
     #[test]
