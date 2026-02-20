@@ -390,6 +390,8 @@ pub struct Settings {
     /// Weight of the usage count when ranking results.
     #[serde(default = "default_usage_weight")]
     pub usage_weight: f32,
+    #[serde(default)]
+    pub match_exact: bool,
     /// Enable autocomplete suggestions while typing a query.
     #[serde(default = "default_query_autocomplete")]
     pub query_autocomplete: bool,
@@ -609,6 +611,7 @@ impl Default for Settings {
             list_scale: Some(1.0),
             fuzzy_weight: default_fuzzy_weight(),
             usage_weight: default_usage_weight(),
+            match_exact: false,
             query_autocomplete: default_query_autocomplete(),
             page_jump: default_page_jump(),
             history_limit: default_history_limit(),
