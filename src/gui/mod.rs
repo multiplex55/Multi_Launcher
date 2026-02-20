@@ -512,6 +512,7 @@ pub struct LauncherApp {
     pub clipboard_limit: usize,
     pub fuzzy_weight: f32,
     pub usage_weight: f32,
+    pub match_exact: bool,
     pub page_jump: usize,
     pub query_results_layout: QueryResultsLayoutSettings,
     resolved_grid_layout: bool,
@@ -928,6 +929,7 @@ impl LauncherApp {
         toast_duration: Option<f32>,
         fuzzy_weight: Option<f32>,
         usage_weight: Option<f32>,
+        match_exact: Option<bool>,
         follow_mouse: Option<bool>,
         static_enabled: Option<bool>,
         static_pos: Option<(i32, i32)>,
@@ -978,6 +980,9 @@ impl LauncherApp {
         }
         if let Some(v) = usage_weight {
             self.usage_weight = v;
+        }
+        if let Some(v) = match_exact {
+            self.match_exact = v;
         }
         if let Some(v) = follow_mouse {
             self.follow_mouse = v;
@@ -1434,6 +1439,7 @@ impl LauncherApp {
             clipboard_limit: settings.clipboard_limit,
             fuzzy_weight: settings.fuzzy_weight,
             usage_weight: settings.usage_weight,
+            match_exact: settings.match_exact,
             page_jump: settings.page_jump,
             query_results_layout: settings.query_results_layout.clone(),
             resolved_grid_layout: false,

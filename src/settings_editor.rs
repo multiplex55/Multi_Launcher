@@ -40,6 +40,7 @@ pub struct SettingsEditor {
     clipboard_limit: usize,
     fuzzy_weight: f32,
     usage_weight: f32,
+    match_exact: bool,
     page_jump: usize,
     query_results_layout_enabled: bool,
     query_results_layout_rows: usize,
@@ -168,6 +169,7 @@ impl SettingsEditor {
             clipboard_limit: settings.clipboard_limit,
             fuzzy_weight: settings.fuzzy_weight,
             usage_weight: settings.usage_weight,
+            match_exact: settings.match_exact,
             page_jump: settings.page_jump,
             query_results_layout_enabled: settings.query_results_layout.enabled,
             query_results_layout_rows: settings.query_results_layout.rows.max(1),
@@ -343,6 +345,7 @@ impl SettingsEditor {
             clipboard_limit: self.clipboard_limit,
             fuzzy_weight: self.fuzzy_weight,
             usage_weight: self.usage_weight,
+            match_exact: self.match_exact,
             page_jump: self.page_jump,
             query_results_layout: QueryResultsLayoutSettings {
                 enabled: self.query_results_layout_enabled,
@@ -543,6 +546,7 @@ impl SettingsEditor {
                             ui.label("Usage weight");
                             ui.add(egui::Slider::new(&mut self.usage_weight, 0.0..=5.0).text(""));
                         });
+                        ui.checkbox(&mut self.match_exact, "Match exact");
 
                         ui.horizontal(|ui| {
                             ui.label("Page jump");
@@ -873,6 +877,7 @@ impl SettingsEditor {
                             Some(new_settings.toast_duration),
                             Some(new_settings.fuzzy_weight),
                             Some(new_settings.usage_weight),
+                            Some(new_settings.match_exact),
                             Some(new_settings.follow_mouse),
                             Some(new_settings.static_location_enabled),
                             new_settings.static_pos,
