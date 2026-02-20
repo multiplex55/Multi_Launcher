@@ -342,24 +342,6 @@ fn resolve_wiki_references(cache: &NoteCache, content: &str) -> Vec<WikiReferenc
     refs
 }
 
-fn resolve_note<'a>(cache: &'a NoteCache, query: &str) -> Option<&'a Note> {
-    let query = query.trim();
-    if query.is_empty() {
-        return None;
-    }
-    let query_lower = query.to_lowercase();
-    if let Some(slug) = cache.aliases.get(&query_lower) {
-        return cache.notes.iter().find(|n| n.slug == *slug);
-    }
-    match resolve_target(cache, query) {
-        NoteTarget::Resolved(slug) => cache.notes.iter().find(|n| n.slug == slug),
-        NoteTarget::Ambiguous(slugs) => slugs
-            .first()
-            .and_then(|slug| cache.notes.iter().find(|n| n.slug == *slug)),
-        NoteTarget::Broken => None,
-    }
-}
-
 fn format_link_row(
     notes: &[Note],
     todos: &[crate::plugins::todo::TodoEntry],
