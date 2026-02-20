@@ -73,6 +73,12 @@ pub struct SettingsEditor {
 }
 
 impl SettingsEditor {
+    const SETTINGS_WINDOW_DEFAULT_WIDTH: f32 = 640.0;
+    const SETTINGS_WINDOW_MAX_DEFAULT_HEIGHT: f32 = 720.0;
+    const SETTINGS_WINDOW_MIN_HEIGHT: f32 = 360.0;
+    const SETTINGS_CONTENT_MIN_HEIGHT: f32 = 180.0;
+    const SETTINGS_FOOTER_RESERVED_HEIGHT: f32 = 56.0;
+
     fn normalized_static_settings(
         follow_mouse: bool,
         static_enabled: bool,
@@ -215,6 +221,24 @@ impl SettingsEditor {
         s
     }
 
+    fn settings_window_default_height(available_height: f32) -> f32 {
+        (available_height * 0.5)
+            .max(Self::SETTINGS_WINDOW_MIN_HEIGHT)
+            .min(Self::SETTINGS_WINDOW_MAX_DEFAULT_HEIGHT)
+    }
+
+    fn settings_window_default_size(ctx: &egui::Context) -> [f32; 2] {
+        [
+            Self::SETTINGS_WINDOW_DEFAULT_WIDTH,
+            Self::settings_window_default_height(ctx.available_rect().height()),
+        ]
+    }
+
+    fn settings_content_height(available_height: f32) -> f32 {
+        (available_height - Self::SETTINGS_FOOTER_RESERVED_HEIGHT)
+            .max(Self::SETTINGS_CONTENT_MIN_HEIGHT)
+    }
+
     fn sync_from_plugin_settings(&mut self) {
         if let Some(val) = self.plugin_settings.get("clipboard") {
             if let Ok(cfg) = serde_json::from_value::<
@@ -354,10 +378,14 @@ impl SettingsEditor {
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         let mut open = app.show_settings;
         egui::Window::new("Settings")
+            .resizable(true)
+            .default_size(Self::settings_window_default_size(ctx))
+            .min_height(Self::SETTINGS_WINDOW_MIN_HEIGHT)
             .open(&mut open)
             .show(ctx, |ui| {
+                let settings_content_height = Self::settings_content_height(ui.available_height());
                 egui::ScrollArea::vertical()
-                    .max_height(300.0)
+                    .max_height(settings_content_height)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label("Launcher hotkey");
@@ -716,211 +744,187 @@ impl SettingsEditor {
                             });
 
                         self.expand_request = None;
-                        ui.separator();
-
-                        if ui.button("Save").clicked() {
-                            if parse_hotkey(&self.hotkey).is_none() {
-                                self.hotkey = self.last_valid_hotkey.clone();
-                                self.hotkey_valid = true;
-                                if app.enable_toasts {
-                                    app.add_toast(Toast {
-                                        text: "Failed to save settings: hotkey is invalid".into(),
-                                        kind: ToastKind::Error,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(app.toast_duration as f64),
-                                    });
-                                }
-                            } else if self.quit_hotkey_enabled
-                                && parse_hotkey(&self.quit_hotkey).is_none()
-                            {
-                                self.quit_hotkey = self.last_valid_quit_hotkey.clone();
-                                self.quit_hotkey_valid = true;
-                                if app.enable_toasts {
-                                    app.add_toast(Toast {
-                                        text: "Failed to save settings: quit hotkey is invalid"
-                                            .into(),
-                                        kind: ToastKind::Error,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(app.toast_duration as f64),
-                                    });
-                                }
-                            } else if self.help_hotkey_enabled
-                                && parse_hotkey(&self.help_hotkey).is_none()
-                            {
-                                self.help_hotkey = self.last_valid_help_hotkey.clone();
-                                self.help_hotkey_valid = true;
-                                if app.enable_toasts {
-                                    app.add_toast(Toast {
-                                        text: "Failed to save settings: help hotkey is invalid"
-                                            .into(),
-                                        kind: ToastKind::Error,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(app.toast_duration as f64),
-                                    });
-                                }
-                            } else {
-                                self.last_valid_hotkey = self.hotkey.clone();
-                                if self.quit_hotkey_enabled {
-                                    self.last_valid_quit_hotkey = self.quit_hotkey.clone();
-                                }
-                                if self.help_hotkey_enabled {
-                                    self.last_valid_help_hotkey = self.help_hotkey.clone();
-                                }
-                                self.sync_from_plugin_settings();
-                                match Settings::load(&app.settings_path) {
-                                    Ok(current) => {
-                                        let new_settings = self.to_settings(&current);
-                                        if let Err(e) = new_settings.save(&app.settings_path) {
-                                            app.set_error(format!("Failed to save: {e}"));
-                                        } else {
-                                            app.update_paths(
-                                                new_settings.plugin_dirs.clone(),
-                                                new_settings.index_paths.clone(),
-                                                new_settings.enabled_plugins.clone(),
-                                                new_settings.enabled_capabilities.clone(),
-                                                new_settings.offscreen_pos,
-                                                Some(new_settings.enable_toasts),
-                                                Some(new_settings.toast_duration),
-                                                Some(new_settings.fuzzy_weight),
-                                                Some(new_settings.usage_weight),
-                                                Some(new_settings.follow_mouse),
-                                                Some(new_settings.static_location_enabled),
-                                                new_settings.static_pos,
-                                                new_settings.static_size,
-                                                Some(new_settings.hide_after_run),
-                                                Some(new_settings.clear_query_after_run),
-                                                Some(new_settings.require_confirm_destructive),
-                                                Some(new_settings.timer_refresh),
-                                                Some(new_settings.disable_timer_updates),
-                                                Some(new_settings.preserve_command),
-                                                Some(new_settings.query_autocomplete),
-                                                Some(new_settings.net_refresh),
-                                                Some(new_settings.net_unit),
-                                                new_settings.screenshot_dir.clone(),
-                                                Some(new_settings.screenshot_save_file),
-                                                Some(new_settings.screenshot_use_editor),
-                                                Some(new_settings.screenshot_auto_save),
-                                                Some(new_settings.always_on_top),
-                                                Some(new_settings.page_jump),
-                                                Some(new_settings.note_panel_default_size),
-                                                Some(new_settings.note_save_on_close),
-                                                Some(new_settings.note_always_overwrite),
-                                                Some(new_settings.note_images_as_links),
-                                                Some(new_settings.note_more_limit),
-                                                Some(new_settings.show_dashboard_diagnostics),
-                                            );
-                                            ctx.send_viewport_cmd(
-                                                egui::ViewportCommand::WindowLevel(
-                                                    if new_settings.always_on_top {
-                                                        egui::WindowLevel::AlwaysOnTop
-                                                    } else {
-                                                        egui::WindowLevel::Normal
-                                                    },
-                                                ),
-                                            );
-                                            app.hotkey_str = new_settings.hotkey.clone();
-                                            app.quit_hotkey_str = new_settings.quit_hotkey.clone();
-                                            app.help_hotkey_str = new_settings.help_hotkey.clone();
-                                            app.query_scale =
-                                                new_settings.query_scale.unwrap_or(1.0).min(5.0);
-                                            app.list_scale =
-                                                new_settings.list_scale.unwrap_or(1.0).min(5.0);
-                                            app.history_limit = new_settings.history_limit;
-                                            app.clipboard_limit = new_settings.clipboard_limit;
-                                            app.page_jump = new_settings.page_jump;
-                                            app.preserve_command = new_settings.preserve_command;
-                                            app.clear_query_after_run =
-                                                new_settings.clear_query_after_run;
-                                            app.require_confirm_destructive =
-                                                new_settings.require_confirm_destructive;
-                                            app.query_autocomplete =
-                                                new_settings.query_autocomplete;
-                                            app.net_refresh = new_settings.net_refresh;
-                                            app.net_unit = new_settings.net_unit;
-                                            app.screenshot_dir =
-                                                new_settings.screenshot_dir.clone();
-                                            app.screenshot_save_file =
-                                                new_settings.screenshot_save_file;
-                                            app.screenshot_auto_save =
-                                                new_settings.screenshot_auto_save;
-                                            app.screenshot_use_editor =
-                                                new_settings.screenshot_use_editor;
-                                            app.reduce_dashboard_work_when_unfocused =
-                                                new_settings.reduce_dashboard_work_when_unfocused;
-                                            app.show_dashboard_diagnostics =
-                                                new_settings.show_dashboard_diagnostics;
-                                            app.dashboard_enabled = new_settings.dashboard.enabled;
-                                            app.dashboard_show_when_empty =
-                                                new_settings.dashboard.show_when_query_empty;
-                                            app.dashboard_default_location =
-                                                new_settings.dashboard.default_location.clone();
-                                            app.dashboard_path = DashboardConfig::path_for(
-                                                new_settings
-                                                    .dashboard
-                                                    .config_path
-                                                    .as_deref()
-                                                    .unwrap_or("dashboard.json"),
-                                            )
-                                            .to_string_lossy()
-                                            .to_string();
-                                            app.dashboard.set_path(&app.dashboard_path);
-                                            app.toast_duration = new_settings.toast_duration;
-                                            app.note_more_limit = new_settings.note_more_limit;
-                                            let dirs = new_settings
-                                                .plugin_dirs
-                                                .clone()
-                                                .unwrap_or_default();
-                                            let actions_arc = Arc::clone(&app.actions);
-                                            app.plugins.reload_from_dirs(
-                                                &dirs,
-                                                app.clipboard_limit,
-                                                app.net_unit,
-                                                false,
-                                                &new_settings.plugin_settings,
-                                                actions_arc,
-                                            );
-                                            if let Some(val) =
-                                                new_settings.plugin_settings.get("note")
-                                            {
-                                                if let Ok(cfg) =
-                                                    serde_json::from_value::<NotePluginSettings>(
-                                                        val.clone(),
-                                                    )
-                                                {
-                                                    app.note_external_open = cfg.external_open;
-                                                }
-                                            }
-                                            crate::request_hotkey_restart(new_settings);
-                                            if app.enable_toasts {
-                                                app.add_toast(Toast {
-                                                    text: "Settings saved".into(),
-                                                    kind: ToastKind::Success,
-                                                    options: ToastOptions::default()
-                                                        .duration_in_seconds(
-                                                            app.toast_duration as f64,
-                                                        ),
-                                                });
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let msg = format!("Failed to read settings: {e}");
-                                        app.set_error(msg.clone());
-                                        if app.enable_toasts {
-                                            app.add_toast(Toast {
-                                                text: msg.into(),
-                                                kind: ToastKind::Error,
-                                                options: ToastOptions::default()
-                                                    .duration_in_seconds(app.toast_duration as f64),
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-                        }
                     });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        self.save_settings(ctx, app);
+                    }
+                });
             });
         app.show_settings = open;
+    }
+
+    fn save_settings(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+        if parse_hotkey(&self.hotkey).is_none() {
+            self.hotkey = self.last_valid_hotkey.clone();
+            self.hotkey_valid = true;
+            if app.enable_toasts {
+                app.add_toast(Toast {
+                    text: "Failed to save settings: hotkey is invalid".into(),
+                    kind: ToastKind::Error,
+                    options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
+                });
+            }
+        } else if self.quit_hotkey_enabled && parse_hotkey(&self.quit_hotkey).is_none() {
+            self.quit_hotkey = self.last_valid_quit_hotkey.clone();
+            self.quit_hotkey_valid = true;
+            if app.enable_toasts {
+                app.add_toast(Toast {
+                    text: "Failed to save settings: quit hotkey is invalid".into(),
+                    kind: ToastKind::Error,
+                    options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
+                });
+            }
+        } else if self.help_hotkey_enabled && parse_hotkey(&self.help_hotkey).is_none() {
+            self.help_hotkey = self.last_valid_help_hotkey.clone();
+            self.help_hotkey_valid = true;
+            if app.enable_toasts {
+                app.add_toast(Toast {
+                    text: "Failed to save settings: help hotkey is invalid".into(),
+                    kind: ToastKind::Error,
+                    options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
+                });
+            }
+        } else {
+            self.last_valid_hotkey = self.hotkey.clone();
+            if self.quit_hotkey_enabled {
+                self.last_valid_quit_hotkey = self.quit_hotkey.clone();
+            }
+            if self.help_hotkey_enabled {
+                self.last_valid_help_hotkey = self.help_hotkey.clone();
+            }
+            self.sync_from_plugin_settings();
+            match Settings::load(&app.settings_path) {
+                Ok(current) => {
+                    let new_settings = self.to_settings(&current);
+                    if let Err(e) = new_settings.save(&app.settings_path) {
+                        app.set_error(format!("Failed to save: {e}"));
+                    } else {
+                        app.update_paths(
+                            new_settings.plugin_dirs.clone(),
+                            new_settings.index_paths.clone(),
+                            new_settings.enabled_plugins.clone(),
+                            new_settings.enabled_capabilities.clone(),
+                            new_settings.offscreen_pos,
+                            Some(new_settings.enable_toasts),
+                            Some(new_settings.toast_duration),
+                            Some(new_settings.fuzzy_weight),
+                            Some(new_settings.usage_weight),
+                            Some(new_settings.follow_mouse),
+                            Some(new_settings.static_location_enabled),
+                            new_settings.static_pos,
+                            new_settings.static_size,
+                            Some(new_settings.hide_after_run),
+                            Some(new_settings.clear_query_after_run),
+                            Some(new_settings.require_confirm_destructive),
+                            Some(new_settings.timer_refresh),
+                            Some(new_settings.disable_timer_updates),
+                            Some(new_settings.preserve_command),
+                            Some(new_settings.query_autocomplete),
+                            Some(new_settings.net_refresh),
+                            Some(new_settings.net_unit),
+                            new_settings.screenshot_dir.clone(),
+                            Some(new_settings.screenshot_save_file),
+                            Some(new_settings.screenshot_use_editor),
+                            Some(new_settings.screenshot_auto_save),
+                            Some(new_settings.always_on_top),
+                            Some(new_settings.page_jump),
+                            Some(new_settings.note_panel_default_size),
+                            Some(new_settings.note_save_on_close),
+                            Some(new_settings.note_always_overwrite),
+                            Some(new_settings.note_images_as_links),
+                            Some(new_settings.note_more_limit),
+                            Some(new_settings.show_dashboard_diagnostics),
+                        );
+                        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                            if new_settings.always_on_top {
+                                egui::WindowLevel::AlwaysOnTop
+                            } else {
+                                egui::WindowLevel::Normal
+                            },
+                        ));
+                        app.hotkey_str = new_settings.hotkey.clone();
+                        app.quit_hotkey_str = new_settings.quit_hotkey.clone();
+                        app.help_hotkey_str = new_settings.help_hotkey.clone();
+                        app.query_scale = new_settings.query_scale.unwrap_or(1.0).min(5.0);
+                        app.list_scale = new_settings.list_scale.unwrap_or(1.0).min(5.0);
+                        app.history_limit = new_settings.history_limit;
+                        app.clipboard_limit = new_settings.clipboard_limit;
+                        app.page_jump = new_settings.page_jump;
+                        app.preserve_command = new_settings.preserve_command;
+                        app.clear_query_after_run = new_settings.clear_query_after_run;
+                        app.require_confirm_destructive = new_settings.require_confirm_destructive;
+                        app.query_autocomplete = new_settings.query_autocomplete;
+                        app.net_refresh = new_settings.net_refresh;
+                        app.net_unit = new_settings.net_unit;
+                        app.screenshot_dir = new_settings.screenshot_dir.clone();
+                        app.screenshot_save_file = new_settings.screenshot_save_file;
+                        app.screenshot_auto_save = new_settings.screenshot_auto_save;
+                        app.screenshot_use_editor = new_settings.screenshot_use_editor;
+                        app.reduce_dashboard_work_when_unfocused =
+                            new_settings.reduce_dashboard_work_when_unfocused;
+                        app.show_dashboard_diagnostics = new_settings.show_dashboard_diagnostics;
+                        app.dashboard_enabled = new_settings.dashboard.enabled;
+                        app.dashboard_show_when_empty =
+                            new_settings.dashboard.show_when_query_empty;
+                        app.dashboard_default_location =
+                            new_settings.dashboard.default_location.clone();
+                        app.dashboard_path = DashboardConfig::path_for(
+                            new_settings
+                                .dashboard
+                                .config_path
+                                .as_deref()
+                                .unwrap_or("dashboard.json"),
+                        )
+                        .to_string_lossy()
+                        .to_string();
+                        app.dashboard.set_path(&app.dashboard_path);
+                        app.toast_duration = new_settings.toast_duration;
+                        app.note_more_limit = new_settings.note_more_limit;
+                        let dirs = new_settings.plugin_dirs.clone().unwrap_or_default();
+                        let actions_arc = Arc::clone(&app.actions);
+                        app.plugins.reload_from_dirs(
+                            &dirs,
+                            app.clipboard_limit,
+                            app.net_unit,
+                            false,
+                            &new_settings.plugin_settings,
+                            actions_arc,
+                        );
+                        if let Some(val) = new_settings.plugin_settings.get("note") {
+                            if let Ok(cfg) =
+                                serde_json::from_value::<NotePluginSettings>(val.clone())
+                            {
+                                app.note_external_open = cfg.external_open;
+                            }
+                        }
+                        crate::request_hotkey_restart(new_settings);
+                        if app.enable_toasts {
+                            app.add_toast(Toast {
+                                text: "Settings saved".into(),
+                                kind: ToastKind::Success,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(app.toast_duration as f64),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("Failed to read settings: {e}");
+                    app.set_error(msg.clone());
+                    if app.enable_toasts {
+                        app.add_toast(Toast {
+                            text: msg.into(),
+                            kind: ToastKind::Error,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(app.toast_duration as f64),
+                        });
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -928,6 +932,50 @@ impl SettingsEditor {
 mod tests {
     use super::SettingsEditor;
     use crate::settings::Settings;
+
+    #[test]
+    fn settings_window_sizing_policy_uses_expected_defaults() {
+        assert_eq!(SettingsEditor::SETTINGS_WINDOW_DEFAULT_WIDTH, 640.0);
+        assert_eq!(SettingsEditor::SETTINGS_WINDOW_MIN_HEIGHT, 360.0);
+        assert_eq!(
+            SettingsEditor::settings_window_default_height(100.0),
+            SettingsEditor::SETTINGS_WINDOW_MIN_HEIGHT
+        );
+        assert_eq!(
+            SettingsEditor::settings_window_default_height(2000.0),
+            SettingsEditor::SETTINGS_WINDOW_MAX_DEFAULT_HEIGHT
+        );
+        assert_eq!(SettingsEditor::settings_window_default_height(900.0), 450.0);
+    }
+
+    #[test]
+    fn settings_content_height_has_sane_floor() {
+        assert_eq!(SettingsEditor::settings_content_height(20.0), 180.0);
+        assert_eq!(SettingsEditor::settings_content_height(320.0), 264.0);
+        assert_eq!(SettingsEditor::settings_content_height(700.0), 644.0);
+    }
+
+    #[test]
+    fn to_settings_preserves_static_values_when_follow_mouse_disabled() {
+        let mut initial = Settings::default();
+        initial.static_location_enabled = true;
+        initial.static_pos = Some((100, 200));
+        initial.static_size = Some((900, 700));
+
+        let mut editor = SettingsEditor::new(&initial);
+        editor.follow_mouse = false;
+        editor.static_enabled = true;
+        editor.static_x = 11;
+        editor.static_y = 22;
+        editor.static_w = 333;
+        editor.static_h = 444;
+
+        let saved = editor.to_settings(&initial);
+        assert!(!saved.follow_mouse);
+        assert!(saved.static_location_enabled);
+        assert_eq!(saved.static_pos, Some((11, 22)));
+        assert_eq!(saved.static_size, Some((333, 444)));
+    }
 
     #[test]
     fn to_settings_disables_static_when_follow_mouse_enabled() {
