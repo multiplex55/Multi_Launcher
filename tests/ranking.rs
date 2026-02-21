@@ -80,3 +80,78 @@ fn fuzzy_vs_usage_weight() {
     app.search();
     assert_eq!(app.results[0].action, "a");
 }
+
+#[test]
+fn exact_mode_excludes_fuzzy_only_candidate_even_if_fuzzy_would_prefer_it() {
+    let ctx = egui::Context::default();
+    let actions = vec![
+        Action {
+            label: "e1v2e".into(),
+            desc: "".into(),
+            action: "fuzzy_only".into(),
+            args: None,
+        },
+        Action {
+            label: "testingeve123".into(),
+            desc: "".into(),
+            action: "substring".into(),
+            args: None,
+        },
+    ];
+
+    let mut fuzzy_settings = Settings::default();
+    fuzzy_settings.fuzzy_weight = 10.0;
+    fuzzy_settings.match_exact = false;
+    let mut fuzzy_app = new_app_with_settings(&ctx, actions.clone(), fuzzy_settings);
+    fuzzy_app.query = format!("{} eve", APP_PREFIX);
+    fuzzy_app.search();
+    assert!(fuzzy_app.results.iter().any(|a| a.action == "fuzzy_only"));
+
+    let mut exact_settings = Settings::default();
+    exact_settings.fuzzy_weight = 10.0;
+    exact_settings.match_exact = true;
+    let mut exact_app = new_app_with_settings(&ctx, actions, exact_settings);
+    exact_app.query = format!("{} eve", APP_PREFIX);
+    exact_app.search();
+    assert!(exact_app.results.iter().any(|a| a.action == "substring"));
+    assert!(!exact_app.results.iter().any(|a| a.action == "fuzzy_only"));
+}
+
+#[test]
+fn exact_mode_partial_label_match_is_case_insensitive() {
+    let ctx = egui::Context::default();
+    let actions = vec![Action {
+        label: "testingeve123".into(),
+        desc: "".into(),
+        action: "a".into(),
+        args: None,
+    }];
+    let mut settings = Settings::default();
+    settings.match_exact = true;
+    let mut app = new_app_with_settings(&ctx, actions, settings);
+
+    app.query = format!("{} Eve", APP_PREFIX);
+    app.search();
+
+    assert!(app.results.iter().any(|a| a.action == "a"));
+}
+
+#[test]
+fn exact_mode_ignores_fuzzy_weight_for_fuzzy_only_match() {
+    let ctx = egui::Context::default();
+    let actions = vec![Action {
+        label: "e1v2e".into(),
+        desc: "".into(),
+        action: "fuzzy_only".into(),
+        args: None,
+    }];
+    let mut settings = Settings::default();
+    settings.match_exact = true;
+    settings.fuzzy_weight = 1000.0;
+    let mut app = new_app_with_settings(&ctx, actions, settings);
+
+    app.query = format!("{} eve", APP_PREFIX);
+    app.search();
+
+    assert!(!app.results.iter().any(|a| a.action == "fuzzy_only"));
+}

@@ -5395,6 +5395,54 @@ mod tests {
     }
 
     #[test]
+    fn update_paths_applies_match_exact_to_runtime_state() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        assert!(!app.match_exact);
+
+        app.update_paths(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(app.match_exact);
+    }
+
+    #[test]
     fn watch_events_refresh_alias_and_lowercase_alias_caches() {
         let _lock = TEST_MUTEX.lock().unwrap();
         let dir = tempdir().unwrap();

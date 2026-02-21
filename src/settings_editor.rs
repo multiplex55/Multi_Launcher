@@ -1068,6 +1068,27 @@ mod tests {
     }
 
     #[test]
+    fn new_loads_match_exact_flag() {
+        let mut initial = Settings::default();
+        initial.match_exact = true;
+
+        let editor = SettingsEditor::new(&initial);
+        assert!(editor.match_exact);
+    }
+
+    #[test]
+    fn to_settings_persists_toggled_match_exact() {
+        let mut initial = Settings::default();
+        initial.match_exact = false;
+
+        let mut editor = SettingsEditor::new(&initial);
+        editor.match_exact = true;
+
+        let saved = editor.to_settings(&initial);
+        assert!(saved.match_exact);
+    }
+
+    #[test]
     fn query_results_layout_round_trip_editor_conversion() {
         let mut initial = Settings::default();
         initial.query_results_layout.enabled = true;

@@ -105,3 +105,51 @@ fn snippet_edit_command_unfiltered() {
     app.search();
     assert_eq!(app.results.len(), 1);
 }
+
+#[test]
+fn plugin_exact_mode_includes_case_insensitive_partial_substring() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let entries = vec![BookmarkEntry {
+        url: "https://example.com".into(),
+        alias: Some("testingeve123".into()),
+    }];
+    save_bookmarks(BOOKMARKS_FILE, &entries).unwrap();
+
+    let mut settings = Settings::default();
+    settings.fuzzy_weight = 25.0;
+    settings.match_exact = true;
+    let ctx = egui::Context::default();
+    let mut app = new_app(&ctx, settings);
+
+    app.query = "bm Eve".into();
+    app.search();
+
+    assert_eq!(app.results.len(), 1);
+}
+
+#[test]
+fn plugin_exact_mode_excludes_fuzzy_only_match_even_with_fuzzy_weight() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let entries = vec![BookmarkEntry {
+        url: "https://example.com".into(),
+        alias: Some("e1v2e".into()),
+    }];
+    save_bookmarks(BOOKMARKS_FILE, &entries).unwrap();
+
+    let mut settings = Settings::default();
+    settings.fuzzy_weight = 100.0;
+    settings.match_exact = true;
+    let ctx = egui::Context::default();
+    let mut app = new_app(&ctx, settings);
+
+    app.query = "bm eve".into();
+    app.search();
+
+    assert_eq!(app.results.len(), 0);
+}

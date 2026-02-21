@@ -755,4 +755,24 @@ mod tests {
         let restored: Settings = serde_json::from_str(&json).expect("deserialize settings");
         assert_eq!(restored.query_results_layout, settings.query_results_layout);
     }
+
+    #[test]
+    fn match_exact_defaults_false_when_missing() {
+        let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
+        assert!(!parsed.match_exact);
+    }
+
+    #[test]
+    fn match_exact_true_survives_save_and_load() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("settings.json");
+        let path_str = path.to_string_lossy().to_string();
+
+        let mut settings = Settings::default();
+        settings.match_exact = true;
+        settings.save(&path_str).expect("save settings");
+
+        let loaded = Settings::load(&path_str).expect("load settings");
+        assert!(loaded.match_exact);
+    }
 }
