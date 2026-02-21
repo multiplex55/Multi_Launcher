@@ -5436,7 +5436,6 @@ mod tests {
             None,
             None,
             None,
-            None,
         );
 
         assert!(app.match_exact);
