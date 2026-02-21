@@ -135,6 +135,7 @@ impl PluginEditor {
                         Some(s.note_save_on_close),
                         Some(s.note_always_overwrite),
                         Some(s.note_images_as_links),
+                        Some(s.note_show_details),
                         Some(s.note_more_limit),
                         Some(s.show_dashboard_diagnostics),
                     );

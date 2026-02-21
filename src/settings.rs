@@ -365,6 +365,9 @@ pub struct Settings {
     /// textures directly in the preview.
     #[serde(default)]
     pub note_images_as_links: bool,
+    /// Whether note metadata/details sections are visible by default.
+    #[serde(default = "default_note_show_details")]
+    pub note_show_details: bool,
     /// Number of tags or links shown before an expandable "... (more)" control
     /// appears in the note panel.
     #[serde(default = "default_note_more_limit")]
@@ -559,6 +562,10 @@ fn default_note_save_on_close() -> bool {
     false
 }
 
+fn default_note_show_details() -> bool {
+    false
+}
+
 fn default_note_more_limit() -> usize {
     5
 }
@@ -604,6 +611,7 @@ impl Default for Settings {
             note_save_on_close: default_note_save_on_close(),
             note_always_overwrite: false,
             note_images_as_links: false,
+            note_show_details: default_note_show_details(),
             note_more_limit: default_note_more_limit(),
             enable_toasts: true,
             toast_duration: default_toast_duration(),
@@ -754,5 +762,25 @@ mod tests {
         let json = serde_json::to_string(&settings).expect("serialize settings");
         let restored: Settings = serde_json::from_str(&json).expect("deserialize settings");
         assert_eq!(restored.query_results_layout, settings.query_results_layout);
+    }
+
+    #[test]
+    fn note_show_details_defaults_to_hidden_when_missing() {
+        let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
+        assert!(!parsed.note_show_details);
+    }
+
+    #[test]
+    fn note_show_details_round_trip_serialization() {
+        let mut settings = Settings::default();
+        settings.note_show_details = true;
+        let json = serde_json::to_string(&settings).expect("serialize settings");
+        let restored: Settings = serde_json::from_str(&json).expect("deserialize settings");
+        assert!(restored.note_show_details);
+
+        settings.note_show_details = false;
+        let json = serde_json::to_string(&settings).expect("serialize settings");
+        let restored: Settings = serde_json::from_str(&json).expect("deserialize settings");
+        assert!(!restored.note_show_details);
     }
 }
