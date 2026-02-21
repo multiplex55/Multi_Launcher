@@ -520,6 +520,7 @@ pub struct LauncherApp {
     pub note_save_on_close: bool,
     pub note_always_overwrite: bool,
     pub note_images_as_links: bool,
+    pub note_show_details: bool,
     pub note_external_open: NoteExternalOpen,
     pub note_font_size: f32,
     pub note_more_limit: usize,
@@ -966,6 +967,7 @@ impl LauncherApp {
         note_save_on_close: Option<bool>,
         note_always_overwrite: Option<bool>,
         note_images_as_links: Option<bool>,
+        note_show_details: Option<bool>,
         note_more_limit: Option<usize>,
         show_dashboard_diagnostics: Option<bool>,
     ) {
@@ -1074,6 +1076,9 @@ impl LauncherApp {
         }
         if let Some(v) = note_images_as_links {
             self.note_images_as_links = v;
+        }
+        if let Some(v) = note_show_details {
+            self.note_show_details = v;
         }
         if let Some(v) = note_more_limit {
             self.note_more_limit = v;
@@ -1460,6 +1465,7 @@ impl LauncherApp {
             note_save_on_close: settings.note_save_on_close,
             note_always_overwrite: settings.note_always_overwrite,
             note_images_as_links: settings.note_images_as_links,
+            note_show_details: settings.note_show_details,
             note_external_open,
             note_font_size: 16.0,
             note_more_limit: settings.note_more_limit,
@@ -4991,7 +4997,10 @@ impl LauncherApp {
                 },
             );
         }
-        self.note_panels.push(NotePanel::from_note(note));
+        self.note_panels.push(NotePanel::from_note_with_details(
+            note,
+            self.note_show_details,
+        ));
         // Allow keyboard shortcuts like Esc/Cmd+W to immediately close the panel
         self.update_panel_stack();
     }

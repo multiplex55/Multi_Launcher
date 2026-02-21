@@ -33,6 +33,7 @@ pub struct SettingsEditor {
     note_save_on_close: bool,
     note_always_overwrite: bool,
     note_images_as_links: bool,
+    note_show_details: bool,
     note_more_limit: usize,
     query_scale: f32,
     list_scale: f32,
@@ -98,7 +99,7 @@ impl SettingsEditor {
         }
     }
 
-    pub fn new(settings: &Settings) -> Self {
+    pub fn from_settings(settings: &Settings) -> Self {
         let hotkey = settings.hotkey.clone().unwrap_or_default();
         let hotkey_valid = parse_hotkey(&hotkey).is_some();
         let default_hotkey = Settings::default().hotkey.unwrap_or_else(|| "F2".into());
@@ -162,6 +163,7 @@ impl SettingsEditor {
             note_save_on_close: settings.note_save_on_close,
             note_always_overwrite: settings.note_always_overwrite,
             note_images_as_links: settings.note_images_as_links,
+            note_show_details: settings.note_show_details,
             note_more_limit: settings.note_more_limit,
             query_scale: settings.query_scale.unwrap_or(1.0),
             list_scale: settings.list_scale.unwrap_or(1.0),
@@ -230,6 +232,10 @@ impl SettingsEditor {
                 })
             });
         s
+    }
+
+    pub fn new(settings: &Settings) -> Self {
+        Self::from_settings(settings)
     }
 
     pub fn new_with_plugins(settings: &Settings) -> Self {
@@ -338,6 +344,7 @@ impl SettingsEditor {
             note_save_on_close: self.note_save_on_close,
             note_always_overwrite: self.note_always_overwrite,
             note_images_as_links: self.note_images_as_links,
+            note_show_details: self.note_show_details,
             note_more_limit: self.note_more_limit,
             query_scale: Some(self.query_scale),
             list_scale: Some(self.list_scale),
@@ -759,6 +766,10 @@ impl SettingsEditor {
                                     &mut self.note_images_as_links,
                                     "Display images as links",
                                 );
+                                ui.checkbox(
+                                    &mut self.note_show_details,
+                                    "Show note details by default",
+                                );
                                 ui.horizontal(|ui| {
                                     ui.label("Tag/link preview limit");
                                     ui.add(
@@ -901,6 +912,7 @@ impl SettingsEditor {
                             Some(new_settings.note_save_on_close),
                             Some(new_settings.note_always_overwrite),
                             Some(new_settings.note_images_as_links),
+                            Some(new_settings.note_show_details),
                             Some(new_settings.note_more_limit),
                             Some(new_settings.show_dashboard_diagnostics),
                         );
@@ -919,6 +931,7 @@ impl SettingsEditor {
                         app.history_limit = new_settings.history_limit;
                         app.clipboard_limit = new_settings.clipboard_limit;
                         app.page_jump = new_settings.page_jump;
+                        app.note_show_details = new_settings.note_show_details;
                         app.preserve_command = new_settings.preserve_command;
                         app.clear_query_after_run = new_settings.clear_query_after_run;
                         app.require_confirm_destructive = new_settings.require_confirm_destructive;

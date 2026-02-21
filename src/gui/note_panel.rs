@@ -217,7 +217,42 @@ impl NotePanel {
         }
     }
 
+    fn set_show_metadata(&mut self, app: &mut LauncherApp, show_metadata: bool) {
+        if self.show_metadata == show_metadata {
+            return;
+        }
+        self.show_metadata = show_metadata;
+        self.persist_details_visibility(app);
+    }
+
+    fn persist_details_visibility(&self, app: &mut LauncherApp) {
+        match crate::settings::Settings::load(&app.settings_path) {
+            Ok(mut settings) => {
+                if settings.note_show_details == self.show_metadata {
+                    return;
+                }
+                settings.note_show_details = self.show_metadata;
+                if let Err(err) = settings.save(&app.settings_path) {
+                    app.set_error(format!(
+                        "Failed to save note detail visibility setting: {err}"
+                    ));
+                } else {
+                    app.note_show_details = self.show_metadata;
+                }
+            }
+            Err(err) => {
+                app.set_error(format!(
+                    "Failed to load settings for note detail visibility: {err}"
+                ));
+            }
+        }
+    }
+
     pub fn from_note(note: Note) -> Self {
+        Self::from_note_with_details(note, true)
+    }
+
+    pub fn from_note_with_details(note: Note, show_details: bool) -> Self {
         let mut panel = Self {
             open: true,
             note,
@@ -229,7 +264,7 @@ impl NotePanel {
             image_cache: HashMap::new(),
             overwrite_prompt: false,
             show_open_with_menu: false,
-            show_metadata: true,
+            show_metadata: show_details,
             tags_expanded: false,
             links_expanded: false,
             backlink_tab: BacklinkTab::LinkedTodos,
@@ -448,7 +483,7 @@ impl NotePanel {
                         }
                     }
                     if ui.button(self.details_toggle_label()).clicked() {
-                        self.show_metadata = !self.show_metadata;
+                        self.set_show_metadata(app, !self.show_metadata);
                         let was_focused = self
                             .last_textedit_id
                             .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
@@ -2160,11 +2195,15 @@ mod tests {
     }
 
     #[test]
-    fn toggle_button_label_reflects_state() {
-        let mut panel = NotePanel::from_note(empty_note("body"));
-        assert_eq!(panel.details_toggle_label(), "Hide Details");
-        panel.show_metadata = false;
+    fn constructor_with_hidden_details_shows_show_details_label() {
+        let panel = NotePanel::from_note_with_details(empty_note("body"), false);
         assert_eq!(panel.details_toggle_label(), "Show Details");
+    }
+
+    #[test]
+    fn constructor_with_visible_details_shows_hide_details_label() {
+        let panel = NotePanel::from_note_with_details(empty_note("body"), true);
+        assert_eq!(panel.details_toggle_label(), "Hide Details");
     }
 
     #[test]
@@ -2178,6 +2217,43 @@ mod tests {
 
         assert_eq!(panel.backlink_tab, BacklinkTab::Mentions);
         assert_eq!(panel.backlink_page, 2);
+    }
+
+    #[test]
+    fn toggle_persists_note_detail_visibility_once_per_change() {
+        use std::{fs, thread, time::Duration};
+        use tempfile::tempdir;
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let dir = tempdir().expect("tempdir");
+        let settings_path = dir.path().join("settings.json");
+
+        let mut settings = Settings::default();
+        settings.note_show_details = false;
+        settings
+            .save(settings_path.to_str().expect("settings path"))
+            .expect("write settings");
+        app.settings_path = settings_path.to_string_lossy().to_string();
+
+        let mut panel = NotePanel::from_note_with_details(empty_note("body"), false);
+        panel.set_show_metadata(&mut app, true);
+
+        let persisted = Settings::load(app.settings_path.as_str()).expect("load settings");
+        assert!(persisted.note_show_details);
+
+        let first_modified = fs::metadata(&settings_path)
+            .expect("metadata")
+            .modified()
+            .expect("modified time");
+        thread::sleep(Duration::from_millis(20));
+        panel.set_show_metadata(&mut app, true);
+        let second_modified = fs::metadata(&settings_path)
+            .expect("metadata")
+            .modified()
+            .expect("modified time");
+
+        assert_eq!(first_modified, second_modified);
     }
 
     #[test]
