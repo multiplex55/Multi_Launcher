@@ -19,3 +19,14 @@ fn always_on_top_persists() {
     let new_settings = editor.to_settings(&settings);
     assert!(!new_settings.always_on_top);
 }
+
+#[test]
+fn match_exact_round_trips_through_editor() {
+    let mut settings = Settings::default();
+    settings.match_exact = true;
+
+    let editor = SettingsEditor::new(&settings);
+    let new_settings = editor.to_settings(&settings);
+
+    assert!(new_settings.match_exact);
+}
