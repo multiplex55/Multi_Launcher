@@ -114,7 +114,7 @@ fn plugin_exact_mode_includes_case_insensitive_partial_substring() {
 
     let entries = vec![BookmarkEntry {
         url: "https://example.com".into(),
-        alias: Some("testingeve123".into()),
+        alias: Some("testingEVE123".into()),
     }];
     save_bookmarks(BOOKMARKS_FILE, &entries).unwrap();
 
@@ -124,10 +124,11 @@ fn plugin_exact_mode_includes_case_insensitive_partial_substring() {
     let ctx = egui::Context::default();
     let mut app = new_app(&ctx, settings);
 
-    app.query = "bm Eve".into();
+    app.query = "bm eve".into();
     app.search();
 
     assert_eq!(app.results.len(), 1);
+    assert_eq!(app.results[0].label, "testingEVE123");
 }
 
 #[test]
