@@ -137,7 +137,7 @@ impl MacroDialog {
 
     fn save(&mut self, app: &mut LauncherApp) {
         if let Err(e) = save_macros(MACROS_FILE, &self.entries) {
-            app.set_error(format!("Failed to save macros: {e}"));
+            app.report_error_message("ui operation", format!("Failed to save macros: {e}"));
         } else {
             app.search();
             app.focus_input();
@@ -381,7 +381,7 @@ impl MacroDialog {
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
                         if self.label.trim().is_empty() {
-                            app.set_error("Label required".into());
+                            app.report_error_message("ui operation", "Label required".into());
                         } else {
                             for step in &mut self.steps {
                                 if let Some(a) = &step.args {

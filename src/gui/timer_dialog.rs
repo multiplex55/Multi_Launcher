@@ -109,7 +109,7 @@ impl TimerDialog {
                                 close = true;
                                 app.focus_input();
                             } else {
-                                app.set_error("Invalid duration".into());
+                                app.report_error_message("ui operation", "Invalid duration".into());
                             }
                         }
                         Mode::Alarm => {
@@ -127,7 +127,7 @@ impl TimerDialog {
                                 );
                                 close = true;
                             } else {
-                                app.set_error("Invalid time".into());
+                                app.report_error_message("ui operation", "Invalid time".into());
                             }
                         }
                     }

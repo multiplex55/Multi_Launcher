@@ -1,5 +1,5 @@
 use crate::dashboard::config::DashboardConfig;
-use crate::gui::LauncherApp;
+use crate::gui::{LauncherApp, UiErrorEvent};
 use crate::hotkey::parse_hotkey;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
 use crate::plugins::screenshot::ScreenshotPluginSettings;
@@ -866,7 +866,10 @@ impl SettingsEditor {
                 Ok(current) => {
                     let new_settings = self.to_settings(&current);
                     if let Err(e) = new_settings.save(&app.settings_path) {
-                        app.set_error(format!("Failed to save: {e}"));
+                        app.report_ui_error(UiErrorEvent::new(
+                            "settings_editor.save",
+                            format!("Failed to save: {e}"),
+                        ));
                     } else {
                         app.update_paths(
                             new_settings.plugin_dirs.clone(),
@@ -986,8 +989,7 @@ impl SettingsEditor {
                 }
                 Err(e) => {
                     let msg = format!("Failed to read settings: {e}");
-                    app.set_error(msg.clone());
-                    app.add_error_toast(msg);
+                    app.report_error_message("settings_editor.read", msg);
                 }
             }
         }

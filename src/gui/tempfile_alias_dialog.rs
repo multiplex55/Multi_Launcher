@@ -43,7 +43,10 @@ impl TempfileAliasDialog {
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
                         if let Err(e) = set_alias(Path::new(&self.path), &self.alias) {
-                            app.set_error(format!("Failed to rename: {e}"));
+                            app.report_error_message(
+                                "ui operation",
+                                format!("Failed to rename: {e}"),
+                            );
                         } else {
                             close = true;
                             app.search();

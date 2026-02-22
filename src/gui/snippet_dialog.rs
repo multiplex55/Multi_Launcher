@@ -37,7 +37,7 @@ impl SnippetDialog {
 
     fn save(&mut self, app: &mut LauncherApp) {
         if let Err(e) = save_snippets(SNIPPETS_FILE, &self.entries) {
-            app.set_error(format!("Failed to save snippets: {e}"));
+            app.report_error_message("ui operation", format!("Failed to save snippets: {e}"));
         } else {
             if app.enable_toasts {
                 push_toast(
@@ -74,7 +74,10 @@ impl SnippetDialog {
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.alias.trim().is_empty() || self.text.trim().is_empty() {
-                                app.set_error("Both fields required".into());
+                                app.report_error_message(
+                                    "ui operation",
+                                    "Both fields required".into(),
+                                );
                             } else {
                                 if idx == self.entries.len() {
                                     self.entries.push(SnippetEntry {

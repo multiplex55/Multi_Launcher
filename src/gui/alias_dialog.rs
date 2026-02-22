@@ -47,7 +47,10 @@ impl AliasDialog {
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
                         if let Err(e) = set_alias(FOLDERS_FILE, &self.path, &self.alias) {
-                            app.set_error(format!("Failed to save alias: {e}"));
+                            app.report_error_message(
+                                "ui operation",
+                                format!("Failed to save alias: {e}"),
+                            );
                         } else {
                             close = true;
                             app.search();

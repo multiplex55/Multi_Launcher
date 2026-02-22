@@ -353,13 +353,19 @@ impl NoteGraphDialog {
             Ok(mut settings) => {
                 settings.note_graph = value.clone();
                 if let Err(err) = settings.save(&app.settings_path) {
-                    app.set_error(format!("Failed to save note graph settings: {err}"));
+                    app.report_error_message(
+                        "ui operation",
+                        format!("Failed to save note graph settings: {err}"),
+                    );
                     return;
                 }
                 self.last_saved_settings = Some(value);
             }
             Err(err) => {
-                app.set_error(format!("Failed to load settings for note graph: {err}"));
+                app.report_error_message(
+                    "ui operation",
+                    format!("Failed to load settings for note graph: {err}"),
+                );
             }
         }
     }

@@ -110,7 +110,7 @@ impl TodoViewDialog {
 
     fn save(&mut self, app: &mut LauncherApp) {
         if let Err(e) = save_todos(TODO_FILE, &self.entries) {
-            app.set_error(format!("Failed to save todos: {e}"));
+            app.report_error_message("ui operation", format!("Failed to save todos: {e}"));
         } else {
             app.search();
             app.focus_input();
@@ -364,7 +364,7 @@ impl TodoViewDialog {
                                                         if let Some(anchor) = anchor.as_deref() {
                                                             if let Some(n) = note.as_ref() {
                                                                 if !note_has_anchor(&n.content, anchor) {
-                                                                    app.set_error(format!(
+                                                                    app.report_error_message("ui operation", format!(
                                                                         "Anchor '{}' not found in note '{}'; opened note top.",
                                                                         anchor, title
                                                                     ));
