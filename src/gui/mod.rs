@@ -168,6 +168,20 @@ pub enum ActivationSource {
     Gesture,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResultContextMenuKind {
+    Folder,
+    Bookmark,
+    Timer { id: u64 },
+    Stopwatch { id: u64 },
+    Snippet,
+    Tempfile,
+    Note { slug: String },
+    Clipboard { idx: usize, label: String },
+    Todo { idx: usize },
+    Default,
+}
+
 impl ActivationSource {
     fn label(self) -> &'static str {
         match self {
@@ -2128,6 +2142,486 @@ impl LauncherApp {
         }
 
         None
+    }
+
+    fn result_context_menu_kind(&self, action: &Action) -> ResultContextMenuKind {
+        if self.folder_aliases.contains_key(&action.action) && !action.action.starts_with("folder:")
+        {
+            ResultContextMenuKind::Folder
+        } else if self.bookmark_aliases.contains_key(&action.action) {
+            ResultContextMenuKind::Bookmark
+        } else if action.desc == "Timer" && action.action.starts_with("timer:show:") {
+            action.action[11..]
+                .parse::<u64>()
+                .map(|id| ResultContextMenuKind::Timer { id })
+                .unwrap_or(ResultContextMenuKind::Default)
+        } else if action.desc == "Stopwatch" && action.action.starts_with("stopwatch:show:") {
+            action.action["stopwatch:show:".len()..]
+                .parse::<u64>()
+                .map(|id| ResultContextMenuKind::Stopwatch { id })
+                .unwrap_or(ResultContextMenuKind::Default)
+        } else if action.desc == "Snippet" {
+            ResultContextMenuKind::Snippet
+        } else if action.desc == "Tempfile" && !action.action.starts_with("tempfile:") {
+            ResultContextMenuKind::Tempfile
+        } else if action.desc == "Note" && action.action.starts_with("note:open:") {
+            let slug = action.action.rsplit(':').next().unwrap_or("").to_string();
+            ResultContextMenuKind::Note { slug }
+        } else if action.desc == "Clipboard" && action.action.starts_with("clipboard:copy:") {
+            if let Ok(idx) = action
+                .action
+                .rsplit(':')
+                .next()
+                .unwrap_or("")
+                .parse::<usize>()
+            {
+                ResultContextMenuKind::Clipboard {
+                    idx,
+                    label: action.label.clone(),
+                }
+            } else {
+                ResultContextMenuKind::Default
+            }
+        } else if action.desc == "Todo" && action.action.starts_with("todo:done:") {
+            action
+                .action
+                .rsplit(':')
+                .next()
+                .unwrap_or("")
+                .parse::<usize>()
+                .map(|idx| ResultContextMenuKind::Todo { idx })
+                .unwrap_or(ResultContextMenuKind::Default)
+        } else {
+            ResultContextMenuKind::Default
+        }
+    }
+
+    fn attach_result_context_menu(
+        &mut self,
+        action: &Action,
+        menu_resp: egui::Response,
+        refresh: &mut bool,
+        set_focus: &mut bool,
+    ) -> egui::Response {
+        let custom_idx = self
+            .actions
+            .iter()
+            .take(self.custom_len)
+            .position(|act| act.action == action.action && act.label == action.label);
+        let query = self.query.trim().to_string();
+
+        match self.result_context_menu_kind(action) {
+            ResultContextMenuKind::Folder => {
+                menu_resp.clone().context_menu(|ui| {
+                    if ui.button("Set Alias").clicked() {
+                        self.alias_dialog.open(&action.action);
+                        ui.close_menu();
+                    }
+                    if ui.button("Remove Folder").clicked() {
+                        if let Err(e) = crate::plugins::folders::remove_folder(
+                            crate::plugins::folders::FOLDERS_FILE,
+                            &action.action,
+                        ) {
+                            self.error = Some(format!("Failed to remove folder: {e}"));
+                        } else {
+                            *refresh = true;
+                            *set_focus = true;
+                            if self.enable_toasts {
+                                push_toast(
+                                    &mut self.toasts,
+                                    Toast {
+                                        text: format!("Removed folder {}", action.label).into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(self.toast_duration as f64),
+                                    },
+                                );
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if let Some(idx_act) = custom_idx {
+                        if ui.button("Edit App").clicked() {
+                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                            self.show_editor = true;
+                            ui.close_menu();
+                        }
+                    }
+                    self.pin_result_menu(ui, action);
+                });
+            }
+            ResultContextMenuKind::Bookmark => {
+                menu_resp.clone().context_menu(|ui| {
+                    if ui.button("Set Alias").clicked() {
+                        self.bookmark_alias_dialog.open(&action.action);
+                        ui.close_menu();
+                    }
+                    if ui.button("Remove Bookmark").clicked() {
+                        if let Err(e) = crate::plugins::bookmarks::remove_bookmark(
+                            crate::plugins::bookmarks::BOOKMARKS_FILE,
+                            &action.action,
+                        ) {
+                            self.error = Some(format!("Failed to remove bookmark: {e}"));
+                        } else {
+                            *refresh = true;
+                            *set_focus = true;
+                            if self.enable_toasts {
+                                push_toast(
+                                    &mut self.toasts,
+                                    Toast {
+                                        text: format!("Removed bookmark {}", action.label).into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(self.toast_duration as f64),
+                                    },
+                                );
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if let Some(idx_act) = custom_idx {
+                        if ui.button("Edit App").clicked() {
+                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                            self.show_editor = true;
+                            ui.close_menu();
+                        }
+                    }
+                    self.pin_result_menu(ui, action);
+                });
+            }
+            ResultContextMenuKind::Timer { id } => {
+                menu_resp.clone().context_menu(|ui| {
+                    if ui.button("Pause Timer").clicked() {
+                        crate::plugins::timer::pause_timer(id);
+                        if query.starts_with("timer list") {
+                            *refresh = true;
+                            *set_focus = true;
+                            if self.enable_toasts {
+                                push_toast(
+                                    &mut self.toasts,
+                                    Toast {
+                                        text: format!("Paused timer {}", action.label).into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(self.toast_duration as f64),
+                                    },
+                                );
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Remove Timer").clicked() {
+                        crate::plugins::timer::cancel_timer(id);
+                        if query.starts_with("timer list") {
+                            *refresh = true;
+                            *set_focus = true;
+                            if self.enable_toasts {
+                                push_toast(
+                                    &mut self.toasts,
+                                    Toast {
+                                        text: format!("Removed timer {}", action.label).into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(self.toast_duration as f64),
+                                    },
+                                );
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if let Some(idx_act) = custom_idx {
+                        if ui.button("Edit App").clicked() {
+                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                            self.show_editor = true;
+                            ui.close_menu();
+                        }
+                    }
+                    self.pin_result_menu(ui, action);
+                });
+            }
+            ResultContextMenuKind::Stopwatch { id } => {
+                menu_resp.clone().context_menu(|ui| {
+                    if ui.button("Pause Stopwatch").clicked() {
+                        crate::plugins::stopwatch::pause_stopwatch(id);
+                        if query.starts_with("sw list") {
+                            *refresh = true;
+                            *set_focus = true;
+                            if self.enable_toasts {
+                                push_toast(
+                                    &mut self.toasts,
+                                    Toast {
+                                        text: format!("Paused stopwatch {}", action.label).into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(self.toast_duration as f64),
+                                    },
+                                );
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Resume Stopwatch").clicked() {
+                        crate::plugins::stopwatch::resume_stopwatch(id);
+                        if query.starts_with("sw list") {
+                            *refresh = true;
+                            *set_focus = true;
+                            if self.enable_toasts {
+                                push_toast(
+                                    &mut self.toasts,
+                                    Toast {
+                                        text: format!("Resumed stopwatch {}", action.label).into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(self.toast_duration as f64),
+                                    },
+                                );
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Stop Stopwatch").clicked() {
+                        crate::plugins::stopwatch::stop_stopwatch(id);
+                        if query.starts_with("sw list") {
+                            *refresh = true;
+                            *set_focus = true;
+                            if self.enable_toasts {
+                                push_toast(
+                                    &mut self.toasts,
+                                    Toast {
+                                        text: format!("Stopped stopwatch {}", action.label).into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(self.toast_duration as f64),
+                                    },
+                                );
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Copy Time").clicked() {
+                        if let Some(time) = crate::plugins::stopwatch::format_elapsed(id) {
+                            if let Err(e) = crate::actions::clipboard::set_text(&time) {
+                                self.error = Some(format!("Failed to copy time: {e}"));
+                            } else if self.enable_toasts {
+                                push_toast(
+                                    &mut self.toasts,
+                                    Toast {
+                                        text: format!("Copied {time}").into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(self.toast_duration as f64),
+                                    },
+                                );
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if let Some(idx_act) = custom_idx {
+                        if ui.button("Edit App").clicked() {
+                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                            self.show_editor = true;
+                            ui.close_menu();
+                        }
+                    }
+                    self.pin_result_menu(ui, action);
+                });
+            }
+            ResultContextMenuKind::Snippet => {
+                menu_resp.clone().context_menu(|ui| {
+                    if ui.button("Edit Snippet").clicked() {
+                        self.snippet_dialog.open_edit(&action.label);
+                        ui.close_menu();
+                    }
+                    if ui.button("Remove Snippet").clicked() {
+                        if let Err(e) = remove_snippet(SNIPPETS_FILE, &action.label) {
+                            self.error = Some(format!("Failed to remove snippet: {e}"));
+                        } else {
+                            *refresh = true;
+                            *set_focus = true;
+                            if self.enable_toasts {
+                                push_toast(
+                                    &mut self.toasts,
+                                    Toast {
+                                        text: format!("Removed snippet {}", action.label).into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(self.toast_duration as f64),
+                                    },
+                                );
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if let Some(idx_act) = custom_idx {
+                        if ui.button("Edit App").clicked() {
+                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                            self.show_editor = true;
+                            ui.close_menu();
+                        }
+                    }
+                    self.pin_result_menu(ui, action);
+                });
+            }
+            ResultContextMenuKind::Tempfile => {
+                let file_path = action.action.clone();
+                menu_resp.clone().context_menu(|ui| {
+                    if ui.button("Set Alias").clicked() {
+                        self.tempfile_alias_dialog.open(&file_path);
+                        ui.close_menu();
+                    }
+                    if ui.button("Delete File").clicked() {
+                        if let Err(e) =
+                            crate::plugins::tempfile::remove_file(std::path::Path::new(&file_path))
+                        {
+                            self.error = Some(format!("Failed to delete file: {e}"));
+                        } else {
+                            *refresh = true;
+                            *set_focus = true;
+                            if self.enable_toasts {
+                                push_toast(
+                                    &mut self.toasts,
+                                    Toast {
+                                        text: format!("Removed file {}", action.label).into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(self.toast_duration as f64),
+                                    },
+                                );
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if let Some(idx_act) = custom_idx {
+                        if ui.button("Edit App").clicked() {
+                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                            self.show_editor = true;
+                            ui.close_menu();
+                        }
+                    }
+                    self.pin_result_menu(ui, action);
+                });
+            }
+            ResultContextMenuKind::Note { slug } => {
+                menu_resp.clone().context_menu(|ui| {
+                    if ui.button("Edit Note").clicked() {
+                        self.open_note_panel(&slug, None);
+                        ui.close_menu();
+                    }
+                    if ui.button("Open in Notepad").clicked() {
+                        match crate::plugins::note::load_notes() {
+                            Ok(notes) => {
+                                if let Some(note) = notes.iter().find(|n| n.slug == slug) {
+                                    if let Err(e) = std::process::Command::new("notepad.exe")
+                                        .arg(&note.path)
+                                        .spawn()
+                                    {
+                                        self.error = Some(e.to_string());
+                                    }
+                                } else {
+                                    self.error = Some("Note not found".to_string());
+                                }
+                            }
+                            Err(e) => {
+                                self.error = Some(e.to_string());
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Open in Neovim").clicked() {
+                        if self.open_note_in_neovim(
+                            &slug,
+                            crate::plugins::note::load_notes,
+                            |path| spawn_external(path, NoteExternalOpen::Wezterm),
+                        ) {
+                            ui.close_menu();
+                        }
+                    }
+                    if ui.button("Remove Note").clicked() {
+                        self.delete_note(&slug);
+                        *refresh = true;
+                        *set_focus = true;
+                        ui.close_menu();
+                    }
+                    if let Some(idx_act) = custom_idx {
+                        if ui.button("Edit App").clicked() {
+                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                            self.show_editor = true;
+                            ui.close_menu();
+                        }
+                    }
+                    self.pin_result_menu(ui, action);
+                });
+            }
+            ResultContextMenuKind::Clipboard { idx, label } => {
+                menu_resp.clone().context_menu(|ui| {
+                    if ui.button("Edit Entry").clicked() {
+                        self.clipboard_dialog.open_edit(idx);
+                        ui.close_menu();
+                    }
+                    if ui.button("Remove Entry").clicked() {
+                        if let Err(e) = crate::plugins::clipboard::remove_entry(
+                            crate::plugins::clipboard::CLIPBOARD_FILE,
+                            idx,
+                        ) {
+                            self.error = Some(format!("Failed to remove entry: {e}"));
+                        } else {
+                            *refresh = true;
+                            *set_focus = true;
+                            if self.enable_toasts {
+                                push_toast(
+                                    &mut self.toasts,
+                                    Toast {
+                                        text: format!("Removed entry {}", label).into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(self.toast_duration as f64),
+                                    },
+                                );
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if let Some(idx_act) = custom_idx {
+                        if ui.button("Edit App").clicked() {
+                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                            self.show_editor = true;
+                            ui.close_menu();
+                        }
+                    }
+                    self.pin_result_menu(ui, action);
+                });
+            }
+            ResultContextMenuKind::Todo { idx } => {
+                menu_resp.clone().context_menu(|ui| {
+                    if ui.button("Edit Todo").clicked() {
+                        self.todo_view_dialog.open_edit(idx);
+                        ui.close_menu();
+                    }
+                    if let Some(idx_act) = custom_idx {
+                        if ui.button("Edit App").clicked() {
+                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                            self.show_editor = true;
+                            ui.close_menu();
+                        }
+                    }
+                    self.pin_result_menu(ui, action);
+                });
+            }
+            ResultContextMenuKind::Default => {
+                menu_resp.clone().context_menu(|ui| {
+                    if let Some(idx_act) = custom_idx {
+                        if ui.button("Edit App").clicked() {
+                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                            self.show_editor = true;
+                            ui.close_menu();
+                        }
+                    }
+                    self.pin_result_menu(ui, action);
+                });
+            }
+        }
+
+        menu_resp
     }
 
     fn pin_result_menu(&mut self, ui: &mut egui::Ui, action: &Action) {
@@ -4197,7 +4691,8 @@ impl eframe::App for LauncherApp {
                                 .unwrap_or(false);
                             if self.resolved_grid_layout {
                                 let cols = self.query_results_layout.cols.max(1);
-                                let col_width = ((ui.available_width() - ((cols.saturating_sub(1)) as f32 * 8.0))
+                                let col_width = ((ui.available_width()
+                                    - ((cols.saturating_sub(1)) as f32 * 8.0))
                                     / cols as f32)
                                     .max(160.0);
                                 egui::Grid::new("query_results_grid")
@@ -4214,10 +4709,16 @@ impl eframe::App for LauncherApp {
                                                     text,
                                                 ),
                                             );
+                                            let menu_resp = self.attach_result_context_menu(
+                                                &action,
+                                                resp,
+                                                &mut refresh,
+                                                &mut set_focus,
+                                            );
                                             if self.selected == Some(idx) {
-                                                resp.scroll_to_me(Some(egui::Align::Center));
+                                                menu_resp.scroll_to_me(Some(egui::Align::Center));
                                             }
-                                            if resp.clicked() {
+                                            if menu_resp.clicked() {
                                                 self.selected = Some(idx);
                                                 self.activate_action(
                                                     action,
@@ -4233,479 +4734,41 @@ impl eframe::App for LauncherApp {
                             } else {
                                 for idx in 0..self.results.len() {
                                     let a = self.results[idx].clone();
-                                let aliased = self
-                                    .folder_aliases
-                                    .get(&a.action)
-                                    .and_then(|v| v.as_ref());
-                                let show_path = show_full || aliased.is_none();
-                                let text = if show_path {
-                                    format!("{} : {}", a.label, a.desc)
-                                } else {
-                                    a.label.clone()
-                                };
-                                let mut resp = ui.add_sized(
-                                    [ui.available_width(), 0.0],
-                                    egui::SelectableLabel::new(self.selected == Some(idx), text),
-                                );
-                                let tooltip = if a.desc == "Timer"
-                                    && a.action.starts_with("timer:show:")
-                                {
-                                    if let Ok(id) = a.action[11..].parse::<u64>() {
-                                        if let Some(ts) = crate::plugins::timer::timer_start_ts(id) {
-                                            format!("Started {}", crate::plugins::timer::format_ts(ts))
+                                    let aliased =
+                                        self.folder_aliases.get(&a.action).and_then(|v| v.as_ref());
+                                    let show_path = show_full || aliased.is_none();
+                                    let text = if show_path {
+                                        format!("{} : {}", a.label, a.desc)
+                                    } else {
+                                        a.label.clone()
+                                    };
+                                    let resp = ui.add_sized(
+                                        [ui.available_width(), 0.0],
+                                        egui::SelectableLabel::new(self.selected == Some(idx), text),
+                                    );
+                                    let tooltip = if a.desc == "Timer" && a.action.starts_with("timer:show:") {
+                                        if let Ok(id) = a.action[11..].parse::<u64>() {
+                                            if let Some(ts) = crate::plugins::timer::timer_start_ts(id) {
+                                                format!("Started {}", crate::plugins::timer::format_ts(ts))
+                                            } else {
+                                                a.action.clone()
+                                            }
                                         } else {
                                             a.action.clone()
                                         }
                                     } else {
                                         a.action.clone()
+                                    };
+                                    let menu_resp =
+                                        self.attach_result_context_menu(&a, resp.on_hover_text(tooltip), &mut refresh, &mut set_focus);
+                                    if self.selected == Some(idx) {
+                                        menu_resp.scroll_to_me(Some(egui::Align::Center));
                                     }
-                                } else {
-                                    a.action.clone()
-                                };
-                                let menu_resp = resp.on_hover_text(tooltip);
-                                let custom_idx = self
-                                    .actions
-                                    .iter()
-                                    .take(self.custom_len)
-                                    .position(|act| act.action == a.action && act.label == a.label);
-                                let mut menu_added = false;
-                                if self.folder_aliases.contains_key(&a.action)
-                                    && !a.action.starts_with("folder:")
-                                {
-                                    menu_resp.clone().context_menu(|ui| {
-                                        if ui.button("Set Alias").clicked() {
-                                            self.alias_dialog.open(&a.action);
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Remove Folder").clicked() {
-                                            if let Err(e) = crate::plugins::folders::remove_folder(
-                                                crate::plugins::folders::FOLDERS_FILE,
-                                                &a.action,
-                                            ) {
-                                                self.error =
-                                                    Some(format!("Failed to remove folder: {e}"));
-                                            } else {
-                                                refresh = true;
-                                                set_focus = true;
-                                                if self.enable_toasts {
-                                                    push_toast(&mut self.toasts, Toast {
-                                                        text: format!("Removed folder {}", a.label)
-                                                            .into(),
-                                                        kind: ToastKind::Success,
-                                                        options: ToastOptions::default()
-                                                            .duration_in_seconds(self.toast_duration as f64),
-                                                    });
-                                                }
-                                            }
-                                            ui.close_menu();
-                                        }
-                                        if let Some(idx_act) = custom_idx {
-                                            if ui.button("Edit App").clicked() {
-                                                self.editor
-                                                    .open_edit(idx_act, &self.actions[idx_act]);
-                                                self.show_editor = true;
-                                                ui.close_menu();
-                                            }
-                                        }
-                                        self.pin_result_menu(ui, &a);
-                                    });
-                                    menu_added = true;
-                                } else if self.bookmark_aliases.contains_key(&a.action) {
-                                    menu_resp.clone().context_menu(|ui| {
-                                        if ui.button("Set Alias").clicked() {
-                                            self.bookmark_alias_dialog.open(&a.action);
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Remove Bookmark").clicked() {
-                                            if let Err(e) = crate::plugins::bookmarks::remove_bookmark(
-                                                crate::plugins::bookmarks::BOOKMARKS_FILE,
-                                                &a.action,
-                                            ) {
-                                                self.error =
-                                                    Some(format!("Failed to remove bookmark: {e}"));
-                                            } else {
-                                                refresh = true;
-                                                set_focus = true;
-                                                if self.enable_toasts {
-                                                    push_toast(&mut self.toasts, Toast {
-                                                        text: format!("Removed bookmark {}", a.label)
-                                                            .into(),
-                                                        kind: ToastKind::Success,
-                                                        options: ToastOptions::default()
-                                                            .duration_in_seconds(self.toast_duration as f64),
-                                                    });
-                                                }
-                                            }
-                                            ui.close_menu();
-                                        }
-                                        if let Some(idx_act) = custom_idx {
-                                            if ui.button("Edit App").clicked() {
-                                                self.editor
-                                                    .open_edit(idx_act, &self.actions[idx_act]);
-                                                self.show_editor = true;
-                                                ui.close_menu();
-                                            }
-                                        }
-                                        self.pin_result_menu(ui, &a);
-                                    });
-                                    menu_added = true;
-                                } else if a.desc == "Timer" && a.action.starts_with("timer:show:") {
-                                    if let Ok(id) = a.action[11..].parse::<u64>() {
-                                        let query = self.query.trim().to_string();
-                                        menu_resp.clone().context_menu(|ui| {
-                                            if ui.button("Pause Timer").clicked() {
-                                                crate::plugins::timer::pause_timer(id);
-                                                if query.starts_with("timer list") {
-                                                    refresh = true;
-                                                    set_focus = true;
-                                                    if self.enable_toasts {
-                                                        push_toast(&mut self.toasts, Toast {
-                                                            text: format!("Paused timer {}", a.label)
-                                                                .into(),
-                                                            kind: ToastKind::Success,
-                                                            options: ToastOptions::default()
-                                                                .duration_in_seconds(self.toast_duration as f64),
-                                                        });
-                                                    }
-                                                }
-                                                ui.close_menu();
-                                            }
-                                            if ui.button("Remove Timer").clicked() {
-                                                crate::plugins::timer::cancel_timer(id);
-                                                if query.starts_with("timer list") {
-                                                    refresh = true;
-                                                    set_focus = true;
-                                                    if self.enable_toasts {
-                                                        push_toast(&mut self.toasts, Toast {
-                                                            text: format!("Removed timer {}", a.label)
-                                                                .into(),
-                                                            kind: ToastKind::Success,
-                                                            options: ToastOptions::default()
-                                                                .duration_in_seconds(self.toast_duration as f64),
-                                                        });
-                                                    }
-                                                }
-                                                ui.close_menu();
-                                            }
-                                            if let Some(idx_act) = custom_idx {
-                                                if ui.button("Edit App").clicked() {
-                                                    self.editor
-                                                        .open_edit(idx_act, &self.actions[idx_act]);
-                                                    self.show_editor = true;
-                                                    ui.close_menu();
-                                                }
-                                            }
-                                            self.pin_result_menu(ui, &a);
-                                        });
-                                        menu_added = true;
-                                    }
-                                } else if a.desc == "Stopwatch" && a.action.starts_with("stopwatch:show:") {
-                                    if let Ok(id) = a.action["stopwatch:show:".len()..].parse::<u64>() {
-                                        let query = self.query.trim().to_string();
-                                        menu_resp.clone().context_menu(|ui| {
-                                            if ui.button("Pause Stopwatch").clicked() {
-                                                crate::plugins::stopwatch::pause_stopwatch(id);
-                                                if query.starts_with("sw list") {
-                                                    refresh = true;
-                                                    set_focus = true;
-                                                    if self.enable_toasts {
-                                                        push_toast(&mut self.toasts, Toast {
-                                                            text: format!("Paused stopwatch {}", a.label).into(),
-                                                            kind: ToastKind::Success,
-                                                            options: ToastOptions::default()
-                                                                .duration_in_seconds(self.toast_duration as f64),
-                                                        });
-                                                    }
-                                                }
-                                                ui.close_menu();
-                                            }
-                                            if ui.button("Resume Stopwatch").clicked() {
-                                                crate::plugins::stopwatch::resume_stopwatch(id);
-                                                if query.starts_with("sw list") {
-                                                    refresh = true;
-                                                    set_focus = true;
-                                                    if self.enable_toasts {
-                                                        push_toast(&mut self.toasts, Toast {
-                                                            text: format!("Resumed stopwatch {}", a.label).into(),
-                                                            kind: ToastKind::Success,
-                                                            options: ToastOptions::default()
-                                                                .duration_in_seconds(self.toast_duration as f64),
-                                                        });
-                                                    }
-                                                }
-                                                ui.close_menu();
-                                            }
-                                            if ui.button("Stop Stopwatch").clicked() {
-                                                crate::plugins::stopwatch::stop_stopwatch(id);
-                                                if query.starts_with("sw list") {
-                                                    refresh = true;
-                                                    set_focus = true;
-                                                    if self.enable_toasts {
-                                                        push_toast(&mut self.toasts, Toast {
-                                                            text: format!("Stopped stopwatch {}", a.label).into(),
-                                                            kind: ToastKind::Success,
-                                                            options: ToastOptions::default()
-                                                                .duration_in_seconds(self.toast_duration as f64),
-                                                        });
-                                                    }
-                                                }
-                                                ui.close_menu();
-                                            }
-                                            if ui.button("Copy Time").clicked() {
-                                                if let Some(time) =
-                                                    crate::plugins::stopwatch::format_elapsed(id)
-                                                {
-                                                    if let Err(e) =
-                                                        crate::actions::clipboard::set_text(&time)
-                                                    {
-                                                        self.error =
-                                                            Some(format!("Failed to copy time: {e}"));
-                                                    } else if self.enable_toasts {
-                                                        push_toast(&mut self.toasts, Toast {
-                                                            text: format!("Copied {time}").into(),
-                                                            kind: ToastKind::Success,
-                                                            options: ToastOptions::default()
-                                                                .duration_in_seconds(self.toast_duration as f64),
-                                                        });
-                                                    }
-                                                }
-                                                ui.close_menu();
-                                            }
-                                            if let Some(idx_act) = custom_idx {
-                                                if ui.button("Edit App").clicked() {
-                                                    self.editor
-                                                        .open_edit(idx_act, &self.actions[idx_act]);
-                                                    self.show_editor = true;
-                                                    ui.close_menu();
-                                                }
-                                            }
-                                            self.pin_result_menu(ui, &a);
-                                        });
-                                        menu_added = true;
-                                    }
-                                } else if a.desc == "Snippet" {
-                                    menu_resp.clone().context_menu(|ui| {
-                                        if ui.button("Edit Snippet").clicked() {
-                                            self.snippet_dialog.open_edit(&a.label);
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Remove Snippet").clicked() {
-                                            if let Err(e) = remove_snippet(SNIPPETS_FILE, &a.label) {
-                                                self.error =
-                                                    Some(format!("Failed to remove snippet: {e}"));
-                                            } else {
-                                                refresh = true;
-                                                set_focus = true;
-                                                if self.enable_toasts {
-                                                    push_toast(&mut self.toasts, Toast {
-                                                        text: format!("Removed snippet {}", a.label)
-                                                            .into(),
-                                                        kind: ToastKind::Success,
-                                                        options: ToastOptions::default()
-                                                            .duration_in_seconds(self.toast_duration as f64),
-                                                    });
-                                                }
-                                            }
-                                            ui.close_menu();
-                                        }
-                                        if let Some(idx_act) = custom_idx {
-                                            if ui.button("Edit App").clicked() {
-                                                self.editor
-                                                    .open_edit(idx_act, &self.actions[idx_act]);
-                                                self.show_editor = true;
-                                                ui.close_menu();
-                                            }
-                                        }
-                                        self.pin_result_menu(ui, &a);
-                                    });
-                                    menu_added = true;
-                                } else if a.desc == "Tempfile" && !a.action.starts_with("tempfile:") {
-                                    let file_path = a.action.clone();
-                                    menu_resp.clone().context_menu(|ui| {
-                                        if ui.button("Set Alias").clicked() {
-                                            self.tempfile_alias_dialog.open(&file_path);
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Delete File").clicked() {
-                                            if let Err(e) = crate::plugins::tempfile::remove_file(
-                                                std::path::Path::new(&file_path),
-                                            ) {
-                                                self.error =
-                                                    Some(format!("Failed to delete file: {e}"));
-                                            } else {
-                                                refresh = true;
-                                                set_focus = true;
-                                                if self.enable_toasts {
-                                                    push_toast(&mut self.toasts, Toast {
-                                                        text: format!("Removed file {}", a.label)
-                                                            .into(),
-                                                        kind: ToastKind::Success,
-                                                        options: ToastOptions::default()
-                                                            .duration_in_seconds(self.toast_duration as f64),
-                                                    });
-                                                }
-                                            }
-                                            ui.close_menu();
-                                        }
-                                        if let Some(idx_act) = custom_idx {
-                                            if ui.button("Edit App").clicked() {
-                                                self.editor
-                                                    .open_edit(idx_act, &self.actions[idx_act]);
-                                                self.show_editor = true;
-                                                ui.close_menu();
-                                            }
-                                        }
-                                        self.pin_result_menu(ui, &a);
-                                    });
-                                    menu_added = true;
-                                } else if a.desc == "Note"
-                                    && a.action.starts_with("note:open:")
-                                {
-                                    let slug = a.action.rsplit(':').next().unwrap_or("").to_string();
-                                    menu_resp.clone().context_menu(|ui| {
-                                        if ui.button("Edit Note").clicked() {
-                                            self.open_note_panel(&slug, None);
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Open in Notepad").clicked() {
-                                            match crate::plugins::note::load_notes() {
-                                                Ok(notes) => {
-                                                    if let Some(note) =
-                                                        notes.iter().find(|n| n.slug == slug)
-                                                    {
-                                                        if let Err(e) = std::process::Command::new(
-                                                            "notepad.exe",
-                                                        )
-                                                        .arg(&note.path)
-                                                        .spawn()
-                                                        {
-                                                            self.error = Some(e.to_string());
-                                                        }
-                                                    } else {
-                                                        self.error =
-                                                            Some("Note not found".to_string());
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    self.error = Some(e.to_string());
-                                                }
-                                            }
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Open in Neovim").clicked() {
-                                            if self.open_note_in_neovim(
-                                                &slug,
-                                                crate::plugins::note::load_notes,
-                                                |path| spawn_external(path, NoteExternalOpen::Wezterm),
-                                            ) {
-                                                ui.close_menu();
-                                            }
-                                        }
-                                        if ui.button("Remove Note").clicked() {
-                                            self.delete_note(&slug);
-                                            refresh = true;
-                                            set_focus = true;
-                                            ui.close_menu();
-                                        }
-                                        if let Some(idx_act) = custom_idx {
-                                            if ui.button("Edit App").clicked() {
-                                                self.editor
-                                                    .open_edit(idx_act, &self.actions[idx_act]);
-                                                self.show_editor = true;
-                                                ui.close_menu();
-                                            }
-                                        }
-                                        self.pin_result_menu(ui, &a);
-                                    });
-                                    menu_added = true;
-                                } else if a.desc == "Clipboard"
-                                    && a.action.starts_with("clipboard:copy:")
-                                {
-                                    let idx_str = a.action.rsplit(':').next().unwrap_or("");
-                                    if let Ok(cb_idx) = idx_str.parse::<usize>() {
-                                        let cb_label = a.label.clone();
-                                        menu_resp.clone().context_menu(|ui| {
-                                            if ui.button("Edit Entry").clicked() {
-                                                self.clipboard_dialog.open_edit(cb_idx);
-                                                ui.close_menu();
-                                            }
-                                            if ui.button("Remove Entry").clicked() {
-                                                if let Err(e) = crate::plugins::clipboard::remove_entry(
-                                                    crate::plugins::clipboard::CLIPBOARD_FILE,
-                                                    cb_idx,
-                                                ) {
-                                                    self.error =
-                                                        Some(format!("Failed to remove entry: {e}"));
-                                                } else {
-                                                    refresh = true;
-                                                    set_focus = true;
-                                                    if self.enable_toasts {
-                                                        push_toast(&mut self.toasts, Toast {
-                                                            text: format!("Removed entry {}", cb_label)
-                                                                .into(),
-                                                            kind: ToastKind::Success,
-                                                            options: ToastOptions::default()
-                                                                .duration_in_seconds(self.toast_duration as f64),
-                                                        });
-                                                    }
-                                                }
-                                                ui.close_menu();
-                                            }
-                                            if let Some(idx_act) = custom_idx {
-                                                if ui.button("Edit App").clicked() {
-                                                    self.editor
-                                                        .open_edit(idx_act, &self.actions[idx_act]);
-                                                    self.show_editor = true;
-                                                    ui.close_menu();
-                                                }
-                                            }
-                                            self.pin_result_menu(ui, &a);
-                                        });
-                                        menu_added = true;
-                                    }
-                                } else if a.desc == "Todo" && a.action.starts_with("todo:done:") {
-                                    let idx_str = a.action.rsplit(':').next().unwrap_or("");
-                                    if let Ok(todo_idx) = idx_str.parse::<usize>() {
-                                        menu_resp.clone().context_menu(|ui| {
-                                            if ui.button("Edit Todo").clicked() {
-                                                self.todo_view_dialog.open_edit(todo_idx);
-                                                ui.close_menu();
-                                            }
-                                            if let Some(idx_act) = custom_idx {
-                                                if ui.button("Edit App").clicked() {
-                                                    self.editor
-                                                        .open_edit(idx_act, &self.actions[idx_act]);
-                                                    self.show_editor = true;
-                                                    ui.close_menu();
-                                                }
-                                            }
-                                            self.pin_result_menu(ui, &a);
-                                        });
-                                        menu_added = true;
+                                    if menu_resp.clicked() {
+                                        self.selected = Some(idx);
+                                        self.activate_action(a.clone(), None, ActivationSource::Click);
                                     }
                                 }
-                                if !menu_added {
-                                    menu_resp.clone().context_menu(|ui| {
-                                        if let Some(idx_act) = custom_idx {
-                                            if ui.button("Edit App").clicked() {
-                                                self.editor
-                                                    .open_edit(idx_act, &self.actions[idx_act]);
-                                                self.show_editor = true;
-                                                ui.close_menu();
-                                            }
-                                        }
-                                        self.pin_result_menu(ui, &a);
-                                    });
-                                }
-                                resp = menu_resp;
-                                if self.selected == Some(idx) {
-                                    resp.scroll_to_me(Some(egui::Align::Center));
-                                }
-                                if resp.clicked() {
-                                    self.selected = Some(idx);
-                                    self.activate_action(a.clone(), None, ActivationSource::Click);
-                                }
-                            }
                             }
                             if refresh {
                                 self.last_results_valid = false;
@@ -6027,6 +6090,65 @@ mod tests {
         assert_eq!(app.static_size, None);
     }
 
+    #[test]
+    fn grid_context_menu_eligibility_uses_result_actions() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.resolved_grid_layout = true;
+        app.bookmark_aliases
+            .insert("https://example.com".into(), Some("Example".into()));
+        app.results = vec![Action {
+            label: "Example".into(),
+            desc: "Bookmark".into(),
+            action: "https://example.com".into(),
+            args: None,
+        }];
+
+        let kind = app.result_context_menu_kind(&app.results[0]);
+        assert_eq!(kind, ResultContextMenuKind::Bookmark);
+    }
+
+    #[test]
+    fn context_menu_parity_bookmark_between_list_and_grid() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let action = Action {
+            label: "Docs".into(),
+            desc: "Bookmark".into(),
+            action: "https://docs.rs".into(),
+            args: None,
+        };
+        app.bookmark_aliases
+            .insert(action.action.clone(), Some("docs".into()));
+
+        app.resolved_grid_layout = false;
+        let list_kind = app.result_context_menu_kind(&action);
+        app.resolved_grid_layout = true;
+        let grid_kind = app.result_context_menu_kind(&action);
+
+        assert_eq!(list_kind, ResultContextMenuKind::Bookmark);
+        assert_eq!(grid_kind, list_kind);
+    }
+
+    #[test]
+    fn context_menu_parity_todo_between_list_and_grid() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let action = Action {
+            label: "[ ] parity".into(),
+            desc: "Todo".into(),
+            action: "todo:done:7".into(),
+            args: None,
+        };
+
+        app.resolved_grid_layout = false;
+        let list_kind = app.result_context_menu_kind(&action);
+        app.resolved_grid_layout = true;
+        let grid_kind = app.result_context_menu_kind(&action);
+
+        assert_eq!(list_kind, ResultContextMenuKind::Todo { idx: 7 });
+        assert_eq!(grid_kind, list_kind);
+    }
     #[test]
     fn handle_key_grid_navigation_arrows_and_numpad() {
         let ctx = egui::Context::default();
