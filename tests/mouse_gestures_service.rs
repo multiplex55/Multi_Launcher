@@ -386,8 +386,7 @@ fn hint_text_includes_best_guess_and_match_type() {
     cursor_provider.set_position((50.0, 0.0));
     sleep(Duration::from_millis(50));
 
-    let hints = hint_state.hints.lock().expect("lock hints");
-    let last = hints.last().expect("hint text");
+    let last = wait_for_hint(&hint_state, Duration::from_millis(500)).expect("hint text");
     assert_eq!(
         last,
         "R\nWheel: cycle • 1-9: select • Release: run • Esc: cancel\nClosest: Open Browser [prefix]"
@@ -521,8 +520,7 @@ fn cheat_sheet_overlay_shows_after_delay_without_tokens() {
     assert!(handle.emit(HookEvent::RButtonDown));
     sleep(Duration::from_millis(300));
 
-    let hints = hint_state.hints.lock().expect("lock hints");
-    let last = hints.last().expect("hint text");
+    let last = wait_for_hint(&hint_state, Duration::from_millis(500)).expect("hint text");
     assert!(last.contains("Cheat sheet"));
     assert!(last.contains("Open Browser"));
 
@@ -691,8 +689,7 @@ fn numeric_selection_updates_hint_text() {
     assert!(handle.emit(HookEvent::SelectBinding(1)));
     sleep(Duration::from_millis(10));
 
-    let hints = hint_state.hints.lock().expect("lock hints");
-    let last = hints.last().expect("hint text");
+    let last = wait_for_hint(&hint_state, Duration::from_millis(500)).expect("hint text");
     let first_line = last.lines().next().expect("first line");
     assert!(first_line.contains("Second"));
 

@@ -461,11 +461,14 @@ fn worker_loop(
                         let ms = start_time.elapsed().as_millis() as u64;
                         let _ = tracker.feed_point(cursor_pos, ms);
 
+                        let dx = cursor_pos.0 - start_pos.0;
+                        let dy = cursor_pos.1 - start_pos.1;
+                        let moved_enough =
+                            dx * dx + dy * dy >= config.threshold_px * config.threshold_px;
+
                         let mut tokens = tracker.tokens_string();
                         if tokens.is_empty() {
-                            let dx = cursor_pos.0 - start_pos.0;
-                            let dy = cursor_pos.1 - start_pos.1;
-                            if dx * dx + dy * dy >= config.threshold_px * config.threshold_px {
+                            if moved_enough {
                                 if let Some(token) = token_from_delta(dx, dy, config.dir_mode) {
                                     tokens = token.to_string();
                                 }
@@ -564,7 +567,11 @@ fn worker_loop(
                                         "mouse gesture practice miss"
                                     );
                                 }
-                                match release_fallback_outcome(false, config.no_match_behavior) {
+                                match release_fallback_outcome(
+                                    false,
+                                    true,
+                                    config.no_match_behavior,
+                                ) {
                                     ReleaseFallbackOutcome::DoNothing => {}
                                     ReleaseFallbackOutcome::PassThroughClick => {
                                         right_click_backend.send_right_click();
@@ -575,7 +582,7 @@ fn worker_loop(
                                 }
                             }
                         } else if matches!(
-                            release_fallback_outcome(true, config.no_match_behavior),
+                            release_fallback_outcome(true, moved_enough, config.no_match_behavior),
                             ReleaseFallbackOutcome::PassThroughClick
                         ) {
                             // No tokens => normal right click
@@ -969,9 +976,10 @@ fn prepare_release_execution(
 
 fn release_fallback_outcome(
     tokens_empty: bool,
+    moved_enough: bool,
     no_match_behavior: NoMatchBehavior,
 ) -> ReleaseFallbackOutcome {
-    if tokens_empty {
+    if tokens_empty && !moved_enough {
         return ReleaseFallbackOutcome::PassThroughClick;
     }
     match no_match_behavior {
@@ -1208,20 +1216,24 @@ mod tests {
     #[test]
     fn no_match_and_cancel_behaviors_are_unchanged() {
         assert_eq!(
-            release_fallback_outcome(false, NoMatchBehavior::DoNothing),
+            release_fallback_outcome(false, true, NoMatchBehavior::DoNothing),
             ReleaseFallbackOutcome::DoNothing
         );
         assert_eq!(
-            release_fallback_outcome(false, NoMatchBehavior::PassThroughClick),
+            release_fallback_outcome(false, true, NoMatchBehavior::PassThroughClick),
             ReleaseFallbackOutcome::PassThroughClick
         );
         assert_eq!(
-            release_fallback_outcome(false, NoMatchBehavior::ShowNoMatchHint),
+            release_fallback_outcome(false, true, NoMatchBehavior::ShowNoMatchHint),
             ReleaseFallbackOutcome::ShowNoMatchHint
         );
         assert_eq!(
-            release_fallback_outcome(true, NoMatchBehavior::DoNothing),
+            release_fallback_outcome(true, false, NoMatchBehavior::DoNothing),
             ReleaseFallbackOutcome::PassThroughClick
+        );
+        assert_eq!(
+            release_fallback_outcome(true, true, NoMatchBehavior::DoNothing),
+            ReleaseFallbackOutcome::DoNothing
         );
         assert!(cancel_should_pass_through(CancelBehavior::PassThroughClick));
         assert!(!cancel_should_pass_through(CancelBehavior::DoNothing));
