@@ -582,7 +582,10 @@ impl MgGesturesDialog {
 
     fn save(&mut self, app: &mut LauncherApp) {
         if let Err(e) = save_gestures(GESTURES_FILE, &self.db) {
-            app.set_error(format!("Failed to save mouse gestures: {e}"));
+            app.report_error_message(
+                "ui operation",
+                format!("Failed to save mouse gestures: {e}"),
+            );
         } else {
             app.search();
             app.focus_input();
@@ -854,7 +857,10 @@ impl MgGesturesDialog {
                         if editor.label.trim().is_empty()
                             || (action_required && editor.action.trim().is_empty())
                         {
-                            app.set_error("Label and action required".into());
+                            app.report_error_message(
+                                "ui operation",
+                                "Label and action required".into(),
+                            );
                         } else {
                             let action = if editor.kind == BindingKind::ToggleLauncher {
                                 String::new()

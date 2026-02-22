@@ -52,7 +52,7 @@ impl NotesDialog {
 
     fn save(&mut self, app: &mut LauncherApp) {
         if let Err(e) = save_notes(&self.entries) {
-            app.set_error(format!("Failed to save notes: {e}"));
+            app.report_error_message("ui operation", format!("Failed to save notes: {e}"));
         } else {
             app.search();
             app.focus_input();
@@ -91,7 +91,7 @@ impl NotesDialog {
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.text.trim().is_empty() {
-                                app.set_error("Text required".into());
+                                app.report_error_message("ui operation", "Text required".into());
                             } else {
                                 if idx == self.entries.len() {
                                     let title =
