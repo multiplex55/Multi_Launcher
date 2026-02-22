@@ -375,6 +375,12 @@ pub struct Settings {
     /// Enable toast notifications in the UI.
     #[serde(default = "default_toasts")]
     pub enable_toasts: bool,
+    /// Show error messages inline in the main panel.
+    #[serde(default = "default_true")]
+    pub show_inline_errors: bool,
+    /// Show error notifications as toast popups.
+    #[serde(default = "default_true")]
+    pub show_error_toasts: bool,
     /// Duration of toast notifications in seconds.
     #[serde(default = "default_toast_duration")]
     pub toast_duration: f32,
@@ -614,6 +620,8 @@ impl Default for Settings {
             note_show_details: default_note_show_details(),
             note_more_limit: default_note_more_limit(),
             enable_toasts: true,
+            show_inline_errors: true,
+            show_error_toasts: true,
             toast_duration: default_toast_duration(),
             query_scale: Some(1.0),
             list_scale: Some(1.0),
@@ -782,5 +790,24 @@ mod tests {
         let json = serde_json::to_string(&settings).expect("serialize settings");
         let restored: Settings = serde_json::from_str(&json).expect("deserialize settings");
         assert!(!restored.note_show_details);
+    }
+
+    #[test]
+    fn error_visibility_defaults_when_fields_are_missing() {
+        let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
+        assert!(parsed.show_inline_errors);
+        assert!(parsed.show_error_toasts);
+    }
+
+    #[test]
+    fn error_visibility_round_trip_serialization() {
+        let mut settings = Settings::default();
+        settings.show_inline_errors = false;
+        settings.show_error_toasts = false;
+
+        let json = serde_json::to_string(&settings).expect("serialize settings");
+        let restored: Settings = serde_json::from_str(&json).expect("deserialize settings");
+        assert!(!restored.show_inline_errors);
+        assert!(!restored.show_error_toasts);
     }
 }

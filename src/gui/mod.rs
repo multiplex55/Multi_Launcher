@@ -477,6 +477,8 @@ pub struct LauncherApp {
     move_cursor_end: bool,
     toasts: egui_toast::Toasts,
     pub enable_toasts: bool,
+    pub show_inline_errors: bool,
+    pub show_error_toasts: bool,
     pub toast_duration: f32,
     alias_dialog: AliasDialog,
     bookmark_alias_dialog: BookmarkAliasDialog,
@@ -784,17 +786,7 @@ impl LauncherApp {
                     Err(e) => {
                         let msg = format!("Failed to empty recycle bin: {e}");
                         self.set_error(msg.clone());
-                        if self.enable_toasts {
-                            push_toast(
-                                &mut self.toasts,
-                                Toast {
-                                    text: msg.into(),
-                                    kind: ToastKind::Error,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(self.toast_duration as f64),
-                                },
-                            );
-                        }
+                        self.add_error_toast(msg);
                     }
                 },
                 WatchEvent::ExecuteAction(action) => {
@@ -897,9 +889,23 @@ impl LauncherApp {
         push_toast(&mut self.toasts, toast);
     }
 
+    pub fn add_error_toast(&mut self, msg: impl Into<String>) {
+        if self.enable_toasts && self.show_error_toasts {
+            self.add_toast(Toast {
+                text: msg.into().into(),
+                kind: ToastKind::Error,
+                options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
+            });
+        }
+    }
+
     pub fn set_error(&mut self, msg: String) {
         self.error = Some(msg);
         self.error_time = Some(Instant::now());
+    }
+
+    fn should_render_inline_error(&self) -> bool {
+        self.show_inline_errors && self.error.is_some()
     }
 
     fn open_settings_dialog(&mut self) {
@@ -911,14 +917,7 @@ impl LauncherApp {
                 Err(e) => {
                     let msg = format!("Failed to load settings: {e}");
                     self.set_error(msg.clone());
-                    if self.enable_toasts {
-                        self.add_toast(Toast {
-                            text: msg.into(),
-                            kind: ToastKind::Error,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        });
-                    }
+                    self.add_error_toast(msg);
                 }
             }
         }
@@ -954,6 +953,8 @@ impl LauncherApp {
         enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
         offscreen_pos: Option<(i32, i32)>,
         enable_toasts: Option<bool>,
+        show_inline_errors: Option<bool>,
+        show_error_toasts: Option<bool>,
         toast_duration: Option<f32>,
         fuzzy_weight: Option<f32>,
         usage_weight: Option<f32>,
@@ -1000,6 +1001,12 @@ impl LauncherApp {
         }
         if let Some(v) = enable_toasts {
             self.enable_toasts = v;
+        }
+        if let Some(v) = show_inline_errors {
+            self.show_inline_errors = v;
+        }
+        if let Some(v) = show_error_toasts {
+            self.show_error_toasts = v;
         }
         if let Some(v) = toast_duration {
             self.toast_duration = v;
@@ -1125,6 +1132,8 @@ impl LauncherApp {
         let mut watchers = Vec::new();
         let mut toasts = Toasts::new().anchor(egui::Align2::RIGHT_TOP, [10.0, 10.0]);
         let enable_toasts = settings.enable_toasts;
+        let show_inline_errors = settings.show_inline_errors;
+        let show_error_toasts = settings.show_error_toasts;
         let toast_duration = settings.toast_duration;
         use std::path::Path;
 
@@ -1157,14 +1166,17 @@ impl LauncherApp {
             Ok(w) => watchers.push(w),
             Err(e) => {
                 tracing::error!("watch error: {:?}", e);
-                push_toast(
-                    &mut toasts,
-                    Toast {
-                        text: format!("Failed to watch {}", actions_path).into(),
-                        kind: ToastKind::Error,
-                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
-                    },
-                );
+                if enable_toasts && show_error_toasts {
+                    push_toast(
+                        &mut toasts,
+                        Toast {
+                            text: format!("Failed to watch {}", actions_path).into(),
+                            kind: ToastKind::Error,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(toast_duration as f64),
+                        },
+                    );
+                }
             }
         }
 
@@ -1176,14 +1188,17 @@ impl LauncherApp {
                     watchers.push(w);
                 }
             } else {
-                push_toast(
-                    &mut toasts,
-                    Toast {
-                        text: format!("Failed to watch {}", actions_path).into(),
-                        kind: ToastKind::Error,
-                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
-                    },
-                );
+                if enable_toasts && show_error_toasts {
+                    push_toast(
+                        &mut toasts,
+                        Toast {
+                            text: format!("Failed to watch {}", actions_path).into(),
+                            kind: ToastKind::Error,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(toast_duration as f64),
+                        },
+                    );
+                }
             }
         }
 
@@ -1196,14 +1211,17 @@ impl LauncherApp {
             Ok(w) => watchers.push(w),
             Err(e) => {
                 tracing::error!("watch error: {:?}", e);
-                push_toast(
-                    &mut toasts,
-                    Toast {
-                        text: "Failed to watch folders.json".into(),
-                        kind: ToastKind::Error,
-                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
-                    },
-                );
+                if enable_toasts && show_error_toasts {
+                    push_toast(
+                        &mut toasts,
+                        Toast {
+                            text: "Failed to watch folders.json".into(),
+                            kind: ToastKind::Error,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(toast_duration as f64),
+                        },
+                    );
+                }
             }
         }
 
@@ -1215,14 +1233,17 @@ impl LauncherApp {
                     watchers.push(w);
                 }
             } else {
-                push_toast(
-                    &mut toasts,
-                    Toast {
-                        text: "Failed to watch folders.json".into(),
-                        kind: ToastKind::Error,
-                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
-                    },
-                );
+                if enable_toasts && show_error_toasts {
+                    push_toast(
+                        &mut toasts,
+                        Toast {
+                            text: "Failed to watch folders.json".into(),
+                            kind: ToastKind::Error,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(toast_duration as f64),
+                        },
+                    );
+                }
             }
         }
 
@@ -1235,14 +1256,17 @@ impl LauncherApp {
             Ok(w) => watchers.push(w),
             Err(e) => {
                 tracing::error!("watch error: {:?}", e);
-                push_toast(
-                    &mut toasts,
-                    Toast {
-                        text: "Failed to watch bookmarks.json".into(),
-                        kind: ToastKind::Error,
-                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
-                    },
-                );
+                if enable_toasts && show_error_toasts {
+                    push_toast(
+                        &mut toasts,
+                        Toast {
+                            text: "Failed to watch bookmarks.json".into(),
+                            kind: ToastKind::Error,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(toast_duration as f64),
+                        },
+                    );
+                }
             }
         }
 
@@ -1254,14 +1278,17 @@ impl LauncherApp {
                     watchers.push(w);
                 }
             } else {
-                push_toast(
-                    &mut toasts,
-                    Toast {
-                        text: "Failed to watch bookmarks.json".into(),
-                        kind: ToastKind::Error,
-                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
-                    },
-                );
+                if enable_toasts && show_error_toasts {
+                    push_toast(
+                        &mut toasts,
+                        Toast {
+                            text: "Failed to watch bookmarks.json".into(),
+                            kind: ToastKind::Error,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(toast_duration as f64),
+                        },
+                    );
+                }
             }
         }
 
@@ -1420,6 +1447,8 @@ impl LauncherApp {
             move_cursor_end: false,
             toasts,
             enable_toasts,
+            show_inline_errors,
+            show_error_toasts,
             toast_duration,
             alias_dialog: AliasDialog::default(),
             bookmark_alias_dialog: BookmarkAliasDialog::default(),
@@ -2894,17 +2923,7 @@ impl LauncherApp {
                 crate::plugins::calendar::CALENDAR_STATE_FILE,
                 &state,
             ) {
-                if self.enable_toasts {
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: format!("Calendar state error: {err}").into(),
-                            kind: ToastKind::Error,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
+                self.add_error_toast(format!("Calendar state error: {err}"));
             }
             if self.dashboard_enabled {
                 self.query.clear();
@@ -2943,17 +2962,7 @@ impl LauncherApp {
                         crate::plugins::calendar::CALENDAR_STATE_FILE,
                         &state,
                     ) {
-                        if self.enable_toasts {
-                            push_toast(
-                                &mut self.toasts,
-                                Toast {
-                                    text: format!("Calendar state error: {err}").into(),
-                                    kind: ToastKind::Error,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(self.toast_duration as f64),
-                                },
-                            );
-                        }
+                        self.add_error_toast(format!("Calendar state error: {err}"));
                     }
                     if self.dashboard_enabled {
                         self.query.clear();
@@ -2974,17 +2983,7 @@ impl LauncherApp {
                     }
                 }
                 None => {
-                    if self.enable_toasts {
-                        push_toast(
-                            &mut self.toasts,
-                            Toast {
-                                text: format!("Invalid date reference: {reference}").into(),
-                                kind: ToastKind::Error,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(self.toast_duration as f64),
-                            },
-                        );
-                    }
+                    self.add_error_toast(format!("Invalid date reference: {reference}"));
                 }
             }
         } else if let Some(input) = a.action.strip_prefix("calendar:add:") {
@@ -3014,31 +3013,11 @@ impl LauncherApp {
                         }
                     }
                     Err(err) => {
-                        if self.enable_toasts {
-                            push_toast(
-                                &mut self.toasts,
-                                Toast {
-                                    text: format!("Calendar add failed: {err}").into(),
-                                    kind: ToastKind::Error,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(self.toast_duration as f64),
-                                },
-                            );
-                        }
+                        self.add_error_toast(format!("Calendar add failed: {err}"));
                     }
                 },
                 Err(err) => {
-                    if self.enable_toasts {
-                        push_toast(
-                            &mut self.toasts,
-                            Toast {
-                                text: err.into(),
-                                kind: ToastKind::Error,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(self.toast_duration as f64),
-                            },
-                        );
-                    }
+                    self.add_error_toast(err);
                 }
             }
         } else if let Some(input) = a.action.strip_prefix("calendar:search:") {
@@ -3075,17 +3054,7 @@ impl LauncherApp {
                     }
                 }
                 Err(err) => {
-                    if self.enable_toasts {
-                        push_toast(
-                            &mut self.toasts,
-                            Toast {
-                                text: err.into(),
-                                kind: ToastKind::Error,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(self.toast_duration as f64),
-                            },
-                        );
-                    }
+                    self.add_error_toast(err);
                 }
             }
         } else if a.action == "calendar:upcoming" {
@@ -3151,53 +3120,17 @@ impl LauncherApp {
                             }
                         }
                         Ok(false) => {
-                            if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Event not found: {event_id}").into(),
-                                        kind: ToastKind::Error,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
-                            }
+                            self.add_error_toast(format!("Event not found: {event_id}"));
                         }
                         Err(err) => {
-                            if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Snooze failed: {err}").into(),
-                                        kind: ToastKind::Error,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
-                            }
+                            self.add_error_toast(format!("Snooze failed: {err}"));
                         }
                     }
-                } else if self.enable_toasts {
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: "Invalid snooze duration (use 10m, 1h, 2d)".into(),
-                            kind: ToastKind::Error,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
+                } else {
+                    self.add_error_toast("Invalid snooze duration (use 10m, 1h, 2d)");
                 }
-            } else if self.enable_toasts {
-                push_toast(
-                    &mut self.toasts,
-                    Toast {
-                        text: "Provide a duration and event id to snooze".into(),
-                        kind: ToastKind::Error,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(self.toast_duration as f64),
-                    },
-                );
+            } else {
+                self.add_error_toast("Provide a duration and event id to snooze");
             }
         } else if a.action == "shell:dialog" {
             self.shell_cmd_dialog.open();
@@ -3365,17 +3298,7 @@ impl LauncherApp {
                 tracing::error!(?e, fav=%a.label, "failed to run favorite");
             }
             self.set_error(format!("Failed: {e}"));
-            if self.enable_toasts {
-                push_toast(
-                    &mut self.toasts,
-                    Toast {
-                        text: format!("Failed: {e}").into(),
-                        kind: ToastKind::Error,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(self.toast_duration as f64),
-                    },
-                );
-            }
+            self.add_error_toast(format!("Failed: {e}"));
         } else {
             if a.desc == "Fav" && !a.action.starts_with("fav:") {
                 tracing::info!(fav=%a.label, command=%a.action, "ran favorite");
@@ -4477,8 +4400,10 @@ impl eframe::App for LauncherApp {
 
         CentralPanel::default().show(ctx, |ui| {
             ui.heading("🚀 Multi Lnchr");
-            if let Some(err) = &self.error {
-                ui.colored_label(Color32::RED, err);
+            if self.should_render_inline_error() {
+                if let Some(err) = &self.error {
+                    ui.colored_label(Color32::RED, err);
+                }
             }
 
             scale_ui(ui, self.query_scale, |ui| {
@@ -5184,17 +5109,7 @@ impl LauncherApp {
                     Err(e) => self.set_error(format!("Failed to open link: {e}")),
                 },
                 _ => {
-                    if self.enable_toasts {
-                        push_toast(
-                            &mut self.toasts,
-                            Toast {
-                                text: format!("Invalid link: {link}").into(),
-                                kind: ToastKind::Error,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(self.toast_duration as f64),
-                            },
-                        );
-                    }
+                    self.add_error_toast(format!("Invalid link: {link}"));
                 }
             }
         } else {
@@ -5399,6 +5314,18 @@ mod tests {
         fn query_prefixes(&self) -> &[&str] {
             &self.prefixes
         }
+    }
+
+    #[test]
+    fn inline_error_visibility_respects_setting() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.set_error("boom".into());
+        app.show_inline_errors = true;
+        assert!(app.should_render_inline_error());
+
+        app.show_inline_errors = false;
+        assert!(!app.should_render_inline_error());
     }
 
     #[test]
