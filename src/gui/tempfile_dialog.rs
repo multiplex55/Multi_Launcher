@@ -47,7 +47,7 @@ impl TempfileDialog {
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
                         if self.alias.trim().is_empty() {
-                            app.report_error_message("ui operation", "Alias required".into());
+                            app.report_error_message("ui operation", "Alias required");
                         } else {
                             match create_named_file(&self.alias, &self.text) {
                                 Ok(path) => {

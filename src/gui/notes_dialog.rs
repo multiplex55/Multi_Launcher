@@ -91,7 +91,7 @@ impl NotesDialog {
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.text.trim().is_empty() {
-                                app.report_error_message("ui operation", "Text required".into());
+                                app.report_error_message("ui operation", "Text required");
                             } else {
                                 if idx == self.entries.len() {
                                     let title =

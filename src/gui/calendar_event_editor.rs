@@ -398,7 +398,7 @@ impl CalendarEventEditor {
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
                         if let Err(err) = self.save(app) {
-                            app.set_error(err);
+                            app.report_error("ui operation", err);
                         } else {
                             close_requested = true;
                         }

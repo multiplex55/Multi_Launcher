@@ -74,10 +74,7 @@ impl SnippetDialog {
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.alias.trim().is_empty() || self.text.trim().is_empty() {
-                                app.report_error_message(
-                                    "ui operation",
-                                    "Both fields required".into(),
-                                );
+                                app.report_error_message("ui operation", "Both fields required");
                             } else {
                                 if idx == self.entries.len() {
                                     self.entries.push(SnippetEntry {

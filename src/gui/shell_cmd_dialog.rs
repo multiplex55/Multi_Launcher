@@ -60,10 +60,7 @@ impl ShellCmdDialog {
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.name.trim().is_empty() || self.args.trim().is_empty() {
-                                app.report_error_message(
-                                    "ui operation",
-                                    "Both fields required".into(),
-                                );
+                                app.report_error_message("ui operation", "Both fields required");
                             } else {
                                 if idx == self.entries.len() {
                                     self.entries.push(ShellCmdEntry {

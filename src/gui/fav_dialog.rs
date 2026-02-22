@@ -152,7 +152,7 @@ impl FavDialog {
                             if self.label.trim().is_empty() || self.command.trim().is_empty() {
                                 app.report_error_message(
                                     "ui operation",
-                                    "Label and command required".into(),
+                                    "Label and command required",
                                 );
                             } else {
                                 let mut cmd = self.command.clone();

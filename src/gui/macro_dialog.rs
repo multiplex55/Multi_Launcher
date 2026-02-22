@@ -381,7 +381,7 @@ impl MacroDialog {
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
                         if self.label.trim().is_empty() {
-                            app.report_error_message("ui operation", "Label required".into());
+                            app.report_error_message("ui operation", "Label required");
                         } else {
                             for step in &mut self.steps {
                                 if let Some(a) = &step.args {

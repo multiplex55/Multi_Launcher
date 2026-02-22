@@ -4431,7 +4431,7 @@ impl eframe::App for LauncherApp {
                             .open(TOAST_LOG_FILE)
                             .is_err()
                         {
-                            self.report_error_message("launcher", "Failed to create log".into());
+                            self.report_error_message("launcher", "Failed to create log");
                         } else if let Err(e) = open::that(TOAST_LOG_FILE) {
                             self.report_error_message(
                                 "launcher",
@@ -5267,7 +5267,7 @@ impl LauncherApp {
                         self.notes_dialog.open();
                     }
                 } else {
-                    self.report_error_message("launcher", "Note not found".into());
+                    self.report_error_message("launcher", "Note not found");
                 }
             }
             Err(e) => self.report_error_message("launcher", format!("Failed to load notes: {e}")),

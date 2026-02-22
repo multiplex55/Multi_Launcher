@@ -135,10 +135,7 @@ impl AddActionDialog {
                         if ui.button(button).clicked() {
                             use std::path::Path;
                             if self.path.is_empty() || !Path::new(&self.path).exists() {
-                                app.report_error_message(
-                                    "ui operation",
-                                    "Path does not exist".into(),
-                                );
+                                app.report_error_message("ui operation", "Path does not exist");
                             } else {
                                 match self.mode {
                                     DialogMode::Add => {

@@ -45,7 +45,7 @@ impl AddBookmarkDialog {
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
                         if self.url.trim().is_empty() {
-                            app.report_error_message("ui operation", "URL required".into());
+                            app.report_error_message("ui operation", "URL required");
                         } else {
                             if let Err(e) = append_bookmark(BOOKMARKS_FILE, &self.url) {
                                 app.report_error_message(

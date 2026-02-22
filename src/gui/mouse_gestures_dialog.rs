@@ -857,10 +857,7 @@ impl MgGesturesDialog {
                         if editor.label.trim().is_empty()
                             || (action_required && editor.action.trim().is_empty())
                         {
-                            app.report_error_message(
-                                "ui operation",
-                                "Label and action required".into(),
-                            );
+                            app.report_error_message("ui operation", "Label and action required");
                         } else {
                             let action = if editor.kind == BindingKind::ToggleLauncher {
                                 String::new()
