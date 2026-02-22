@@ -56,7 +56,31 @@ impl OmniSearchPlugin {
                 tracing::warn!(%k, value = v, ?err, "failed to insert key into search index");
             }
         }
-        let index = Map::new(builder.into_inner().unwrap()).unwrap();
+        let index = match builder
+            .into_inner()
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| Map::new(bytes).map_err(anyhow::Error::from))
+        {
+            Ok(index) => index,
+            Err(err) => {
+                tracing::error!(?err, "failed to build omni search index; using empty index");
+                let mut fallback = MapBuilder::memory();
+                if let Err(build_err) = fallback.insert("", 0) {
+                    tracing::error!(?build_err, "failed to build fallback omni index");
+                }
+                match fallback
+                    .into_inner()
+                    .map_err(anyhow::Error::from)
+                    .and_then(|bytes| Map::new(bytes).map_err(anyhow::Error::from))
+                {
+                    Ok(index) => index,
+                    Err(fallback_err) => {
+                        tracing::error!(?fallback_err, "failed to initialize fallback omni index");
+                        Map::from_iter(std::iter::empty::<(&str, u64)>())
+                    }
+                }
+            }
+        };
 
         Self {
             folders: FoldersPlugin::default(),

@@ -63,7 +63,13 @@ impl Plugin for VolumePlugin {
                     if let Ok(level) = level_str.parse::<u32>() {
                         if level <= 100 {
                             let pid_opt = {
-                                let mut guard = SYSTEM_CACHE.lock().unwrap();
+                                let mut guard = match SYSTEM_CACHE.lock() {
+                                    Ok(guard) => guard,
+                                    Err(err) => {
+                                        tracing::error!(?err, "volume system cache lock poisoned");
+                                        return Vec::new();
+                                    }
+                                };
                                 if guard.1.elapsed() > CACHE_TIMEOUT {
                                     guard.0.refresh_processes(ProcessesToUpdate::All, true);
                                     guard.1 = Instant::now();

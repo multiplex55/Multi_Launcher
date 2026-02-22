@@ -17,6 +17,32 @@ use std::sync::{
 };
 use std::thread;
 
+fn build_viewport_with_icon(settings: &Settings, icon_bytes: &[u8]) -> egui::ViewportBuilder {
+    let (w, h) = settings.window_size.unwrap_or((400, 220));
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([w as f32, h as f32])
+        .with_min_inner_size([320.0, 160.0])
+        .with_visible(true);
+
+    match icon_data::from_png_bytes(icon_bytes) {
+        Ok(icon) => {
+            viewport = viewport.with_icon(icon);
+        }
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                "failed to decode launcher icon; continuing without custom icon"
+            );
+        }
+    }
+
+    if settings.always_on_top {
+        viewport = viewport.with_always_on_top();
+    }
+
+    viewport
+}
+
 static RESTART_TX: Lazy<Mutex<Option<Sender<Settings>>>> = Lazy::new(|| Mutex::new(None));
 static EVENT_TX: Lazy<Mutex<Option<Sender<()>>>> = Lazy::new(|| Mutex::new(None));
 
@@ -93,18 +119,10 @@ fn spawn_gui(
     let actions_for_window = Arc::clone(&actions);
 
     let handle = thread::spawn(move || {
-        let (w, h) = settings.window_size.unwrap_or((400, 220));
-        let icon =
-            icon_data::from_png_bytes(include_bytes!("../Resources/Green_MultiLauncher.png"))
-                .expect("invalid icon");
-        let mut viewport = egui::ViewportBuilder::default()
-            .with_inner_size([w as f32, h as f32])
-            .with_min_inner_size([320.0, 160.0])
-            .with_visible(true)
-            .with_icon(icon);
-        if settings.always_on_top {
-            viewport = viewport.with_always_on_top();
-        }
+        let viewport = build_viewport_with_icon(
+            &settings,
+            include_bytes!("../Resources/Green_MultiLauncher.png"),
+        );
         let native_options = eframe::NativeOptions {
             viewport,
             event_loop_builder: Some(Box::new(|_builder| {
@@ -218,7 +236,12 @@ fn main() -> anyhow::Result<()> {
     let mut queued_visibility: Option<bool> = None;
 
     loop {
-        let _ = event_rx.recv();
+        if let Err(err) = event_rx.recv() {
+            tracing::error!(?err, "event channel closed; shutting down launcher loop");
+            listener.stop();
+            let _ = handle.join();
+            break Ok(());
+        }
 
         if handle.is_finished() {
             listener.stop();
@@ -273,26 +296,48 @@ fn main() -> anyhow::Result<()> {
             listener = HotkeyTrigger::start_listener(watched, "main", event_tx.clone());
         }
 
-        if handle_visibility_trigger(
-            trigger.as_ref(),
-            &visibility,
-            &restore_flag,
-            &ctx,
-            &mut queued_visibility,
-            {
-                let (x, y) = settings.offscreen_pos.unwrap_or((2000, 2000));
-                (x as f32, y as f32)
-            },
-            settings.follow_mouse,
-            settings.static_location_enabled,
-            settings.static_pos.map(|(x, y)| (x as f32, y as f32)),
-            settings.static_size.map(|(w, h)| (w as f32, h as f32)),
-            {
-                let (w, h) = settings.window_size.unwrap_or((400, 220));
-                (w as f32, h as f32)
-            },
-        ) {
-            let _ = event_tx.send(());
+        let visibility_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handle_visibility_trigger(
+                trigger.as_ref(),
+                &visibility,
+                &restore_flag,
+                &ctx,
+                &mut queued_visibility,
+                {
+                    let (x, y) = settings.offscreen_pos.unwrap_or((2000, 2000));
+                    (x as f32, y as f32)
+                },
+                settings.follow_mouse,
+                settings.static_location_enabled,
+                settings.static_pos.map(|(x, y)| (x as f32, y as f32)),
+                settings.static_size.map(|(w, h)| (w as f32, h as f32)),
+                {
+                    let (w, h) = settings.window_size.unwrap_or((400, 220));
+                    (w as f32, h as f32)
+                },
+            )
+        }));
+
+        match visibility_result {
+            Ok(true) => {
+                let _ = event_tx.send(());
+            }
+            Ok(false) => {}
+            Err(_panic_payload) => {
+                tracing::error!("visibility handler panicked; continuing event loop");
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_viewport_with_invalid_icon_bytes_does_not_panic() {
+        let settings = Settings::default();
+        let result = std::panic::catch_unwind(|| build_viewport_with_icon(&settings, b"not-a-png"));
+        assert!(result.is_ok());
     }
 }

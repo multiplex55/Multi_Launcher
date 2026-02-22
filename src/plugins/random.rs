@@ -51,7 +51,13 @@ impl Plugin for RandomPlugin {
                     return Vec::new();
                 }
                 if let Ok(max) = parts[1].parse::<u64>() {
-                    let mut rng = self.rng.lock().unwrap();
+                    let mut rng = match self.rng.lock() {
+                        Ok(rng) => rng,
+                        Err(err) => {
+                            tracing::error!(?err, "random plugin rng lock poisoned");
+                            return Vec::new();
+                        }
+                    };
                     let value = rng.gen_range(0..=max).to_string();
                     return vec![Action {
                         label: value.clone(),
@@ -62,7 +68,13 @@ impl Plugin for RandomPlugin {
                 }
             }
             "dice" => {
-                let mut rng = self.rng.lock().unwrap();
+                let mut rng = match self.rng.lock() {
+                    Ok(rng) => rng,
+                    Err(err) => {
+                        tracing::error!(?err, "random plugin rng lock poisoned");
+                        return Vec::new();
+                    }
+                };
                 let value = rng.gen_range(1..=6).to_string();
                 return vec![Action {
                     label: value.clone(),
@@ -76,7 +88,13 @@ impl Plugin for RandomPlugin {
                     return Vec::new();
                 }
                 if let Ok(len) = parts[1].parse::<usize>() {
-                    let mut rng = self.rng.lock().unwrap();
+                    let mut rng = match self.rng.lock() {
+                        Ok(rng) => rng,
+                        Err(err) => {
+                            tracing::error!(?err, "random plugin rng lock poisoned");
+                            return Vec::new();
+                        }
+                    };
                     let pw: String = (&mut *rng)
                         .sample_iter(&Alphanumeric)
                         .take(len)
@@ -128,5 +146,23 @@ impl Plugin for RandomPlugin {
                 args: None,
             },
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    #[test]
+    fn poisoned_rng_lock_falls_back_without_panic() {
+        let plugin = RandomPlugin::from_seed(7);
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = plugin.rng.lock().unwrap();
+            panic!("poison");
+        }));
+
+        let out = plugin.search("rand dice");
+        assert!(out.is_empty());
     }
 }
