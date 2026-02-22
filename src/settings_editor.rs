@@ -23,6 +23,8 @@ pub struct SettingsEditor {
     last_valid_help_hotkey: String,
     debug_logging: bool,
     show_toasts: bool,
+    show_inline_errors: bool,
+    show_error_toasts: bool,
     toast_duration: f32,
     offscreen_x: i32,
     offscreen_y: i32,
@@ -153,6 +155,8 @@ impl SettingsEditor {
             last_valid_help_hotkey,
             debug_logging: settings.debug_logging,
             show_toasts: settings.enable_toasts,
+            show_inline_errors: settings.show_inline_errors,
+            show_error_toasts: settings.show_error_toasts,
             toast_duration: settings.toast_duration,
             offscreen_x: settings.offscreen_pos.unwrap_or((2000, 2000)).0,
             offscreen_y: settings.offscreen_pos.unwrap_or((2000, 2000)).1,
@@ -337,6 +341,8 @@ impl SettingsEditor {
             debug_logging: self.debug_logging,
             log_file: current.log_file.clone(),
             enable_toasts: self.show_toasts,
+            show_inline_errors: self.show_inline_errors,
+            show_error_toasts: self.show_error_toasts,
             toast_duration: self.toast_duration,
             offscreen_pos: Some((self.offscreen_x, self.offscreen_y)),
             window_size: Some((self.window_w, self.window_h)),
@@ -497,6 +503,8 @@ impl SettingsEditor {
                         });
 
                         ui.checkbox(&mut self.show_toasts, "Enable toast notifications");
+                        ui.checkbox(&mut self.show_inline_errors, "Show inline errors");
+                        ui.checkbox(&mut self.show_error_toasts, "Show error toasts");
                         if self.show_toasts {
                             ui.horizontal(|ui| {
                                 ui.label("Toast duration (s)");
@@ -836,33 +844,15 @@ impl SettingsEditor {
         if parse_hotkey(&self.hotkey).is_none() {
             self.hotkey = self.last_valid_hotkey.clone();
             self.hotkey_valid = true;
-            if app.enable_toasts {
-                app.add_toast(Toast {
-                    text: "Failed to save settings: hotkey is invalid".into(),
-                    kind: ToastKind::Error,
-                    options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
-                });
-            }
+            app.add_error_toast("Failed to save settings: hotkey is invalid");
         } else if self.quit_hotkey_enabled && parse_hotkey(&self.quit_hotkey).is_none() {
             self.quit_hotkey = self.last_valid_quit_hotkey.clone();
             self.quit_hotkey_valid = true;
-            if app.enable_toasts {
-                app.add_toast(Toast {
-                    text: "Failed to save settings: quit hotkey is invalid".into(),
-                    kind: ToastKind::Error,
-                    options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
-                });
-            }
+            app.add_error_toast("Failed to save settings: quit hotkey is invalid");
         } else if self.help_hotkey_enabled && parse_hotkey(&self.help_hotkey).is_none() {
             self.help_hotkey = self.last_valid_help_hotkey.clone();
             self.help_hotkey_valid = true;
-            if app.enable_toasts {
-                app.add_toast(Toast {
-                    text: "Failed to save settings: help hotkey is invalid".into(),
-                    kind: ToastKind::Error,
-                    options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
-                });
-            }
+            app.add_error_toast("Failed to save settings: help hotkey is invalid");
         } else {
             self.last_valid_hotkey = self.hotkey.clone();
             if self.quit_hotkey_enabled {
@@ -885,6 +875,8 @@ impl SettingsEditor {
                             new_settings.enabled_capabilities.clone(),
                             new_settings.offscreen_pos,
                             Some(new_settings.enable_toasts),
+                            Some(new_settings.show_inline_errors),
+                            Some(new_settings.show_error_toasts),
                             Some(new_settings.toast_duration),
                             Some(new_settings.fuzzy_weight),
                             Some(new_settings.usage_weight),
@@ -995,14 +987,7 @@ impl SettingsEditor {
                 Err(e) => {
                     let msg = format!("Failed to read settings: {e}");
                     app.set_error(msg.clone());
-                    if app.enable_toasts {
-                        app.add_toast(Toast {
-                            text: msg.into(),
-                            kind: ToastKind::Error,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(app.toast_duration as f64),
-                        });
-                    }
+                    app.add_error_toast(msg);
                 }
             }
         }
@@ -1105,5 +1090,17 @@ mod tests {
         let saved = editor.to_settings(&initial);
         assert_eq!(saved.query_results_layout.rows, 1);
         assert_eq!(saved.query_results_layout.cols, 1);
+    }
+
+    #[test]
+    fn error_visibility_round_trip_editor_conversion() {
+        let mut initial = Settings::default();
+        initial.show_inline_errors = false;
+        initial.show_error_toasts = false;
+
+        let editor = SettingsEditor::new(&initial);
+        let saved = editor.to_settings(&initial);
+        assert!(!saved.show_inline_errors);
+        assert!(!saved.show_error_toasts);
     }
 }

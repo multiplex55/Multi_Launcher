@@ -108,6 +108,8 @@ impl PluginEditor {
                         s.enabled_capabilities.clone(),
                         s.offscreen_pos,
                         Some(s.enable_toasts),
+                        Some(s.show_inline_errors),
+                        Some(s.show_error_toasts),
                         Some(s.toast_duration),
                         Some(s.fuzzy_weight),
                         Some(s.usage_weight),
