@@ -5409,6 +5409,11 @@ mod tests {
 
     #[test]
     fn report_error_respects_inline_and_toast_settings() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         app.enable_toasts = true;
@@ -5417,20 +5422,27 @@ mod tests {
 
         app.report_error("test.report_error", "first");
         assert_eq!(app.error.as_deref(), Some("first"));
-        assert_eq!(app.toasts.len(), 1);
+        let log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap();
+        assert_eq!(log.matches("[error:test.report_error] first").count(), 1);
+        assert_eq!(log.matches("first").count(), 2);
 
         app.error = None;
         app.show_inline_errors = false;
         app.show_error_toasts = false;
         app.report_error("test.report_error", "second");
         assert!(app.error.is_none());
-        assert_eq!(app.toasts.len(), 1);
+        let log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap();
+        assert_eq!(log.matches("[error:test.report_error] second").count(), 1);
+        assert_eq!(log.matches("second").count(), 1);
+
+        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]
     fn report_error_records_when_ui_is_disabled() {
         let _guard = TEST_MUTEX.lock().unwrap();
         let temp = tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(temp.path()).unwrap();
 
         let ctx = egui::Context::default();
@@ -5442,15 +5454,18 @@ mod tests {
         app.report_error("test.recording", "record me");
 
         assert!(app.error.is_none());
-        assert_eq!(app.toasts.len(), 0);
         let log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap();
         assert!(log.contains("[error:test.recording] record me"));
+        assert_eq!(log.matches("record me").count(), 1);
+
+        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]
     fn recycle_error_path_uses_unified_reporting() {
         let _guard = TEST_MUTEX.lock().unwrap();
         let temp = tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(temp.path()).unwrap();
 
         let ctx = egui::Context::default();
@@ -5459,15 +5474,15 @@ mod tests {
         app.show_error_toasts = false;
         app.show_inline_errors = false;
 
-        app.tx
-            .send(WatchEvent::Recycle(Err("boom".into())))
-            .unwrap();
+        send_event(WatchEvent::Recycle(Err("boom".into())));
         app.process_watch_events();
 
         assert!(app.error.is_none());
-        assert_eq!(app.toasts.len(), 0);
         let log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap();
         assert!(log.contains("[error:recycle.empty] Failed to empty recycle bin: boom"));
+        assert_eq!(log.matches("Failed to empty recycle bin: boom").count(), 1);
+
+        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]
