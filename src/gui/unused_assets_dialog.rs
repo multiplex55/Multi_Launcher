@@ -47,7 +47,10 @@ impl UnusedAssetsDialog {
                         if self.selected[i] {
                             let path = assets_dir().join(&self.assets[i]);
                             if let Err(e) = std::fs::remove_file(&path) {
-                                app.set_error(format!("Failed to delete {}: {e}", self.assets[i]));
+                                app.report_error_message(
+                                    "ui operation",
+                                    format!("Failed to delete {}: {e}", self.assets[i]),
+                                );
                             } else {
                                 self.assets.remove(i);
                                 self.selected.remove(i);

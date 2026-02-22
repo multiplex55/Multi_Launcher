@@ -47,12 +47,15 @@ impl TempfileDialog {
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
                         if self.alias.trim().is_empty() {
-                            app.set_error("Alias required".into());
+                            app.report_error_message("ui operation", "Alias required");
                         } else {
                             match create_named_file(&self.alias, &self.text) {
                                 Ok(path) => {
                                     if let Err(e) = open::that(&path) {
-                                        app.set_error(format!("Failed to open: {e}"));
+                                        app.report_error_message(
+                                            "ui operation",
+                                            format!("Failed to open: {e}"),
+                                        );
                                     } else {
                                         if app.enable_toasts {
                                             app.add_toast(Toast {
@@ -73,7 +76,10 @@ impl TempfileDialog {
                                         app.focus_input();
                                     }
                                 }
-                                Err(e) => app.set_error(format!("Failed to save: {e}")),
+                                Err(e) => app.report_error_message(
+                                    "ui operation",
+                                    format!("Failed to save: {e}"),
+                                ),
                             }
                         }
                     }

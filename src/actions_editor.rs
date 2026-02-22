@@ -96,7 +96,7 @@ impl ActionsEditor {
                     app.search();
                     if let Err(e) = save_actions(&app.actions_path, &app.actions[..app.custom_len])
                     {
-                        app.set_error(format!("Failed to save: {e}"));
+                        app.report_error("ui operation", format!("Failed to save: {e}"));
                     }
                 }
             });

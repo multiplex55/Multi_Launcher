@@ -177,7 +177,10 @@ impl CalendarEventDetails {
                         };
                         events.push(new_event);
                         if let Err(err) = save_events(CALENDAR_EVENTS_FILE, &events) {
-                            app.set_error(format!("Failed to duplicate event: {err}"));
+                            app.report_error(
+                                "ui operation",
+                                format!("Failed to duplicate event: {err}"),
+                            );
                         } else {
                             app.dashboard_data_cache.refresh_calendar();
                         }
@@ -211,7 +214,10 @@ impl CalendarEventDetails {
                     if ui.button("Delete").clicked() {
                         if let Err(err) = delete_event_with_scope(&event, start, self.delete_scope)
                         {
-                            app.set_error(format!("Failed to delete event: {err}"));
+                            app.report_error(
+                                "ui operation",
+                                format!("Failed to delete event: {err}"),
+                            );
                         } else {
                             app.dashboard_data_cache.refresh_calendar();
                             close_requested = true;
@@ -225,7 +231,10 @@ impl CalendarEventDetails {
                         if let Err(err) =
                             snooze_event(&event.id, Duration::minutes(self.snooze_minutes))
                         {
-                            app.set_error(format!("Failed to snooze event: {err}"));
+                            app.report_error(
+                                "ui operation",
+                                format!("Failed to snooze event: {err}"),
+                            );
                         } else {
                             app.dashboard_data_cache.refresh_calendar();
                         }

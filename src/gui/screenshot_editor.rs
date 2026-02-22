@@ -519,13 +519,19 @@ impl ScreenshotEditor {
                                 }
                             }
                             Err(e) => {
-                                app.set_error(format!("Failed to save screenshot: {e}"));
+                                app.report_error(
+                                    "ui operation",
+                                    format!("Failed to save screenshot: {e}"),
+                                );
                             }
                         }
                     }
                     if ui.button("Copy").clicked() {
                         if let Err(e) = self.copy_to_clipboard() {
-                            app.set_error(format!("Failed to copy screenshot: {e}"));
+                            app.report_error(
+                                "ui operation",
+                                format!("Failed to copy screenshot: {e}"),
+                            );
                         } else {
                             if app.enable_toasts {
                                 app.add_toast(Toast {

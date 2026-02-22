@@ -24,7 +24,7 @@ impl ShellCmdDialog {
 
     fn save(&mut self, app: &mut LauncherApp) {
         if let Err(e) = save_shell_cmds(SHELL_CMDS_FILE, &self.entries) {
-            app.set_error(format!("Failed to save commands: {e}"));
+            app.report_error_message("ui operation", format!("Failed to save commands: {e}"));
         } else {
             app.search();
             app.focus_input();
@@ -60,7 +60,7 @@ impl ShellCmdDialog {
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.name.trim().is_empty() || self.args.trim().is_empty() {
-                                app.set_error("Both fields required".into());
+                                app.report_error_message("ui operation", "Both fields required");
                             } else {
                                 if idx == self.entries.len() {
                                     self.entries.push(ShellCmdEntry {

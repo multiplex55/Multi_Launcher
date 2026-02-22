@@ -108,6 +108,7 @@ use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Mutex;
@@ -166,6 +167,21 @@ pub enum ActivationSource {
     Click,
     Dashboard,
     Gesture,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiErrorEvent {
+    pub context: &'static str,
+    pub message: String,
+}
+
+impl UiErrorEvent {
+    pub fn new(context: &'static str, err: impl Display) -> Self {
+        Self {
+            context,
+            message: err.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -710,7 +726,10 @@ impl LauncherApp {
                                 Ok(idx) => acts.extend(idx),
                                 Err(e) => {
                                     tracing::error!(error = %e, "failed to index paths");
-                                    self.set_error(format!("Failed to index paths: {e}"));
+                                    self.report_error_message(
+                                        "launcher",
+                                        format!("Failed to index paths: {e}"),
+                                    );
                                 }
                             }
                         }
@@ -785,8 +804,7 @@ impl LauncherApp {
                     }
                     Err(e) => {
                         let msg = format!("Failed to empty recycle bin: {e}");
-                        self.set_error(msg.clone());
-                        self.add_error_toast(msg);
+                        self.report_error_message("recycle.empty", msg);
                     }
                 },
                 WatchEvent::ExecuteAction(action) => {
@@ -899,9 +917,33 @@ impl LauncherApp {
         }
     }
 
-    pub fn set_error(&mut self, msg: String) {
+    fn set_inline_error(&mut self, msg: String) {
         self.error = Some(msg);
         self.error_time = Some(Instant::now());
+    }
+
+    pub fn report_error(&mut self, context: &'static str, err: impl Display) {
+        self.report_error_message(context, err.to_string());
+    }
+
+    pub fn report_ui_error(&mut self, err: UiErrorEvent) {
+        self.report_error_message(err.context, err.message);
+    }
+
+    pub fn report_error_message(&mut self, context: &'static str, msg: impl Into<String>) {
+        let msg = msg.into();
+        tracing::error!(context, error = %msg);
+        append_toast_log(&format!("[error:{context}] {msg}"));
+        if self.show_inline_errors {
+            self.set_inline_error(msg.clone());
+        }
+        if self.enable_toasts && self.show_error_toasts {
+            self.add_toast(Toast {
+                text: msg.into(),
+                kind: ToastKind::Error,
+                options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
+            });
+        }
     }
 
     fn should_render_inline_error(&self) -> bool {
@@ -916,8 +958,7 @@ impl LauncherApp {
                 }
                 Err(e) => {
                     let msg = format!("Failed to load settings: {e}");
-                    self.set_error(msg.clone());
-                    self.add_error_toast(msg);
+                    self.report_error_message("settings_dialog.load", msg);
                 }
             }
         }
@@ -2251,7 +2292,10 @@ impl LauncherApp {
                             crate::plugins::folders::FOLDERS_FILE,
                             &action.action,
                         ) {
-                            self.error = Some(format!("Failed to remove folder: {e}"));
+                            self.report_error_message(
+                                "launcher",
+                                format!("Failed to remove folder: {e}"),
+                            );
                         } else {
                             *refresh = true;
                             *set_focus = true;
@@ -2290,7 +2334,10 @@ impl LauncherApp {
                             crate::plugins::bookmarks::BOOKMARKS_FILE,
                             &action.action,
                         ) {
-                            self.error = Some(format!("Failed to remove bookmark: {e}"));
+                            self.report_error_message(
+                                "launcher",
+                                format!("Failed to remove bookmark: {e}"),
+                            );
                         } else {
                             *refresh = true;
                             *set_focus = true;
@@ -2430,7 +2477,10 @@ impl LauncherApp {
                     if ui.button("Copy Time").clicked() {
                         if let Some(time) = crate::plugins::stopwatch::format_elapsed(id) {
                             if let Err(e) = crate::actions::clipboard::set_text(&time) {
-                                self.error = Some(format!("Failed to copy time: {e}"));
+                                self.report_error_message(
+                                    "launcher",
+                                    format!("Failed to copy time: {e}"),
+                                );
                             } else if self.enable_toasts {
                                 push_toast(
                                     &mut self.toasts,
@@ -2463,7 +2513,10 @@ impl LauncherApp {
                     }
                     if ui.button("Remove Snippet").clicked() {
                         if let Err(e) = remove_snippet(SNIPPETS_FILE, &action.label) {
-                            self.error = Some(format!("Failed to remove snippet: {e}"));
+                            self.report_error_message(
+                                "launcher",
+                                format!("Failed to remove snippet: {e}"),
+                            );
                         } else {
                             *refresh = true;
                             *set_focus = true;
@@ -2502,7 +2555,10 @@ impl LauncherApp {
                         if let Err(e) =
                             crate::plugins::tempfile::remove_file(std::path::Path::new(&file_path))
                         {
-                            self.error = Some(format!("Failed to delete file: {e}"));
+                            self.report_error_message(
+                                "launcher",
+                                format!("Failed to delete file: {e}"),
+                            );
                         } else {
                             *refresh = true;
                             *set_focus = true;
@@ -2544,14 +2600,17 @@ impl LauncherApp {
                                         .arg(&note.path)
                                         .spawn()
                                     {
-                                        self.error = Some(e.to_string());
+                                        self.report_error_message("launcher", e.to_string());
                                     }
                                 } else {
-                                    self.error = Some("Note not found".to_string());
+                                    self.report_error_message(
+                                        "launcher",
+                                        "Note not found".to_string(),
+                                    );
                                 }
                             }
                             Err(e) => {
-                                self.error = Some(e.to_string());
+                                self.report_error_message("launcher", e.to_string());
                             }
                         }
                         ui.close_menu();
@@ -2592,7 +2651,10 @@ impl LauncherApp {
                             crate::plugins::clipboard::CLIPBOARD_FILE,
                             idx,
                         ) {
-                            self.error = Some(format!("Failed to remove entry: {e}"));
+                            self.report_error_message(
+                                "launcher",
+                                format!("Failed to remove entry: {e}"),
+                            );
                         } else {
                             *refresh = true;
                             *set_focus = true;
@@ -2683,7 +2745,7 @@ impl LauncherApp {
                         }
                     }
                     Err(e) => {
-                        self.error = Some(format!("Failed to pin result: {e}"));
+                        self.report_error_message("launcher", format!("Failed to pin result: {e}"));
                     }
                 }
                 ui.close_menu();
@@ -2693,7 +2755,7 @@ impl LauncherApp {
                 if let Err(e) =
                     history::remove_pin(HISTORY_PINS_FILE, &action.action, action.args.as_deref())
                 {
-                    self.error = Some(format!("Failed to unpin result: {e}"));
+                    self.report_error_message("launcher", format!("Failed to unpin result: {e}"));
                 } else if self.enable_toasts {
                     push_toast(
                         &mut self.toasts,
@@ -2723,7 +2785,7 @@ impl LauncherApp {
                         }
                     }
                     Err(e) => {
-                        self.error = Some(format!("Failed to update pin: {e}"));
+                        self.report_error_message("launcher", format!("Failed to update pin: {e}"));
                     }
                 }
                 ui.close_menu();
@@ -2762,7 +2824,7 @@ impl LauncherApp {
                     }
                 }
                 Err(e) => {
-                    self.error = Some(format!("Failed to recompute pins: {e}"));
+                    self.report_error_message("launcher", format!("Failed to recompute pins: {e}"));
                 }
             }
             ui.close_menu();
@@ -3181,7 +3243,10 @@ impl LauncherApp {
                 }) {
                     gesture.enabled = args.enabled;
                     if let Err(err) = save_gestures(GESTURES_FILE, &db) {
-                        self.set_error(format!("Failed to save mouse gestures: {err}"));
+                        self.report_error_message(
+                            "launcher",
+                            format!("Failed to save mouse gestures: {err}"),
+                        );
                     } else {
                         self.dashboard_data_cache.refresh_gestures();
                     }
@@ -3227,11 +3292,14 @@ impl LauncherApp {
                         self.search();
                     }
                     _ => {
-                        self.set_error(format!("Unsupported link target: {}", link_id));
+                        self.report_error_message(
+                            "launcher",
+                            format!("Unsupported link target: {}", link_id),
+                        );
                     }
                 }
             } else {
-                self.set_error(format!("Invalid link id: {}", link_id));
+                self.report_error_message("launcher", format!("Invalid link id: {}", link_id));
             }
         } else if let Some(slug) = a.action.strip_prefix("note:remove:") {
             self.delete_note(slug);
@@ -3289,7 +3357,7 @@ impl LauncherApp {
                 _ => (ScreenshotMode::Desktop, false, MarkupTool::Rectangle),
             };
             if let Err(e) = crate::plugins::screenshot::launch_editor(self, mode, clip, tool) {
-                self.set_error(format!("Failed: {e}"));
+                self.report_error_message("launcher", format!("Failed: {e}"));
             } else if a.action != "help:show" {
                 self.record_history_usage(&a, &current, source);
             }
@@ -3297,7 +3365,7 @@ impl LauncherApp {
             if a.desc == "Fav" && !a.action.starts_with("fav:") {
                 tracing::error!(?e, fav=%a.label, "failed to run favorite");
             }
-            self.set_error(format!("Failed: {e}"));
+            self.report_error_message("launcher", format!("Failed: {e}"));
             self.add_error_toast(format!("Failed: {e}"));
         } else {
             if a.desc == "Fav" && !a.action.starts_with("fav:") {
@@ -4054,7 +4122,7 @@ impl LauncherApp {
         if let Ok(mut s) = Settings::load(&self.settings_path) {
             s.pinned_panels = self.pinned_panels.clone();
             if let Err(e) = s.save(&self.settings_path) {
-                self.set_error(format!("Failed to save: {e}"));
+                self.report_error_message("launcher", format!("Failed to save: {e}"));
             }
         }
     }
@@ -4363,9 +4431,12 @@ impl eframe::App for LauncherApp {
                             .open(TOAST_LOG_FILE)
                             .is_err()
                         {
-                            self.set_error("Failed to create log".into());
+                            self.report_error_message("launcher", "Failed to create log");
                         } else if let Err(e) = open::that(TOAST_LOG_FILE) {
-                            self.set_error(format!("Failed to open log: {e}"));
+                            self.report_error_message(
+                                "launcher",
+                                format!("Failed to open log: {e}"),
+                            );
                         }
                     }
                     if ui.button("View Toast Log").clicked() {
@@ -5001,11 +5072,14 @@ impl LauncherApp {
     /// Open an image viewer panel for the given file path.
     pub fn open_image_panel(&mut self, path: &Path) {
         if !path.exists() {
-            self.set_error(format!("Image not found: {}", path.display()));
+            self.report_error_message("launcher", format!("Image not found: {}", path.display()));
             return;
         }
         if image::ImageFormat::from_path(path).is_err() {
-            self.set_error(format!("Unsupported image format: {}", path.display()));
+            self.report_error_message(
+                "launcher",
+                format!("Unsupported image format: {}", path.display()),
+            );
             return;
         }
         self.image_panels.push(ImagePanel::new(path.to_path_buf()));
@@ -5106,7 +5180,9 @@ impl LauncherApp {
                             );
                         }
                     }
-                    Err(e) => self.set_error(format!("Failed to open link: {e}")),
+                    Err(e) => {
+                        self.report_error_message("launcher", format!("Failed to open link: {e}"))
+                    }
                 },
                 _ => {
                     self.add_error_toast(format!("Invalid link: {link}"));
@@ -5135,14 +5211,14 @@ impl LauncherApp {
             Ok(notes) => {
                 if let Some(note) = notes.iter().find(|n| n.slug == slug) {
                     if let Err(e) = spawn(&note.path) {
-                        self.error = Some(e.to_string());
+                        self.report_error_message("launcher", e.to_string());
                     }
                 } else {
-                    self.error = Some("Note not found".to_string());
+                    self.report_error_message("launcher", "Note not found".to_string());
                 }
             }
             Err(e) => {
-                self.error = Some(e.to_string());
+                self.report_error_message("launcher", e.to_string());
             }
         }
         true
@@ -5162,7 +5238,10 @@ impl LauncherApp {
                 }) {
                     let word_count = note.content.split_whitespace().count();
                     if let Err(e) = remove_note(idx) {
-                        self.set_error(format!("Failed to remove note: {e}"));
+                        self.report_error_message(
+                            "launcher",
+                            format!("Failed to remove note: {e}"),
+                        );
                     } else {
                         let msg = format!(
                             "Removed note {} ({} words)",
@@ -5188,10 +5267,10 @@ impl LauncherApp {
                         self.notes_dialog.open();
                     }
                 } else {
-                    self.set_error("Note not found".into());
+                    self.report_error_message("launcher", "Note not found");
                 }
             }
-            Err(e) => self.set_error(format!("Failed to load notes: {e}")),
+            Err(e) => self.report_error_message("launcher", format!("Failed to load notes: {e}")),
         }
         self.focus_input();
     }
@@ -5202,7 +5281,7 @@ impl LauncherApp {
             if let Some(path) = file.path {
                 if path.is_dir() {
                     if let Err(e) = folders::add(path.to_str().unwrap_or_default()) {
-                        self.set_error(format!("Failed to add folder: {e}"));
+                        self.report_error_message("launcher", format!("Failed to add folder: {e}"));
                     }
                     if let Some(p) = path.to_str() {
                         self.alias_dialog.open(p);
@@ -5320,12 +5399,90 @@ mod tests {
     fn inline_error_visibility_respects_setting() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
-        app.set_error("boom".into());
+        app.report_error("test.inline_error_visibility", "boom");
         app.show_inline_errors = true;
         assert!(app.should_render_inline_error());
 
         app.show_inline_errors = false;
         assert!(!app.should_render_inline_error());
+    }
+
+    #[test]
+    fn report_error_respects_inline_and_toast_settings() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.enable_toasts = true;
+        app.show_error_toasts = true;
+        app.show_inline_errors = true;
+
+        app.report_error("test.report_error", "first");
+        assert_eq!(app.error.as_deref(), Some("first"));
+        let log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap();
+        assert_eq!(log.matches("[error:test.report_error] first").count(), 1);
+        assert_eq!(log.matches("first").count(), 2);
+
+        app.error = None;
+        app.show_inline_errors = false;
+        app.show_error_toasts = false;
+        app.report_error("test.report_error", "second");
+        assert!(app.error.is_none());
+        let log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap();
+        assert_eq!(log.matches("[error:test.report_error] second").count(), 1);
+        assert_eq!(log.matches("second").count(), 1);
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn report_error_records_when_ui_is_disabled() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.enable_toasts = false;
+        app.show_error_toasts = false;
+        app.show_inline_errors = false;
+
+        app.report_error("test.recording", "record me");
+
+        assert!(app.error.is_none());
+        let log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap();
+        assert!(log.contains("[error:test.recording] record me"));
+        assert_eq!(log.matches("record me").count(), 1);
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn recycle_error_path_uses_unified_reporting() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.enable_toasts = false;
+        app.show_error_toasts = false;
+        app.show_inline_errors = false;
+
+        send_event(WatchEvent::Recycle(Err("boom".into())));
+        app.process_watch_events();
+
+        assert!(app.error.is_none());
+        let log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap();
+        assert!(log.contains("[error:recycle.empty] Failed to empty recycle bin: boom"));
+        assert_eq!(log.matches("Failed to empty recycle bin: boom").count(), 1);
+
+        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]

@@ -233,17 +233,19 @@ impl NotePanel {
                 }
                 settings.note_show_details = self.show_metadata;
                 if let Err(err) = settings.save(&app.settings_path) {
-                    app.set_error(format!(
-                        "Failed to save note detail visibility setting: {err}"
-                    ));
+                    app.report_error(
+                        "ui operation",
+                        format!("Failed to save note detail visibility setting: {err}"),
+                    );
                 } else {
                     app.note_show_details = self.show_metadata;
                 }
             }
             Err(err) => {
-                app.set_error(format!(
-                    "Failed to load settings for note detail visibility: {err}"
-                ));
+                app.report_error(
+                    "ui operation",
+                    format!("Failed to load settings for note detail visibility: {err}"),
+                );
             }
         }
     }
@@ -1006,7 +1008,10 @@ impl NotePanel {
                     ui.horizontal(|ui| {
                         if ui.button("Overwrite").clicked() {
                             if let Err(e) = save_note(&mut self.note, true) {
-                                app.set_error(format!("Failed to save note: {e}"));
+                                app.report_error(
+                                    "ui operation",
+                                    format!("Failed to save note: {e}"),
+                                );
                             } else {
                                 self.refresh_fast_derived();
                                 self.refresh_heavy_derived(true);
@@ -1018,7 +1023,10 @@ impl NotePanel {
                             self.note.slug.clear();
                             self.note.path = std::path::PathBuf::new();
                             if let Err(e) = save_note(&mut self.note, true) {
-                                app.set_error(format!("Failed to save note: {e}"));
+                                app.report_error(
+                                    "ui operation",
+                                    format!("Failed to save note: {e}"),
+                                );
                             } else {
                                 self.refresh_fast_derived();
                                 self.refresh_heavy_derived(true);
@@ -1061,7 +1069,7 @@ impl NotePanel {
                 self.overwrite_prompt = true;
             }
             Err(e) => {
-                app.set_error(format!("Failed to save note: {e}"));
+                app.report_error("ui operation", format!("Failed to save note: {e}"));
             }
         }
     }
@@ -1268,7 +1276,7 @@ impl NotePanel {
                     if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
                         let dest = assets_dir().join(fname);
                         if let Err(e) = std::fs::copy(&path, &dest) {
-                            app.set_error(format!("Failed to copy image: {e}"));
+                            app.report_error("ui operation", format!("Failed to copy image: {e}"));
                         } else {
                             let insert = format!("![{0}](assets/{0})", fname);
                             let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id)
@@ -1302,7 +1310,10 @@ impl NotePanel {
                                     .map(|_| std::fs::remove_file(&path).unwrap_or(()))
                             });
                             if let Err(e) = result {
-                                app.set_error(format!("Failed to save screenshot: {e}"));
+                                app.report_error(
+                                    "ui operation",
+                                    format!("Failed to save screenshot: {e}"),
+                                );
                             } else {
                                 let insert = format!("![{0}](assets/{0})", fname);
                                 let mut state =
@@ -1326,7 +1337,7 @@ impl NotePanel {
                             }
                         }
                     }
-                    Err(e) => app.set_error(format!("Screenshot failed: {e}")),
+                    Err(e) => app.report_error("ui operation", format!("Screenshot failed: {e}")),
                 }
             }
             ui.label("Insert image:");
@@ -1508,7 +1519,10 @@ impl NotePanel {
     fn open_external(&self, app: &mut LauncherApp, choice: NoteExternalOpen) {
         let path = self.note.path.clone();
         if let Err(e) = spawn_external(&path, choice) {
-            app.set_error(format!("Failed to open note externally: {e}"));
+            app.report_error(
+                "ui operation",
+                format!("Failed to open note externally: {e}"),
+            );
         }
     }
 }
@@ -1552,7 +1566,7 @@ pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui
                     .sense(egui::Sense::click()),
             );
             if resp.clicked() {
-                app.set_error(format!(
+                app.report_error("ui operation", format!(
                     "Ambiguous link [[{target}]]; use [[slug:<slug>]] or [[path:<file.md>]]. Candidates: {}",
                     slugs.join(", ")
                 ));
@@ -1568,7 +1582,7 @@ pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui
                 .sense(egui::Sense::click()),
             );
             if resp.clicked() {
-                app.set_error(format!("Broken note link: [[{target}]]"));
+                app.report_error("ui operation", format!("Broken note link: [[{target}]]"));
                 app.open_note_panel(&slug, None);
             }
             resp

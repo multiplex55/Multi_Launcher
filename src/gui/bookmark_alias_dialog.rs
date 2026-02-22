@@ -46,7 +46,10 @@ impl BookmarkAliasDialog {
 
                 if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
                     if let Err(e) = set_alias(BOOKMARKS_FILE, &self.url, &self.alias) {
-                        app.set_error(format!("Failed to save alias: {e}"));
+                        app.report_error_message(
+                            "ui operation",
+                            format!("Failed to save alias: {e}"),
+                        );
                     } else {
                         close = true;
                         app.search();
@@ -59,7 +62,10 @@ impl BookmarkAliasDialog {
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
                         if let Err(e) = set_alias(BOOKMARKS_FILE, &self.url, &self.alias) {
-                            app.set_error(format!("Failed to save alias: {e}"));
+                            app.report_error_message(
+                                "ui operation",
+                                format!("Failed to save alias: {e}"),
+                            );
                         } else {
                             close = true;
                             app.search();

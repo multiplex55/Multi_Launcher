@@ -47,7 +47,7 @@ impl FavDialog {
 
     fn save(&mut self, app: &mut LauncherApp) {
         if let Err(e) = save_favs(FAV_FILE, &self.entries) {
-            app.set_error(format!("Failed to save favorites: {e}"));
+            app.report_error_message("ui operation", format!("Failed to save favorites: {e}"));
         } else {
             app.search();
             app.focus_input();
@@ -150,7 +150,10 @@ impl FavDialog {
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.label.trim().is_empty() || self.command.trim().is_empty() {
-                                app.set_error("Label and command required".into());
+                                app.report_error_message(
+                                    "ui operation",
+                                    "Label and command required",
+                                );
                             } else {
                                 let mut cmd = self.command.clone();
                                 let mut args_opt = if self.args.trim().is_empty() {
