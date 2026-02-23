@@ -6364,7 +6364,7 @@ mod tests {
             .error
             .as_ref()
             .is_some_and(|msg| msg.contains("injected failure")));
-        assert!(!app.toasts.is_empty());
+        assert!(app.error_time.is_some());
 
         set_execute_action_hook(Some(Box::new(|_| Ok(()))));
         app.activate_action(
