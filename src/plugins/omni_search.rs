@@ -19,7 +19,7 @@ pub struct OmniSearchPlugin {
     /// bookmarks. Cloning the `Arc` only clones the pointer so the underlying
     /// `Vec` remains shared.
     actions: Arc<Vec<Action>>,
-    index: Map<Vec<u8>>,
+    index: Option<Map<Vec<u8>>>,
 }
 
 impl OmniSearchPlugin {
@@ -61,24 +61,13 @@ impl OmniSearchPlugin {
             .map_err(anyhow::Error::from)
             .and_then(|bytes| Map::new(bytes).map_err(anyhow::Error::from))
         {
-            Ok(index) => index,
+            Ok(index) => Some(index),
             Err(err) => {
-                tracing::error!(?err, "failed to build omni search index; using empty index");
-                let mut fallback = MapBuilder::memory();
-                if let Err(build_err) = fallback.insert("", 0) {
-                    tracing::error!(?build_err, "failed to build fallback omni index");
-                }
-                match fallback
-                    .into_inner()
-                    .map_err(anyhow::Error::from)
-                    .and_then(|bytes| Map::new(bytes).map_err(anyhow::Error::from))
-                {
-                    Ok(index) => index,
-                    Err(fallback_err) => {
-                        tracing::error!(?fallback_err, "failed to initialize fallback omni index");
-                        Map::from_iter(std::iter::empty::<(&str, u64)>())
-                    }
-                }
+                tracing::error!(
+                    ?err,
+                    "failed to build omni search index; falling back to linear scan"
+                );
+                None
             }
         };
 
@@ -154,13 +143,23 @@ impl OmniSearchPlugin {
             out.extend(self.actions.iter().cloned());
         } else {
             let q_lc = q.to_lowercase();
-            let automaton = Subsequence::new(&q_lc);
-            let mut stream = self.index.search(automaton).into_stream();
-            let mut seen = HashSet::new();
-            while let Some((_, idx)) = stream.next() {
-                if seen.insert(idx) {
-                    if let Some(a) = self.actions.get(idx as usize) {
-                        out.push(a.clone());
+            if let Some(index) = &self.index {
+                let automaton = Subsequence::new(&q_lc);
+                let mut stream = index.search(automaton).into_stream();
+                let mut seen = HashSet::new();
+                while let Some((_, idx)) = stream.next() {
+                    if seen.insert(idx) {
+                        if let Some(a) = self.actions.get(idx as usize) {
+                            out.push(a.clone());
+                        }
+                    }
+                }
+            } else {
+                for action in self.actions.iter() {
+                    let label = action.label.to_lowercase();
+                    let desc = action.desc.to_lowercase();
+                    if label.contains(&q_lc) || desc.contains(&q_lc) {
+                        out.push(action.clone());
                     }
                 }
             }
