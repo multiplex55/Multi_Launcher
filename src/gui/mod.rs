@@ -655,13 +655,42 @@ impl LauncherApp {
     }
 
     fn should_bypass_exact_post_filter(query: &str, action: &str) -> bool {
-        let mut parts = query.split_whitespace();
-        let _plugin = parts.next();
-        let has_explicit_plugin_command = parts.next().is_some();
-
         // `query:*` actions are command suggestions that should still participate in
         // exact display-text filtering when users are browsing command names/options.
-        has_explicit_plugin_command && !action.starts_with("query:")
+        if action.starts_with("query:") {
+            return false;
+        }
+
+        let mut parts = query.split_whitespace();
+        let Some(head) = parts.next().map(str::to_ascii_lowercase) else {
+            return false;
+        };
+        let Some(subcommand) = parts.next().map(str::to_ascii_lowercase) else {
+            return false;
+        };
+
+        // Only bypass launcher-side exact display filtering when the query is an
+        // explicit plugin command whose plugin already returned resolved outputs.
+        // Example: `note today` / `note search <term>` yielding `note:new:*` or
+        // `note:open:*` actions; re-filtering those by label text can hide valid results.
+        matches!(head.as_str(), "note" | "notes")
+            && matches!(
+                subcommand.as_str(),
+                "today"
+                    | "search"
+                    | "links"
+                    | "link"
+                    | "list"
+                    | "open"
+                    | "new"
+                    | "add"
+                    | "create"
+                    | "graph"
+                    | "templates"
+                    | "tag"
+                    | "rm"
+            )
+            && action.starts_with("note:")
     }
 
     fn has_diagnostics_widget(&self) -> bool {
