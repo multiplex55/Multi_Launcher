@@ -76,10 +76,20 @@ mod imp {
 
     #[cfg(not(test))]
     fn log_enum_error(msg: &str, err: windows::core::Error) {
-        let mut last = LAST_ENUM_ERR.lock().unwrap();
-        if last.elapsed() > Duration::from_secs(30) {
-            error!(?err, "BrowserTabsPlugin: {msg}");
-            *last = Instant::now();
+        match LAST_ENUM_ERR.lock() {
+            Ok(mut last) => {
+                if last.elapsed() > Duration::from_secs(30) {
+                    error!(?err, "BrowserTabsPlugin: {msg}");
+                    *last = Instant::now();
+                }
+            }
+            Err(lock_err) => {
+                error!(
+                    ?lock_err,
+                    ?err,
+                    "BrowserTabsPlugin: {msg} (enum error throttle lock poisoned)"
+                );
+            }
         }
     }
 

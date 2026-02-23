@@ -19,7 +19,7 @@ pub struct OmniSearchPlugin {
     /// bookmarks. Cloning the `Arc` only clones the pointer so the underlying
     /// `Vec` remains shared.
     actions: Arc<Vec<Action>>,
-    index: Map<Vec<u8>>,
+    index: Option<Map<Vec<u8>>>,
 }
 
 impl OmniSearchPlugin {
@@ -56,7 +56,20 @@ impl OmniSearchPlugin {
                 tracing::warn!(%k, value = v, ?err, "failed to insert key into search index");
             }
         }
-        let index = Map::new(builder.into_inner().unwrap()).unwrap();
+        let index = match builder
+            .into_inner()
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| Map::new(bytes).map_err(anyhow::Error::from))
+        {
+            Ok(index) => Some(index),
+            Err(err) => {
+                tracing::error!(
+                    ?err,
+                    "failed to build omni search index; falling back to linear scan"
+                );
+                None
+            }
+        };
 
         Self {
             folders: FoldersPlugin::default(),
@@ -130,13 +143,23 @@ impl OmniSearchPlugin {
             out.extend(self.actions.iter().cloned());
         } else {
             let q_lc = q.to_lowercase();
-            let automaton = Subsequence::new(&q_lc);
-            let mut stream = self.index.search(automaton).into_stream();
-            let mut seen = HashSet::new();
-            while let Some((_, idx)) = stream.next() {
-                if seen.insert(idx) {
-                    if let Some(a) = self.actions.get(idx as usize) {
-                        out.push(a.clone());
+            if let Some(index) = &self.index {
+                let automaton = Subsequence::new(&q_lc);
+                let mut stream = index.search(automaton).into_stream();
+                let mut seen = HashSet::new();
+                while let Some((_, idx)) = stream.next() {
+                    if seen.insert(idx) {
+                        if let Some(a) = self.actions.get(idx as usize) {
+                            out.push(a.clone());
+                        }
+                    }
+                }
+            } else {
+                for action in self.actions.iter() {
+                    let label = action.label.to_lowercase();
+                    let desc = action.desc.to_lowercase();
+                    if label.contains(&q_lc) || desc.contains(&q_lc) {
+                        out.push(action.clone());
                     }
                 }
             }

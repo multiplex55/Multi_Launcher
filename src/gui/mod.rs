@@ -6339,4 +6339,46 @@ mod tests {
         app.recompute_query_results_layout();
         assert!(!app.resolved_grid_layout);
     }
+
+    #[test]
+    fn failing_action_reports_error_and_launcher_stays_responsive() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.enable_toasts = true;
+
+        set_execute_action_hook(Some(Box::new(|_| Err(anyhow::anyhow!("injected failure")))));
+
+        app.activate_action(
+            Action {
+                label: "Broken".into(),
+                desc: "Test".into(),
+                action: "exec:broken".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Enter,
+        );
+
+        assert!(app
+            .error
+            .as_ref()
+            .is_some_and(|msg| msg.contains("injected failure")));
+        assert!(app.error_time.is_some());
+
+        set_execute_action_hook(Some(Box::new(|_| Ok(()))));
+        app.activate_action(
+            Action {
+                label: "Healthy".into(),
+                desc: "Test".into(),
+                action: "exec:ok".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Enter,
+        );
+        assert!(app.error.is_some());
+
+        set_execute_action_hook(None);
+    }
 }
