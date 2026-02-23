@@ -654,6 +654,45 @@ impl LauncherApp {
         haystack_label.to_lowercase().contains(&query_lc)
     }
 
+    fn should_bypass_exact_post_filter(query: &str, action: &str) -> bool {
+        // `query:*` actions are command suggestions that should still participate in
+        // exact display-text filtering when users are browsing command names/options.
+        if action.starts_with("query:") {
+            return false;
+        }
+
+        let mut parts = query.split_whitespace();
+        let Some(head) = parts.next().map(str::to_ascii_lowercase) else {
+            return false;
+        };
+        let Some(subcommand) = parts.next().map(str::to_ascii_lowercase) else {
+            return false;
+        };
+
+        // Only bypass launcher-side exact display filtering when the query is an
+        // explicit plugin command whose plugin already returned resolved outputs.
+        // Example: `note today` / `note search <term>` yielding `note:new:*` or
+        // `note:open:*` actions; re-filtering those by label text can hide valid results.
+        matches!(head.as_str(), "note" | "notes")
+            && matches!(
+                subcommand.as_str(),
+                "today"
+                    | "search"
+                    | "links"
+                    | "link"
+                    | "list"
+                    | "open"
+                    | "new"
+                    | "add"
+                    | "create"
+                    | "graph"
+                    | "templates"
+                    | "tag"
+                    | "rm"
+            )
+            && action.starts_with("note:")
+    }
+
     fn has_diagnostics_widget(&self) -> bool {
         self.dashboard
             .slots
@@ -1744,6 +1783,14 @@ impl LauncherApp {
             for a in plugin_results {
                 let desc_lc = a.desc.to_lowercase();
                 if self.is_exact_match_mode() {
+                    if Self::should_bypass_exact_post_filter(trimmed, &a.action) {
+                        // Plugin commands like `note today`/`note search <term>` already
+                        // returned concrete results (e.g. `note:new:*`, `note:open:*`).
+                        // Re-filtering by label/desc text can hide valid plugin-resolved
+                        // outputs, so keep them as-is in exact mode.
+                        res.push((a, 0.0));
+                        continue;
+                    }
                     if query_term.is_empty() {
                         res.push((a, 0.0));
                     } else {
@@ -1814,6 +1861,13 @@ impl LauncherApp {
             for a in plugin_results {
                 let desc_lc = a.desc.to_lowercase();
                 if self.is_exact_match_mode() {
+                    if Self::should_bypass_exact_post_filter(trimmed, &a.action) {
+                        // Explicit plugin commands can resolve into result lists/artifacts.
+                        // Preserve those resolved actions in exact mode instead of applying
+                        // a second label/description exact filter in the launcher layer.
+                        res.push((a, 0.0));
+                        continue;
+                    }
                     if query_term_lc.is_empty() {
                         res.push((a, 0.0));
                     } else {
@@ -5395,6 +5449,55 @@ mod tests {
         }
     }
 
+    struct ExactFilterPlugin;
+
+    impl crate::plugin::Plugin for ExactFilterPlugin {
+        fn search(&self, query: &str) -> Vec<Action> {
+            let query = query.trim().to_ascii_lowercase();
+            if query == "note today" {
+                return vec![Action {
+                    label: "Create 2025 02 23".into(),
+                    desc: "Note".into(),
+                    action: "note:new:2025-02-23".into(),
+                    args: None,
+                }];
+            }
+            if query.starts_with("note search ") {
+                return vec![Action {
+                    label: "Alpha note".into(),
+                    desc: "Note".into(),
+                    action: "note:open:alpha".into(),
+                    args: None,
+                }];
+            }
+            if query.starts_with("note ") {
+                return vec![Action {
+                    label: "note search".into(),
+                    desc: "Note".into(),
+                    action: "query:note search ".into(),
+                    args: None,
+                }];
+            }
+            Vec::new()
+        }
+
+        fn name(&self) -> &str {
+            "exact-filter-plugin"
+        }
+
+        fn description(&self) -> &str {
+            "Exact filter test plugin"
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &[]
+        }
+
+        fn query_prefixes(&self) -> &[&str] {
+            &["note"]
+        }
+    }
+
     #[test]
     fn inline_error_visibility_respects_setting() {
         let ctx = egui::Context::default();
@@ -5548,6 +5651,31 @@ mod tests {
         app.last_results_valid = false;
         app.search();
         assert!(!app.results.iter().any(|a| a.action == "demo:action"));
+    }
+
+    #[test]
+    fn exact_mode_keeps_plugin_resolved_results_but_filters_query_suggestions() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.match_exact = true;
+        app.plugins.register(Box::new(ExactFilterPlugin));
+
+        app.query = "note today".into();
+        app.search();
+        assert!(app
+            .results
+            .iter()
+            .any(|a| a.action == "note:new:2025-02-23"));
+
+        app.query = "note search alpha".into();
+        app.last_results_valid = false;
+        app.search();
+        assert!(app.results.iter().any(|a| a.action == "note:open:alpha"));
+
+        app.query = "note zz".into();
+        app.last_results_valid = false;
+        app.search();
+        assert!(app.results.is_empty());
     }
 
     #[test]
