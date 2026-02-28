@@ -1,12 +1,47 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
 use crate::plugins::bookmarks::BookmarksPlugin;
+use crate::plugins::calendar::CalendarPlugin;
 use crate::plugins::folders::FoldersPlugin;
 use crate::plugins::note::NotePlugin;
 use crate::plugins::todo::TodoPlugin;
 use fst::{automaton::Subsequence, IntoStreamer, Map, MapBuilder, Streamer};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OmniSearchSettings {
+    #[serde(default = "default_true")]
+    pub include_apps: bool,
+    #[serde(default = "default_true")]
+    pub include_notes: bool,
+    #[serde(default = "default_true")]
+    pub include_todos: bool,
+    #[serde(default = "default_true")]
+    pub include_calendar: bool,
+    #[serde(default = "default_true")]
+    pub include_folders: bool,
+    #[serde(default = "default_true")]
+    pub include_bookmarks: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+impl Default for OmniSearchSettings {
+    fn default() -> Self {
+        Self {
+            include_apps: true,
+            include_notes: true,
+            include_todos: true,
+            include_calendar: true,
+            include_folders: true,
+            include_bookmarks: true,
+        }
+    }
+}
 
 /// Combined search across folders, bookmarks, notes, todos, and launcher
 /// actions.
@@ -20,6 +55,8 @@ pub struct OmniSearchPlugin {
     bookmarks: BookmarksPlugin,
     note: NotePlugin,
     todo: TodoPlugin,
+    calendar: CalendarPlugin,
+    settings: OmniSearchSettings,
     /// Shared list of launcher actions searched alongside folders and
     /// bookmarks. Cloning the `Arc` only clones the pointer so the underlying
     /// `Vec` remains shared.
@@ -81,6 +118,8 @@ impl OmniSearchPlugin {
             bookmarks: BookmarksPlugin::default(),
             note: NotePlugin::default(),
             todo: TodoPlugin::default(),
+            calendar: CalendarPlugin,
+            settings: OmniSearchSettings::default(),
             actions,
             index,
         }
@@ -134,18 +173,58 @@ impl Plugin for OmniSearchPlugin {
     fn query_prefixes(&self) -> &[&str] {
         &["o"]
     }
+
+    fn default_settings(&self) -> Option<serde_json::Value> {
+        serde_json::to_value(OmniSearchSettings::default()).ok()
+    }
+
+    fn apply_settings(&mut self, value: &serde_json::Value) {
+        match serde_json::from_value::<OmniSearchSettings>(value.clone()) {
+            Ok(settings) => self.settings = settings,
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "failed to parse omni_search settings; keeping existing settings"
+                );
+            }
+        }
+    }
 }
 
 impl OmniSearchPlugin {
     fn search_all(&self, rest: &str) -> Vec<Action> {
         let mut out = Vec::new();
-        out.extend(self.collect_folder_results(rest));
-        out.extend(self.collect_bookmark_results(rest));
-        out.extend(self.collect_app_results(rest));
-        out.extend(self.collect_note_results(rest));
-        out.extend(self.collect_todo_results(rest));
+        // Keep source aggregation order stable for deterministic result ordering.
+        if self.settings.include_folders {
+            out.extend(self.collect_folder_results(rest));
+        }
+        if self.settings.include_bookmarks {
+            out.extend(self.collect_bookmark_results(rest));
+        }
+        if self.settings.include_apps {
+            out.extend(self.collect_app_results(rest));
+        }
+        if self.settings.include_notes {
+            out.extend(self.collect_note_results(rest));
+        }
+        if self.settings.include_todos {
+            out.extend(self.collect_todo_results(rest));
+        }
+        if self.settings.include_calendar {
+            out.extend(self.collect_calendar_results(rest));
+        }
 
         self.dedup_actions(out)
+    }
+
+    fn collect_calendar_results(&self, rest: &str) -> Vec<Action> {
+        if rest.trim().is_empty() {
+            let mut actions = self.calendar.search("cal");
+            actions.extend(self.calendar.search("cal upcoming"));
+            actions
+        } else {
+            self.calendar.search(&format!("cal find {rest}"))
+        }
     }
 
     fn collect_folder_results(&self, rest: &str) -> Vec<Action> {

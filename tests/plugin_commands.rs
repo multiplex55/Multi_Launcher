@@ -3,6 +3,7 @@ use multi_launcher::actions::Action;
 use multi_launcher::gui::LauncherApp;
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
+use serde_json::json;
 use std::sync::{atomic::AtomicBool, Arc};
 
 fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
@@ -109,4 +110,28 @@ fn disabled_plugin_commands_hidden() {
     app.query.clear();
     app.search();
     assert!(!app.results.iter().any(|a| a.label == "help"));
+}
+
+#[test]
+fn omni_search_settings_from_plugin_manager_are_applied() {
+    let ctx = egui::Context::default();
+    let actions = vec![Action {
+        label: "plan app".into(),
+        desc: "launcher".into(),
+        action: "app:plan".into(),
+        args: None,
+    }];
+    let mut settings = Settings::default();
+    settings.plugin_settings.insert(
+        "omni_search".into(),
+        json!({"include_calendar": false, "include_todos": false}),
+    );
+
+    let mut app = new_app_with_settings(&ctx, actions, settings);
+    app.query = "o list".into();
+    app.search();
+
+    assert!(!app.results.iter().any(|a| a.action == "calendar:upcoming"));
+    assert!(!app.results.iter().any(|a| a.action == "todo:done:0"));
+    assert!(app.results.iter().any(|a| a.action == "app:plan"));
 }
