@@ -213,6 +213,58 @@ fn o_prefix_matches_non_list_path() {
 }
 
 #[test]
+fn o_query_finds_note_by_title() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let (_dir, _guard) = setup_fixture();
+
+    let plugin = OmniSearchPlugin::new(Arc::new(Vec::new()));
+    let results = plugin.search("o project");
+
+    assert!(results.iter().any(|a| a.action == "note:open:project-plan"));
+}
+
+#[test]
+fn o_query_finds_todo_by_text() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let (_dir, _guard) = setup_fixture();
+
+    let plugin = OmniSearchPlugin::new(Arc::new(Vec::new()));
+    let results = plugin.search("o sprint");
+
+    assert!(results.iter().any(|a| a.action == "todo:done:0"));
+}
+
+#[test]
+fn o_list_query_finds_note_and_todo_independently() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let (_dir, _guard) = setup_fixture();
+
+    let plugin = OmniSearchPlugin::new(Arc::new(Vec::new()));
+
+    let note_results = plugin.search("o list project");
+    assert!(note_results
+        .iter()
+        .any(|a| a.action == "note:open:project-plan"));
+
+    let todo_results = plugin.search("o list sprint");
+    assert!(todo_results.iter().any(|a| a.action == "todo:done:0"));
+}
+
+#[test]
+fn o_list_query_excludes_unmatched_note_and_todo_while_preserving_other_sources() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let (_dir, _guard) = setup_fixture();
+
+    let plugin = OmniSearchPlugin::new(Arc::new(Vec::new()));
+    let results = plugin.search("o list mismatch");
+    let actions: Vec<&str> = results.iter().map(|a| a.action.as_str()).collect();
+
+    assert!(!actions.contains(&"note:open:project-plan"));
+    assert!(!actions.contains(&"todo:done:0"));
+    assert!(actions.contains(&"calendar:search:mismatch"));
+}
+
+#[test]
 fn o_list_dedups_duplicate_rows_across_sources() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let (_dir, _guard) = setup_fixture();
