@@ -172,11 +172,13 @@ fn o_list_with_query_filters_notes_todos_and_apps() {
     let results = plugin.search("o list plan");
     let actions: Vec<&str> = results.iter().map(|a| a.action.as_str()).collect();
 
+    // `o list <term>` should include matches from app, bookmark, folder, note, and todo
+    // sources while still filtering out unrelated app entries.
     assert!(actions.contains(&"app:plan"));
     assert!(actions.contains(&"https://plan.example.com"));
     assert!(actions.contains(&"/workspace/plan"));
-    assert!(!actions.contains(&"note:open:project-plan"));
-    assert!(!actions.contains(&"todo:done:0"));
+    assert!(actions.contains(&"note:open:project-plan"));
+    assert!(actions.contains(&"todo:done:0"));
     assert!(!actions.contains(&"app:other"));
 }
 
@@ -203,9 +205,11 @@ fn o_prefix_matches_non_list_path() {
         .map(|a| a.action)
         .collect();
 
+    // `o <term>` and `o list <term>` should stay behaviorally equivalent, including
+    // returning note and todo actions for matching terms.
     assert_eq!(prefix_results, list_results);
-    assert!(!prefix_results.contains(&"note:open:project-plan".to_string()));
-    assert!(!prefix_results.contains(&"todo:done:0".to_string()));
+    assert!(prefix_results.contains(&"note:open:project-plan".to_string()));
+    assert!(prefix_results.contains(&"todo:done:0".to_string()));
 }
 
 #[test]
