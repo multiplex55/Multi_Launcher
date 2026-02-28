@@ -189,6 +189,34 @@ impl Plugin for OmniSearchPlugin {
             }
         }
     }
+
+    fn settings_ui(&mut self, ui: &mut eframe::egui::Ui, value: &mut serde_json::Value) {
+        let mut settings = match serde_json::from_value::<OmniSearchSettings>(value.clone()) {
+            Ok(settings) => settings,
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "failed to parse omni_search settings ui value; resetting to defaults"
+                );
+                OmniSearchSettings::default()
+            }
+        };
+
+        ui.checkbox(&mut settings.include_apps, "Search apps");
+        ui.checkbox(&mut settings.include_notes, "Search notes");
+        ui.checkbox(&mut settings.include_todos, "Search todos");
+        ui.checkbox(&mut settings.include_calendar, "Search calendar events");
+        ui.checkbox(&mut settings.include_folders, "Search folders");
+        ui.checkbox(&mut settings.include_bookmarks, "Search bookmarks");
+
+        *value = serde_json::to_value(settings).unwrap_or_else(|err| {
+            tracing::warn!(
+                ?err,
+                "failed to serialize omni_search settings from ui; using defaults"
+            );
+            serde_json::to_value(OmniSearchSettings::default()).unwrap_or(serde_json::Value::Null)
+        });
+    }
 }
 
 impl OmniSearchPlugin {
@@ -303,5 +331,54 @@ impl OmniSearchPlugin {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OmniSearchPlugin, OmniSearchSettings};
+    use crate::plugin::Plugin;
+    use eframe::egui;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    #[test]
+    fn settings_ui_reseeds_defaults_for_malformed_json() {
+        let mut plugin = OmniSearchPlugin::new(Arc::new(Vec::new()));
+        let mut value = json!("invalid");
+        let ctx = egui::Context::default();
+
+        ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                plugin.settings_ui(ui, &mut value);
+            });
+        });
+
+        let parsed: OmniSearchSettings =
+            serde_json::from_value(value).expect("ui should write valid omni settings json");
+        assert_eq!(
+            parsed.include_apps,
+            OmniSearchSettings::default().include_apps
+        );
+        assert_eq!(
+            parsed.include_notes,
+            OmniSearchSettings::default().include_notes
+        );
+        assert_eq!(
+            parsed.include_todos,
+            OmniSearchSettings::default().include_todos
+        );
+        assert_eq!(
+            parsed.include_calendar,
+            OmniSearchSettings::default().include_calendar
+        );
+        assert_eq!(
+            parsed.include_folders,
+            OmniSearchSettings::default().include_folders
+        );
+        assert_eq!(
+            parsed.include_bookmarks,
+            OmniSearchSettings::default().include_bookmarks
+        );
     }
 }
