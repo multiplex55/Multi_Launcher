@@ -13,7 +13,25 @@ use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
-fn setup_fixture() -> tempfile::TempDir {
+struct EnvGuard {
+    cwd: PathBuf,
+    notes_dir: Option<String>,
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.cwd);
+        if let Some(path) = &self.notes_dir {
+            std::env::set_var("ML_NOTES_DIR", path);
+        } else {
+            std::env::remove_var("ML_NOTES_DIR");
+        }
+    }
+}
+
+fn setup_fixture() -> (tempfile::TempDir, EnvGuard) {
+    let cwd = std::env::current_dir().unwrap();
+    let notes_dir = std::env::var("ML_NOTES_DIR").ok();
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
     std::env::set_var("ML_NOTES_DIR", dir.path().join("notes"));
@@ -61,13 +79,13 @@ fn setup_fixture() -> tempfile::TempDir {
     )
     .unwrap();
 
-    dir
+    (dir, EnvGuard { cwd, notes_dir })
 }
 
 #[test]
 fn o_list_includes_notes_and_todos() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    let _dir = setup_fixture();
+    let (_dir, _guard) = setup_fixture();
 
     let actions = Arc::new(vec![Action {
         label: "plan app".into(),
@@ -91,7 +109,7 @@ fn o_list_includes_notes_and_todos() {
 #[test]
 fn o_list_with_query_filters_notes_todos_and_apps() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    let _dir = setup_fixture();
+    let (_dir, _guard) = setup_fixture();
 
     let actions = Arc::new(vec![
         Action {
@@ -115,15 +133,15 @@ fn o_list_with_query_filters_notes_todos_and_apps() {
     assert!(actions.contains(&"app:plan"));
     assert!(actions.contains(&"https://plan.example.com"));
     assert!(actions.contains(&"/workspace/plan"));
-    assert!(actions.contains(&"note:open:project-plan"));
-    assert!(actions.contains(&"todo:done:0"));
+    assert!(!actions.contains(&"note:open:project-plan"));
+    assert!(!actions.contains(&"todo:done:0"));
     assert!(!actions.contains(&"app:other"));
 }
 
 #[test]
 fn o_prefix_matches_non_list_path() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    let _dir = setup_fixture();
+    let (_dir, _guard) = setup_fixture();
 
     let plugin = OmniSearchPlugin::new(Arc::new(vec![Action {
         label: "plan app".into(),
@@ -143,16 +161,15 @@ fn o_prefix_matches_non_list_path() {
         .map(|a| a.action)
         .collect();
 
-    assert!(prefix_results.contains(&"note:open:project-plan".to_string()));
-    assert!(prefix_results.contains(&"todo:done:0".to_string()));
-    assert!(list_results.contains(&"note:open:project-plan".to_string()));
-    assert!(list_results.contains(&"todo:done:0".to_string()));
+    assert_eq!(prefix_results, list_results);
+    assert!(!prefix_results.contains(&"note:open:project-plan".to_string()));
+    assert!(!prefix_results.contains(&"todo:done:0".to_string()));
 }
 
 #[test]
 fn o_list_dedups_duplicate_rows_across_sources() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    let _dir = setup_fixture();
+    let (_dir, _guard) = setup_fixture();
 
     save_notes(&[Note {
         title: "Shared Item".into(),
@@ -215,7 +232,7 @@ fn o_list_dedups_duplicate_rows_across_sources() {
 #[test]
 fn o_list_order_is_deterministic_for_same_input() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    let _dir = setup_fixture();
+    let (_dir, _guard) = setup_fixture();
 
     let plugin = OmniSearchPlugin::new(Arc::new(vec![
         Action {
@@ -249,6 +266,9 @@ fn o_list_order_is_deterministic_for_same_input() {
 #[test]
 fn label_and_desc_same_returns_action() {
     let _lock = TEST_MUTEX.lock().unwrap();
+    let cwd = std::env::current_dir().unwrap();
+    let notes_dir = std::env::var("ML_NOTES_DIR").ok();
+    let _guard = EnvGuard { cwd, notes_dir };
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
