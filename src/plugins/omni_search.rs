@@ -268,18 +268,22 @@ impl OmniSearchPlugin {
     }
 
     fn collect_note_results(&self, rest: &str) -> Vec<Action> {
-        if rest.trim().is_empty() {
+        let rest = rest.trim();
+        if rest.is_empty() {
             self.note.search("note list")
         } else {
-            self.note.search(&format!("note {rest}"))
+            // `note` root command does not filter by content/title, so use list form.
+            self.note.search(&format!("note list {rest}"))
         }
     }
 
     fn collect_todo_results(&self, rest: &str) -> Vec<Action> {
-        if rest.trim().is_empty() {
+        let rest = rest.trim();
+        if rest.is_empty() {
             self.todo.search("todo list")
         } else {
-            self.todo.search(&format!("todo {rest}"))
+            // `todo` root command does not filter by content/title, so use list form.
+            self.todo.search(&format!("todo list {rest}"))
         }
     }
 
