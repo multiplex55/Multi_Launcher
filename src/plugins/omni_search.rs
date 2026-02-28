@@ -2,11 +2,14 @@ use crate::actions::Action;
 use crate::plugin::Plugin;
 use crate::plugins::bookmarks::BookmarksPlugin;
 use crate::plugins::folders::FoldersPlugin;
+use crate::plugins::note::NotePlugin;
+use crate::plugins::todo::TodoPlugin;
 use fst::{automaton::Subsequence, IntoStreamer, Map, MapBuilder, Streamer};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// Combined search across folders, bookmarks, and launcher actions.
+/// Combined search across folders, bookmarks, notes, todos, and launcher
+/// actions.
 ///
 /// The action list is provided as an [`Arc<Vec<Action>>`] so the plugin can
 /// participate in searches without holding its own copy. Cloning the `Arc`
@@ -15,6 +18,8 @@ use std::sync::Arc;
 pub struct OmniSearchPlugin {
     folders: FoldersPlugin,
     bookmarks: BookmarksPlugin,
+    note: NotePlugin,
+    todo: TodoPlugin,
     /// Shared list of launcher actions searched alongside folders and
     /// bookmarks. Cloning the `Arc` only clones the pointer so the underlying
     /// `Vec` remains shared.
@@ -74,6 +79,8 @@ impl OmniSearchPlugin {
         Self {
             folders: FoldersPlugin::default(),
             bookmarks: BookmarksPlugin::default(),
+            note: NotePlugin::default(),
+            todo: TodoPlugin::default(),
             actions,
             index,
         }
@@ -100,7 +107,7 @@ impl Plugin for OmniSearchPlugin {
     }
 
     fn description(&self) -> &str {
-        "Combined search for folders, bookmarks and apps (prefix: `o`)"
+        "Combined search for folders, bookmarks, apps, notes and todos (prefix: `o`)"
     }
 
     fn capabilities(&self) -> &[&str] {
@@ -132,12 +139,45 @@ impl Plugin for OmniSearchPlugin {
 impl OmniSearchPlugin {
     fn search_all(&self, rest: &str) -> Vec<Action> {
         let mut out = Vec::new();
-        out.extend(self.folders.search(&format!("f {rest}")));
+        out.extend(self.collect_folder_results(rest));
+        out.extend(self.collect_bookmark_results(rest));
+        out.extend(self.collect_app_results(rest));
+        out.extend(self.collect_note_results(rest));
+        out.extend(self.collect_todo_results(rest));
+
+        self.dedup_actions(out)
+    }
+
+    fn collect_folder_results(&self, rest: &str) -> Vec<Action> {
+        self.folders.search(&format!("f {rest}"))
+    }
+
+    fn collect_bookmark_results(&self, rest: &str) -> Vec<Action> {
         if rest.trim().is_empty() {
-            out.extend(self.bookmarks.search("bm list"));
+            self.bookmarks.search("bm list")
         } else {
-            out.extend(self.bookmarks.search(&format!("bm {rest}")));
+            self.bookmarks.search(&format!("bm {rest}"))
         }
+    }
+
+    fn collect_note_results(&self, rest: &str) -> Vec<Action> {
+        if rest.trim().is_empty() {
+            self.note.search("note list")
+        } else {
+            self.note.search(&format!("note {rest}"))
+        }
+    }
+
+    fn collect_todo_results(&self, rest: &str) -> Vec<Action> {
+        if rest.trim().is_empty() {
+            self.todo.search("todo list")
+        } else {
+            self.todo.search(&format!("todo {rest}"))
+        }
+    }
+
+    fn collect_app_results(&self, rest: &str) -> Vec<Action> {
+        let mut out = Vec::new();
         let q = rest.trim();
         if q.is_empty() {
             out.extend(self.actions.iter().cloned());
@@ -162,6 +202,25 @@ impl OmniSearchPlugin {
                         out.push(action.clone());
                     }
                 }
+            }
+        }
+
+        out
+    }
+
+    fn dedup_actions(&self, actions: Vec<Action>) -> Vec<Action> {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        for action in actions {
+            let normalized_label = action
+                .label
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase();
+            let dedup_key = format!("{}\x1f{}", action.action, normalized_label);
+            if seen.insert(dedup_key) {
+                out.push(action);
             }
         }
         out
