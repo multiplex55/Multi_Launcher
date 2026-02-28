@@ -1,11 +1,14 @@
+use chrono::{Local, NaiveDate};
 use multi_launcher::actions::Action;
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::bookmarks::{save_bookmarks, BookmarkEntry, BOOKMARKS_FILE};
+use multi_launcher::plugins::calendar::{save_events, CalendarEvent, CALENDAR_EVENTS_FILE};
 use multi_launcher::plugins::folders::{save_folders, FolderEntry, FOLDERS_FILE};
 use multi_launcher::plugins::note::{save_notes, Note};
-use multi_launcher::plugins::omni_search::OmniSearchPlugin;
+use multi_launcher::plugins::omni_search::{OmniSearchPlugin, OmniSearchSettings};
 use multi_launcher::plugins::todo::{save_todos, TodoEntry, TODO_FILE};
 use once_cell::sync::Lazy;
+use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -79,6 +82,31 @@ fn setup_fixture() -> (tempfile::TempDir, EnvGuard) {
     )
     .unwrap();
 
+    let now = Local::now().naive_local();
+    save_events(
+        CALENDAR_EVENTS_FILE,
+        &[CalendarEvent {
+            id: "evt-plan".into(),
+            title: "Planning session".into(),
+            start: NaiveDate::from_ymd_opt(2026, 1, 15)
+                .unwrap()
+                .and_hms_opt(9, 0, 0)
+                .unwrap(),
+            end: None,
+            duration_minutes: Some(30),
+            all_day: false,
+            notes: None,
+            recurrence: None,
+            reminders: Vec::new(),
+            tags: vec!["planning".into()],
+            category: None,
+            created_at: now,
+            updated_at: None,
+            entity_refs: Vec::new(),
+        }],
+    )
+    .unwrap();
+
     (dir, EnvGuard { cwd, notes_dir })
 }
 
@@ -104,6 +132,20 @@ fn o_list_includes_notes_and_todos() {
     assert!(results.iter().any(|a| a.action == "/workspace/plan"));
     assert!(results.iter().any(|a| a.action == "note:open:project-plan"));
     assert!(results.iter().any(|a| a.action == "todo:done:0"));
+    assert!(results.iter().any(|a| a.action == "calendar:upcoming"));
+}
+
+#[test]
+fn o_list_query_includes_calendar_search_action() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let (_dir, _guard) = setup_fixture();
+
+    let plugin = OmniSearchPlugin::new(Arc::new(Vec::new()));
+    let results = plugin.search("o list planning");
+
+    assert!(results
+        .iter()
+        .any(|a| a.action == "calendar:search:planning"));
 }
 
 #[test]
@@ -261,6 +303,44 @@ fn o_list_order_is_deterministic_for_same_input() {
         .collect();
 
     assert_eq!(first, second);
+}
+
+#[test]
+fn apply_settings_can_disable_calendar_and_todos() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let (_dir, _guard) = setup_fixture();
+
+    let mut plugin = OmniSearchPlugin::new(Arc::new(vec![Action {
+        label: "plan app".into(),
+        desc: "launcher".into(),
+        action: "app:plan".into(),
+        args: None,
+    }]));
+
+    plugin.apply_settings(&json!({
+        "include_calendar": false,
+        "include_todos": false,
+    }));
+
+    let results = plugin.search("o list");
+    let actions: Vec<&str> = results.iter().map(|a| a.action.as_str()).collect();
+
+    assert!(!actions.contains(&"calendar:upcoming"));
+    assert!(!actions.contains(&"todo:done:0"));
+    assert!(actions.contains(&"app:plan"));
+}
+
+#[test]
+fn omni_settings_deserialization_defaults_missing_keys() {
+    let parsed: OmniSearchSettings =
+        serde_json::from_value(json!({ "include_calendar": false })).unwrap();
+
+    assert!(!parsed.include_calendar);
+    assert!(parsed.include_apps);
+    assert!(parsed.include_notes);
+    assert!(parsed.include_todos);
+    assert!(parsed.include_folders);
+    assert!(parsed.include_bookmarks);
 }
 
 #[test]
