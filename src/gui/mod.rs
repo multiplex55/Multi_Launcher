@@ -3410,9 +3410,10 @@ impl LauncherApp {
                 "desktop_clip" => (ScreenshotMode::Desktop, true, MarkupTool::Rectangle),
                 _ => (ScreenshotMode::Desktop, false, MarkupTool::Rectangle),
             };
-            if let Err(e) = crate::plugins::screenshot::launch_editor(self, mode, clip, tool) {
-                self.report_error_message("launcher", format!("Failed: {e}"));
-            } else if a.action != "help:show" {
+            if self.handle_screenshot_launch_result(crate::plugins::screenshot::launch_editor(
+                self, mode, clip, tool,
+            )) && a.action != "help:show"
+            {
                 self.record_history_usage(&a, &current, source);
             }
         } else if let Err(e) = execute_action(&a) {
@@ -3764,6 +3765,20 @@ impl LauncherApp {
             registered_hotkeys.clear();
         } else {
             tracing::error!("failed to lock registered_hotkeys");
+        }
+    }
+
+    fn handle_screenshot_launch_result(
+        &mut self,
+        result: anyhow::Result<crate::plugins::screenshot::ScreenshotLaunchOutcome>,
+    ) -> bool {
+        match result {
+            Ok(crate::plugins::screenshot::ScreenshotLaunchOutcome::Completed) => true,
+            Ok(crate::plugins::screenshot::ScreenshotLaunchOutcome::Cancelled) => false,
+            Err(e) => {
+                self.report_error_message("launcher", format!("Failed: {e}"));
+                false
+            }
         }
     }
 
@@ -5537,6 +5552,33 @@ mod tests {
         let log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap();
         assert_eq!(log.matches("[error:test.report_error] second").count(), 1);
         assert_eq!(log.matches("second").count(), 1);
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn screenshot_cancel_does_not_report_failure_or_toast() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.enable_toasts = true;
+        app.show_error_toasts = true;
+        app.show_inline_errors = true;
+
+        let handled = app.handle_screenshot_launch_result(Ok(
+            crate::plugins::screenshot::ScreenshotLaunchOutcome::Cancelled,
+        ));
+
+        assert!(!handled);
+        assert!(app.error.is_none());
+        assert!(app.toasts.is_empty());
+
+        let log_path = std::path::Path::new(TOAST_LOG_FILE);
+        assert!(!log_path.exists());
 
         std::env::set_current_dir(original_dir).unwrap();
     }
