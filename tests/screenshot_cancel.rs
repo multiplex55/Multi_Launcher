@@ -24,11 +24,12 @@ fn wait_for_new_clipboard_image_detects_changed_snapshot() {
         bytes: vec![0, 0, 0, 255],
     });
     let mut calls = 0;
+    let old_for_closure = old.clone();
     let img = wait_for_new_clipboard_image(
         || {
             calls += 1;
             if calls == 1 {
-                old.clone()
+                old_for_closure.clone()
             } else {
                 Some(ClipboardSnapshot {
                     width: 1,
