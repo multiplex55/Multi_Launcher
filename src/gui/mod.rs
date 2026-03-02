@@ -5568,14 +5568,15 @@ mod tests {
         app.show_error_toasts = true;
         app.show_inline_errors = true;
 
+        let before_log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap_or_default();
         let handled = app.handle_screenshot_launch_result(Ok(
             crate::plugins::screenshot::ScreenshotLaunchOutcome::Cancelled,
         ));
+        let after_log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap_or_default();
 
         assert!(!handled);
         assert!(app.error.is_none());
-        let log_path = std::path::Path::new(TOAST_LOG_FILE);
-        assert!(!log_path.exists());
+        assert_eq!(before_log, after_log);
 
         std::env::set_current_dir(original_dir).unwrap();
     }
