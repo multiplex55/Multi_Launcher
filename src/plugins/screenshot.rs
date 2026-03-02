@@ -41,15 +41,27 @@ impl Default for ScreenshotPluginSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScreenshotLaunchOutcome {
+    Completed,
+    Cancelled,
+}
+
 pub fn launch_editor(
     app: &mut crate::gui::LauncherApp,
     mode: crate::actions::screenshot::Mode,
     clip: bool,
     tool: crate::gui::MarkupTool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ScreenshotLaunchOutcome> {
     use chrono::Local;
     use std::borrow::Cow;
-    let img = crate::actions::screenshot::capture_raw(mode)?;
+    let img = match crate::actions::screenshot::capture_raw(mode) {
+        Ok(img) => img,
+        Err(err) if crate::actions::screenshot::is_cancel_or_timeout(&err) => {
+            return Ok(ScreenshotLaunchOutcome::Cancelled);
+        }
+        Err(err) => return Err(err),
+    };
     if app.get_screenshot_use_editor() {
         app.open_screenshot_editor(img, clip, tool);
     } else {
@@ -83,7 +95,7 @@ pub fn launch_editor(
             open::that(&path)?;
         }
     }
-    Ok(())
+    Ok(ScreenshotLaunchOutcome::Completed)
 }
 
 pub struct ScreenshotPlugin;
