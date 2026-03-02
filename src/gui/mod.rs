@@ -3410,10 +3410,9 @@ impl LauncherApp {
                 "desktop_clip" => (ScreenshotMode::Desktop, true, MarkupTool::Rectangle),
                 _ => (ScreenshotMode::Desktop, false, MarkupTool::Rectangle),
             };
-            if self.handle_screenshot_launch_result(crate::plugins::screenshot::launch_editor(
-                self, mode, clip, tool,
-            )) && a.action != "help:show"
-            {
+            let screenshot_result =
+                crate::plugins::screenshot::launch_editor(self, mode, clip, tool);
+            if self.handle_screenshot_launch_result(screenshot_result) && a.action != "help:show" {
                 self.record_history_usage(&a, &current, source);
             }
         } else if let Err(e) = execute_action(&a) {
