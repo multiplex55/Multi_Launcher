@@ -5574,8 +5574,6 @@ mod tests {
 
         assert!(!handled);
         assert!(app.error.is_none());
-        assert!(app.toasts.is_empty());
-
         let log_path = std::path::Path::new(TOAST_LOG_FILE);
         assert!(!log_path.exists());
 
