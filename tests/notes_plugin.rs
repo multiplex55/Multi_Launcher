@@ -213,6 +213,42 @@ fn note_link_dedupes_backlinks() {
 }
 
 #[test]
+fn link_new_creates_only_when_missing_and_inserts_exact_wiki_syntax() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _tmp = setup();
+    append_note("Existing Note", "body").unwrap();
+
+    let ctx = egui::Context::default();
+    let mut app = new_app(&ctx);
+    let mut panel =
+        multi_launcher::gui::NotePanel::from_note(multi_launcher::plugins::note::Note {
+            title: "Current".into(),
+            path: std::path::PathBuf::new(),
+            content: "prefix suffix".into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "current".into(),
+            alias: None,
+            entity_refs: Vec::new(),
+        });
+    let id = egui::Id::new("note_content");
+
+    let before_count = load_notes().unwrap().len();
+    panel.set_link_new_name("Existing Note");
+    panel.insert_or_create_note_link(&ctx, id, &mut app);
+    assert_eq!(panel.note_content(), "prefix suffix[[Existing Note]]");
+    let after_existing_count = load_notes().unwrap().len();
+    assert_eq!(after_existing_count, before_count);
+
+    panel.set_link_new_name("Fresh Note");
+    panel.insert_or_create_note_link(&ctx, id, &mut app);
+    assert!(panel.note_content().contains("[[fresh-note]]"));
+    let final_notes = load_notes().unwrap();
+    assert_eq!(final_notes.len(), before_count + 1);
+    assert!(final_notes.iter().any(|n| n.slug == "fresh-note"));
+}
+
+#[test]
 fn note_today_creates_daily_note_without_template() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let _tmp = setup();

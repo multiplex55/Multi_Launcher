@@ -3,8 +3,8 @@ use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::plugin::Plugin;
 use crate::plugins::note::{
-    assets_dir, available_tags, image_files, note_cache_snapshot, note_version, resolve_note_query,
-    save_note, Note, NoteExternalOpen, NotePlugin, NoteTarget,
+    append_note, assets_dir, available_tags, image_files, load_notes, note_cache_snapshot,
+    note_version, resolve_note_query, save_note, Note, NoteExternalOpen, NotePlugin, NoteTarget,
 };
 use crate::plugins::todo::{load_todos, todo_version, TODO_FILE};
 use eframe::egui::{self, popup, Color32, FontId, Key};
@@ -170,6 +170,8 @@ pub struct NotePanel {
     link_dialog_open: bool,
     link_text: String,
     link_url: String,
+    link_new_dialog_open: bool,
+    link_new_name: String,
 
     // Focus management: avoid requesting focus on an ID that does not correspond to
     // an existing widget in the current frame. This prevents AccessKit from seeing
@@ -275,6 +277,8 @@ impl NotePanel {
             link_dialog_open: false,
             link_text: String::new(),
             link_url: String::new(),
+            link_new_dialog_open: false,
+            link_new_name: String::new(),
             focus_textedit_next_frame: false,
             last_textedit_id: None,
             derived: NoteDerivedView::default(),
@@ -371,6 +375,10 @@ impl NotePanel {
 
     pub fn note_slug(&self) -> &str {
         &self.note.slug
+    }
+
+    pub fn note_content(&self) -> &str {
+        &self.note.content
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
@@ -991,6 +999,34 @@ impl NotePanel {
                 });
             self.link_dialog_open &= open_link;
         }
+        if self.link_new_dialog_open {
+            let mut open_link_new = true;
+            egui::Window::new("Link new note")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open_link_new)
+                .show(ctx, |ui| {
+                    ui.label("New note name:");
+                    ui.text_edit_singleline(&mut self.link_new_name);
+                    let is_empty = self.link_new_name.trim().is_empty();
+                    if is_empty {
+                        ui.colored_label(Color32::YELLOW, "Name is required");
+                    }
+                    ui.horizontal(|ui| {
+                        let id = self.last_textedit_id.unwrap_or(content_id);
+                        let confirm = ui.add_enabled(!is_empty, egui::Button::new("Link"));
+                        if confirm.clicked() {
+                            self.insert_or_create_note_link(ctx, id, app);
+                            self.focus_textedit_next_frame = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.link_new_name.clear();
+                            self.link_new_dialog_open = false;
+                        }
+                    });
+                });
+            self.link_new_dialog_open &= open_link_new;
+        }
         if save_now || (!open && app.note_save_on_close) {
             self.save(app);
             if self.overwrite_prompt {
@@ -1230,7 +1266,14 @@ impl NotePanel {
 
         ui.menu_button("Insert link", |ui| {
             ui.set_min_width(200.0);
-            ui.label("Insert link:");
+            ui.horizontal(|ui| {
+                ui.label("Insert link:");
+                if ui.button("Link new").clicked() {
+                    self.link_new_dialog_open = true;
+                    self.link_new_name.clear();
+                    ui.close_menu();
+                }
+            });
             ui.text_edit_singleline(&mut self.link_search);
             let plugin = NotePlugin::default();
             let results = plugin.search(&format!("note open {}", self.link_search));
@@ -1244,21 +1287,7 @@ impl NotePanel {
                         }
                         if ui.button(&title).clicked() {
                             let insert = format!("[[{title}]]");
-                            let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id)
-                                .unwrap_or_default();
-                            let idx = state
-                                .cursor
-                                .char_range()
-                                .map(|r| r.primary.index)
-                                .unwrap_or_else(|| self.note.content.chars().count());
-                            let idx_byte = char_to_byte_index(&self.note.content, idx);
-                            self.note.content.insert_str(idx_byte, &insert);
-                            state
-                                .cursor
-                                .set_char_range(Some(egui::text::CCursorRange::one(
-                                    egui::text::CCursor::new(idx + insert.chars().count()),
-                                )));
-                            state.store(ctx, id);
+                            self.insert_text_at_cursor_or_selection(ctx, id, &insert);
                             self.link_search.clear();
                             ui.close_menu();
                         }
@@ -1479,11 +1508,23 @@ impl NotePanel {
             self.link_text.clone()
         };
         let insert = format!("[{text}]({})", self.link_url);
+        self.insert_text_at_cursor_or_selection(ctx, id, &insert);
+        self.link_dialog_open = false;
+        self.link_text.clear();
+        self.link_url.clear();
+    }
+
+    fn insert_text_at_cursor_or_selection(
+        &mut self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        insert: &str,
+    ) {
         if let Some((start, end)) = self.pending_selection.take() {
             let (start_byte, end_byte) = char_range_to_byte_range(&self.note.content, start, end);
             self.note
                 .content
-                .replace_range(start_byte..end_byte, &insert);
+                .replace_range(start_byte..end_byte, insert);
             let mut state =
                 egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
             let cursor = start + insert.chars().count();
@@ -1493,27 +1534,85 @@ impl NotePanel {
                     egui::text::CCursor::new(cursor),
                 )));
             state.store(ctx, id);
-        } else {
-            let mut state =
-                egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
-            let idx = state
-                .cursor
-                .char_range()
-                .map(|r| r.primary.index)
-                .unwrap_or_else(|| self.note.content.chars().count());
-            let idx_byte = char_to_byte_index(&self.note.content, idx);
-            self.note.content.insert_str(idx_byte, &insert);
-            let cursor = idx + insert.chars().count();
-            state
-                .cursor
-                .set_char_range(Some(egui::text::CCursorRange::one(
-                    egui::text::CCursor::new(cursor),
-                )));
-            state.store(ctx, id);
+            return;
         }
-        self.link_dialog_open = false;
-        self.link_text.clear();
-        self.link_url.clear();
+
+        let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+        let idx = state
+            .cursor
+            .char_range()
+            .map(|r| r.primary.index)
+            .unwrap_or_else(|| self.note.content.chars().count());
+        let idx_byte = char_to_byte_index(&self.note.content, idx);
+        self.note.content.insert_str(idx_byte, insert);
+        let cursor = idx + insert.chars().count();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(cursor),
+            )));
+        state.store(ctx, id);
+    }
+
+    pub fn set_link_new_name(&mut self, name: impl Into<String>) {
+        self.link_new_name = name.into();
+    }
+
+    pub fn insert_or_create_note_link(
+        &mut self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        app: &mut LauncherApp,
+    ) {
+        let normalized_name = self.link_new_name.trim();
+        if normalized_name.is_empty() {
+            return;
+        }
+
+        let mut target_slug = slugify(normalized_name);
+        let mut link_target = normalized_name.to_string();
+
+        match resolve_note_query(normalized_name) {
+            NoteTarget::Resolved(slug) => {
+                target_slug = slug.clone();
+                if let Some(note) = load_notes()
+                    .ok()
+                    .and_then(|notes| notes.into_iter().find(|n| n.slug == slug))
+                {
+                    link_target = note.title;
+                } else {
+                    link_target = slug;
+                }
+            }
+            NoteTarget::Ambiguous(slugs) => {
+                if let Some(slug) = slugs.into_iter().next() {
+                    target_slug = slug.clone();
+                    link_target = slug;
+                }
+            }
+            NoteTarget::Broken => {
+                if let Err(err) = append_note(normalized_name, "") {
+                    app.report_error(
+                        "ui operation",
+                        format!("Failed to create note while linking: {err}"),
+                    );
+                    return;
+                }
+                target_slug = slugify(normalized_name);
+                link_target = target_slug.clone();
+            }
+        }
+
+        if target_slug == self.note.slug {
+            self.link_new_dialog_open = false;
+            self.link_new_name.clear();
+            return;
+        }
+
+        let insert = format!("[[{link_target}]]");
+        self.insert_text_at_cursor_or_selection(ctx, id, &insert);
+        self.link_new_dialog_open = false;
+        self.link_new_name.clear();
     }
 
     fn open_external(&self, app: &mut LauncherApp, choice: NoteExternalOpen) {
@@ -1923,6 +2022,120 @@ mod tests {
         panel.insert_link(&ctx, id);
         assert_eq!(panel.note.content, "hello [world](http://example.com)");
         assert!(panel.pending_selection.is_none());
+    }
+
+    #[test]
+    fn insert_or_create_note_link_creates_and_inserts_at_cursor() {
+        use tempfile::tempdir;
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("hello "));
+        panel.note.slug = "current-note".into();
+        panel.link_new_name = "Brand New Note".into();
+        let id = egui::Id::new("note_content");
+        let dir = tempdir().unwrap();
+        let prev = std::env::var("ML_NOTES_DIR").ok();
+        std::env::set_var("ML_NOTES_DIR", dir.path());
+        let _ = crate::plugins::note::refresh_cache();
+
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(6),
+            )));
+        state.store(&ctx, id);
+
+        panel.insert_or_create_note_link(&ctx, id, &mut app);
+
+        assert_eq!(panel.note.content, "hello [[brand-new-note]]");
+        let notes = crate::plugins::note::load_notes().unwrap();
+        assert!(notes.iter().any(|n| n.slug == "brand-new-note"));
+
+        if let Some(p) = prev {
+            std::env::set_var("ML_NOTES_DIR", p);
+        } else {
+            std::env::remove_var("ML_NOTES_DIR");
+        }
+        let _ = crate::plugins::note::refresh_cache();
+    }
+
+    #[test]
+    fn insert_or_create_note_link_reuses_existing_note() {
+        use tempfile::tempdir;
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("hello "));
+        panel.note.slug = "current-note".into();
+        panel.link_new_name = "existing note".into();
+        let id = egui::Id::new("note_content");
+        let dir = tempdir().unwrap();
+        let prev = std::env::var("ML_NOTES_DIR").ok();
+        std::env::set_var("ML_NOTES_DIR", dir.path());
+        crate::plugins::note::append_note("Existing Note", "body").unwrap();
+        let _ = crate::plugins::note::refresh_cache();
+
+        panel.insert_or_create_note_link(&ctx, id, &mut app);
+
+        assert_eq!(panel.note.content, "hello [[Existing Note]]");
+        let notes = crate::plugins::note::load_notes().unwrap();
+        assert_eq!(
+            notes.iter().filter(|n| n.slug == "existing-note").count(),
+            1
+        );
+
+        if let Some(p) = prev {
+            std::env::set_var("ML_NOTES_DIR", p);
+        } else {
+            std::env::remove_var("ML_NOTES_DIR");
+        }
+        let _ = crate::plugins::note::refresh_cache();
+    }
+
+    #[test]
+    fn insert_or_create_note_link_replaces_selection_and_sets_cursor() {
+        use tempfile::tempdir;
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("hello world"));
+        panel.note.slug = "current-note".into();
+        panel.pending_selection = Some((6, 11));
+        panel.link_new_name = "Linked Note".into();
+        let id = egui::Id::new("note_content");
+        let dir = tempdir().unwrap();
+        let prev = std::env::var("ML_NOTES_DIR").ok();
+        std::env::set_var("ML_NOTES_DIR", dir.path());
+        let _ = crate::plugins::note::refresh_cache();
+
+        panel.insert_or_create_note_link(&ctx, id, &mut app);
+
+        assert_eq!(panel.note.content, "hello [[linked-note]]");
+        let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
+        let idx = state.cursor.char_range().unwrap().primary.index;
+        assert_eq!(idx, "hello [[linked-note]]".chars().count());
+
+        if let Some(p) = prev {
+            std::env::set_var("ML_NOTES_DIR", p);
+        } else {
+            std::env::remove_var("ML_NOTES_DIR");
+        }
+        let _ = crate::plugins::note::refresh_cache();
+    }
+
+    #[test]
+    fn insert_or_create_note_link_empty_name_does_not_mutate_content() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("hello world"));
+        panel.link_new_name = "   ".into();
+        let id = egui::Id::new("note_content");
+
+        panel.insert_or_create_note_link(&ctx, id, &mut app);
+
+        assert_eq!(panel.note.content, "hello world");
     }
 
     #[test]
