@@ -1156,12 +1156,24 @@ impl Plugin for NotePlugin {
                         format!("note:new:{slug}")
                     };
                     let title = slug.replace('-', " ");
-                    return vec![Action {
+                    let mut actions = vec![Action {
                         label: format!("Create {title}"),
                         desc: "Note".into(),
                         action,
                         args: None,
                     }];
+                    if !args.is_empty() {
+                        actions.push(Action {
+                            label: format!(
+                                "Ignored trailing arguments for note today: {}",
+                                args.trim()
+                            ),
+                            desc: "Note".into(),
+                            action: "query:note today".into(),
+                            args: None,
+                        });
+                    }
+                    return actions;
                 }
                 "links" | "link" => {
                     if args.is_empty() {

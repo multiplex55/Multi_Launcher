@@ -224,6 +224,23 @@ fn note_today_creates_daily_note_without_template() {
 }
 
 #[test]
+fn note_today_with_trailing_args_returns_safe_action() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _tmp = setup();
+    let plugin = NotePlugin::default();
+    let today = Local::now().format("%Y-%m-%d").to_string();
+
+    let results = plugin.search("note today Note");
+
+    assert!(results
+        .iter()
+        .any(|action| action.action == format!("note:new:{}", today)));
+    assert!(results
+        .iter()
+        .any(|action| action.action == "query:note today"));
+}
+
+#[test]
 fn note_today_uses_today_template_when_available() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = setup();

@@ -3326,10 +3326,22 @@ impl LauncherApp {
             let slug = slug.to_string();
             self.open_note_panel(&slug, None);
         } else if let Some(rest) = a.action.strip_prefix("note:new:") {
-            let mut parts = rest.splitn(2, ':');
-            let slug = parts.next().unwrap_or("").to_string();
-            let template = parts.next().map(|s| s.to_string());
-            self.open_note_panel(&slug, template.as_deref());
+            let mut parts = rest.split(':');
+            let slug = parts.next().unwrap_or("").trim();
+            let template = parts.next().map(str::trim);
+            let has_extra_delimiter = parts.next().is_some();
+            let slug_has_whitespace = slug.chars().any(char::is_whitespace);
+            let template_invalid = template
+                .map(|tpl| tpl.is_empty() || tpl.chars().any(char::is_whitespace))
+                .unwrap_or(false);
+            if has_extra_delimiter || slug.is_empty() || slug_has_whitespace || template_invalid {
+                self.report_error_message(
+                    "launcher",
+                    format!("Malformed note action: {}", a.action),
+                );
+                return;
+            }
+            self.open_note_panel(slug, template);
         } else if a.action == "note:tags" {
             self.open_note_tags();
             set_focus = true;
@@ -5716,6 +5728,40 @@ mod tests {
         app.last_results_valid = false;
         app.search();
         assert!(app.results.is_empty());
+    }
+
+    #[test]
+    fn malformed_note_new_action_reports_error_and_search_recovers() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.actions = Arc::new(vec![Action {
+            label: "Sample Action".into(),
+            desc: "Demo".into(),
+            action: "demo:action".into(),
+            args: None,
+        }]);
+        app.update_action_cache();
+
+        app.activate_action(
+            Action {
+                label: "Malformed note".into(),
+                desc: "Note".into(),
+                action: "note:new:2025-02-23:today:extra".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Enter,
+        );
+
+        assert!(app
+            .error
+            .as_ref()
+            .is_some_and(|msg| msg.contains("Malformed note action")));
+
+        app.query = "app sample".into();
+        app.last_results_valid = false;
+        app.search();
+        assert!(app.results.iter().any(|a| a.action == "demo:action"));
     }
 
     #[test]
