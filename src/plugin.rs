@@ -326,7 +326,7 @@ impl PluginManager {
             }
             if let Some(map) = enabled_caps {
                 if let Some(caps) = map.get(name) {
-                    if !caps.contains(&"search".to_string()) {
+                    if !caps.iter().any(|c| c == "search") {
                         continue;
                     }
                 }
