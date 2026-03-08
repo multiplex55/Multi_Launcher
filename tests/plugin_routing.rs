@@ -129,6 +129,28 @@ fn global_plugins_and_opt_out_plugins_still_run() {
 }
 
 #[test]
+fn search_capability_gate_skips_plugin_when_disabled() {
+    use std::collections::HashMap;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let mut pm = PluginManager::new();
+    pm.register(Box::new(CountingPlugin::new(
+        "searchable",
+        &[],
+        false,
+        calls.clone(),
+    )));
+
+    let mut enabled_caps = HashMap::new();
+    enabled_caps.insert("searchable".to_string(), vec!["commands".to_string()]);
+
+    let out = pm.search_filtered("query", None, Some(&enabled_caps));
+    assert!(out.is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn existing_prefix_commands_remain_equivalent() {
     let plugin = TodoPlugin::default();
     let direct = plugin.search("todo list");
