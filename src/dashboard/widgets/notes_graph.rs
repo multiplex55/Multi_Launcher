@@ -100,8 +100,9 @@ impl Widget for NotesGraphWidget {
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
         let snapshot = ctx.data_cache.snapshot();
-        let notes: Vec<Note> = snapshot.notes.iter().cloned().collect();
-        self.sync_from_snapshot(&notes, ctx.notes_version);
+        if self.last_rendered_version != Some(ctx.notes_version) {
+            self.sync_from_snapshot(snapshot.notes.as_ref(), ctx.notes_version);
+        }
 
         let can_animate = !ctx.reduce_dashboard_work_when_unfocused || ctx.dashboard_focused;
         if can_animate {
