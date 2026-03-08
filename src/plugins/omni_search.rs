@@ -220,6 +220,29 @@ impl Plugin for OmniSearchPlugin {
 }
 
 impl OmniSearchPlugin {
+    fn normalize_label_into(label: &str, normalized: &mut String) {
+        normalized.clear();
+        let mut pending_space = false;
+
+        for ch in label.chars() {
+            if ch.is_whitespace() {
+                if !normalized.is_empty() {
+                    pending_space = true;
+                }
+                continue;
+            }
+
+            if pending_space {
+                normalized.push(' ');
+                pending_space = false;
+            }
+
+            for lc in ch.to_lowercase() {
+                normalized.push(lc);
+            }
+        }
+    }
+
     fn search_all(&self, rest: &str) -> Vec<Action> {
         let mut out = Vec::new();
         // Keep source aggregation order stable for deterministic result ordering.
@@ -322,15 +345,18 @@ impl OmniSearchPlugin {
     fn dedup_actions(&self, actions: Vec<Action>) -> Vec<Action> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
+        let mut normalized_label = String::new();
+        let mut dedup_key = String::new();
+
         for action in actions {
-            let normalized_label = action
-                .label
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .to_lowercase();
-            let dedup_key = format!("{}\x1f{}", action.action, normalized_label);
-            if seen.insert(dedup_key) {
+            Self::normalize_label_into(&action.label, &mut normalized_label);
+
+            dedup_key.clear();
+            dedup_key.push_str(&action.action);
+            dedup_key.push('\x1f');
+            dedup_key.push_str(&normalized_label);
+
+            if seen.insert(dedup_key.clone()) {
                 out.push(action);
             }
         }
