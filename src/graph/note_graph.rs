@@ -482,22 +482,27 @@ impl LayoutState {
         }
         self.sync_model(model);
 
+        let node_count = model.nodes.len();
+        let mut positions = vec![[0.0_f32, 0.0_f32]; node_count];
+        let mut velocities = vec![[0.0_f32, 0.0_f32]; node_count];
+        let mut pinned = vec![false; node_count];
+
+        for (index, node) in model.nodes.iter().enumerate() {
+            if let Some(physics) = self.nodes.get(&node.id) {
+                positions[index] = physics.position;
+                velocities[index] = physics.velocity;
+                pinned[index] = physics.pinned;
+            }
+        }
+
         let iterations = cfg.iterations_per_frame.max(1);
         for _ in 0..iterations {
-            let node_ids: Vec<String> = model.nodes.iter().map(|n| n.id.clone()).collect();
-            let mut forces: HashMap<String, [f32; 2]> = node_ids
-                .iter()
-                .map(|id| (id.clone(), [0.0_f32, 0.0_f32]))
-                .collect();
+            let mut forces = vec![[0.0_f32, 0.0_f32]; node_count];
 
-            for i in 0..node_ids.len() {
-                for j in (i + 1)..node_ids.len() {
-                    let a = &node_ids[i];
-                    let b = &node_ids[j];
-                    let (pa, pb) = match (self.nodes.get(a), self.nodes.get(b)) {
-                        (Some(na), Some(nb)) => (na.position, nb.position),
-                        _ => continue,
-                    };
+            for i in 0..node_count {
+                for j in (i + 1)..node_count {
+                    let pa = positions[i];
+                    let pb = positions[j];
                     let dx = pa[0] - pb[0];
                     let dy = pa[1] - pb[1];
                     let dist_sq = (dx * dx + dy * dy).max(0.01);
@@ -506,22 +511,23 @@ impl LayoutState {
                     let fx = force_mag * dx / dist;
                     let fy = force_mag * dy / dist;
 
-                    if let Some(fa) = forces.get_mut(a) {
-                        fa[0] += fx;
-                        fa[1] += fy;
-                    }
-                    if let Some(fb) = forces.get_mut(b) {
-                        fb[0] -= fx;
-                        fb[1] -= fy;
-                    }
+                    forces[i][0] += fx;
+                    forces[i][1] += fy;
+                    forces[j][0] -= fx;
+                    forces[j][1] -= fy;
                 }
             }
 
             for edge in &model.edges {
-                let (pa, pb) = match (self.nodes.get(&edge.from), self.nodes.get(&edge.to)) {
-                    (Some(na), Some(nb)) => (na.position, nb.position),
+                let (from_index, to_index) = match (
+                    model.node_lookup.get(&edge.from),
+                    model.node_lookup.get(&edge.to),
+                ) {
+                    (Some(from), Some(to)) => (*from, *to),
                     _ => continue,
                 };
+                let pa = positions[from_index];
+                let pb = positions[to_index];
                 let dx = pb[0] - pa[0];
                 let dy = pb[1] - pa[1];
                 let dist = (dx * dx + dy * dy).sqrt().max(0.01);
@@ -530,28 +536,28 @@ impl LayoutState {
                 let fx = spring * dx / dist;
                 let fy = spring * dy / dist;
 
-                if let Some(fa) = forces.get_mut(&edge.from) {
-                    fa[0] += fx;
-                    fa[1] += fy;
-                }
-                if let Some(fb) = forces.get_mut(&edge.to) {
-                    fb[0] -= fx;
-                    fb[1] -= fy;
-                }
+                forces[from_index][0] += fx;
+                forces[from_index][1] += fy;
+                forces[to_index][0] -= fx;
+                forces[to_index][1] -= fy;
             }
 
-            for node in &model.nodes {
-                let force = forces.get(&node.id).copied().unwrap_or([0.0, 0.0]);
-                if let Some(physics) = self.nodes.get_mut(&node.id) {
-                    if physics.pinned {
-                        physics.velocity = [0.0, 0.0];
-                        continue;
-                    }
-                    physics.velocity[0] = (physics.velocity[0] + force[0] * 0.01) * cfg.damping;
-                    physics.velocity[1] = (physics.velocity[1] + force[1] * 0.01) * cfg.damping;
-                    physics.position[0] += physics.velocity[0];
-                    physics.position[1] += physics.velocity[1];
+            for i in 0..node_count {
+                if pinned[i] {
+                    velocities[i] = [0.0, 0.0];
+                    continue;
                 }
+                velocities[i][0] = (velocities[i][0] + forces[i][0] * 0.01) * cfg.damping;
+                velocities[i][1] = (velocities[i][1] + forces[i][1] * 0.01) * cfg.damping;
+                positions[i][0] += velocities[i][0];
+                positions[i][1] += velocities[i][1];
+            }
+        }
+
+        for (index, node) in model.nodes.iter().enumerate() {
+            if let Some(physics) = self.nodes.get_mut(&node.id) {
+                physics.position = positions[index];
+                physics.velocity = velocities[index];
             }
         }
     }
@@ -703,6 +709,75 @@ mod tests {
         assert_eq!(a_before, a_after);
     }
 
+    #[test]
+    fn layout_step_is_deterministic_for_same_initial_state() {
+        let notes = vec![
+            note("alpha", "Alpha", &[], &["beta"]),
+            note("beta", "Beta", &[], &["gamma"]),
+            note("gamma", "Gamma", &[], &[]),
+        ];
+        let model = build_note_graph(&notes, &NoteGraphFilter::default());
+
+        let mut first = LayoutState::default();
+        first.sync_model(&model);
+        let mut second = first.clone();
+
+        let cfg = LayoutConfig {
+            iterations_per_frame: 4,
+            ..Default::default()
+        };
+
+        first.step(&model, cfg);
+        second.step(&model, cfg);
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn layout_step_handles_empty_and_single_node_models() {
+        let cfg = LayoutConfig::default();
+
+        let mut layout = LayoutState::default();
+        layout.step(&NoteGraphModel::default(), cfg);
+        assert!(layout.nodes.is_empty());
+
+        let notes = vec![note("solo", "Solo", &[], &[])];
+        let model = build_note_graph(&notes, &NoteGraphFilter::default());
+        layout.step(&model, cfg);
+
+        assert_eq!(layout.nodes.len(), 1);
+        assert!(layout.nodes.contains_key("solo"));
+    }
+
+    #[test]
+    fn layout_step_keeps_pinned_nodes_stationary() {
+        let notes = vec![note("a", "A", &[], &["b"]), note("b", "B", &[], &[])];
+        let model = build_note_graph(&notes, &NoteGraphFilter::default());
+        let mut layout = LayoutState::default();
+        layout.sync_model(&model);
+
+        let pinned_before = layout
+            .nodes
+            .get("a")
+            .copied()
+            .expect("node a should exist before pinning");
+
+        if let Some(node) = layout.nodes.get_mut("a") {
+            node.pinned = true;
+            node.velocity = [3.0, -2.0];
+        }
+
+        layout.step(&model, LayoutConfig::default());
+
+        let pinned_after = layout
+            .nodes
+            .get("a")
+            .copied()
+            .expect("node a should exist after stepping");
+
+        assert_eq!(pinned_after.position, pinned_before.position);
+        assert_eq!(pinned_after.velocity, [0.0, 0.0]);
+    }
     #[test]
     fn draw_primitives_are_deterministic_for_fixed_input() {
         let notes = vec![
