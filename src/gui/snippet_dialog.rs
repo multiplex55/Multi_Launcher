@@ -10,6 +10,18 @@ pub struct SnippetDialog {
     edit_idx: Option<usize>,
     alias: String,
     text: String,
+    filter: String,
+}
+
+fn matches_snippet_filter(entry: &SnippetEntry, filter: &str) -> bool {
+    let filter = filter.trim();
+    if filter.is_empty() {
+        return true;
+    }
+
+    let lowered_filter = filter.to_lowercase();
+    entry.alias.to_lowercase().contains(&lowered_filter)
+        || entry.text.to_lowercase().contains(&lowered_filter)
 }
 
 impl SnippetDialog {
@@ -19,10 +31,12 @@ impl SnippetDialog {
         self.edit_idx = None;
         self.alias.clear();
         self.text.clear();
+        self.filter.clear();
     }
 
     pub fn open_edit(&mut self, alias: &str) {
         self.entries = load_snippets(SNIPPETS_FILE).unwrap_or_default();
+        self.filter.clear();
         if let Some(pos) = self.entries.iter().position(|e| e.alias == alias) {
             self.edit_idx = Some(pos);
             self.alias = alias.to_string();
@@ -97,11 +111,20 @@ impl SnippetDialog {
                     });
                 } else {
                     let mut remove: Option<usize> = None;
+                    ui.horizontal(|ui| {
+                        ui.label("Filter");
+                        ui.add(egui::TextEdit::singleline(&mut self.filter));
+                    });
+                    let mut shown_count = 0usize;
                     egui::ScrollArea::vertical()
                         .max_height(200.0)
                         .show(ui, |ui| {
                             for idx in 0..self.entries.len() {
                                 let entry = self.entries[idx].clone();
+                                if !matches_snippet_filter(&entry, &self.filter) {
+                                    continue;
+                                }
+                                shown_count += 1;
                                 ui.horizontal(|ui| {
                                     ui.label(format!(
                                         "{}: {}",
@@ -119,6 +142,9 @@ impl SnippetDialog {
                                 });
                             }
                         });
+                    if shown_count == 0 {
+                        ui.label("No snippets match filter");
+                    }
                     if let Some(idx) = remove {
                         self.entries.remove(idx);
                         save_now = true;
@@ -139,5 +165,50 @@ impl SnippetDialog {
         if close {
             self.open = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matches_snippet_filter;
+    use crate::plugins::snippets::SnippetEntry;
+
+    fn snippet(alias: &str, text: &str) -> SnippetEntry {
+        SnippetEntry {
+            alias: alias.to_string(),
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn empty_filter_matches_all() {
+        let entry = snippet("greet", "hello world");
+        assert!(matches_snippet_filter(&entry, ""));
+        assert!(matches_snippet_filter(&entry, "   "));
+    }
+
+    #[test]
+    fn alias_only_match() {
+        let entry = snippet("git-status", "show status");
+        assert!(matches_snippet_filter(&entry, "status"));
+    }
+
+    #[test]
+    fn text_only_match() {
+        let entry = snippet("gs", "Git Status Output");
+        assert!(matches_snippet_filter(&entry, "output"));
+    }
+
+    #[test]
+    fn case_insensitive_matching() {
+        let entry = snippet("DockerUp", "Start Containers");
+        assert!(matches_snippet_filter(&entry, "docker"));
+        assert!(matches_snippet_filter(&entry, "CONTAINERS"));
+    }
+
+    #[test]
+    fn non_match_behavior() {
+        let entry = snippet("deploy", "release production");
+        assert!(!matches_snippet_filter(&entry, "staging"));
     }
 }
