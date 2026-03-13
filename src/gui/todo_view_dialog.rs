@@ -8,6 +8,13 @@ use std::collections::HashMap;
 const TODO_VIEW_SIZE: egui::Vec2 = egui::vec2(360.0, 260.0);
 const TODO_VIEW_LIST_HEIGHT: f32 = 170.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum TodoSortMode {
+    #[default]
+    Priority,
+    Name,
+}
+
 pub fn todo_view_layout_sizes() -> (egui::Vec2, f32) {
     (TODO_VIEW_SIZE, TODO_VIEW_LIST_HEIGHT)
 }
@@ -56,7 +63,7 @@ pub struct TodoViewDialog {
     pub open: bool,
     entries: Vec<TodoEntry>,
     filter: String,
-    sort_by_priority: bool,
+    sort_mode: TodoSortMode,
     editing_idx: Option<usize>,
     editing_text: String,
     editing_priority: u8,
@@ -68,7 +75,7 @@ impl TodoViewDialog {
         self.entries = load_todos(TODO_FILE).unwrap_or_default();
         self.open = true;
         self.filter.clear();
-        self.sort_by_priority = true;
+        self.sort_mode = TodoSortMode::Priority;
         self.editing_idx = None;
     }
 
@@ -84,7 +91,56 @@ impl TodoViewDialog {
         }
         self.open = true;
         self.filter.clear();
-        self.sort_by_priority = true;
+        self.sort_mode = TodoSortMode::Priority;
+    }
+
+    fn sorted_todo_indices(
+        entries: &[TodoEntry],
+        filter: &str,
+        sort_mode: TodoSortMode,
+    ) -> Vec<usize> {
+        let filter = filter.trim().to_lowercase();
+        let mut indices: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                if filter.is_empty() {
+                    true
+                } else if filter.starts_with('#') {
+                    let tag = filter.trim_start_matches('#');
+                    e.tags.iter().any(|t| t.to_lowercase().contains(tag))
+                } else {
+                    e.text.to_lowercase().contains(&filter)
+                        || e.tags.iter().any(|t| t.to_lowercase().contains(&filter))
+                }
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        indices.sort_by(|a, b| {
+            let entry_a = &entries[*a];
+            let entry_b = &entries[*b];
+            match sort_mode {
+                TodoSortMode::Priority => entry_b
+                    .priority
+                    .cmp(&entry_a.priority)
+                    .then_with(|| {
+                        entry_a
+                            .text
+                            .to_lowercase()
+                            .cmp(&entry_b.text.to_lowercase())
+                    })
+                    .then_with(|| a.cmp(b)),
+                TodoSortMode::Name => entry_a
+                    .text
+                    .to_lowercase()
+                    .cmp(&entry_b.text.to_lowercase())
+                    .then_with(|| entry_b.priority.cmp(&entry_a.priority))
+                    .then_with(|| a.cmp(b)),
+            }
+        });
+
+        indices
     }
 
     fn link_note_to_todo(entry: &mut TodoEntry, note_slug: &str, note_title: &str) {
@@ -133,33 +189,28 @@ impl TodoViewDialog {
             .max_size(max_size)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.sort_by_priority, "Sort by priority");
+                    egui::ComboBox::from_label("Sort")
+                        .selected_text(match self.sort_mode {
+                            TodoSortMode::Priority => "Priority",
+                            TodoSortMode::Name => "Name",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.sort_mode,
+                                TodoSortMode::Priority,
+                                "Priority",
+                            );
+                            ui.selectable_value(
+                                &mut self.sort_mode,
+                                TodoSortMode::Name,
+                                "Name",
+                            );
+                        });
                     ui.label("Filter");
                     ui.text_edit_singleline(&mut self.filter);
                 });
                 ui.separator();
-                let filter = self.filter.trim().to_lowercase();
-                let mut indices: Vec<usize> = self
-                    .entries
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, e)| {
-                        if filter.is_empty() {
-                            true
-                        } else if filter.starts_with('#') {
-                            let tag = filter.trim_start_matches('#');
-                            e.tags.iter().any(|t| t.to_lowercase().contains(tag))
-                        } else {
-                            e.text.to_lowercase().contains(&filter)
-                                || e.tags.iter().any(|t| t.to_lowercase().contains(&filter))
-                        }
-                    })
-                    .map(|(i, _)| i)
-                    .collect();
-                if self.sort_by_priority {
-                    indices
-                        .sort_by(|a, b| self.entries[*b].priority.cmp(&self.entries[*a].priority));
-                }
+                let indices = Self::sorted_todo_indices(&self.entries, &self.filter, self.sort_mode);
                 let note_titles: HashMap<String, String> = load_notes()
                     .unwrap_or_default()
                     .into_iter()
@@ -399,6 +450,17 @@ impl TodoViewDialog {
 mod tests {
     use super::*;
 
+    fn todo_entry(text: &str, priority: u8, tags: &[&str]) -> TodoEntry {
+        TodoEntry {
+            id: format!("id-{text}"),
+            text: text.to_string(),
+            done: false,
+            priority,
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            entity_refs: vec![],
+        }
+    }
+
     #[test]
     fn todo_view_layout_sizes_constants() {
         let (window_size, list_height) = todo_view_layout_sizes();
@@ -430,5 +492,59 @@ mod tests {
             parse_note_token("@note:plan#phase-1"),
             Some(("plan".to_string(), Some("phase-1".to_string())))
         );
+    }
+
+    #[test]
+    fn sorted_indices_priority_ordering_with_ties() {
+        let entries = vec![
+            todo_entry("beta", 3, &[]),
+            todo_entry("alpha", 3, &[]),
+            todo_entry("gamma", 9, &[]),
+            todo_entry("alpha", 3, &[]),
+        ];
+
+        let indices = TodoViewDialog::sorted_todo_indices(&entries, "", TodoSortMode::Priority);
+        assert_eq!(indices, vec![2, 1, 3, 0]);
+    }
+
+    #[test]
+    fn sorted_indices_name_ordering_with_priority_tiebreak() {
+        let entries = vec![
+            todo_entry("zeta", 2, &[]),
+            todo_entry("Alpha", 1, &[]),
+            todo_entry("alpha", 7, &[]),
+            todo_entry("beta", 9, &[]),
+        ];
+
+        let indices = TodoViewDialog::sorted_todo_indices(&entries, "", TodoSortMode::Name);
+        assert_eq!(indices, vec![2, 1, 3, 0]);
+    }
+
+    #[test]
+    fn sorted_indices_name_mode_is_stable_when_name_and_priority_match() {
+        let entries = vec![
+            todo_entry("same", 4, &[]),
+            todo_entry("same", 4, &[]),
+            todo_entry("same", 4, &[]),
+        ];
+
+        let indices = TodoViewDialog::sorted_todo_indices(&entries, "", TodoSortMode::Name);
+        assert_eq!(indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn sorted_indices_filter_and_sort_interaction() {
+        let entries = vec![
+            todo_entry("alpha", 2, &["home"]),
+            todo_entry("bravo", 5, &["work"]),
+            todo_entry("charlie", 7, &["work-urgent"]),
+            todo_entry("work note", 1, &["misc"]),
+        ];
+
+        let by_text = TodoViewDialog::sorted_todo_indices(&entries, "work", TodoSortMode::Name);
+        assert_eq!(by_text, vec![1, 2, 3]);
+
+        let by_tag = TodoViewDialog::sorted_todo_indices(&entries, "#work", TodoSortMode::Priority);
+        assert_eq!(by_tag, vec![2, 1]);
     }
 }
