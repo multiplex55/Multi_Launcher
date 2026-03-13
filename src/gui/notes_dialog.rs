@@ -1,7 +1,32 @@
 use crate::gui::LauncherApp;
 use crate::plugins::note::{load_notes, save_notes, Note};
 use crate::plugins::todo::{load_todos, TODO_FILE};
+use chrono::{DateTime, Local};
 use eframe::egui;
+
+fn format_note_timestamp(dt: DateTime<Local>) -> String {
+    dt.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+fn format_note_timestamp_now() -> String {
+    format_note_timestamp(Local::now())
+}
+
+fn insert_at_char_boundary(text: &str, idx: usize, insert: &str) -> String {
+    let char_count = text.chars().count();
+    let char_idx = idx.min(char_count);
+    let byte_idx = text
+        .char_indices()
+        .nth(char_idx)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(text.len());
+
+    let mut out = String::with_capacity(text.len() + insert.len());
+    out.push_str(&text[..byte_idx]);
+    out.push_str(insert);
+    out.push_str(&text[byte_idx..]);
+    out
+}
 
 #[derive(Default)]
 pub struct NotesDialog {
@@ -78,11 +103,30 @@ impl NotesDialog {
                     egui::ScrollArea::vertical()
                         .max_height(ui.available_height())
                         .show(ui, |ui| {
-                            let resp = ui.add(
-                                egui::TextEdit::multiline(&mut self.text)
-                                    .desired_width(f32::INFINITY)
-                                    .desired_rows(10),
-                            );
+                            let output = egui::TextEdit::multiline(&mut self.text)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(10)
+                                .show(ui);
+                            let resp = output.response.clone();
+                            let caret_char_idx =
+                                output.cursor_range.map(|range| range.primary.ccursor.index);
+
+                            let mut insert_timestamp = false;
+                            let mut insert_idx = None;
+                            resp.context_menu(|ui| {
+                                if ui.button("Insert timestamp").clicked() {
+                                    insert_timestamp = true;
+                                    insert_idx = caret_char_idx;
+                                    ui.close_menu();
+                                }
+                            });
+
+                            if insert_timestamp {
+                                let ts = format_note_timestamp_now();
+                                let idx = insert_idx.unwrap_or(usize::MAX);
+                                self.text = insert_at_char_boundary(&self.text, idx, &ts);
+                            }
+
                             if resp.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
                                 let modifiers = ctx.input(|i| i.modifiers);
                                 ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
@@ -216,5 +260,45 @@ impl NotesDialog {
         if close {
             self.open = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_note_timestamp, insert_at_char_boundary};
+    use chrono::{Local, TimeZone};
+
+    #[test]
+    fn insert_in_middle() {
+        assert_eq!(
+            insert_at_char_boundary("hello world", 5, ","),
+            "hello, world"
+        );
+    }
+
+    #[test]
+    fn insert_at_start_and_end() {
+        assert_eq!(insert_at_char_boundary("world", 0, "hello "), "hello world");
+        assert_eq!(insert_at_char_boundary("hello", 5, " world"), "hello world");
+    }
+
+    #[test]
+    fn insert_out_of_range_falls_back_to_end() {
+        assert_eq!(insert_at_char_boundary("hello", 999, "!"), "hello!");
+    }
+
+    #[test]
+    fn unicode_safe_char_boundary_handling() {
+        assert_eq!(insert_at_char_boundary("a😀b", 2, "-"), "a😀-b");
+        assert_eq!(insert_at_char_boundary("éß", 1, "-"), "é-ß");
+    }
+
+    #[test]
+    fn timestamp_format_is_deterministic() {
+        let dt = Local
+            .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
+            .single()
+            .expect("valid local datetime");
+        assert_eq!(format_note_timestamp(dt), "2024-01-02 03:04:05");
     }
 }
