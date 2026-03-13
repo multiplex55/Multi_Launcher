@@ -161,27 +161,46 @@ fn is_default_generated_label(label: &str) -> bool {
     rest.chars().all(|c| c.is_ascii_digit()) || rest == normalize_recorded_tokens_for_label(rest)
 }
 
-fn list_query_prefix_for_plugin(plugin_name: &str) -> Option<&'static str> {
+fn list_query_prefix_for_plugin(plugin_name: &str) -> Option<(&'static str, Option<&'static str>)> {
     match plugin_name {
-        "folders" => Some("f list"),
-        "bookmarks" => Some("bm list"),
-        "clipboard" => Some("cb list"),
-        "emoji" => Some("emoji list"),
-        "notes" => Some("note list"),
+        "folders" => Some(("f list", Some("f"))),
+        "bookmarks" => Some(("bm list", Some("bm"))),
+        "clipboard" => Some(("cb list", Some("cb"))),
+        "emoji" => Some(("emoji list", Some("emoji"))),
+        "note" | "notes" => Some(("note list", Some("note search"))),
+        "processes" => Some(("ps", Some("pss"))),
+        "todo" => Some(("todo list", Some("todo"))),
+        "snippets" => Some(("cs list", Some("cs"))),
         _ => None,
     }
 }
 
+fn has_concrete_actions(actions: &[crate::actions::Action]) -> bool {
+    actions
+        .iter()
+        .any(|action| !action.action.trim_start().starts_with("query:"))
+}
+
 fn resolve_action_source(plugin: &dyn Plugin, filter: &str) -> Vec<crate::actions::Action> {
-    if let Some(prefix) = list_query_prefix_for_plugin(plugin.name()) {
-        let query = if filter.trim().is_empty() {
-            prefix.to_string()
-        } else {
-            format!("{prefix} {}", filter.trim())
-        };
-        let actions = plugin.search(&query);
-        if !actions.is_empty() {
-            return actions;
+    if let Some((prefix, alternate_prefix)) = list_query_prefix_for_plugin(plugin.name()) {
+        let filter = filter.trim();
+        for candidate in [Some(prefix), alternate_prefix] {
+            let Some(candidate) = candidate else {
+                continue;
+            };
+
+            let query = if filter.is_empty() {
+                candidate.to_string()
+            } else {
+                format!("{candidate} {filter}")
+            };
+            let actions = plugin.search(&query);
+            if actions.is_empty() {
+                continue;
+            }
+            if has_concrete_actions(&actions) {
+                return actions;
+            }
         }
     }
     plugin.commands()
@@ -1281,16 +1300,48 @@ mod tests {
         assert_eq!(dlg.rename_idx, Some(1));
     }
 
-    #[derive(Clone)]
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
     struct MockPlugin {
         name: String,
-        search_results: Vec<crate::actions::Action>,
+        search_results_by_query: HashMap<String, Vec<crate::actions::Action>>,
         command_results: Vec<crate::actions::Action>,
+        seen_queries: Mutex<Vec<String>>,
+    }
+
+    impl MockPlugin {
+        fn with_query_results(
+            name: &str,
+            search_results_by_query: impl IntoIterator<Item = (String, Vec<crate::actions::Action>)>,
+            command_results: Vec<crate::actions::Action>,
+        ) -> Self {
+            Self {
+                name: name.into(),
+                search_results_by_query: search_results_by_query.into_iter().collect(),
+                command_results,
+                seen_queries: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_queries(&self) -> Vec<String> {
+            self.seen_queries
+                .lock()
+                .expect("seen_queries lock poisoned")
+                .clone()
+        }
     }
 
     impl crate::plugin::Plugin for MockPlugin {
-        fn search(&self, _query: &str) -> Vec<crate::actions::Action> {
-            self.search_results.clone()
+        fn search(&self, query: &str) -> Vec<crate::actions::Action> {
+            self.seen_queries
+                .lock()
+                .expect("seen_queries lock poisoned")
+                .push(query.to_string());
+            self.search_results_by_query
+                .get(query)
+                .cloned()
+                .unwrap_or_default()
         }
 
         fn name(&self) -> &str {
@@ -1332,37 +1383,149 @@ mod tests {
         assert_eq!(entry.label, "My Favorite Gesture");
     }
 
+    fn query_result(
+        query: &str,
+        actions: Vec<crate::actions::Action>,
+    ) -> (String, Vec<crate::actions::Action>) {
+        (query.to_string(), actions)
+    }
+    fn concrete_action(action: &str) -> crate::actions::Action {
+        crate::actions::Action {
+            label: "Concrete".into(),
+            desc: "Mock".into(),
+            action: action.into(),
+            args: None,
+        }
+    }
+
+    fn query_action(action: &str) -> crate::actions::Action {
+        crate::actions::Action {
+            label: "Query".into(),
+            desc: "Mock".into(),
+            action: action.into(),
+            args: None,
+        }
+    }
+
     #[test]
     fn resolve_action_source_prefers_mapped_list_search_and_falls_back_to_commands() {
-        let list_action = crate::actions::Action {
-            label: "Clipboard Entry".into(),
-            desc: "Clipboard".into(),
-            action: "clipboard:copy:1".into(),
-            args: None,
-        };
-        let command_action = crate::actions::Action {
-            label: "cb list".into(),
-            desc: "Clipboard".into(),
-            action: "query:cb list".into(),
-            args: None,
-        };
+        let command_action = query_action("query:cb list");
+        let mapped_plugin = MockPlugin::with_query_results(
+            "clipboard",
+            [query_result(
+                "cb list abc",
+                vec![concrete_action("clipboard:copy:1")],
+            )],
+            vec![command_action.clone()],
+        );
 
-        let mapped_plugin = MockPlugin {
-            name: "clipboard".into(),
-            search_results: vec![list_action.clone()],
-            command_results: vec![command_action.clone()],
-        };
         let mapped_actions = resolve_action_source(&mapped_plugin, "abc");
         assert_eq!(mapped_actions.len(), 1);
         assert_eq!(mapped_actions[0].action, "clipboard:copy:1");
+        assert_eq!(mapped_plugin.seen_queries(), vec!["cb list abc"]);
 
-        let fallback_plugin = MockPlugin {
-            name: "custom".into(),
-            search_results: vec![list_action],
-            command_results: vec![command_action.clone()],
-        };
+        let fallback_plugin = MockPlugin::with_query_results(
+            "custom",
+            [query_result(
+                "ignored",
+                vec![concrete_action("clipboard:copy:2")],
+            )],
+            vec![command_action.clone()],
+        );
         let fallback_actions = resolve_action_source(&fallback_plugin, "abc");
         assert_eq!(fallback_actions.len(), 1);
         assert_eq!(fallback_actions[0].action, command_action.action);
+        assert!(fallback_plugin.seen_queries().is_empty());
+    }
+
+    #[test]
+    fn resolve_action_source_uses_mapped_search_for_each_supported_list_plugin() {
+        let cases = [
+            ("clipboard", "cb list", "clipboard:copy:0"),
+            ("emoji", "emoji list", "clipboard:😀"),
+            ("processes", "ps", "process:switch:42"),
+            ("note", "note list", "note:open:alpha"),
+            ("notes", "note list", "note:open:beta"),
+            ("folders", "f list", "/tmp"),
+            ("bookmarks", "bm list", "https://example.com"),
+            ("todo", "todo list", "todo:toggle:1"),
+            ("snippets", "cs list", "snippet:copy:1"),
+        ];
+
+        for (plugin_name, expected_query_prefix, expected_action) in cases {
+            let plugin = MockPlugin::with_query_results(
+                plugin_name,
+                [query_result(
+                    &format!("{expected_query_prefix} abc"),
+                    vec![concrete_action(expected_action)],
+                )],
+                vec![query_action("query:fallback")],
+            );
+
+            let actions = resolve_action_source(&plugin, "abc");
+            assert_eq!(actions.len(), 1, "plugin={plugin_name}");
+            assert_eq!(actions[0].action, expected_action, "plugin={plugin_name}");
+            assert_eq!(
+                plugin.seen_queries(),
+                vec![format!("{expected_query_prefix} abc")],
+                "plugin={plugin_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_action_source_falls_back_to_commands_when_mapped_search_is_empty() {
+        let command_action = query_action("query:note list");
+        let plugin = MockPlugin::with_query_results(
+            "note",
+            Vec::<(String, Vec<crate::actions::Action>)>::new(),
+            vec![command_action.clone()],
+        );
+
+        let actions = resolve_action_source(&plugin, "abc");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, command_action.action);
+        assert_eq!(
+            plugin.seen_queries(),
+            vec!["note list abc", "note search abc"]
+        );
+    }
+
+    #[test]
+    fn resolve_action_source_retries_alternate_prefix_when_primary_only_returns_query_actions() {
+        let plugin = MockPlugin::with_query_results(
+            "clipboard",
+            [
+                query_result(
+                    "cb list abc",
+                    vec![query_action("query:cb list"), query_action("query:cb")],
+                ),
+                query_result("cb abc", vec![concrete_action("clipboard:copy:7")]),
+            ],
+            vec![query_action("query:cb list")],
+        );
+
+        let actions = resolve_action_source(&plugin, "abc");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, "clipboard:copy:7");
+        assert_eq!(plugin.seen_queries(), vec!["cb list abc", "cb abc"]);
+    }
+
+    #[test]
+    fn resolve_action_source_uses_commands_for_unmapped_plugins() {
+        let command_action = query_action("query:custom");
+        let plugin = MockPlugin::with_query_results(
+            "custom",
+            [query_result(
+                "custom abc",
+                vec![concrete_action("custom:run")],
+            )],
+            vec![command_action.clone()],
+        );
+
+        let actions = resolve_action_source(&plugin, "abc");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, command_action.action);
+        assert!(plugin.seen_queries().is_empty());
     }
 }
