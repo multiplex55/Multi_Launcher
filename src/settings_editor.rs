@@ -335,6 +335,7 @@ impl SettingsEditor {
                 Some(self.help_hotkey.clone())
             },
             index_paths: current.index_paths.clone(),
+            max_indexed_items: current.max_indexed_items,
             plugin_dirs: current.plugin_dirs.clone(),
             enabled_plugins: current.enabled_plugins.clone(),
             enabled_capabilities: current.enabled_capabilities.clone(),

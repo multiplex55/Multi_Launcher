@@ -483,6 +483,7 @@ pub struct LauncherApp {
     bookmark_aliases_lc: HashMap<String, Option<String>>,
     plugin_dirs: Option<Vec<String>>,
     index_paths: Option<Vec<String>>,
+    max_indexed_items: Option<usize>,
     enabled_plugins: Option<HashSet<String>>,
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
     visible_flag: Arc<AtomicBool>,
@@ -785,20 +786,30 @@ impl LauncherApp {
                 WatchEvent::Actions => {
                     if let Ok(mut acts) = load_actions(&self.actions_path) {
                         let custom_len = acts.len();
+                        self.custom_len = custom_len;
                         if let Some(paths) = &self.index_paths {
-                            match indexer::index_paths(paths) {
-                                Ok(idx) => acts.extend(idx),
-                                Err(e) => {
-                                    tracing::error!(error = %e, "failed to index paths");
-                                    self.report_error_message(
-                                        "launcher",
-                                        format!("Failed to index paths: {e}"),
-                                    );
+                            let options =
+                                indexer::IndexOptions::with_max_items(self.max_indexed_items);
+                            for batch in indexer::index_paths_batched(paths, options) {
+                                match batch {
+                                    Ok(idx) => {
+                                        acts.extend(idx);
+                                        self.actions = Arc::new(acts.clone());
+                                        self.update_action_cache();
+                                        self.search();
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(error = %e, "failed to index paths");
+                                        self.report_error_message(
+                                            "launcher",
+                                            format!("Failed to index paths: {e}"),
+                                        );
+                                        break;
+                                    }
                                 }
                             }
                         }
                         self.actions = Arc::new(acts);
-                        self.custom_len = custom_len;
                         self.update_action_cache();
                         self.search();
                         crate::actions::bump_actions_version();
@@ -1538,6 +1549,7 @@ impl LauncherApp {
             bookmark_aliases_lc,
             plugin_dirs,
             index_paths,
+            max_indexed_items: settings.max_indexed_items,
             enabled_plugins,
             enabled_capabilities,
             visible_flag: visible_flag.clone(),

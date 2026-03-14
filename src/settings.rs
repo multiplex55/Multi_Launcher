@@ -328,6 +328,10 @@ pub struct Settings {
     /// Hotkey to show the quick help overlay. If `None`, the overlay is disabled.
     pub help_hotkey: Option<String>,
     pub index_paths: Option<Vec<String>>,
+    /// Maximum number of filesystem entries to index from `index_paths`.
+    ///
+    /// When missing, a conservative default is applied to protect memory.
+    pub max_indexed_items: Option<usize>,
     pub plugin_dirs: Option<Vec<String>>,
     /// Set of plugin names which should be enabled. If `None`, all loaded
     /// plugins are enabled.
@@ -606,6 +610,7 @@ impl Default for Settings {
             quit_hotkey: None,
             help_hotkey: Some("F1".into()),
             index_paths: None,
+            max_indexed_items: None,
             plugin_dirs: None,
             enabled_plugins: None,
             enabled_capabilities: None,
