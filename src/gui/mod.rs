@@ -435,9 +435,10 @@ pub struct LauncherApp {
     /// duplicates the pointer, keeping the action data itself shared. When
     /// actions are edited the entire `Arc` is replaced with a new one.
     pub actions: Arc<Vec<Action>>,
-    action_cache: Vec<(String, String)>,
+    action_cache: Vec<CachedSearchEntry>,
     actions_by_id: HashMap<String, Action>,
     command_cache: Vec<Action>,
+    command_search_cache: Vec<CachedSearchEntry>,
     completion_index: Option<Map<Vec<u8>>>,
     action_completion_dirty: bool,
     command_completion_dirty: bool,
@@ -593,6 +594,23 @@ pub struct LauncherApp {
     pub vim_mode: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CachedSearchEntry {
+    label_lc: String,
+    desc_lc: String,
+    action_lc: String,
+}
+
+impl CachedSearchEntry {
+    fn from_action(action: &Action) -> Self {
+        Self {
+            label_lc: action.label.to_lowercase(),
+            desc_lc: action.desc.to_lowercase(),
+            action_lc: action.action.to_lowercase(),
+        }
+    }
+}
+
 impl LauncherApp {
     fn normalize_alias(alias: Option<String>) -> (Option<String>, Option<String>) {
         let alias_lc = alias.as_ref().map(|text| text.to_lowercase());
@@ -646,12 +664,12 @@ impl LauncherApp {
         self.match_exact || self.fuzzy_weight <= 0.0
     }
 
-    fn matches_exact_display_text(haystack_label: &str, query: &str) -> bool {
-        let query_lc = query.trim().to_lowercase();
+    fn matches_exact_display_text(cached: &CachedSearchEntry, query_lc: &str) -> bool {
+        let query_lc = query_lc.trim();
         if query_lc.is_empty() {
             return true;
         }
-        haystack_label.to_lowercase().contains(&query_lc)
+        cached.label_lc.contains(query_lc)
     }
 
     fn should_bypass_exact_post_filter(query: &str, action: &str) -> bool {
@@ -704,7 +722,7 @@ impl LauncherApp {
         self.action_cache = self
             .actions
             .iter()
-            .map(|a| (a.label.to_lowercase(), a.desc.to_lowercase()))
+            .map(CachedSearchEntry::from_action)
             .collect();
         self.actions_by_id = self
             .actions
@@ -720,6 +738,7 @@ impl LauncherApp {
             .plugins
             .commands_filtered(self.enabled_plugins.as_ref());
         cmds.sort_by_cached_key(|a| a.label.to_lowercase());
+        self.command_search_cache = cmds.iter().map(CachedSearchEntry::from_action).collect();
         self.command_cache = cmds;
         self.command_completion_dirty = true;
         self.schedule_completion_rebuild();
@@ -1072,9 +1091,7 @@ impl LauncherApp {
 
         // Keep MG hook in lockstep with whether the plugin is enabled in the UI/settings.
         crate::plugins::mouse_gestures::sync_enabled_plugins(self.enabled_plugins.as_ref());
-        if self.enabled_plugins.is_some() {
-            self.update_command_cache();
-        }
+        self.update_command_cache();
         self.enabled_capabilities = enabled_capabilities;
         if let Some((x, y)) = offscreen_pos {
             self.offscreen_pos = (x as f32, y as f32);
@@ -1629,6 +1646,7 @@ impl LauncherApp {
             action_cache: Vec::new(),
             actions_by_id,
             command_cache: Vec::new(),
+            command_search_cache: Vec::new(),
             completion_index: None,
             action_completion_dirty: false,
             command_completion_dirty: false,
@@ -1747,14 +1765,15 @@ impl LauncherApp {
             res.extend(self.actions.iter().cloned().map(|a| (a, 0.0)));
         } else {
             for (i, a) in self.actions.iter().enumerate() {
-                let (_, ref desc_lc) = self.action_cache[i];
+                let cached = &self.action_cache[i];
                 if self.is_exact_match_mode() {
                     let alias_match = self.alias_matches_lc(&a.action, query_lc);
-                    let label_match = Self::matches_exact_display_text(&a.label, query);
+                    let label_match = Self::matches_exact_display_text(cached, query_lc);
                     // Prefer displayed label text, but keep `desc`/aliases as supplemental
                     // filters for compatibility with existing query behavior.
-                    let desc_match = desc_lc.contains(query_lc);
-                    if label_match || desc_match || alias_match {
+                    let desc_match = cached.desc_lc.contains(query_lc);
+                    let action_match = cached.action_lc.contains(query_lc);
+                    if label_match || desc_match || action_match || alias_match {
                         let score = if alias_match { 1.0 } else { 0.0 };
                         res.push((a.clone(), score));
                     }
@@ -1781,7 +1800,7 @@ impl LauncherApp {
             );
             let query_term = trimmed_lc.splitn(2, ' ').nth(1).unwrap_or("");
             for a in plugin_results {
-                let desc_lc = a.desc.to_lowercase();
+                let cached = CachedSearchEntry::from_action(&a);
                 if self.is_exact_match_mode() {
                     if Self::should_bypass_exact_post_filter(trimmed, &a.action) {
                         // Plugin commands like `note today`/`note search <term>` already
@@ -1795,9 +1814,10 @@ impl LauncherApp {
                         res.push((a, 0.0));
                     } else {
                         let alias_match = self.alias_matches_lc(&a.action, query_term);
-                        let label_match = Self::matches_exact_display_text(&a.label, query_term);
-                        let desc_match = desc_lc.contains(query_term);
-                        if label_match || desc_match || alias_match {
+                        let label_match = Self::matches_exact_display_text(&cached, query_term);
+                        let desc_match = cached.desc_lc.contains(query_term);
+                        let action_match = cached.action_lc.contains(query_term);
+                        if label_match || desc_match || action_match || alias_match {
                             let score = if alias_match { 1.0 } else { 0.0 };
                             res.push((a, score));
                         }
@@ -1825,24 +1845,25 @@ impl LauncherApp {
         );
 
         if plugin_results.is_empty() && !trimmed.is_empty() {
-            for a in self
-                .plugins
-                .commands_filtered(self.enabled_plugins.as_ref())
+            for (a, cached) in self
+                .command_cache
+                .iter()
+                .zip(self.command_search_cache.iter())
             {
-                let desc_lc = a.desc.to_lowercase();
                 if self.is_exact_match_mode() {
                     let alias_match = self.alias_matches_lc(&a.action, trimmed_lc);
-                    let label_match = Self::matches_exact_display_text(&a.label, trimmed);
-                    let desc_match = desc_lc.contains(trimmed_lc);
-                    if label_match || desc_match || alias_match {
+                    let label_match = Self::matches_exact_display_text(cached, trimmed_lc);
+                    let desc_match = cached.desc_lc.contains(trimmed_lc);
+                    let action_match = cached.action_lc.contains(trimmed_lc);
+                    if label_match || desc_match || action_match || alias_match {
                         let score = if alias_match { 1.0 } else { 0.0 };
-                        res.push((a, score));
+                        res.push((a.clone(), score));
                     }
                 } else {
                     let s1 = self.matcher.fuzzy_match(&a.label, trimmed);
                     let s2 = self.matcher.fuzzy_match(&a.desc, trimmed);
                     if let Some(score) = s1.max(s2) {
-                        res.push((a, score as f32 * self.fuzzy_weight));
+                        res.push((a.clone(), score as f32 * self.fuzzy_weight));
                     }
                 }
             }
@@ -1859,7 +1880,7 @@ impl LauncherApp {
             }
             let query_term_lc = query_term.to_lowercase();
             for a in plugin_results {
-                let desc_lc = a.desc.to_lowercase();
+                let cached = CachedSearchEntry::from_action(&a);
                 if self.is_exact_match_mode() {
                     if Self::should_bypass_exact_post_filter(trimmed, &a.action) {
                         // Explicit plugin commands can resolve into result lists/artifacts.
@@ -1872,9 +1893,10 @@ impl LauncherApp {
                         res.push((a, 0.0));
                     } else {
                         let alias_match = self.alias_matches_lc(&a.action, &query_term_lc);
-                        let label_match = Self::matches_exact_display_text(&a.label, &query_term);
-                        let desc_match = desc_lc.contains(&query_term_lc);
-                        if label_match || desc_match || alias_match {
+                        let label_match = Self::matches_exact_display_text(&cached, &query_term_lc);
+                        let desc_match = cached.desc_lc.contains(&query_term_lc);
+                        let action_match = cached.action_lc.contains(&query_term_lc);
+                        if label_match || desc_match || action_match || alias_match {
                             let score = if alias_match { 1.0 } else { 0.0 };
                             res.push((a, score));
                         }
@@ -5667,17 +5689,49 @@ mod tests {
     }
 
     #[test]
-    fn exact_display_match_is_case_insensitive_substring() {
-        assert!(LauncherApp::matches_exact_display_text("eve", "Eve"));
-        assert!(LauncherApp::matches_exact_display_text("EVENING", "Eve"));
+    fn exact_display_match_uses_pre_normalized_query_substring() {
+        let cached = CachedSearchEntry {
+            label_lc: "testingeve123".into(),
+            desc_lc: String::new(),
+            action_lc: String::new(),
+        };
         assert!(LauncherApp::matches_exact_display_text(
-            "testingEve123",
-            "eve"
+            &cached,
+            &"Eve".to_lowercase()
         ));
-        assert!(!LauncherApp::matches_exact_display_text(
-            "testing123",
-            "Eve"
-        ));
+        assert!(LauncherApp::matches_exact_display_text(&cached, "eve"));
+        assert!(!LauncherApp::matches_exact_display_text(&cached, "night"));
+    }
+
+    #[test]
+    fn action_and_command_search_cache_is_normalized() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.actions = Arc::new(vec![Action {
+            label: "MiXeD Label".into(),
+            desc: "MiXeD Desc".into(),
+            action: "Action:ID".into(),
+            args: None,
+        }]);
+        app.update_action_cache();
+
+        assert_eq!(app.action_cache.len(), 1);
+        assert_eq!(app.action_cache[0].label_lc, "mixed label");
+        assert_eq!(app.action_cache[0].desc_lc, "mixed desc");
+        assert_eq!(app.action_cache[0].action_lc, "action:id");
+
+        app.plugins.register(Box::new(ExactFilterPlugin));
+        app.update_command_cache();
+        assert_eq!(app.command_cache.len(), app.command_search_cache.len());
+        for (action, cached) in app
+            .command_cache
+            .iter()
+            .zip(app.command_search_cache.iter())
+        {
+            assert_eq!(cached.label_lc, action.label.to_lowercase());
+            assert_eq!(cached.desc_lc, action.desc.to_lowercase());
+            assert_eq!(cached.action_lc, action.action.to_lowercase());
+        }
     }
 
     #[test]
@@ -5728,6 +5782,89 @@ mod tests {
         app.last_results_valid = false;
         app.search();
         assert!(app.results.is_empty());
+    }
+
+    #[test]
+    fn update_paths_refreshes_command_search_cache_for_plugin_reload() {
+        struct CommandPlugin;
+
+        impl crate::plugin::Plugin for CommandPlugin {
+            fn search(&self, _query: &str) -> Vec<Action> {
+                Vec::new()
+            }
+
+            fn name(&self) -> &str {
+                "command-plugin"
+            }
+
+            fn description(&self) -> &str {
+                "command plugin"
+            }
+
+            fn capabilities(&self) -> &[&str] {
+                &[]
+            }
+
+            fn commands(&self) -> Vec<Action> {
+                vec![Action {
+                    label: "PlUgIn Command".into(),
+                    desc: "PlUgIn Desc".into(),
+                    action: "Plugin:Command".into(),
+                    args: None,
+                }]
+            }
+        }
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.plugins.register(Box::new(CommandPlugin));
+
+        app.update_paths(
+            None, // plugin_dirs
+            None, // index_paths
+            None, // enabled_plugins
+            None, // enabled_capabilities
+            None, // offscreen_pos
+            None, // enable_toasts
+            None, // show_inline_errors
+            None, // show_error_toasts
+            None, // toast_duration
+            None, // fuzzy_weight
+            None, // usage_weight
+            None, // match_exact
+            None, // follow_mouse
+            None, // static_enabled
+            None, // static_pos
+            None, // static_size
+            None, // hide_after_run
+            None, // clear_query_after_run
+            None, // require_confirm_destructive
+            None, // timer_refresh
+            None, // disable_timer_updates
+            None, // preserve_command
+            None, // query_autocomplete
+            None, // net_refresh
+            None, // net_unit
+            None, // screenshot_dir
+            None, // screenshot_save_file
+            None, // screenshot_use_editor
+            None, // screenshot_auto_save
+            None, // always_on_top
+            None, // page_jump
+            None, // note_panel_default_size
+            None, // note_save_on_close
+            None, // note_always_overwrite
+            None, // note_images_as_links
+            None, // note_show_details
+            None, // note_more_limit
+            None, // show_dashboard_diagnostics
+        );
+
+        assert_eq!(app.command_cache.len(), 1);
+        assert_eq!(app.command_search_cache.len(), 1);
+        assert_eq!(app.command_search_cache[0].label_lc, "plugin command");
+        assert_eq!(app.command_search_cache[0].desc_lc, "plugin desc");
+        assert_eq!(app.command_search_cache[0].action_lc, "plugin:command");
     }
 
     #[test]
