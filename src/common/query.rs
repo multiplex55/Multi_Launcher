@@ -1,5 +1,45 @@
 use crate::actions::Action;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionFilterMetadata {
+    pub normalized_id: String,
+    pub normalized_kind_candidates: Vec<String>,
+}
+
+impl ActionFilterMetadata {
+    pub fn from_action(action: &Action) -> Self {
+        let mut normalized_kind_candidates = Vec::new();
+        if !action.desc.trim().is_empty() {
+            normalized_kind_candidates.push(action.desc.trim().to_lowercase());
+        }
+        if let Some(prefix) = action.action.split(':').next() {
+            if !prefix.trim().is_empty() {
+                normalized_kind_candidates.push(prefix.trim().to_lowercase());
+            }
+        }
+        normalized_kind_candidates.sort();
+        normalized_kind_candidates.dedup();
+
+        Self {
+            normalized_id: action.action.to_lowercase(),
+            normalized_kind_candidates,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionWithMetadata {
+    pub action: Action,
+    pub metadata: ActionFilterMetadata,
+}
+
+impl ActionWithMetadata {
+    pub fn from_action(action: Action) -> Self {
+        let metadata = ActionFilterMetadata::from_action(&action);
+        Self { action, metadata }
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct QueryFilters {
     pub remaining_tokens: Vec<String>,
@@ -245,15 +285,29 @@ pub fn rebuild_query(tokens: &[String]) -> String {
 }
 
 pub fn apply_action_filters(actions: Vec<Action>, filters: &QueryFilters) -> Vec<Action> {
+    apply_action_filters_with_metadata(
+        actions
+            .into_iter()
+            .map(ActionWithMetadata::from_action)
+            .collect(),
+        filters,
+    )
+}
+
+pub fn apply_action_filters_with_metadata(
+    actions: Vec<ActionWithMetadata>,
+    filters: &QueryFilters,
+) -> Vec<Action> {
     actions
         .into_iter()
-        .filter(|action| action_matches_filters(action, filters))
+        .filter(|cached| action_matches_filters(&cached.metadata, filters))
+        .map(|cached| cached.action)
         .collect()
 }
 
-fn action_matches_filters(action: &Action, filters: &QueryFilters) -> bool {
-    let action_id = action.action.to_lowercase();
-    let kind_candidates = action_kind_candidates(action);
+pub fn action_matches_filters(metadata: &ActionFilterMetadata, filters: &QueryFilters) -> bool {
+    let action_id = &metadata.normalized_id;
+    let kind_candidates = &metadata.normalized_kind_candidates;
 
     if !filters.include_kinds.is_empty()
         && !filters
@@ -281,21 +335,6 @@ fn action_matches_filters(action: &Action, filters: &QueryFilters) -> bool {
     }
 
     true
-}
-
-fn action_kind_candidates(action: &Action) -> Vec<String> {
-    let mut kinds = Vec::new();
-    if !action.desc.trim().is_empty() {
-        kinds.push(action.desc.trim().to_lowercase());
-    }
-    if let Some(prefix) = action.action.split(':').next() {
-        if !prefix.trim().is_empty() {
-            kinds.push(prefix.trim().to_lowercase());
-        }
-    }
-    kinds.sort();
-    kinds.dedup();
-    kinds
 }
 
 fn split_negation(token: &str) -> (&str, bool) {

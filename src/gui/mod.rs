@@ -75,7 +75,7 @@ pub use volume_dialog::VolumeDialog;
 use crate::actions::folders;
 use crate::actions::{load_actions, Action};
 use crate::actions_editor::ActionsEditor;
-use crate::common::query::split_action_filters;
+use crate::common::query::{action_matches_filters, split_action_filters, ActionFilterMetadata};
 use crate::dashboard::config::DashboardConfig;
 use crate::dashboard::widgets::{WidgetRegistry, WidgetSettingsContext};
 use crate::dashboard::{
@@ -436,6 +436,7 @@ pub struct LauncherApp {
     /// actions are edited the entire `Arc` is replaced with a new one.
     pub actions: Arc<Vec<Action>>,
     action_cache: Vec<CachedSearchEntry>,
+    action_filter_metadata: Vec<ActionFilterMetadata>,
     actions_by_id: HashMap<String, Action>,
     command_cache: Vec<Action>,
     command_search_cache: Vec<CachedSearchEntry>,
@@ -723,6 +724,11 @@ impl LauncherApp {
             .actions
             .iter()
             .map(CachedSearchEntry::from_action)
+            .collect();
+        self.action_filter_metadata = self
+            .actions
+            .iter()
+            .map(ActionFilterMetadata::from_action)
             .collect();
         self.actions_by_id = self
             .actions
@@ -1644,6 +1650,7 @@ impl LauncherApp {
             confirm_modal: ConfirmationModal::default(),
             pending_confirm: None,
             action_cache: Vec::new(),
+            action_filter_metadata: Vec::new(),
             actions_by_id,
             command_cache: Vec::new(),
             command_search_cache: Vec::new(),
@@ -1759,12 +1766,26 @@ impl LauncherApp {
         self.recompute_query_results_layout();
     }
 
-    fn search_actions(&self, query: &str, query_lc: &str) -> Vec<(Action, f32)> {
+    fn search_actions(&self, query: &str, _query_lc: &str) -> Vec<(Action, f32)> {
+        let (filtered_query, filters) = split_action_filters(query);
+        let filtered_query = filtered_query.trim();
+        let filtered_query_lc = filtered_query.to_lowercase();
+        let query = filtered_query;
+        let query_lc = filtered_query_lc.as_str();
+
         let mut res = Vec::new();
         if query.is_empty() {
-            res.extend(self.actions.iter().cloned().map(|a| (a, 0.0)));
+            for (i, a) in self.actions.iter().enumerate() {
+                if action_matches_filters(&self.action_filter_metadata[i], &filters) {
+                    res.push((a.clone(), 0.0));
+                }
+            }
         } else {
             for (i, a) in self.actions.iter().enumerate() {
+                if !action_matches_filters(&self.action_filter_metadata[i], &filters) {
+                    continue;
+                }
+
                 let cached = &self.action_cache[i];
                 if self.is_exact_match_mode() {
                     let alias_match = self.alias_matches_lc(&a.action, query_lc);
