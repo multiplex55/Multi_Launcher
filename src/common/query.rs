@@ -452,4 +452,32 @@ mod tests {
         };
         assert!(!action_matches_filters(&metadata, &exclude_hit));
     }
+    #[test]
+    fn apply_action_filters_with_metadata_filters_without_recomputing() {
+        let keep = Action {
+            label: "Keep".into(),
+            desc: "Todo".into(),
+            action: "todo:item:1".into(),
+            args: None,
+        };
+        let drop = Action {
+            label: "Drop".into(),
+            desc: "Note".into(),
+            action: "note:item:2".into(),
+            args: None,
+        };
+        let actions = vec![
+            ActionWithMetadata::from_action(keep.clone()),
+            ActionWithMetadata::from_action(drop),
+        ];
+        let filters = QueryFilters {
+            include_ids: vec!["todo:item:1".into()],
+            include_kinds: vec!["todo".into()],
+            ..QueryFilters::default()
+        };
+
+        let filtered = apply_action_filters_with_metadata(actions, &filters);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].action, keep.action);
+    }
 }
