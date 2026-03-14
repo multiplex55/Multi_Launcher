@@ -27,7 +27,7 @@ impl ActionFilterMetadata {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ActionWithMetadata {
     pub action: Action,
     pub metadata: ActionFilterMetadata,
@@ -326,11 +326,11 @@ pub fn action_matches_filters(metadata: &ActionFilterMetadata, filters: &QueryFi
         return false;
     }
 
-    if !filters.include_ids.is_empty() && !filters.include_ids.iter().any(|id| action_id == *id) {
+    if !filters.include_ids.is_empty() && !filters.include_ids.iter().any(|id| action_id == id) {
         return false;
     }
 
-    if filters.exclude_ids.iter().any(|id| action_id == *id) {
+    if filters.exclude_ids.iter().any(|id| action_id == id) {
         return false;
     }
 
