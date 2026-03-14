@@ -5689,13 +5689,16 @@ mod tests {
     }
 
     #[test]
-    fn exact_display_match_is_case_insensitive_substring() {
+    fn exact_display_match_uses_pre_normalized_query_substring() {
         let cached = CachedSearchEntry {
             label_lc: "testingeve123".into(),
             desc_lc: String::new(),
             action_lc: String::new(),
         };
-        assert!(LauncherApp::matches_exact_display_text(&cached, "Eve"));
+        assert!(LauncherApp::matches_exact_display_text(
+            &cached,
+            &"Eve".to_lowercase()
+        ));
         assert!(LauncherApp::matches_exact_display_text(&cached, "eve"));
         assert!(!LauncherApp::matches_exact_display_text(&cached, "night"));
     }
