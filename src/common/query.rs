@@ -422,4 +422,34 @@ mod tests {
         assert_eq!(filters.include_kinds, vec!["todo"]);
         assert_eq!(filters.exclude_ids, vec!["todo:done:1"]);
     }
+
+    #[test]
+    fn action_matches_filters_uses_metadata_for_id_and_kind() {
+        let action = Action {
+            label: "Task".into(),
+            desc: "Todo".into(),
+            action: "todo:item:1".into(),
+            args: None,
+        };
+        let metadata = ActionFilterMetadata::from_action(&action);
+
+        let include_match = QueryFilters {
+            include_ids: vec!["todo:item:1".into()],
+            include_kinds: vec!["todo".into()],
+            ..QueryFilters::default()
+        };
+        assert!(action_matches_filters(&metadata, &include_match));
+
+        let include_miss = QueryFilters {
+            include_ids: vec!["todo:item:2".into()],
+            ..QueryFilters::default()
+        };
+        assert!(!action_matches_filters(&metadata, &include_miss));
+
+        let exclude_hit = QueryFilters {
+            exclude_ids: vec!["todo:item:1".into()],
+            ..QueryFilters::default()
+        };
+        assert!(!action_matches_filters(&metadata, &exclude_hit));
+    }
 }
