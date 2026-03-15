@@ -199,7 +199,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Some(paths) = &settings.index_paths {
-        actions_vec.extend(indexer::index_paths(paths)?);
+        let options = indexer::IndexOptions::with_max_items(settings.max_indexed_items);
+        for batch in indexer::index_paths_batched(paths, options) {
+            actions_vec.extend(batch?);
+        }
     }
     let actions = Arc::new(actions_vec);
 
