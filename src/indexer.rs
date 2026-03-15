@@ -80,8 +80,11 @@ impl Iterator for IndexBatchIter {
         let mut batch = Vec::with_capacity(self.options.batch_size);
         while self.produced < self.options.max_items && batch.len() < self.options.batch_size {
             if self.current.is_none() {
-                let root = self.next_root()?;
-                self.current = Some(WalkDir::new(root).into_iter());
+                if let Some(root) = self.next_root() {
+                    self.current = Some(WalkDir::new(root).into_iter());
+                } else {
+                    break;
+                }
             }
 
             let Some(iter) = self.current.as_mut() else {
