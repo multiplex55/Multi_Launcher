@@ -111,6 +111,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
+#[cfg(test)]
 use search::{COMPLETION_REBUILD_DEBOUNCE, NOTE_SEARCH_DEBOUNCE};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -126,9 +127,9 @@ use std::time::{Duration, Instant};
 use url::Url;
 use watch::watch_file;
 
+pub use state::WatchEvent;
 pub(crate) use state::{
     ActivationSource, PendingConfirmAction, ResultContextMenuKind, TestWatchEvent, UiErrorEvent,
-    WatchEvent,
 };
 
 const SUBCOMMANDS: &[&str] = &[
