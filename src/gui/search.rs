@@ -1,10 +1,4 @@
-use super::{CachedSearchEntry, LauncherApp, APP_PREFIX, SUBCOMMANDS};
-use crate::common::query::{action_matches_filters, split_action_filters};
-use fst::{IntoStreamer, Map, MapBuilder, Streamer};
-use fuzzy_matcher::skim::SkimMatcherV2;
-use fuzzy_matcher::FuzzyMatcher;
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use super::*;
 
 pub(crate) const NOTE_SEARCH_DEBOUNCE: Duration = Duration::from_secs(1);
 pub(crate) const COMPLETION_REBUILD_DEBOUNCE: Duration = Duration::from_millis(120);
@@ -15,7 +9,7 @@ impl LauncherApp {
         (alias, alias_lc)
     }
 
-    fn folder_alias_maps() -> (
+    pub(crate) fn folder_alias_maps() -> (
         HashMap<String, Option<String>>,
         HashMap<String, Option<String>>,
     ) {
@@ -31,7 +25,7 @@ impl LauncherApp {
         (aliases, aliases_lc)
     }
 
-    fn bookmark_alias_maps() -> (
+    pub(crate) fn bookmark_alias_maps() -> (
         HashMap<String, Option<String>>,
         HashMap<String, Option<String>>,
     ) {
@@ -109,7 +103,7 @@ impl LauncherApp {
             && action.starts_with("note:")
     }
 
-    fn has_diagnostics_widget(&self) -> bool {
+    pub(crate) fn has_diagnostics_widget(&self) -> bool {
         self.dashboard
             .slots
             .iter()
@@ -154,7 +148,7 @@ impl LauncherApp {
         self.suggestions.clear();
     }
 
-    fn maybe_rebuild_completion_index(&mut self, now: Instant) {
+    pub(crate) fn maybe_rebuild_completion_index(&mut self, now: Instant) {
         let should_rebuild = self
             .completion_rebuild_after
             .is_some_and(|scheduled| now >= scheduled)
@@ -167,7 +161,7 @@ impl LauncherApp {
         }
     }
 
-    fn rebuild_completion_index_now(&mut self) {
+    pub(crate) fn rebuild_completion_index_now(&mut self) {
         if self.action_completion_dirty || self.command_completion_dirty {
             self.update_completion_index();
             self.action_completion_dirty = false;
@@ -195,7 +189,7 @@ impl LauncherApp {
         self.update_suggestions();
     }
 
-    fn update_suggestions(&mut self) {
+    pub(crate) fn update_suggestions(&mut self) {
         self.autocomplete_index = 0;
         self.suggestions.clear();
         if !self.query_autocomplete
@@ -222,7 +216,7 @@ impl LauncherApp {
         }
     }
 
-    fn is_note_search_query(query: &str) -> bool {
+    pub(crate) fn is_note_search_query(query: &str) -> bool {
         query.trim_start().to_lowercase().starts_with("note search")
     }
 
@@ -236,7 +230,7 @@ impl LauncherApp {
             .unwrap_or(false)
     }
 
-    fn maybe_run_note_search_debounce(&mut self) {
+    pub(crate) fn maybe_run_note_search_debounce(&mut self) {
         if !Self::is_note_search_query(&self.query) {
             self.last_note_search_change = None;
             return;

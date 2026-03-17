@@ -1,6 +1,4 @@
-use super::LauncherApp;
-use super::{ActivationSource, PendingConfirmAction};
-use crate::actions::Action;
+use super::*;
 
 impl LauncherApp {
     pub fn activate_action(
@@ -36,7 +34,7 @@ impl LauncherApp {
         false
     }
 
-    fn activate_action_confirmed(
+    pub(crate) fn activate_action_confirmed(
         &mut self,
         a: Action,
         query_override: Option<String>,

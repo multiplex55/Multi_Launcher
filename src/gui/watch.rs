@@ -1,14 +1,4 @@
-use super::{push_toast, LauncherApp};
-use crate::actions::load_actions;
-use crate::indexer;
-use egui_toast::{Toast, ToastKind, ToastOptions};
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::path::Path;
-use std::sync::mpsc::Sender;
-use std::sync::Arc;
-use std::time::Instant;
-
-use super::WatchEvent;
+use super::*;
 
 pub(super) fn watch_file(
     path: &Path,

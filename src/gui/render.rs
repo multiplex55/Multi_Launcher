@@ -1,7 +1,4 @@
-use super::{LauncherApp, Panel, ResultContextMenuKind};
-use crate::actions::Action;
-use eframe::egui;
-use std::sync::atomic::Ordering;
+use super::*;
 
 impl LauncherApp {
     fn result_context_menu_kind(&self, action: &Action) -> ResultContextMenuKind {
