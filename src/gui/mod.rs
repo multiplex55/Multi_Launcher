@@ -127,10 +127,8 @@ use std::time::{Duration, Instant};
 use url::Url;
 use watch::watch_file;
 
-pub use state::WatchEvent;
-pub(crate) use state::{
-    ActivationSource, PendingConfirmAction, ResultContextMenuKind, TestWatchEvent, UiErrorEvent,
-};
+pub use state::{ActivationSource, WatchEvent};
+pub(crate) use state::{PendingConfirmAction, ResultContextMenuKind, TestWatchEvent, UiErrorEvent};
 
 const SUBCOMMANDS: &[&str] = &[
     "add", "rm", "list", "clear", "open", "new", "alias", "set", "pause", "resume", "cancel",
