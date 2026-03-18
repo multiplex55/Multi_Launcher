@@ -871,6 +871,10 @@ mod tests {
 
     #[test]
     fn action_execution_errors_flow_through_unified_ui_reporting() {
+        let dir = tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         app.enable_toasts = true;
@@ -893,9 +897,12 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|msg| msg.contains("injected failure")));
-        assert_eq!(app.toasts.len(), 1);
+        let log = std::fs::read_to_string(crate::toast_log::TOAST_LOG_FILE).unwrap();
+        assert!(log.contains("[error:launcher] Failed: injected failure"));
+        assert!(log.contains("Failed: injected failure"));
 
         set_execute_action_hook(None);
+        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]

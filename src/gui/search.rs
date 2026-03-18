@@ -56,7 +56,7 @@ impl LauncherApp {
         self.match_exact || self.fuzzy_weight <= 0.0
     }
 
-    pub(crate) fn matches_exact_display_text(cached: &CachedSearchEntry, query_lc: &str) -> bool {
+    pub(super) fn matches_exact_display_text(cached: &CachedSearchEntry, query_lc: &str) -> bool {
         let query_lc = query_lc.trim();
         if query_lc.is_empty() {
             return true;

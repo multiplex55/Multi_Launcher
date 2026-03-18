@@ -221,8 +221,8 @@ mod tests {
 
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
-        app.tx.send(WatchEvent::Folders).unwrap();
-        app.tx.send(WatchEvent::Bookmarks).unwrap();
+        send_event(WatchEvent::Folders);
+        send_event(WatchEvent::Bookmarks);
         app.process_watch_events();
 
         assert_eq!(
