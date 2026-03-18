@@ -1329,3 +1329,130 @@ impl eframe::App for LauncherApp {
         std::process::exit(0);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{plugin::PluginManager, settings::Settings};
+    use eframe::egui;
+    use std::sync::{atomic::AtomicBool, Arc};
+
+    fn new_app(ctx: &egui::Context) -> LauncherApp {
+        LauncherApp::new(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new(),
+            "actions.json".into(),
+            "settings.json".into(),
+            Settings::default(),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    #[test]
+    fn list_and_grid_modes_share_context_menu_resolution() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let actions = vec![
+            (
+                Action {
+                    label: "Bookmark".into(),
+                    desc: "Web".into(),
+                    action: "https://example.com".into(),
+                    args: None,
+                },
+                ResultContextMenuKind::Bookmark,
+            ),
+            (
+                Action {
+                    label: "Todo".into(),
+                    desc: "Todo".into(),
+                    action: "todo:done:7".into(),
+                    args: None,
+                },
+                ResultContextMenuKind::Todo { idx: 7 },
+            ),
+            (
+                Action {
+                    label: "Clipboard entry".into(),
+                    desc: "Clipboard".into(),
+                    action: "clipboard:copy:2".into(),
+                    args: None,
+                },
+                ResultContextMenuKind::Clipboard {
+                    idx: 2,
+                    label: "Clipboard entry".into(),
+                },
+            ),
+        ];
+        app.bookmark_aliases
+            .insert("https://example.com".into(), Some("Docs".into()));
+
+        for (action, expected) in actions {
+            app.resolved_grid_layout = false;
+            let list_kind = app.result_context_menu_kind(&action);
+            app.resolved_grid_layout = true;
+            let grid_kind = app.result_context_menu_kind(&action);
+            assert_eq!(list_kind, expected);
+            assert_eq!(grid_kind, expected);
+        }
+    }
+
+    #[test]
+    fn keyboard_navigation_is_consistent_between_grid_and_list_modes() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.results = (0..8)
+            .map(|i| Action {
+                label: format!("A{i}"),
+                desc: "d".into(),
+                action: format!("act:{i}"),
+                args: None,
+            })
+            .collect();
+
+        app.resolved_grid_layout = false;
+        app.selected = Some(1);
+        app.handle_key(egui::Key::ArrowDown);
+        app.handle_key(egui::Key::ArrowUp);
+        assert_eq!(app.selected, Some(1));
+        app.handle_key(egui::Key::ArrowRight);
+        assert_eq!(app.selected, Some(1));
+
+        app.resolved_grid_layout = true;
+        app.query_results_layout.cols = 3;
+        app.selected = Some(4);
+        app.handle_key(egui::Key::ArrowLeft);
+        app.handle_key(egui::Key::ArrowRight);
+        assert_eq!(app.selected, Some(4));
+        app.handle_key(egui::Key::ArrowUp);
+        assert_eq!(app.selected, Some(1));
+        app.handle_key(egui::Key::ArrowDown);
+        assert_eq!(app.selected, Some(4));
+    }
+
+    #[test]
+    fn pinned_panels_prevent_close_until_unpinned() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.pinned_panels.push(Panel::ClipboardDialog);
+        app.clipboard_dialog.open = true;
+        app.update_panel_stack();
+
+        assert!(!app.close_front_dialog());
+        assert!(app.clipboard_dialog.open);
+
+        app.toggle_pin(Panel::ClipboardDialog);
+        app.clipboard_dialog.open = true;
+        app.update_panel_stack();
+        assert!(app.close_front_dialog());
+        assert!(!app.clipboard_dialog.open);
+    }
+}

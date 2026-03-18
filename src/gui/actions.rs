@@ -794,3 +794,139 @@ impl LauncherApp {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        common::slug::reset_slug_lookup,
+        history,
+        plugin::PluginManager,
+        plugins::note::{append_note, load_notes, save_notes},
+        settings::Settings,
+    };
+    use eframe::egui;
+    use std::sync::{atomic::AtomicBool, Arc};
+    use tempfile::tempdir;
+
+    fn new_app(ctx: &egui::Context) -> LauncherApp {
+        LauncherApp::new(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new(),
+            "actions.json".into(),
+            "settings.json".into(),
+            Settings::default(),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    #[test]
+    fn destructive_confirmation_supports_queue_confirm_and_cancel_paths() {
+        let dir = tempdir().unwrap();
+        let notes_dir = dir.path().join("notes");
+        std::fs::create_dir_all(&notes_dir).unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        std::env::set_var("ML_NOTES_DIR", &notes_dir);
+        save_notes(&[]).unwrap();
+        reset_slug_lookup();
+        append_note("alpha", "# alpha\n\nbody").unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.require_confirm_destructive = true;
+        let delete = Action {
+            label: "Delete note".into(),
+            desc: "Notes".into(),
+            action: "note:remove:alpha".into(),
+            args: None,
+        };
+
+        app.activate_action(delete.clone(), None, ActivationSource::Click);
+        assert!(app.pending_confirm.is_some());
+        assert_eq!(load_notes().unwrap().len(), 1);
+
+        app.pending_confirm = None;
+        assert_eq!(load_notes().unwrap().len(), 1);
+
+        app.activate_action(delete, None, ActivationSource::Dashboard);
+        let pending = app
+            .pending_confirm
+            .take()
+            .expect("queued destructive action");
+        assert_eq!(pending.source, ActivationSource::Dashboard);
+        app.activate_action_confirmed(pending.action, pending.query_override, pending.source);
+        assert!(load_notes().unwrap().is_empty());
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn action_execution_errors_flow_through_unified_ui_reporting() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.enable_toasts = true;
+        app.show_error_toasts = true;
+        app.show_inline_errors = true;
+
+        set_execute_action_hook(Some(Box::new(|_| Err(anyhow::anyhow!("injected failure")))));
+        app.activate_action(
+            Action {
+                label: "Broken".into(),
+                desc: "Test".into(),
+                action: "exec:broken".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Enter,
+        );
+
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|msg| msg.contains("injected failure")));
+        assert_eq!(app.toasts.len(), 1);
+
+        set_execute_action_hook(None);
+    }
+
+    #[test]
+    fn activation_source_and_usage_are_recorded_for_successful_actions() {
+        let dir = tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let action = Action {
+            label: "Track Me".into(),
+            desc: "Test".into(),
+            action: "exec:track".into(),
+            args: None,
+        };
+        let before_len = history::get_history().len();
+
+        set_execute_action_hook(Some(Box::new(|_| Ok(()))));
+        app.query = "track me".into();
+        app.activate_action(action.clone(), None, ActivationSource::Gesture);
+
+        assert_eq!(app.usage.get(&action.action), Some(&1));
+        let history_entries = history::get_history();
+        assert!(history_entries.len() >= before_len + 1);
+        let latest = history_entries.front().expect("latest history entry");
+        assert_eq!(latest.action.action, action.action);
+        assert_eq!(latest.query, "track me");
+        assert_eq!(latest.source.as_deref(), Some("gesture"));
+
+        set_execute_action_hook(None);
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+}

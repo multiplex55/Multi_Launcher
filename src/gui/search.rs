@@ -491,3 +491,128 @@ impl LauncherApp {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{plugin::PluginManager, settings::Settings};
+    use eframe::egui;
+    use std::sync::{atomic::AtomicBool, Arc};
+
+    fn new_app(ctx: &egui::Context) -> LauncherApp {
+        LauncherApp::new(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new(),
+            "actions.json".into(),
+            "settings.json".into(),
+            Settings::default(),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    #[test]
+    fn cache_normalization_and_match_exact_filters_by_normalized_label() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.actions = Arc::new(vec![Action {
+            label: "MiXeD Label".into(),
+            desc: "MiXeD Desc".into(),
+            action: "Action:ID".into(),
+            args: None,
+        }]);
+        app.update_action_cache();
+
+        assert_eq!(app.action_cache[0].label_lc, "mixed label");
+        assert_eq!(app.action_cache[0].desc_lc, "mixed desc");
+        assert_eq!(app.action_cache[0].action_lc, "action:id");
+        assert!(LauncherApp::matches_exact_display_text(
+            &app.action_cache[0],
+            " mixed "
+        ));
+        assert!(!LauncherApp::matches_exact_display_text(
+            &app.action_cache[0],
+            "nomatch"
+        ));
+
+        app.query = "app mxd lbl".into();
+        app.match_exact = false;
+        app.search();
+        assert!(app
+            .results
+            .iter()
+            .any(|action| action.action == "Action:ID"));
+
+        app.query = "app mxd lbl".into();
+        app.match_exact = true;
+        app.last_results_valid = false;
+        app.search();
+        assert!(app.results.is_empty());
+    }
+
+    #[test]
+    fn completion_rebuild_debounce_waits_for_latest_schedule() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query_autocomplete = true;
+        app.actions = Arc::new(vec![Action {
+            label: "Old App".into(),
+            desc: "demo".into(),
+            action: "old:app".into(),
+            args: None,
+        }]);
+        app.update_action_cache();
+        let first_due = app
+            .completion_rebuild_after
+            .expect("initial rebuild schedule");
+
+        app.actions = Arc::new(vec![Action {
+            label: "New App".into(),
+            desc: "demo".into(),
+            action: "new:app".into(),
+            args: None,
+        }]);
+        app.update_action_cache();
+        let second_due = app.completion_rebuild_after.expect("rescheduled rebuild");
+        assert!(second_due >= first_due);
+        assert!(app.completion_index.is_none());
+        assert!(app.suggestions.is_empty());
+
+        app.query = "app ".into();
+        app.maybe_rebuild_completion_index(first_due);
+        assert!(app.completion_index.is_none());
+        assert!(app.suggestions.is_empty());
+
+        app.maybe_rebuild_completion_index(second_due + Duration::from_millis(1));
+        assert!(app.completion_index.is_some());
+        assert!(app.suggestions.iter().any(|s| s == "app new app"));
+        assert!(app.suggestions.iter().all(|s| s != "app old app"));
+    }
+
+    #[test]
+    fn note_search_debounce_gate_only_fires_after_delay() {
+        let start = Instant::now();
+        assert!(!LauncherApp::note_search_debounce_ready(
+            None,
+            start,
+            NOTE_SEARCH_DEBOUNCE
+        ));
+        assert!(!LauncherApp::note_search_debounce_ready(
+            Some(start),
+            start + NOTE_SEARCH_DEBOUNCE - Duration::from_millis(1),
+            NOTE_SEARCH_DEBOUNCE,
+        ));
+        assert!(LauncherApp::note_search_debounce_ready(
+            Some(start),
+            start + NOTE_SEARCH_DEBOUNCE,
+            NOTE_SEARCH_DEBOUNCE,
+        ));
+    }
+}
