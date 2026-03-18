@@ -1,7 +1,7 @@
 use super::*;
 
 impl LauncherApp {
-    fn result_context_menu_kind(&self, action: &Action) -> ResultContextMenuKind {
+    pub(crate) fn result_context_menu_kind(&self, action: &Action) -> ResultContextMenuKind {
         if self.folder_aliases.contains_key(&action.action) && !action.action.starts_with("folder:")
         {
             ResultContextMenuKind::Folder

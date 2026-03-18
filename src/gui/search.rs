@@ -56,7 +56,7 @@ impl LauncherApp {
         self.match_exact || self.fuzzy_weight <= 0.0
     }
 
-    fn matches_exact_display_text(cached: &CachedSearchEntry, query_lc: &str) -> bool {
+    pub(crate) fn matches_exact_display_text(cached: &CachedSearchEntry, query_lc: &str) -> bool {
         let query_lc = query_lc.trim();
         if query_lc.is_empty() {
             return true;
@@ -220,7 +220,7 @@ impl LauncherApp {
         query.trim_start().to_lowercase().starts_with("note search")
     }
 
-    fn note_search_debounce_ready(
+    pub(crate) fn note_search_debounce_ready(
         last_change: Option<Instant>,
         now: Instant,
         debounce: Duration,
