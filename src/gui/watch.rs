@@ -139,3 +139,177 @@ impl LauncherApp {
         self.maybe_rebuild_completion_index(Instant::now());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{plugin::PluginManager, settings::Settings};
+    use eframe::egui;
+    use std::sync::{atomic::AtomicBool, mpsc::channel, Arc};
+    use tempfile::tempdir;
+
+    fn new_app(ctx: &egui::Context) -> LauncherApp {
+        LauncherApp::new(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new(),
+            "actions.json".into(),
+            "settings.json".into(),
+            Settings::default(),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    #[test]
+    fn burst_watch_events_coalesce_completion_rebuild_until_debounce_window() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+
+        app.actions = Arc::new(vec![Action {
+            label: "Before".into(),
+            desc: "demo".into(),
+            action: "before:app".into(),
+            args: None,
+        }]);
+        app.update_action_cache();
+        let first_due = app.completion_rebuild_after.expect("first due");
+
+        app.actions = Arc::new(vec![Action {
+            label: "After".into(),
+            desc: "demo".into(),
+            action: "after:app".into(),
+            args: None,
+        }]);
+        app.update_action_cache();
+        let second_due = app.completion_rebuild_after.expect("second due");
+
+        app.maybe_rebuild_completion_index(first_due);
+        assert!(app.completion_index.is_none());
+        app.maybe_rebuild_completion_index(second_due + Duration::from_millis(1));
+        assert!(app.completion_index.is_some());
+    }
+
+    #[test]
+    fn folder_and_bookmark_watch_updates_refresh_alias_caches() {
+        let dir = tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        std::fs::write(
+            crate::plugins::folders::FOLDERS_FILE,
+            serde_json::to_string_pretty(&serde_json::json!([
+                {"label": "Docs", "path": "C:/Docs", "alias": "Docs Alias"}
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            crate::plugins::bookmarks::BOOKMARKS_FILE,
+            serde_json::to_string_pretty(&serde_json::json!([
+                {"url": "https://example.com", "alias": "Example Alias"}
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        assert_eq!(
+            app.folder_aliases.get("C:/Docs"),
+            Some(&Some("Docs Alias".into()))
+        );
+        assert_eq!(
+            app.bookmark_aliases.get("https://example.com"),
+            Some(&Some("Example Alias".into()))
+        );
+
+        std::fs::write(
+            crate::plugins::folders::FOLDERS_FILE,
+            serde_json::to_string_pretty(&serde_json::json!([
+                {"label": "Docs", "path": "C:/Docs", "alias": "Updated Docs Alias"}
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            crate::plugins::bookmarks::BOOKMARKS_FILE,
+            serde_json::to_string_pretty(&serde_json::json!([
+                {"url": "https://example.com", "alias": "Updated Example Alias"}
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        send_event(WatchEvent::Folders);
+        send_event(WatchEvent::Bookmarks);
+        app.process_watch_events();
+
+        assert_eq!(
+            app.folder_aliases.get("C:/Docs"),
+            Some(&Some("Updated Docs Alias".into()))
+        );
+        assert_eq!(
+            app.folder_aliases_lc.get("C:/Docs"),
+            Some(&Some("updated docs alias".into()))
+        );
+        assert_eq!(
+            app.bookmark_aliases.get("https://example.com"),
+            Some(&Some("Updated Example Alias".into()))
+        );
+        assert_eq!(
+            app.bookmark_aliases_lc.get("https://example.com"),
+            Some(&Some("updated example alias".into()))
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_watch_event_adapters_preserve_expected_public_parity() {
+        let action = Action {
+            label: "Run".into(),
+            desc: "demo".into(),
+            action: "demo:run".into(),
+            args: None,
+        };
+        assert_eq!(
+            TestWatchEvent::from(WatchEvent::Actions),
+            TestWatchEvent::Actions
+        );
+        assert_eq!(
+            TestWatchEvent::from(WatchEvent::Folders),
+            TestWatchEvent::Folders
+        );
+        assert_eq!(
+            TestWatchEvent::from(WatchEvent::Bookmarks),
+            TestWatchEvent::Bookmarks
+        );
+        assert_eq!(
+            TestWatchEvent::from(WatchEvent::ExecuteAction(action.clone())),
+            TestWatchEvent::Actions
+        );
+        assert_eq!(
+            TestWatchEvent::from(WatchEvent::Dashboard(
+                crate::dashboard::DashboardEvent::Reloaded
+            )),
+            TestWatchEvent::Actions
+        );
+
+        let (tx, rx) = channel();
+        tx.send(WatchEvent::Clipboard).unwrap();
+        tx.send(WatchEvent::Folders).unwrap();
+        assert_eq!(recv_test_event(&rx), Some(TestWatchEvent::Folders));
+
+        let (tx, rx) = channel();
+        tx.send(WatchEvent::ExecuteAction(action)).unwrap();
+        tx.send(WatchEvent::Bookmarks).unwrap();
+        assert_eq!(recv_test_event(&rx), Some(TestWatchEvent::Bookmarks));
+    }
+}
