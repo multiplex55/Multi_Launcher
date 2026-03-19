@@ -1,6 +1,3 @@
-use crate::actions::Action;
-use crate::plugins::calc_history::{self, CalcHistoryEntry, CALC_HISTORY_FILE, MAX_ENTRIES};
-
 pub(crate) fn set_system_volume(percent: u32) {
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::Media::Audio::{

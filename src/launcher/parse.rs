@@ -1,7 +1,7 @@
 use crate::actions::Action;
 
 #[derive(Debug, Clone, PartialEq)]
-enum ActionKind<'a> {
+pub(crate) enum ActionKind<'a> {
     Shell {
         cmd: &'a str,
         keep_open: bool,
@@ -142,7 +142,7 @@ enum ActionKind<'a> {
     Macro(&'a str),
 }
 
-fn parse_action_kind(action: &Action) -> ActionKind<'_> {
+pub(crate) fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     let s = action.action.as_str();
     if let Some(rest) = s.strip_prefix("shell:add:") {
         if let Some((name, args)) = rest.split_once('|') {
