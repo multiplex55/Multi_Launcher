@@ -12,6 +12,7 @@ pub mod linking;
 pub mod logging;
 pub mod mouse_gestures;
 pub mod note_todo_sync;
+pub mod platform;
 pub mod plugin;
 pub mod plugin_editor;
 pub mod plugins;
