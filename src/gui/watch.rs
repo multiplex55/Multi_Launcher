@@ -205,7 +205,7 @@ mod tests {
         std::fs::write(
             crate::plugins::folders::FOLDERS_FILE,
             serde_json::to_string_pretty(&serde_json::json!([
-                {"path": "C:/Docs", "alias": "Docs Alias"}
+                {"label": "Docs", "path": "C:/Docs", "alias": "Docs Alias"}
             ]))
             .unwrap(),
         )
@@ -221,25 +221,51 @@ mod tests {
 
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
+        assert_eq!(
+            app.folder_aliases.get("C:/Docs"),
+            Some(&Some("Docs Alias".into()))
+        );
+        assert_eq!(
+            app.bookmark_aliases.get("https://example.com"),
+            Some(&Some("Example Alias".into()))
+        );
+
+        std::fs::write(
+            crate::plugins::folders::FOLDERS_FILE,
+            serde_json::to_string_pretty(&serde_json::json!([
+                {"label": "Docs", "path": "C:/Docs", "alias": "Updated Docs Alias"}
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            crate::plugins::bookmarks::BOOKMARKS_FILE,
+            serde_json::to_string_pretty(&serde_json::json!([
+                {"url": "https://example.com", "alias": "Updated Example Alias"}
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+
         send_event(WatchEvent::Folders);
         send_event(WatchEvent::Bookmarks);
         app.process_watch_events();
 
         assert_eq!(
             app.folder_aliases.get("C:/Docs"),
-            Some(&Some("Docs Alias".into()))
+            Some(&Some("Updated Docs Alias".into()))
         );
         assert_eq!(
             app.folder_aliases_lc.get("C:/Docs"),
-            Some(&Some("docs alias".into()))
+            Some(&Some("updated docs alias".into()))
         );
         assert_eq!(
             app.bookmark_aliases.get("https://example.com"),
-            Some(&Some("Example Alias".into()))
+            Some(&Some("Updated Example Alias".into()))
         );
         assert_eq!(
             app.bookmark_aliases_lc.get("https://example.com"),
-            Some(&Some("example alias".into()))
+            Some(&Some("updated example alias".into()))
         );
 
         std::env::set_current_dir(original_dir).unwrap();
