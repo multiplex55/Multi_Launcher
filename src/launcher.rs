@@ -52,6 +52,7 @@ pub(crate) fn toggle_system_mute() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::launcher::parse::{parse_action_kind, ActionKind};
 
     #[test]
     fn parse_volume_pid_toggle_mute() {
@@ -390,4 +391,3 @@ pub(crate) mod parse;
 pub(crate) mod plan;
 
 pub use exec::launch_action;
-pub(crate) use parse::{parse_action_kind, ActionKind};
