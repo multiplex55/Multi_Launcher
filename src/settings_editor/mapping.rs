@@ -1,6 +1,5 @@
 use super::state::SettingsEditor;
 use crate::hotkey::parse_hotkey;
-use crate::plugins::note::NotePluginSettings;
 use crate::plugins::screenshot::ScreenshotPluginSettings;
 use crate::settings::{QueryResultsLayoutSettings, Settings};
 
