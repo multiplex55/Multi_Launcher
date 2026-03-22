@@ -297,6 +297,7 @@ impl SettingsEditor {
 #[cfg(test)]
 mod tests {
     use super::SettingsEditor;
+    use crate::plugins::note::NotePluginSettings;
     use crate::plugins::screenshot::ScreenshotPluginSettings;
     use crate::settings::Settings;
 

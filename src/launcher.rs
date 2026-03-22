@@ -51,7 +51,7 @@ pub(crate) fn toggle_system_mute() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::actions::Action;
     use crate::launcher::parse::{parse_action_kind, ActionKind};
 
     #[test]
