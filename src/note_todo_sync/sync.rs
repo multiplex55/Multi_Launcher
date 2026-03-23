@@ -1,9 +1,9 @@
+use crate::note_todo_sync::checklist::{
+    parse_checklist_items, render_checklist_line, upsert_mapping_token,
+};
+use crate::note_todo_sync::metadata::normalize_text;
 use chrono::NaiveDate;
-use regex::Regex;
-use std::collections::{HashMap, HashSet};
-
-pub const PRIORITY_MIN: u8 = 1;
-pub const PRIORITY_MAX: u8 = 5;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncMode {
@@ -25,17 +25,6 @@ impl Default for SyncConfig {
             mode: SyncMode::OneWayImportFromNote,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChecklistItem {
-    pub line_index: usize,
-    pub checked: bool,
-    pub text: String,
-    pub tags: Vec<String>,
-    pub priority: Option<u8>,
-    pub due: Option<NaiveDate>,
-    pub todo_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,150 +66,6 @@ pub struct SyncResult {
     pub revision: RevisionState,
 }
 
-fn checklist_re() -> Regex {
-    Regex::new(r"^(\s*[-*]\s+\[( |x|X)\]\s*)(.*?)(\s*<!--\s*ml:todo:([A-Za-z0-9:_-]+)\s*-->\s*)?$")
-        .expect("valid checklist regex")
-}
-
-fn tag_re() -> Regex {
-    Regex::new(r"(?P<tag>#[A-Za-z][A-Za-z0-9_-]*)").expect("valid tag regex")
-}
-
-fn priority_re() -> Regex {
-    Regex::new(r"\bp(?P<n>[0-9]+)\b").expect("valid priority regex")
-}
-
-fn due_re() -> Regex {
-    Regex::new(r"@due\s+(?P<date>\d{4}-\d{2}-\d{2})").expect("valid due regex")
-}
-
-fn normalize_text(text: &str) -> String {
-    text.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn parse_metadata(body: &str) -> (String, Vec<String>, Option<u8>, Option<NaiveDate>) {
-    let tags = tag_re()
-        .captures_iter(body)
-        .filter_map(|c| c.name("tag"))
-        .map(|m| m.as_str().trim_start_matches('#').to_lowercase())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-
-    let priority = priority_re()
-        .captures_iter(body)
-        .filter_map(|c| c.name("n"))
-        .filter_map(|m| m.as_str().parse::<u8>().ok())
-        .find(|p| (*p >= PRIORITY_MIN) && (*p <= PRIORITY_MAX));
-
-    let due = due_re()
-        .captures_iter(body)
-        .filter_map(|c| c.name("date"))
-        .find_map(|m| NaiveDate::parse_from_str(m.as_str(), "%Y-%m-%d").ok());
-
-    let stripped = due_re().replace_all(body, "");
-    let stripped = priority_re().replace_all(&stripped, "");
-    let stripped = tag_re().replace_all(&stripped, "");
-    (stripped.trim().to_string(), tags, priority, due)
-}
-
-pub fn parse_checklist_items(note_content: &str) -> Vec<ChecklistItem> {
-    let re = checklist_re();
-    note_content
-        .lines()
-        .enumerate()
-        .filter_map(|(line_index, line)| {
-            let cap = re.captures(line)?;
-            let checked = cap.get(2).map(|m| m.as_str().eq_ignore_ascii_case("x"))?;
-            let body = cap.get(3).map(|m| m.as_str()).unwrap_or_default();
-            let (text, mut tags, priority, due) = parse_metadata(body);
-            tags.sort();
-            let todo_id = cap.get(5).map(|m| m.as_str().to_string());
-            Some(ChecklistItem {
-                line_index,
-                checked,
-                text,
-                tags,
-                priority,
-                due,
-                todo_id,
-            })
-        })
-        .collect()
-}
-
-pub fn checkbox_sync_enabled(note_content: &str) -> bool {
-    note_content
-        .lines()
-        .any(|l| l.trim() == "<!-- ml:checkbox_sync:on -->")
-}
-
-pub fn set_checkbox_sync_enabled(note_content: &str, enabled: bool) -> String {
-    let marker = "<!-- ml:checkbox_sync:on -->";
-    let mut lines = note_content
-        .lines()
-        .map(|l| l.to_string())
-        .collect::<Vec<_>>();
-    let marker_pos = lines.iter().position(|l| l.trim() == marker);
-    match (enabled, marker_pos) {
-        (true, None) => lines.insert(0, marker.to_string()),
-        (false, Some(idx)) => {
-            lines.remove(idx);
-        }
-        _ => {}
-    }
-    lines.join("\n")
-}
-
-fn upsert_mapping_token(line: &str, todo_id: &str) -> String {
-    let re = checklist_re();
-    if let Some(cap) = re.captures(line) {
-        let prefix = cap.get(1).map(|m| m.as_str()).unwrap_or_default();
-        let body = cap
-            .get(3)
-            .map(|m| m.as_str())
-            .unwrap_or_default()
-            .trim_end();
-        return format!("{prefix}{body} <!-- ml:todo:{todo_id} -->");
-    }
-    line.to_string()
-}
-
-fn render_checklist_line(
-    template: &str,
-    checked: bool,
-    text: &str,
-    tags: &[String],
-    priority: Option<u8>,
-    due: Option<NaiveDate>,
-    todo_id: &str,
-) -> String {
-    let re = checklist_re();
-    let prefix = re
-        .captures(template)
-        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
-        .unwrap_or_else(|| "- [ ] ".to_string());
-    let marker = if checked { "x" } else { " " };
-    let mut payload = text.trim().to_string();
-    if let Some(p) = priority {
-        payload.push_str(&format!(" p{p}"));
-    }
-    if let Some(d) = due {
-        payload.push_str(&format!(" @due {}", d.format("%Y-%m-%d")));
-    }
-    for t in tags {
-        payload.push_str(&format!(" #{t}"));
-    }
-    let prefix = format!("{}[{}] ", prefix.split('[').next().unwrap_or("- "), marker);
-    format!("{}{} <!-- ml:todo:{} -->", prefix, payload.trim(), todo_id)
-}
-
 pub fn sync_note_todos(
     note_content: &str,
     todos: &[TodoItem],
@@ -255,7 +100,6 @@ pub fn sync_note_todos(
         .as_ref()
         .map(|r| r.todo_rev != current_revision.todo_rev)
         .unwrap_or(true);
-
     let conflict_mode = note_changed && todo_changed;
 
     let mut lines = note_content
@@ -363,23 +207,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parser_extracts_checked_unchecked_and_metadata() {
-        let note = "- [ ] Ship parser #work #rust p2 @due 2026-03-01\n- [x] Done item p6 #ignored";
-        let items = parse_checklist_items(note);
-        assert_eq!(items.len(), 2);
-        assert!(!items[0].checked);
-        assert_eq!(items[0].text, "Ship parser");
-        assert_eq!(items[0].priority, Some(2));
-        assert_eq!(items[0].due, NaiveDate::from_ymd_opt(2026, 3, 1));
-        assert_eq!(items[0].tags, vec!["rust", "work"]);
-        assert!(items[1].checked);
-        assert_eq!(
-            items[1].priority, None,
-            "priority outside allowed range is ignored"
-        );
-    }
-
-    #[test]
     fn note_source_of_truth_updates_todos() {
         let note = "- [x] Finish release p1 #work <!-- ml:todo:t-1 -->";
         let todos = vec![TodoItem {
@@ -408,7 +235,7 @@ mod tests {
                 .todos
                 .into_iter()
                 .find(|t| t.id == "t-1")
-                .expect("todo")
+                .unwrap()
                 .text,
             "Finish release"
         );
@@ -477,8 +304,10 @@ mod tests {
                 todo_rev: 1,
             },
         );
-        let t2 = result.todos.iter().find(|t| t.id == "t-2").expect("t2");
-        assert_eq!(t2.text, "renamed task");
+        assert_eq!(
+            result.todos.iter().find(|t| t.id == "t-2").unwrap().text,
+            "renamed task"
+        );
     }
 
     #[test]
@@ -514,10 +343,9 @@ mod tests {
     #[test]
     fn non_checkbox_markdown_is_untouched() {
         let note = "# Heading\nplain paragraph\n- [ ] sync me";
-        let todos = vec![];
         let result = sync_note_todos(
             note,
-            &todos,
+            &[],
             SyncConfig {
                 enabled: true,
                 mode: SyncMode::OneWayImportFromNote,
