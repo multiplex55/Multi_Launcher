@@ -17,6 +17,10 @@ pub fn due_re() -> Regex {
     Regex::new(r"@due\s+(?P<date>\d{4}-\d{2}-\d{2})").expect("valid due regex")
 }
 
+pub fn due_token_re() -> Regex {
+    Regex::new(r"@due\s+\S+").expect("valid due token regex")
+}
+
 pub fn normalize_text(text: &str) -> String {
     text.to_lowercase()
         .chars()
@@ -47,7 +51,7 @@ pub fn parse_metadata(body: &str) -> (String, Vec<String>, Option<u8>, Option<Na
         .filter_map(|c| c.name("date"))
         .find_map(|m| NaiveDate::parse_from_str(m.as_str(), "%Y-%m-%d").ok());
 
-    let stripped = due_re().replace_all(body, "");
+    let stripped = due_token_re().replace_all(body, "");
     let stripped = priority_re().replace_all(&stripped, "");
     let stripped = tag_re().replace_all(&stripped, "");
     (stripped.trim().to_string(), tags, priority, due)
