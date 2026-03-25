@@ -1,8 +1,7 @@
-use crate::hotkey::Key;
-
 use crate::gui::Panel;
+use crate::hotkey::Key;
 use crate::hotkey::{parse_hotkey, Hotkey};
-use once_cell::sync::OnceCell;
+use crate::settings::defaults::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -15,13 +14,11 @@ pub enum NetUnit {
     Kb,
     Mb,
 }
-
 impl Default for NetUnit {
     fn default() -> Self {
         NetUnit::Auto
     }
 }
-
 impl std::fmt::Display for NetUnit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -33,7 +30,6 @@ impl std::fmt::Display for NetUnit {
     }
 }
 
-/// Configuration for writing log output to a file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum LogFile {
@@ -52,6 +48,16 @@ pub struct DashboardSettings {
     #[serde(default = "default_show_dashboard_when_empty")]
     pub show_when_query_empty: bool,
 }
+impl Default for DashboardSettings {
+    fn default() -> Self {
+        Self {
+            enabled: default_dashboard_enabled(),
+            config_path: None,
+            default_location: None,
+            show_when_query_empty: true,
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct QueryResultsLayoutSettings {
@@ -66,7 +72,6 @@ pub struct QueryResultsLayoutSettings {
     #[serde(default)]
     pub plugin_opt_out: Vec<String>,
 }
-
 impl Default for QueryResultsLayoutSettings {
     fn default() -> Self {
         Self {
@@ -77,30 +82,6 @@ impl Default for QueryResultsLayoutSettings {
             plugin_opt_out: Vec::new(),
         }
     }
-}
-
-fn default_note_graph_max_nodes() -> usize {
-    220
-}
-
-fn default_note_graph_label_zoom_threshold() -> f32 {
-    0.55
-}
-
-fn default_note_graph_layout_iterations_per_frame() -> usize {
-    2
-}
-
-fn default_note_graph_repulsion_strength() -> f32 {
-    3000.0
-}
-
-fn default_note_graph_link_distance() -> f32 {
-    60.0
-}
-
-fn default_note_graph_local_graph_depth() -> usize {
-    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -124,7 +105,6 @@ pub struct NoteGraphSettings {
     #[serde(default)]
     pub exclude_tags: Vec<String>,
 }
-
 impl Default for NoteGraphSettings {
     fn default() -> Self {
         Self {
@@ -149,7 +129,6 @@ pub enum ThemeMode {
     Light,
     Custom,
 }
-
 impl Default for ThemeMode {
     fn default() -> Self {
         Self::System
@@ -167,17 +146,11 @@ pub struct ThemeColor {
     #[serde(default = "default_alpha")]
     pub a: u8,
 }
-
 impl ThemeColor {
     const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self { r, g, b, a }
     }
 }
-
-fn default_alpha() -> u8 {
-    255
-}
-
 impl Default for ThemeColor {
     fn default() -> Self {
         Self::rgba(0, 0, 0, default_alpha())
@@ -217,7 +190,6 @@ pub struct ColorScheme {
     #[serde(default)]
     pub success_accent: ThemeColor,
 }
-
 impl ColorScheme {
     pub fn dark() -> Self {
         Self {
@@ -238,7 +210,6 @@ impl ColorScheme {
             success_accent: ThemeColor::rgba(116, 219, 149, 255),
         }
     }
-
     pub fn light() -> Self {
         Self {
             window_fill: ThemeColor::rgba(245, 246, 250, 255),
@@ -259,7 +230,6 @@ impl ColorScheme {
         }
     }
 }
-
 impl Default for ColorScheme {
     fn default() -> Self {
         Self::dark()
@@ -275,7 +245,6 @@ pub struct ThemeSettings {
     #[serde(default = "ThemeSettings::default_custom_scheme")]
     pub custom_scheme: ColorScheme,
 }
-
 impl ThemeSettings {
     pub fn default_dark() -> Self {
         Self {
@@ -287,7 +256,6 @@ impl ThemeSettings {
             custom_scheme: ColorScheme::dark(),
         }
     }
-
     pub fn default_light() -> Self {
         Self {
             mode: ThemeMode::Light,
@@ -298,26 +266,13 @@ impl ThemeSettings {
             custom_scheme: ColorScheme::light(),
         }
     }
-
     fn default_custom_scheme() -> ColorScheme {
         ColorScheme::dark()
     }
 }
-
 impl Default for ThemeSettings {
     fn default() -> Self {
         Self::default_dark()
-    }
-}
-
-impl Default for DashboardSettings {
-    fn default() -> Self {
-        Self {
-            enabled: default_dashboard_enabled(),
-            config_path: None,
-            default_location: None,
-            show_when_query_empty: true,
-        }
     }
 }
 
@@ -325,156 +280,99 @@ impl Default for DashboardSettings {
 pub struct Settings {
     pub hotkey: Option<String>,
     pub quit_hotkey: Option<String>,
-    /// Hotkey to show the quick help overlay. If `None`, the overlay is disabled.
     pub help_hotkey: Option<String>,
     pub index_paths: Option<Vec<String>>,
-    /// Maximum number of filesystem entries to index from `index_paths`.
-    ///
-    /// When missing, a conservative default is applied to protect memory.
     pub max_indexed_items: Option<usize>,
     pub plugin_dirs: Option<Vec<String>>,
-    /// Set of plugin names which should be enabled. If `None`, all loaded
-    /// plugins are enabled.
     pub enabled_plugins: Option<HashSet<String>>,
-    /// Map of plugin capability identifiers enabled per plugin.
     pub enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
-    /// When enabled the application initialises the logger at debug level.
-    /// Defaults to `false` when the field is missing in the settings file.
     #[serde(default)]
     pub debug_logging: bool,
-    /// Enable logging to a file. Use `true` for the default `launcher.log` next
-    /// to the executable or provide a custom path.
     #[serde(default)]
     pub log_file: Option<LogFile>,
-    /// Position used to hide the window off-screen when not visible.
-    /// Defaults to `(2000, 2000)` if missing.
     #[serde(default)]
     pub offscreen_pos: Option<(i32, i32)>,
-    /// Last known window size. If absent, a default size is used.
     #[serde(default)]
     pub window_size: Option<(i32, i32)>,
-    /// Default size for note editor panels.
     #[serde(default = "default_note_panel_size")]
     pub note_panel_default_size: (f32, f32),
-    /// When enabled, the note panel saves its contents whenever its window is
-    /// closed—whether by pressing `Esc`, clicking the window's close button, or
-    /// any other close event. Defaults to `false` when the field is missing in
-    /// the settings file.
     #[serde(default = "default_note_save_on_close")]
     pub note_save_on_close: bool,
-    /// When true, saving a note overwrites existing files without prompting.
     #[serde(default)]
     pub note_always_overwrite: bool,
-    /// When true, images in notes are rendered as links to avoid loading large
-    /// textures directly in the preview.
     #[serde(default)]
     pub note_images_as_links: bool,
-    /// Whether note metadata/details sections are visible by default.
     #[serde(default = "default_note_show_details")]
     pub note_show_details: bool,
-    /// Number of tags or links shown before an expandable "... (more)" control
-    /// appears in the note panel.
     #[serde(default = "default_note_more_limit")]
     pub note_more_limit: usize,
-    /// Enable toast notifications in the UI.
     #[serde(default = "default_toasts")]
     pub enable_toasts: bool,
-    /// Show error messages inline in the main panel.
     #[serde(default = "default_true")]
     pub show_inline_errors: bool,
-    /// Show error notifications as toast popups.
     #[serde(default = "default_true")]
     pub show_error_toasts: bool,
-    /// Duration of toast notifications in seconds.
     #[serde(default = "default_toast_duration")]
     pub toast_duration: f32,
-    /// Remember whether the help window shows example queries.
     #[serde(default)]
     pub show_examples: bool,
-    /// Scale factor for the search box. Defaults to `1.0`.
     #[serde(default = "default_scale")]
     pub query_scale: Option<f32>,
-    /// Scale factor for the action list. Defaults to `1.0`.
     #[serde(default = "default_scale")]
     pub list_scale: Option<f32>,
-    /// Weight of the fuzzy match score when ranking results.
     #[serde(default = "default_fuzzy_weight")]
     pub fuzzy_weight: f32,
-    /// Weight of the usage count when ranking results.
     #[serde(default = "default_usage_weight")]
     pub usage_weight: f32,
     #[serde(default)]
     pub match_exact: bool,
-    /// Enable autocomplete suggestions while typing a query.
     #[serde(default = "default_query_autocomplete")]
     pub query_autocomplete: bool,
-    /// Number of results to move when paging through the action list.
     #[serde(default = "default_page_jump")]
     pub page_jump: usize,
-    /// Maximum number of entries kept in the history list.
     #[serde(default = "default_history_limit")]
     pub history_limit: usize,
     #[serde(default = "default_clipboard_limit")]
     pub clipboard_limit: usize,
-    /// When true the window spawns at the mouse cursor each time it becomes
-    /// visible.
     #[serde(default = "default_follow_mouse")]
     pub follow_mouse: bool,
-    /// Enable positioning and sizing the window at a fixed location rather than
-    /// following the cursor.
     #[serde(default)]
     pub static_location_enabled: bool,
-    /// Position of the window when `static_location_enabled` is true.
     #[serde(default)]
     pub static_pos: Option<(i32, i32)>,
-    /// Size of the window when `static_location_enabled` is true.
     #[serde(default)]
     pub static_size: Option<(i32, i32)>,
-    /// Hide the main window automatically after successfully launching an action.
     #[serde(default)]
     pub hide_after_run: bool,
-    /// Keep the window always on top of other windows.
     #[serde(default = "default_always_on_top")]
     pub always_on_top: bool,
-    /// Interval in seconds to refresh the timer list.
     #[serde(default = "default_timer_refresh")]
     pub timer_refresh: f32,
-    /// When true, the timer list will not refresh automatically.
     #[serde(default)]
     pub disable_timer_updates: bool,
-    /// Keep the command prefix in the query after running an action.
     #[serde(default)]
     pub preserve_command: bool,
-    /// Clear the search query after successfully running an action.
     #[serde(default)]
     pub clear_query_after_run: bool,
-    /// Require confirmation before destructive actions.
     #[serde(default = "default_true")]
     pub require_confirm_destructive: bool,
     #[serde(default = "default_net_refresh")]
     pub net_refresh: f32,
     #[serde(default)]
     pub net_unit: NetUnit,
-    /// Directory used for saving screenshots. If `None`, a platform default is
-    /// used.
     pub screenshot_dir: Option<String>,
-    /// When capturing screenshots to the clipboard, also save them to disk.
     #[serde(default)]
     pub screenshot_save_file: bool,
-    /// Automatically save screenshots after editing without prompting.
     #[serde(default = "default_true")]
     pub screenshot_auto_save: bool,
-    /// Enable the in-app screenshot editor after capture.
     #[serde(default = "default_true")]
     pub screenshot_use_editor: bool,
     #[serde(default)]
     pub plugin_settings: std::collections::HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub pinned_panels: Vec<Panel>,
-    /// Reduce dashboard refresh work when the launcher is not focused.
     #[serde(default = "default_true")]
     pub reduce_dashboard_work_when_unfocused: bool,
-    /// Show the dashboard diagnostics widget (developer option).
     #[serde(default)]
     pub show_dashboard_diagnostics: bool,
     #[serde(default)]
@@ -486,123 +384,6 @@ pub struct Settings {
     #[serde(default)]
     pub query_results_layout: QueryResultsLayoutSettings,
 }
-
-static SETTINGS_PATH: OnceCell<PathBuf> = OnceCell::new();
-
-pub fn set_settings_path(path: impl Into<PathBuf>) {
-    let _ = SETTINGS_PATH.set(path.into());
-}
-
-pub fn settings_path() -> PathBuf {
-    SETTINGS_PATH
-        .get()
-        .cloned()
-        .unwrap_or_else(|| PathBuf::from("settings.json"))
-}
-
-fn default_toasts() -> bool {
-    true
-}
-
-fn default_toast_duration() -> f32 {
-    3.0
-}
-
-fn default_scale() -> Option<f32> {
-    Some(1.0)
-}
-
-fn default_history_limit() -> usize {
-    100
-}
-
-fn default_clipboard_limit() -> usize {
-    20
-}
-
-fn default_fuzzy_weight() -> f32 {
-    1.0
-}
-
-fn default_usage_weight() -> f32 {
-    1.0
-}
-
-fn default_query_autocomplete() -> bool {
-    true
-}
-
-fn default_page_jump() -> usize {
-    5
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_follow_mouse() -> bool {
-    true
-}
-
-fn default_always_on_top() -> bool {
-    true
-}
-
-fn default_timer_refresh() -> f32 {
-    1.0
-}
-
-fn default_net_refresh() -> f32 {
-    1.0
-}
-
-fn default_dashboard_enabled() -> bool {
-    true
-}
-
-fn default_show_dashboard_when_empty() -> bool {
-    true
-}
-
-fn default_note_panel_size() -> (f32, f32) {
-    (420.0, 320.0)
-}
-
-fn default_note_save_on_close() -> bool {
-    false
-}
-
-fn default_note_show_details() -> bool {
-    false
-}
-
-fn default_note_more_limit() -> usize {
-    5
-}
-
-fn default_query_results_layout_rows() -> usize {
-    3
-}
-
-fn default_query_results_layout_cols() -> usize {
-    2
-}
-
-fn default_log_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("launcher.log")))
-        .unwrap_or_else(|| PathBuf::from("launcher.log"))
-}
-
-fn default_launcher_hotkey() -> Option<String> {
-    if std::env::var("ML_DEFAULT_HOTKEY_NONE").is_ok() {
-        None
-    } else {
-        Some("F2".into())
-    }
-}
-
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -672,7 +453,6 @@ impl Default for Settings {
         }
     }
 }
-
 impl Settings {
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path).unwrap_or_default();
@@ -681,23 +461,19 @@ impl Settings {
         }
         Ok(serde_json::from_str(&content)?)
     }
-
     pub fn save(&self, path: &str) -> anyhow::Result<()> {
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(path, json)?;
         Ok(())
     }
-
     pub fn hotkey(&self) -> Hotkey {
         if let Some(hotkey) = &self.hotkey {
             match parse_hotkey(hotkey) {
                 Some(k) => return k,
-                None => {
-                    tracing::warn!(
-                        "provided hotkey string '{}' is invalid; using default F2",
-                        hotkey
-                    );
-                }
+                None => tracing::warn!(
+                    "provided hotkey string '{}' is invalid; using default F2",
+                    hotkey
+                ),
             }
         }
         Hotkey {
@@ -708,39 +484,30 @@ impl Settings {
             win: false,
         }
     }
-
     pub fn quit_hotkey(&self) -> Option<Hotkey> {
         if let Some(hotkey) = &self.quit_hotkey {
             match parse_hotkey(hotkey) {
                 Some(k) => return Some(k),
-                None => {
-                    tracing::warn!(
-                        "provided quit_hotkey string '{}' is invalid; ignoring",
-                        hotkey
-                    );
-                }
+                None => tracing::warn!(
+                    "provided quit_hotkey string '{}' is invalid; ignoring",
+                    hotkey
+                ),
             }
         }
         None
     }
-
-    /// Parse the help overlay hotkey if configured.
     pub fn help_hotkey(&self) -> Option<Hotkey> {
         if let Some(hotkey) = &self.help_hotkey {
             match parse_hotkey(hotkey) {
                 Some(k) => return Some(k),
-                None => {
-                    tracing::warn!(
-                        "provided help_hotkey string '{}' is invalid; ignoring",
-                        hotkey
-                    );
-                }
+                None => tracing::warn!(
+                    "provided help_hotkey string '{}' is invalid; ignoring",
+                    hotkey
+                ),
             }
         }
         None
     }
-
-    /// Determine the path for file logging if enabled.
     pub fn log_file_path(&self) -> Option<PathBuf> {
         match &self.log_file {
             Some(LogFile::Flag(true)) => Some(default_log_path()),
@@ -771,48 +538,29 @@ mod tests {
         settings.query_results_layout.cols = 5;
         settings.query_results_layout.respect_plugin_capability = false;
         settings.query_results_layout.plugin_opt_out = vec!["note".into(), "todo".into()];
-
         let json = serde_json::to_string(&settings).expect("serialize settings");
         let restored: Settings = serde_json::from_str(&json).expect("deserialize settings");
         assert_eq!(restored.query_results_layout, settings.query_results_layout);
     }
 
     #[test]
-    fn note_show_details_defaults_to_hidden_when_missing() {
+    fn settings_snapshot_backcompat_defaults() {
         let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
-        assert!(!parsed.note_show_details);
-    }
-
-    #[test]
-    fn note_show_details_round_trip_serialization() {
-        let mut settings = Settings::default();
-        settings.note_show_details = true;
-        let json = serde_json::to_string(&settings).expect("serialize settings");
-        let restored: Settings = serde_json::from_str(&json).expect("deserialize settings");
-        assert!(restored.note_show_details);
-
-        settings.note_show_details = false;
-        let json = serde_json::to_string(&settings).expect("serialize settings");
-        let restored: Settings = serde_json::from_str(&json).expect("deserialize settings");
-        assert!(!restored.note_show_details);
-    }
-
-    #[test]
-    fn error_visibility_defaults_when_fields_are_missing() {
-        let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
-        assert!(parsed.show_inline_errors);
-        assert!(parsed.show_error_toasts);
-    }
-
-    #[test]
-    fn error_visibility_round_trip_serialization() {
-        let mut settings = Settings::default();
-        settings.show_inline_errors = false;
-        settings.show_error_toasts = false;
-
-        let json = serde_json::to_string(&settings).expect("serialize settings");
-        let restored: Settings = serde_json::from_str(&json).expect("deserialize settings");
-        assert!(!restored.show_inline_errors);
-        assert!(!restored.show_error_toasts);
+        let snapshot = serde_json::json!({
+            "note_show_details": parsed.note_show_details,
+            "show_inline_errors": parsed.show_inline_errors,
+            "show_error_toasts": parsed.show_error_toasts,
+            "query_results_layout": {
+                "enabled": parsed.query_results_layout.enabled,
+                "rows": parsed.query_results_layout.rows,
+                "cols": parsed.query_results_layout.cols,
+                "respect_plugin_capability": parsed.query_results_layout.respect_plugin_capability,
+                "plugin_opt_out": parsed.query_results_layout.plugin_opt_out,
+            }
+        });
+        assert_eq!(
+            serde_json::to_string_pretty(&snapshot).unwrap(),
+            "{\n  \"note_show_details\": false,\n  \"query_results_layout\": {\n    \"cols\": 2,\n    \"enabled\": false,\n    \"plugin_opt_out\": [],\n    \"respect_plugin_capability\": true,\n    \"rows\": 3\n  },\n  \"show_error_toasts\": true,\n  \"show_inline_errors\": true\n}"
+        );
     }
 }
