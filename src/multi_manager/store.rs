@@ -191,6 +191,7 @@ mod tests {
                 }),
                 disabled: true,
                 valid: false,
+                hwnd: 0,
             }],
             home_rect: Some(MmRect {
                 x: 10,
