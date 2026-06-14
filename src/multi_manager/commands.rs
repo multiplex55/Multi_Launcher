@@ -62,6 +62,18 @@ mod tests {
     }
 
     #[test]
+    fn mm_save_returns_save() {
+        let actions = search_mm_commands("mm save");
+        assert!(actions.iter().any(|a| a.action == "mm:save"));
+    }
+
+    #[test]
+    fn mm_reload_returns_reload() {
+        let actions = search_mm_commands("mm reload");
+        assert!(actions.iter().any(|a| a.action == "mm:reload"));
+    }
+
+    #[test]
     fn mm_recapture_all_returns_recapture_all() {
         let actions = search_mm_commands("mm recapture all");
         assert!(actions.iter().any(|a| a.action == "mm:recapture-all"));

@@ -65,6 +65,15 @@ pub struct MmHotkey {
     pub win: bool,
 }
 
+impl MmHotkey {
+    pub fn is_valid(&self) -> bool {
+        let key = self.key.trim();
+        !key.is_empty()
+            && !key.contains('+')
+            && crate::window_manager::virtual_key_from_string(key).is_some()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MmWindow {
     #[serde(default)]
@@ -87,6 +96,23 @@ pub struct MmWindow {
     pub valid: bool,
     #[serde(default, skip_serializing, skip_deserializing)]
     pub hwnd: usize,
+}
+
+impl MmWindow {
+    pub fn display_label(&self) -> &str {
+        let alias = self.alias.trim();
+        if alias.is_empty() {
+            self.title.trim()
+        } else {
+            alias
+        }
+    }
+
+    pub fn sync_alias_from_title_if_missing(&mut self) {
+        if self.alias.trim().is_empty() {
+            self.alias = self.title.trim().to_string();
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,4 +181,102 @@ pub struct RecaptureQueueItem {
     pub workspace_id: String,
     #[serde(default)]
     pub window_index: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_display_label_uses_alias_when_non_empty() {
+        let window = MmWindow {
+            alias: "  Editor  ".into(),
+            title: "Code".into(),
+            ..MmWindow::default()
+        };
+        assert_eq!(window.display_label(), "Editor");
+    }
+
+    #[test]
+    fn window_display_label_falls_back_to_title_when_alias_absent_or_blank() {
+        let titled = MmWindow {
+            title: "  Browser  ".into(),
+            ..MmWindow::default()
+        };
+        let blank_alias = MmWindow {
+            alias: " \t ".into(),
+            title: "Terminal".into(),
+            ..MmWindow::default()
+        };
+        assert_eq!(titled.display_label(), "Browser");
+        assert_eq!(blank_alias.display_label(), "Terminal");
+    }
+
+    #[test]
+    fn sync_alias_from_title_if_missing_does_not_overwrite_non_empty_aliases() {
+        let mut window = MmWindow {
+            alias: "Docs".into(),
+            title: "Untitled - Notepad".into(),
+            ..MmWindow::default()
+        };
+        window.sync_alias_from_title_if_missing();
+        assert_eq!(window.alias, "Docs");
+    }
+
+    #[test]
+    fn sync_alias_from_title_if_missing_copies_title_for_blank_alias() {
+        let mut window = MmWindow {
+            alias: "  ".into(),
+            title: "  Notes  ".into(),
+            ..MmWindow::default()
+        };
+        window.sync_alias_from_title_if_missing();
+        assert_eq!(window.alias, "Notes");
+    }
+
+    #[test]
+    fn hotkey_validation_accepts_supported_combinations() {
+        for hotkey in [
+            MmHotkey {
+                key: "F9".into(),
+                ctrl: true,
+                ..MmHotkey::default()
+            },
+            MmHotkey {
+                key: "Space".into(),
+                shift: true,
+                alt: true,
+                ..MmHotkey::default()
+            },
+            MmHotkey {
+                key: "A".into(),
+                win: true,
+                ..MmHotkey::default()
+            },
+        ] {
+            assert!(hotkey.is_valid(), "{hotkey:?}");
+        }
+    }
+
+    #[test]
+    fn hotkey_validation_rejects_malformed_combinations() {
+        for hotkey in [
+            MmHotkey::default(),
+            MmHotkey {
+                key: "NoSuchKey".into(),
+                ctrl: true,
+                ..MmHotkey::default()
+            },
+            MmHotkey {
+                key: "Ctrl+A".into(),
+                ..MmHotkey::default()
+            },
+            MmHotkey {
+                key: "+".into(),
+                ..MmHotkey::default()
+            },
+        ] {
+            assert!(!hotkey.is_valid(), "{hotkey:?}");
+        }
+    }
 }
