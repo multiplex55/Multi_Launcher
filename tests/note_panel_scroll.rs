@@ -14,8 +14,8 @@ fn setup() -> tempfile::TempDir {
     let dir = tempdir().unwrap();
     let notes_dir = dir.path().join("notes");
     std::fs::create_dir_all(&notes_dir).unwrap();
-    std::env::set_var("ML_NOTES_DIR", &notes_dir);
-    std::env::set_var("HOME", dir.path());
+    unsafe { std::env::set_var("ML_NOTES_DIR", &notes_dir) };
+    unsafe { std::env::set_var("HOME", dir.path()) };
     save_notes(&[]).unwrap();
     dir
 }

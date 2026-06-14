@@ -835,7 +835,7 @@ mod tests {
         std::fs::create_dir_all(&notes_dir).unwrap();
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
-        std::env::set_var("ML_NOTES_DIR", &notes_dir);
+        unsafe { std::env::set_var("ML_NOTES_DIR", &notes_dir) };
         save_notes(&[]).unwrap();
         reset_slug_lookup();
         append_note("alpha", "# alpha\n\nbody").unwrap();

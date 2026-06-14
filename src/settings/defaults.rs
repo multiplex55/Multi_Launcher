@@ -102,3 +102,13 @@ pub fn default_launcher_hotkey() -> Option<String> {
         Some("F2".into())
     }
 }
+
+pub fn default_multi_manager_workspaces_path() -> String {
+    "multi_manager_workspaces.json".into()
+}
+pub fn default_multi_manager_bindings_path() -> String {
+    "multi_manager_bindings.json".into()
+}
+pub fn default_multi_manager_hotkey_poll_ms() -> u64 {
+    50
+}

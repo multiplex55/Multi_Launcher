@@ -11,7 +11,7 @@ static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 fn setup() -> tempfile::TempDir {
     let dir = tempdir().unwrap();
-    std::env::set_var("ML_TMP_DIR", dir.path());
+    unsafe { std::env::set_var("ML_TMP_DIR", dir.path()) };
     clear_files().unwrap();
     dir
 }

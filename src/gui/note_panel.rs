@@ -2036,7 +2036,7 @@ mod tests {
         let id = egui::Id::new("note_content");
         let dir = tempdir().unwrap();
         let prev = std::env::var("ML_NOTES_DIR").ok();
-        std::env::set_var("ML_NOTES_DIR", dir.path());
+        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
         let _ = crate::plugins::note::refresh_cache();
 
         let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap_or_default();
@@ -2054,9 +2054,9 @@ mod tests {
         assert!(notes.iter().any(|n| n.slug == "brand-new-note"));
 
         if let Some(p) = prev {
-            std::env::set_var("ML_NOTES_DIR", p);
+            unsafe { std::env::set_var("ML_NOTES_DIR", p) };
         } else {
-            std::env::remove_var("ML_NOTES_DIR");
+            unsafe { std::env::remove_var("ML_NOTES_DIR") };
         }
         let _ = crate::plugins::note::refresh_cache();
     }
@@ -2073,7 +2073,7 @@ mod tests {
         let id = egui::Id::new("note_content");
         let dir = tempdir().unwrap();
         let prev = std::env::var("ML_NOTES_DIR").ok();
-        std::env::set_var("ML_NOTES_DIR", dir.path());
+        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
         crate::plugins::note::append_note("Existing Note", "body").unwrap();
         let _ = crate::plugins::note::refresh_cache();
 
@@ -2087,9 +2087,9 @@ mod tests {
         );
 
         if let Some(p) = prev {
-            std::env::set_var("ML_NOTES_DIR", p);
+            unsafe { std::env::set_var("ML_NOTES_DIR", p) };
         } else {
-            std::env::remove_var("ML_NOTES_DIR");
+            unsafe { std::env::remove_var("ML_NOTES_DIR") };
         }
         let _ = crate::plugins::note::refresh_cache();
     }
@@ -2107,7 +2107,7 @@ mod tests {
         let id = egui::Id::new("note_content");
         let dir = tempdir().unwrap();
         let prev = std::env::var("ML_NOTES_DIR").ok();
-        std::env::set_var("ML_NOTES_DIR", dir.path());
+        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
         let _ = crate::plugins::note::refresh_cache();
 
         panel.insert_or_create_note_link(&ctx, id, &mut app);
@@ -2118,9 +2118,9 @@ mod tests {
         assert_eq!(idx, "hello [[linked-note]]".chars().count());
 
         if let Some(p) = prev {
-            std::env::set_var("ML_NOTES_DIR", p);
+            unsafe { std::env::set_var("ML_NOTES_DIR", p) };
         } else {
-            std::env::remove_var("ML_NOTES_DIR");
+            unsafe { std::env::remove_var("ML_NOTES_DIR") };
         }
         let _ = crate::plugins::note::refresh_cache();
     }
@@ -2546,7 +2546,7 @@ Body with [[Other]]"
         let mut app = new_app(&ctx);
         let dir = tempdir().unwrap();
         let prev = std::env::var("ML_NOTES_DIR").ok();
-        std::env::set_var("ML_NOTES_DIR", dir.path());
+        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
 
         let note = Note {
             title: "Source".into(),
@@ -2575,9 +2575,9 @@ Body with [[Other]]"
         assert_eq!(panel.note.links, vec!["beta".to_string()]);
 
         if let Some(p) = prev {
-            std::env::set_var("ML_NOTES_DIR", p);
+            unsafe { std::env::set_var("ML_NOTES_DIR", p) };
         } else {
-            std::env::remove_var("ML_NOTES_DIR");
+            unsafe { std::env::remove_var("ML_NOTES_DIR") };
         }
     }
 
@@ -2590,7 +2590,7 @@ Body with [[Other]]"
         let mut app = new_app(&ctx);
         let dir = tempdir().unwrap();
         let prev = std::env::var("ML_NOTES_DIR").ok();
-        std::env::set_var("ML_NOTES_DIR", dir.path());
+        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
 
         fs::write(
             dir.path().join("alpha.md"),
@@ -2626,9 +2626,9 @@ body"
         assert!(panel.derived.backlink_rows_related_notes.is_empty());
 
         if let Some(p) = prev {
-            std::env::set_var("ML_NOTES_DIR", p);
+            unsafe { std::env::set_var("ML_NOTES_DIR", p) };
         } else {
-            std::env::remove_var("ML_NOTES_DIR");
+            unsafe { std::env::remove_var("ML_NOTES_DIR") };
         }
     }
 
@@ -2650,7 +2650,7 @@ body"
         let mut app = new_app(&ctx);
         let dir = tempdir().unwrap();
         let prev = std::env::var("ML_NOTES_DIR").ok();
-        std::env::set_var("ML_NOTES_DIR", dir.path());
+        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
         let note = Note {
             title: "Title".into(),
             path: PathBuf::new(),
@@ -2670,9 +2670,9 @@ body"
         });
         drop(dir);
         if let Some(p) = prev {
-            std::env::set_var("ML_NOTES_DIR", p);
+            unsafe { std::env::set_var("ML_NOTES_DIR", p) };
         } else {
-            std::env::remove_var("ML_NOTES_DIR");
+            unsafe { std::env::remove_var("ML_NOTES_DIR") };
         }
         let _ = crate::plugins::note::refresh_cache();
         assert_eq!(app.note_panels.len(), 1);

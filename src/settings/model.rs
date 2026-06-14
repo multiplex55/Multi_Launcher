@@ -276,6 +276,47 @@ impl Default for ThemeSettings {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MultiManagerSettings {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_multi_manager_workspaces_path")]
+    pub workspaces_path: String,
+    #[serde(default = "default_multi_manager_bindings_path")]
+    pub bindings_path: String,
+    #[serde(default = "default_true")]
+    pub auto_save: bool,
+    #[serde(default = "default_true")]
+    pub save_on_exit: bool,
+    #[serde(default)]
+    pub developer_debugging: bool,
+    #[serde(default)]
+    pub show_force_recapture_prompt: bool,
+    #[serde(default = "default_multi_manager_hotkey_poll_ms")]
+    pub hotkey_poll_ms: u64,
+    #[serde(default)]
+    pub hide_launcher_before_toggle: bool,
+    #[serde(default = "default_true")]
+    pub ignore_launcher_window_on_capture: bool,
+}
+
+impl Default for MultiManagerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            workspaces_path: default_multi_manager_workspaces_path(),
+            bindings_path: default_multi_manager_bindings_path(),
+            auto_save: true,
+            save_on_exit: true,
+            developer_debugging: false,
+            show_force_recapture_prompt: false,
+            hotkey_poll_ms: default_multi_manager_hotkey_poll_ms(),
+            hide_launcher_before_toggle: false,
+            ignore_launcher_window_on_capture: true,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Settings {
     pub hotkey: Option<String>,
@@ -383,6 +424,8 @@ pub struct Settings {
     pub note_graph: NoteGraphSettings,
     #[serde(default)]
     pub query_results_layout: QueryResultsLayoutSettings,
+    #[serde(default)]
+    pub multi_manager: MultiManagerSettings,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -450,6 +493,7 @@ impl Default for Settings {
             theme: ThemeSettings::default(),
             note_graph: NoteGraphSettings::default(),
             query_results_layout: QueryResultsLayoutSettings::default(),
+            multi_manager: MultiManagerSettings::default(),
         }
     }
 }
@@ -519,7 +563,13 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::{QueryResultsLayoutSettings, Settings};
+    use super::{MultiManagerSettings, QueryResultsLayoutSettings, Settings};
+
+    #[test]
+    fn multi_manager_defaults_are_backward_compatible() {
+        let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
+        assert_eq!(parsed.multi_manager, MultiManagerSettings::default());
+    }
 
     #[test]
     fn query_results_layout_defaults_are_backward_compatible() {
@@ -550,6 +600,18 @@ mod tests {
             "note_show_details": parsed.note_show_details,
             "show_inline_errors": parsed.show_inline_errors,
             "show_error_toasts": parsed.show_error_toasts,
+            "multi_manager": {
+                "enabled": parsed.multi_manager.enabled,
+                "workspaces_path": parsed.multi_manager.workspaces_path,
+                "bindings_path": parsed.multi_manager.bindings_path,
+                "auto_save": parsed.multi_manager.auto_save,
+                "save_on_exit": parsed.multi_manager.save_on_exit,
+                "developer_debugging": parsed.multi_manager.developer_debugging,
+                "show_force_recapture_prompt": parsed.multi_manager.show_force_recapture_prompt,
+                "hotkey_poll_ms": parsed.multi_manager.hotkey_poll_ms,
+                "hide_launcher_before_toggle": parsed.multi_manager.hide_launcher_before_toggle,
+                "ignore_launcher_window_on_capture": parsed.multi_manager.ignore_launcher_window_on_capture,
+            },
             "query_results_layout": {
                 "enabled": parsed.query_results_layout.enabled,
                 "rows": parsed.query_results_layout.rows,

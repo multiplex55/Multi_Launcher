@@ -11,6 +11,7 @@ pub mod launcher;
 pub mod linking;
 pub mod logging;
 pub mod mouse_gestures;
+pub mod multi_manager;
 pub mod note_todo_sync;
 pub mod platform;
 pub mod plugin;
