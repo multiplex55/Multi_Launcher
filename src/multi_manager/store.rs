@@ -173,6 +173,7 @@ mod tests {
             }),
             aliases: vec!["main".into(), "work".into()],
             windows: vec![MmWindow {
+                alias: "Editor".into(),
                 title: "Editor".into(),
                 executable: "code.exe".into(),
                 class_name: "Chrome_WidgetWin_1".into(),
