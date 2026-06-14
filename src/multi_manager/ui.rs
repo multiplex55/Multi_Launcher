@@ -1,4 +1,5 @@
 use crate::gui::LauncherApp;
+use crate::multi_manager::bindings;
 use crate::multi_manager::model::{
     new_workspace_id, MmHotkey, MmRect, MmWindow, MmWorkspace, PendingCaptureAction,
 };
@@ -65,6 +66,15 @@ impl MultiManagerDialog {
                     if ui.button("Reload").clicked() {
                         self.confirm.reload = true;
                     }
+                    if ui.button("Save Bindings").clicked() {
+                        app.multi_manager_save_bindings();
+                    }
+                    if ui.button("Restore Bindings").clicked() {
+                        app.multi_manager_restore_bindings();
+                    }
+                    if ui.button("Refresh Titles").clicked() {
+                        app.multi_manager_refresh_titles();
+                    }
                     if ui.button("Send All Home").clicked() {
                         send_all(app, true);
                     }
@@ -125,8 +135,18 @@ impl MultiManagerDialog {
     }
 
     fn capture_banner(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
-        if app.multi_manager.pending_capture.is_some() {
-            ui.colored_label(egui::Color32::LIGHT_BLUE, "Capture mode active: press Enter to capture active window, S to skip supported multi-step captures, or Escape to cancel.");
+        if let Some(action) = &app.multi_manager.pending_capture {
+            ui.colored_label(egui::Color32::LIGHT_BLUE, "Capture mode active: press Enter to capture active window, S to skip current item, or Escape to cancel remaining queue.");
+            if let PendingCaptureAction::RecaptureWindow {
+                workspace_id,
+                window_id,
+            } = action
+            {
+                ui.label(format!(
+                    "Recapturing workspace {workspace_id}, window {}",
+                    window_id.parse::<usize>().map(|i| i + 1).unwrap_or(1)
+                ));
+            }
         }
     }
 
@@ -279,6 +299,9 @@ impl MultiManagerDialog {
             }
             ui.label(format!("Original title: {}", win.title));
             ui.label(format!("HWND: {}", win.hwnd));
+            if is_duplicate_hwnd(app, win.hwnd, id, index) {
+                ui.colored_label(egui::Color32::YELLOW, "⚠ duplicate HWND");
+            }
             ui.label(if win.valid { "valid" } else { "invalid" });
             rect_ui(ui, "Home", win.home_rect, |r| {
                 app.multi_manager.with_workspace_mut(id, |w| {
@@ -539,4 +562,35 @@ mod tests {
         assert!(!MultiManagerDialog::default().open);
         assert!(!MultiManagerSettingsDialog::default().open);
     }
+}
+
+fn is_duplicate_hwnd(
+    app: &LauncherApp,
+    hwnd: usize,
+    workspace_id: &str,
+    window_index: usize,
+) -> bool {
+    if hwnd == 0 {
+        return false;
+    }
+    app.multi_manager
+        .workspaces
+        .lock()
+        .map(|workspaces| {
+            bindings::duplicate_hwnds(&workspaces)
+                .into_iter()
+                .any(|duplicate| {
+                    duplicate.hwnd == hwnd
+                        && duplicate
+                            .locations
+                            .into_iter()
+                            .any(|(ws_index, win_index)| {
+                                workspaces
+                                    .get(ws_index)
+                                    .is_some_and(|workspace| workspace.id == workspace_id)
+                                    && win_index == window_index
+                            })
+                })
+        })
+        .unwrap_or(false)
 }

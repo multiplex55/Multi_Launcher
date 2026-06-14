@@ -143,8 +143,9 @@ pub enum PendingCaptureAction {
         workspace_id: String,
         window_id: String,
     },
-    RecaptureWorkspace {
+    RecaptureWindow {
         workspace_id: String,
+        window_id: String,
     },
 }
 
@@ -152,4 +153,6 @@ pub enum PendingCaptureAction {
 pub struct RecaptureQueueItem {
     #[serde(default)]
     pub workspace_id: String,
+    #[serde(default)]
+    pub window_index: usize,
 }
