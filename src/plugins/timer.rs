@@ -64,7 +64,7 @@ struct TimerManager {
 struct HeapEntry {
     deadline: Instant,
     id: u64,
-    gen: u64,
+    generation: u64,
 }
 
 struct TimerHeap {
@@ -210,7 +210,7 @@ impl TimerManager {
                 if entry.deadline <= now {
                     let popped = heap_guard.pop().unwrap();
                     drop(heap_guard);
-                    Self::fire_timer(popped.id, popped.gen);
+                    Self::fire_timer(popped.id, popped.generation);
                     heap_guard = match inner.heap.lock().ok() {
                         Some(g) => g,
                         None => return,
@@ -229,13 +229,13 @@ impl TimerManager {
         }
     }
 
-    fn fire_timer(id: u64, gen: u64) {
+    fn fire_timer(id: u64, generation: u64) {
         let mut list = match ACTIVE_TIMERS.lock().ok() {
             Some(l) => l,
             None => return,
         };
         if let Some(entry) = list.get(&id) {
-            if entry.generation == gen && !entry.paused {
+            if entry.generation == generation && !entry.paused {
                 if let Some(entry) = list.remove(&id) {
                     if entry.persist {
                         save_persistent_alarms_locked(&list);
@@ -256,10 +256,14 @@ impl TimerManager {
         }
     }
 
-    fn register(&self, deadline: Instant, id: u64, gen: u64) {
+    fn register(&self, deadline: Instant, id: u64, generation: u64) {
         if let Some(mut heap) = self.inner.heap.lock().ok() {
             heap.remove(id);
-            heap.push(HeapEntry { deadline, id, gen });
+            heap.push(HeapEntry {
+                deadline,
+                id,
+                generation,
+            });
             self.inner.condvar.notify_one();
         }
     }

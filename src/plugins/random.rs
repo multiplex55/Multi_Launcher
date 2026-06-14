@@ -1,8 +1,8 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
-use rand::distributions::Alphanumeric;
+use rand::distr::Alphanumeric;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::sync::Mutex;
 
 pub struct RandomPlugin {
@@ -13,7 +13,7 @@ impl RandomPlugin {
     /// Create a new plugin using randomness from the operating system.
     pub fn new() -> Self {
         Self {
-            rng: Mutex::new(StdRng::from_entropy()),
+            rng: Mutex::new(StdRng::from_rng(&mut rand::rng())),
         }
     }
 
@@ -58,7 +58,7 @@ impl Plugin for RandomPlugin {
                             return Vec::new();
                         }
                     };
-                    let value = rng.gen_range(0..=max).to_string();
+                    let value = rng.random_range(0..=max).to_string();
                     return vec![Action {
                         label: value.clone(),
                         desc: "Random number".into(),
@@ -75,7 +75,7 @@ impl Plugin for RandomPlugin {
                         return Vec::new();
                     }
                 };
-                let value = rng.gen_range(1..=6).to_string();
+                let value = rng.random_range(1..=6).to_string();
                 return vec![Action {
                     label: value.clone(),
                     desc: "Dice roll".into(),
@@ -96,7 +96,7 @@ impl Plugin for RandomPlugin {
                         }
                     };
                     let pw: String = (&mut *rng)
-                        .sample_iter(&Alphanumeric)
+                        .sample_iter(Alphanumeric)
                         .take(len)
                         .map(char::from)
                         .collect();

@@ -3290,7 +3290,7 @@ mod tests {
         let mut app = new_app(&ctx);
         let dir = tempdir().unwrap();
         let prev = std::env::var("ML_NOTES_DIR").ok();
-        std::env::set_var("ML_NOTES_DIR", dir.path());
+        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
 
         append_note("Second Note", "body").unwrap();
         app.open_note_panel("second-note", None);
@@ -3299,9 +3299,9 @@ mod tests {
         assert_eq!(app.note_panels.len(), 1);
 
         if let Some(prev) = prev {
-            std::env::set_var("ML_NOTES_DIR", prev);
+            unsafe { std::env::set_var("ML_NOTES_DIR", prev) };
         } else {
-            std::env::remove_var("ML_NOTES_DIR");
+            unsafe { std::env::remove_var("ML_NOTES_DIR") };
         }
     }
 
@@ -3548,8 +3548,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let notes_dir = dir.path().join("notes");
         std::fs::create_dir_all(&notes_dir).unwrap();
-        std::env::set_var("ML_NOTES_DIR", &notes_dir);
-        std::env::set_var("HOME", dir.path());
+        unsafe { std::env::set_var("ML_NOTES_DIR", &notes_dir) };
+        unsafe { std::env::set_var("HOME", dir.path()) };
         let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         std::env::set_current_dir(dir.path()).unwrap();
         save_notes(&[]).unwrap();
@@ -3585,8 +3585,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let notes_dir = dir.path().join("notes");
         std::fs::create_dir_all(&notes_dir).unwrap();
-        std::env::set_var("ML_NOTES_DIR", &notes_dir);
-        std::env::set_var("HOME", dir.path());
+        unsafe { std::env::set_var("ML_NOTES_DIR", &notes_dir) };
+        unsafe { std::env::set_var("HOME", dir.path()) };
         let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         std::env::set_current_dir(dir.path()).unwrap();
         save_notes(&[]).unwrap();
@@ -3620,8 +3620,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let notes_dir = dir.path().join("notes");
         std::fs::create_dir_all(&notes_dir).unwrap();
-        std::env::set_var("ML_NOTES_DIR", &notes_dir);
-        std::env::set_var("HOME", dir.path());
+        unsafe { std::env::set_var("ML_NOTES_DIR", &notes_dir) };
+        unsafe { std::env::set_var("HOME", dir.path()) };
         let orig_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         std::env::set_current_dir(dir.path()).unwrap();
         save_notes(&[]).unwrap();

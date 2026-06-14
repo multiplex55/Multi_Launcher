@@ -1519,7 +1519,7 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let prev = std::env::var("ML_NOTES_DIR").ok();
-        std::env::set_var("ML_NOTES_DIR", dir.path());
+        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
 
         fs::write(
             dir.path().join("one.md"),
@@ -1546,9 +1546,9 @@ Body",
         assert!(second.iter().any(|n| n.slug == "two"));
 
         if let Some(p) = prev {
-            std::env::set_var("ML_NOTES_DIR", p);
+            unsafe { std::env::set_var("ML_NOTES_DIR", p) };
         } else {
-            std::env::remove_var("ML_NOTES_DIR");
+            unsafe { std::env::remove_var("ML_NOTES_DIR") };
         }
     }
 
@@ -2045,7 +2045,7 @@ Body",
 
         let dir = tempdir().unwrap();
         let prev = std::env::var("ML_NOTES_DIR").ok();
-        std::env::set_var("ML_NOTES_DIR", dir.path());
+        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
 
         let path = dir.path().join("alpha.md");
         fs::write(&path, "# Alpha\n\nold").unwrap();
@@ -2067,9 +2067,9 @@ Body",
         assert_eq!(fs::read_to_string(path).unwrap(), "# Alpha\n\nupdated");
 
         if let Some(p) = prev {
-            std::env::set_var("ML_NOTES_DIR", p);
+            unsafe { std::env::set_var("ML_NOTES_DIR", p) };
         } else {
-            std::env::remove_var("ML_NOTES_DIR");
+            unsafe { std::env::remove_var("ML_NOTES_DIR") };
         }
     }
 
@@ -2079,7 +2079,7 @@ Body",
 
         let dir = tempdir().unwrap();
         let prev = std::env::var("ML_NOTES_DIR").ok();
-        std::env::set_var("ML_NOTES_DIR", dir.path());
+        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
 
         std::fs::write(dir.path().join("alpha.md"), "# Alpha\n\nbody").unwrap();
         refresh_cache().unwrap();
@@ -2101,9 +2101,9 @@ Body",
         assert!(dir.path().join("alpha-1.md").exists());
 
         if let Some(p) = prev {
-            std::env::set_var("ML_NOTES_DIR", p);
+            unsafe { std::env::set_var("ML_NOTES_DIR", p) };
         } else {
-            std::env::remove_var("ML_NOTES_DIR");
+            unsafe { std::env::remove_var("ML_NOTES_DIR") };
         }
     }
 
@@ -2113,7 +2113,7 @@ Body",
 
         let dir = tempdir().unwrap();
         let prev = std::env::var("ML_NOTES_DIR").ok();
-        std::env::set_var("ML_NOTES_DIR", dir.path());
+        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
 
         let old_path = dir.path().join("alpha.md");
         std::fs::write(&old_path, "# Alpha\n\nbody").unwrap();
@@ -2137,9 +2137,9 @@ Body",
         assert!(note.path.exists());
 
         if let Some(p) = prev {
-            std::env::set_var("ML_NOTES_DIR", p);
+            unsafe { std::env::set_var("ML_NOTES_DIR", p) };
         } else {
-            std::env::remove_var("ML_NOTES_DIR");
+            unsafe { std::env::remove_var("ML_NOTES_DIR") };
         }
     }
 }

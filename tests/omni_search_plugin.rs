@@ -25,9 +25,9 @@ impl Drop for EnvGuard {
     fn drop(&mut self) {
         let _ = std::env::set_current_dir(&self.cwd);
         if let Some(path) = &self.notes_dir {
-            std::env::set_var("ML_NOTES_DIR", path);
+            unsafe { std::env::set_var("ML_NOTES_DIR", path) };
         } else {
-            std::env::remove_var("ML_NOTES_DIR");
+            unsafe { std::env::remove_var("ML_NOTES_DIR") };
         }
     }
 }
@@ -37,7 +37,7 @@ fn setup_fixture() -> (tempfile::TempDir, EnvGuard) {
     let notes_dir = std::env::var("ML_NOTES_DIR").ok();
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
-    std::env::set_var("ML_NOTES_DIR", dir.path().join("notes"));
+    unsafe { std::env::set_var("ML_NOTES_DIR", dir.path().join("notes")) };
 
     save_bookmarks(
         BOOKMARKS_FILE,
