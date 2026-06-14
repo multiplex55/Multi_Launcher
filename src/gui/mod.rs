@@ -92,6 +92,8 @@ use crate::indexer;
 use crate::launcher::launch_action;
 use crate::mouse_gestures::db::{load_gestures, save_gestures, GESTURES_FILE};
 use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
+use crate::multi_manager::state::MultiManagerState;
+use crate::multi_manager::ui::{MultiManagerDialog, MultiManagerSettingsDialog};
 use crate::plugin::{PluginManager, CAP_FORCE_LIST_RESULTS, CAP_GRID_RESULTS_COMPATIBLE};
 use crate::plugin_editor::PluginEditor;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
@@ -346,6 +348,9 @@ pub struct LauncherApp {
     pub settings_editor: SettingsEditor,
     pub plugin_editor: PluginEditor,
     pub settings_path: String,
+    pub multi_manager: MultiManagerState,
+    pub multi_manager_dialog: MultiManagerDialog,
+    pub multi_manager_settings_dialog: MultiManagerSettingsDialog,
     /// Hold watchers so the `RecommendedWatcher` instances remain active.
     #[allow(dead_code)] // required to keep watchers alive
     watchers: Vec<RecommendedWatcher>,
@@ -1036,6 +1041,8 @@ impl LauncherApp {
             .unwrap_or(NoteExternalOpen::Wezterm);
 
         let settings_editor = SettingsEditor::new_with_plugins(&settings);
+        let multi_manager =
+            MultiManagerState::load_or_default(&settings.multi_manager, &settings_path);
         let plugin_editor = PluginEditor::new(&settings);
         let actions_by_id = actions
             .iter()
@@ -1062,6 +1069,9 @@ impl LauncherApp {
             settings_editor,
             plugin_editor,
             settings_path,
+            multi_manager,
+            multi_manager_dialog: MultiManagerDialog::default(),
+            multi_manager_settings_dialog: MultiManagerSettingsDialog::default(),
             watchers,
             dashboard,
             dashboard_data_cache,

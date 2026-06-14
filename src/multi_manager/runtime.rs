@@ -66,6 +66,15 @@ pub struct MultiManagerRuntime {
 }
 
 impl MultiManagerRuntime {
+    pub fn inactive(workspaces: Arc<Mutex<Vec<MmWorkspace>>>) -> Self {
+        Self {
+            workspaces,
+            control: Arc::new(RuntimeControl::new(false)),
+            last_hotkey_info: Arc::new(Mutex::new(None)),
+            join_handle: None,
+        }
+    }
+
     pub fn start(workspaces: Arc<Mutex<Vec<MmWorkspace>>>, settings: MultiManagerSettings) -> Self {
         let control = Arc::new(RuntimeControl::new(settings.enabled));
         let last_hotkey_info = Arc::new(Mutex::new(None));
