@@ -24,6 +24,7 @@ use crate::plugins::macros::MacrosPlugin;
 use crate::plugins::media::MediaPlugin;
 use crate::plugins::missing::MissingPlugin;
 use crate::plugins::mouse_gestures::MouseGesturesPlugin;
+use crate::plugins::multi_manager::MultiManagerPlugin;
 use crate::plugins::network::NetworkPlugin;
 use crate::plugins::note::NotePlugin;
 use crate::plugins::omni_search::OmniSearchPlugin;
@@ -168,6 +169,7 @@ impl PluginManager {
         self.register_with_settings(MacrosPlugin::default(), plugin_settings);
         self.register_with_settings(KeysPlugin::default(), plugin_settings);
         self.register_with_settings(MouseGesturesPlugin::default(), plugin_settings);
+        self.register_with_settings(MultiManagerPlugin, plugin_settings);
         self.register_with_settings(FavPlugin::default(), plugin_settings);
         self.register_with_settings(MissingPlugin, plugin_settings);
         self.register_with_settings(RecyclePlugin, plugin_settings);

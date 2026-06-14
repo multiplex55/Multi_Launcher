@@ -24,6 +24,7 @@ pub mod macros;
 pub mod media;
 pub mod missing;
 pub mod mouse_gestures;
+pub mod multi_manager;
 pub mod network;
 pub mod note;
 pub mod omni_search;

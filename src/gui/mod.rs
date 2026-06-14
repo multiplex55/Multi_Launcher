@@ -17,6 +17,7 @@ mod image_panel;
 mod macro_dialog;
 mod mouse_gesture_settings_dialog;
 mod mouse_gestures_dialog;
+mod multi_manager_actions;
 mod note_graph_dialog;
 mod note_panel;
 mod notes_dialog;
