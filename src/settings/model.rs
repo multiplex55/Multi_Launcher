@@ -622,7 +622,7 @@ mod tests {
         });
         assert_eq!(
             serde_json::to_string_pretty(&snapshot).unwrap(),
-            "{\n  \"note_show_details\": false,\n  \"query_results_layout\": {\n    \"cols\": 2,\n    \"enabled\": false,\n    \"plugin_opt_out\": [],\n    \"respect_plugin_capability\": true,\n    \"rows\": 3\n  },\n  \"show_error_toasts\": true,\n  \"show_inline_errors\": true\n}"
+            "{\n  \"multi_manager\": {\n    \"auto_save\": true,\n    \"bindings_path\": \"multi_manager_bindings.json\",\n    \"developer_debugging\": false,\n    \"enabled\": true,\n    \"hide_launcher_before_toggle\": false,\n    \"hotkey_poll_ms\": 50,\n    \"ignore_launcher_window_on_capture\": true,\n    \"save_on_exit\": true,\n    \"show_force_recapture_prompt\": false,\n    \"workspaces_path\": \"multi_manager_workspaces.json\"\n  },\n  \"note_show_details\": false,\n  \"query_results_layout\": {\n    \"cols\": 2,\n    \"enabled\": false,\n    \"plugin_opt_out\": [],\n    \"respect_plugin_capability\": true,\n    \"rows\": 3\n  },\n  \"show_error_toasts\": true,\n  \"show_inline_errors\": true\n}"
         );
     }
 }
