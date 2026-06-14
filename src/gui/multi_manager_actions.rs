@@ -89,16 +89,21 @@ impl LauncherApp {
     pub fn multi_manager_restore_bindings(&mut self) {
         match bindings::load_bindings(&self.multi_manager.bindings_path) {
             Ok(snapshots) => {
-                let restored =
-                    self.multi_manager.workspaces.lock().map(|mut workspaces| {
-                        bindings::restore_bindings(&mut workspaces, &snapshots)
-                    });
+                let restored = {
+                    match self.multi_manager.workspaces.lock() {
+                        Ok(mut workspaces) => {
+                            bindings::restore_bindings(&mut workspaces, &snapshots);
+                            Ok(())
+                        }
+                        Err(_) => Err(()),
+                    }
+                };
                 match restored {
                     Ok(()) => {
                         self.multi_manager.mark_dirty();
                         self.add_success_toast("Restored MultiManager window bindings");
                     }
-                    Err(_) => self.report_error_message(
+                    Err(()) => self.report_error_message(
                         "multi_manager.bindings",
                         "Failed to lock workspaces for binding restore",
                     ),
@@ -112,18 +117,19 @@ impl LauncherApp {
     }
 
     pub fn multi_manager_refresh_titles(&mut self) {
-        let changed = self
-            .multi_manager
-            .workspaces
-            .lock()
-            .map(|mut workspaces| bindings::refresh_titles(&mut workspaces));
+        let changed = {
+            match self.multi_manager.workspaces.lock() {
+                Ok(mut workspaces) => Ok(bindings::refresh_titles(&mut workspaces)),
+                Err(_) => Err(()),
+            }
+        };
         match changed {
             Ok(true) => {
                 self.multi_manager.mark_dirty();
                 self.add_success_toast("Refreshed MultiManager window titles");
             }
             Ok(false) => self.add_success_toast("MultiManager window titles already current"),
-            Err(_) => self.report_error_message(
+            Err(()) => self.report_error_message(
                 "multi_manager.titles",
                 "Failed to lock workspaces for title refresh",
             ),
