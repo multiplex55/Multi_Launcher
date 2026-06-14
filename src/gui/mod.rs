@@ -99,7 +99,7 @@ use crate::plugin::{PluginManager, CAP_FORCE_LIST_RESULTS, CAP_GRID_RESULTS_COMP
 use crate::plugin_editor::PluginEditor;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
-use crate::settings::{QueryResultsLayoutSettings, Settings};
+use crate::settings::{MultiManagerSettings, QueryResultsLayoutSettings, Settings};
 use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{append_toast_log, TOAST_LOG_FILE};
 use crate::usage::{self, USAGE_FILE};
@@ -264,6 +264,8 @@ pub enum Panel {
     Editor,
     Settings,
     Plugins,
+    MultiManagerDialog,
+    MultiManagerSettingsDialog,
 }
 
 #[derive(Default)]
@@ -304,6 +306,8 @@ struct PanelStates {
     editor: bool,
     settings: bool,
     plugins: bool,
+    multi_manager_dialog: bool,
+    multi_manager_settings_dialog: bool,
 }
 
 /// Primary GUI state for Multi Launcher.
@@ -350,6 +354,8 @@ pub struct LauncherApp {
     pub plugin_editor: PluginEditor,
     pub settings_path: String,
     pub multi_manager: MultiManagerState,
+    pub multi_manager_settings: MultiManagerSettings,
+    pub launcher_hwnd: Option<usize>,
     pub multi_manager_dialog: MultiManagerDialog,
     pub multi_manager_settings_dialog: MultiManagerSettingsDialog,
     /// Hold watchers so the `RecommendedWatcher` instances remain active.
@@ -1071,6 +1077,8 @@ impl LauncherApp {
             plugin_editor,
             settings_path,
             multi_manager,
+            multi_manager_settings: settings.multi_manager.clone(),
+            launcher_hwnd: None,
             multi_manager_dialog: MultiManagerDialog::default(),
             multi_manager_settings_dialog: MultiManagerSettingsDialog::default(),
             watchers,
@@ -1913,6 +1921,14 @@ impl LauncherApp {
                 self.show_plugins = false;
                 self.panel_states.plugins = false;
             }
+            Panel::MultiManagerDialog => {
+                self.multi_manager_dialog.open = false;
+                self.panel_states.multi_manager_dialog = false;
+            }
+            Panel::MultiManagerSettingsDialog => {
+                self.multi_manager_settings_dialog.open = false;
+                self.panel_states.multi_manager_settings_dialog = false;
+            }
         }
         true
     }
@@ -2067,6 +2083,14 @@ impl LauncherApp {
                 self.show_plugins = false;
                 self.panel_states.plugins = false;
             }
+            Panel::MultiManagerDialog => {
+                self.multi_manager_dialog.open = false;
+                self.panel_states.multi_manager_dialog = false;
+            }
+            Panel::MultiManagerSettingsDialog => {
+                self.multi_manager_settings_dialog.open = false;
+                self.panel_states.multi_manager_settings_dialog = false;
+            }
         }
         self.panel_stack.retain(|p| *p != panel);
     }
@@ -2109,6 +2133,8 @@ impl LauncherApp {
             Panel::Editor => self.show_editor = true,
             Panel::Settings => self.open_settings_dialog(),
             Panel::Plugins => self.show_plugins = true,
+            Panel::MultiManagerDialog => self.multi_manager_dialog.open = true,
+            Panel::MultiManagerSettingsDialog => self.multi_manager_settings_dialog.open = true,
         }
         if !self.panel_stack.contains(&panel) {
             self.panel_stack.push(panel);
@@ -2290,6 +2316,16 @@ impl LauncherApp {
         check!(self.show_editor, editor, Panel::Editor);
         check!(self.show_settings, settings, Panel::Settings);
         check!(self.show_plugins, plugins, Panel::Plugins);
+        check!(
+            self.multi_manager_dialog.open,
+            multi_manager_dialog,
+            Panel::MultiManagerDialog
+        );
+        check!(
+            self.multi_manager_settings_dialog.open,
+            multi_manager_settings_dialog,
+            Panel::MultiManagerSettingsDialog
+        );
     }
 }
 

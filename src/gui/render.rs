@@ -1175,6 +1175,13 @@ impl eframe::App for LauncherApp {
                 self.dashboard.reload();
             }
         }
+
+        let mut mm_dlg = std::mem::take(&mut self.multi_manager_dialog);
+        mm_dlg.ui(ctx, self);
+        self.multi_manager_dialog = mm_dlg;
+        let mut mm_settings_dlg = std::mem::take(&mut self.multi_manager_settings_dialog);
+        mm_settings_dlg.ui(ctx, self);
+        self.multi_manager_settings_dialog = mm_settings_dlg;
         let mut dlg = std::mem::take(&mut self.alias_dialog);
         dlg.ui(ctx, self);
         self.alias_dialog = dlg;

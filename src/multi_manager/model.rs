@@ -68,6 +68,8 @@ pub struct MmHotkey {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MmWindow {
     #[serde(default)]
+    pub alias: String,
+    #[serde(default)]
     pub title: String,
     #[serde(default)]
     pub executable: String,
