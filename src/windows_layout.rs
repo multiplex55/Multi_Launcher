@@ -1,7 +1,9 @@
 pub mod apply;
 pub mod plan;
 
-use crate::plugins::layouts_storage::{Layout, LayoutMatch, LayoutWindow, LayoutWindowState};
+use crate::plugins::layouts_storage::{
+    Layout, LayoutMatch, LayoutPlacement, LayoutWindow, LayoutWindowState,
+};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LayoutWindowOptions {
@@ -95,21 +97,21 @@ fn enumerate_windows(options: LayoutWindowOptions) -> anyhow::Result<Vec<Enumera
     use std::os::windows::ffi::OsStringExt;
     use std::path::Path;
 
-    use windows::core::PWSTR;
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
+        GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW, MonitorFromWindow,
     };
     use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
-        PROCESS_QUERY_LIMITED_INFORMATION,
+        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
-        GetWindowPlacement, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-        IsWindowVisible, GWL_EXSTYLE, GW_OWNER, SW_MINIMIZE, SW_SHOWMINIMIZED, WINDOWPLACEMENT,
+        EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindow,
+        GetWindowLongPtrW, GetWindowPlacement, GetWindowTextLengthW, GetWindowTextW,
+        GetWindowThreadProcessId, IsWindowVisible, SW_MINIMIZE, SW_SHOWMINIMIZED, WINDOWPLACEMENT,
         WS_EX_TOOLWINDOW,
     };
+    use windows::core::PWSTR;
 
     struct Ctx {
         options: LayoutWindowOptions,
@@ -615,7 +617,7 @@ pub fn plan_layout_restore(
 #[cfg(windows)]
 pub fn apply_layout_restore_plan(plan: &LayoutRestorePlan) -> anyhow::Result<()> {
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowPlacement, SetWindowPlacement, ShowWindow, SW_SHOWNORMAL, WINDOWPLACEMENT,
+        GetWindowPlacement, SW_SHOWNORMAL, SetWindowPlacement, ShowWindow, WINDOWPLACEMENT,
     };
 
     for action in &plan.actions {
