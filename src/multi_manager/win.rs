@@ -184,7 +184,6 @@ pub fn move_window_to_rect(hwnd: usize, rect: MmRect) -> Result<(), MmWindowErro
             let _ = ShowWindowAsync(hwnd, SW_RESTORE);
         }
         MoveWindow(hwnd, rect.x, rect.y, rect.w, rect.h, true)
-            .ok()
             .map_err(|err| anyhow!("failed to move window to rect: {err}"))
     }
 }
