@@ -1316,6 +1316,15 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.multi_manager.shutdown();
+        let multi_manager_save_on_exit = crate::settings::Settings::load(&self.settings_path)
+            .map(|settings| settings.multi_manager.save_on_exit)
+            .unwrap_or(true);
+        if multi_manager_save_on_exit {
+            if let Err(err) = self.multi_manager.save() {
+                self.report_error("multi_manager.save_on_exit", err);
+            }
+        }
         self.unregister_all_hotkeys();
         self.visible_flag.store(false, Ordering::SeqCst);
         self.last_visible = false;

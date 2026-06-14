@@ -145,3 +145,9 @@ pub enum PendingCaptureAction {
         workspace_id: String,
     },
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RecaptureQueueItem {
+    #[serde(default)]
+    pub workspace_id: String,
+}
