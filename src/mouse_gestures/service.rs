@@ -1,12 +1,12 @@
 use crate::mouse_gestures::db::{
-    format_gesture_label, load_gestures, GestureCandidate, GestureMatchType, SharedGestureDb,
-    GESTURES_FILE,
+    GESTURES_FILE, GestureCandidate, GestureMatchType, SharedGestureDb, format_gesture_label,
+    load_gestures,
 };
-use crate::mouse_gestures::engine::{token_from_delta, DirMode, GestureTracker};
+use crate::mouse_gestures::engine::{DirMode, GestureTracker, token_from_delta};
 use crate::mouse_gestures::overlay::{
     DefaultOverlayBackend, HintOverlay, OverlayBackend, TrailOverlay,
 };
-use crate::mouse_gestures::usage::{record_usage, GestureUsageEntry, GESTURES_USAGE_FILE};
+use crate::mouse_gestures::usage::{GESTURES_USAGE_FILE, GestureUsageEntry, record_usage};
 use anyhow::anyhow;
 use chrono::Local;
 use once_cell::sync::OnceCell;
@@ -72,7 +72,7 @@ impl Default for MouseGestureConfig {
     }
 }
 
-use crate::gui::{send_event, WatchEvent};
+use crate::gui::{WatchEvent, send_event};
 
 pub fn should_ignore_window_title(ignore: &[String], title: &str) -> bool {
     if ignore.is_empty() {
@@ -408,7 +408,7 @@ fn worker_loop(
         #[cfg(windows)]
         {
             use windows::Win32::UI::WindowsAndMessaging::{
-                DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+                DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
             };
 
             let mut msg = MSG::default();
@@ -1298,8 +1298,8 @@ const MG_INJECT_TAG: usize = 0x4D47_494E_4A; // "MG_INJ"
 #[cfg(windows)]
 fn send_right_click() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-        MOUSEINPUT,
+        INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT,
+        SendInput,
     };
 
     // Prevent the hook from consuming the injected click (and re-triggering itself)
@@ -1373,7 +1373,7 @@ impl HookBackend for DefaultHookBackend {
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::Win32::System::Threading::GetCurrentThreadId;
         use windows::Win32::UI::WindowsAndMessaging::{
-            DispatchMessageW, GetMessageW, PeekMessageW, TranslateMessage, MSG, PM_NOREMOVE,
+            DispatchMessageW, GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, TranslateMessage,
         };
         use windows::Win32::UI::WindowsAndMessaging::{
             SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL,
@@ -1689,29 +1689,33 @@ unsafe extern "system" fn mouse_hook_proc(
 
             if dispatch.enabled.load(Ordering::Acquire) {
                 // If we're injecting (or the event is injected), do NOT consume it and do NOT forward to worker.
-                let info = &*(l_param.0 as *const MSLLHOOKSTRUCT);
+                let info = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
 
                 // Flags: 0x1 = LLMHF_INJECTED, 0x2 = LLMHF_LOWER_IL_INJECTED
                 let injected_flagged = (info.flags & 0x1) != 0 || (info.flags & 0x2) != 0;
                 let injected_tagged = info.dwExtraInfo == MG_INJECT_TAG;
 
                 if dispatch.is_injecting() || injected_flagged || injected_tagged {
-                    return CallNextHookEx(
-                        windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
-                        n_code,
-                        w_param,
-                        l_param,
-                    );
-                }
-
-                if let Some(title) = get_foreground_window_title() {
-                    if dispatch.should_ignore_window_title(&title) {
-                        return CallNextHookEx(
+                    return unsafe {
+                        CallNextHookEx(
                             windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
                             n_code,
                             w_param,
                             l_param,
-                        );
+                        )
+                    };
+                }
+
+                if let Some(title) = get_foreground_window_title() {
+                    if dispatch.should_ignore_window_title(&title) {
+                        return unsafe {
+                            CallNextHookEx(
+                                windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
+                                n_code,
+                                w_param,
+                                l_param,
+                            )
+                        };
                     }
                 }
 
@@ -1730,12 +1734,14 @@ unsafe extern "system" fn mouse_hook_proc(
                         }
                     };
                     if !allow {
-                        return CallNextHookEx(
-                            windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
-                            n_code,
-                            w_param,
-                            l_param,
-                        );
+                        return unsafe {
+                            CallNextHookEx(
+                                windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
+                                n_code,
+                                w_param,
+                                l_param,
+                            )
+                        };
                     }
                 }
 
@@ -1766,12 +1772,14 @@ unsafe extern "system" fn mouse_hook_proc(
         }
     }
 
-    CallNextHookEx(
-        windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
-        n_code,
-        w_param,
-        l_param,
-    )
+    unsafe {
+        CallNextHookEx(
+            windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
+            n_code,
+            w_param,
+            l_param,
+        )
+    }
 }
 
 #[cfg(windows)]
@@ -1791,7 +1799,7 @@ unsafe extern "system" fn keyboard_hook_proc(
     if n_code == HC_ACTION as i32 {
         let msg = w_param.0 as u32;
         if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
-            let info = &*(l_param.0 as *const KBDLLHOOKSTRUCT);
+            let info = unsafe { &*(l_param.0 as *const KBDLLHOOKSTRUCT) };
             let injected = (info.flags & KBDLLHOOKSTRUCT_FLAGS(0x10)) != KBDLLHOOKSTRUCT_FLAGS(0);
             if !injected {
                 let dispatch = hook_dispatch();
@@ -1825,10 +1833,12 @@ unsafe extern "system" fn keyboard_hook_proc(
         }
     }
 
-    CallNextHookEx(
-        windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
-        n_code,
-        w_param,
-        l_param,
-    )
+    unsafe {
+        CallNextHookEx(
+            windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
+            n_code,
+            w_param,
+            l_param,
+        )
+    }
 }

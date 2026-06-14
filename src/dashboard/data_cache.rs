@@ -1,15 +1,15 @@
 use crate::actions::Action;
-use crate::mouse_gestures::db::{load_gestures, GestureDb, GESTURES_FILE};
-use crate::mouse_gestures::usage::{load_usage, GestureUsageEntry, GESTURES_USAGE_FILE};
+use crate::mouse_gestures::db::{GESTURES_FILE, GestureDb, load_gestures};
+use crate::mouse_gestures::usage::{GESTURES_USAGE_FILE, GestureUsageEntry, load_usage};
 use crate::plugin::PluginManager;
 use crate::plugins::calendar::{
-    build_snapshot, refresh_events_from_disk, CalendarSnapshot, CALENDAR_EVENTS_FILE,
+    CALENDAR_EVENTS_FILE, CalendarSnapshot, build_snapshot, refresh_events_from_disk,
 };
-use crate::plugins::clipboard::{load_history, CLIPBOARD_FILE};
-use crate::plugins::fav::{load_favs, FavEntry, FAV_FILE};
-use crate::plugins::note::{load_notes, Note};
-use crate::plugins::snippets::{load_snippets, SnippetEntry, SNIPPETS_FILE};
-use crate::plugins::todo::{load_todos, TodoEntry, TODO_FILE};
+use crate::plugins::clipboard::{CLIPBOARD_FILE, load_history};
+use crate::plugins::fav::{FAV_FILE, FavEntry, load_favs};
+use crate::plugins::note::{Note, load_notes};
+use crate::plugins::snippets::{SNIPPETS_FILE, SnippetEntry, load_snippets};
+use crate::plugins::todo::{TODO_FILE, TodoEntry, load_todos};
 use crate::{launcher, launcher::RecycleBinInfo};
 use chrono::Local;
 use std::sync::{Arc, Mutex};
@@ -531,10 +531,10 @@ impl DashboardDataCache {
 fn get_system_volume() -> Option<u8> {
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::Media::Audio::{
-        eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
+        IMMDeviceEnumerator, MMDeviceEnumerator, eMultimedia, eRender,
     };
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     };
 
     unsafe {
@@ -578,22 +578,29 @@ fn get_main_display_brightness() -> Option<u8> {
     ) -> BOOL {
         let percent_ptr = lparam.0 as *mut u32;
         let mut count: u32 = 0;
-        if GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count).is_ok() {
+        if unsafe { GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count) }.is_ok() {
             let mut monitors = vec![PHYSICAL_MONITOR::default(); count as usize];
-            if GetPhysicalMonitorsFromHMONITOR(hmonitor, &mut monitors).is_ok() {
+            if unsafe { GetPhysicalMonitorsFromHMONITOR(hmonitor, &mut monitors) }.is_ok() {
                 if let Some(m) = monitors.first() {
                     let mut min = 0u32;
                     let mut cur = 0u32;
                     let mut max = 0u32;
-                    if GetMonitorBrightness(m.hPhysicalMonitor, &mut min, &mut cur, &mut max) != 0 {
+                    if unsafe {
+                        GetMonitorBrightness(m.hPhysicalMonitor, &mut min, &mut cur, &mut max)
+                    } != 0
+                    {
                         if max > min {
-                            *percent_ptr = ((cur - min) * 100 / (max - min)) as u32;
+                            unsafe {
+                                *percent_ptr = (cur - min) * 100 / (max - min);
+                            }
                         } else {
-                            *percent_ptr = 0;
+                            unsafe {
+                                *percent_ptr = 0;
+                            }
                         }
                     }
                 }
-                let _ = DestroyPhysicalMonitors(&monitors);
+                let _ = unsafe { DestroyPhysicalMonitors(&monitors) };
             }
         }
         false.into()
