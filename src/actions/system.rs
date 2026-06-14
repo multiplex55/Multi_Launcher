@@ -68,10 +68,10 @@ pub fn get_system_volume() -> Option<u8> {
     {
         use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
         use windows::Win32::Media::Audio::{
-            eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
+            IMMDeviceEnumerator, MMDeviceEnumerator, eMultimedia, eRender,
         };
         use windows::Win32::System::Com::{
-            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+            CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
         };
 
         unsafe {
@@ -104,10 +104,10 @@ pub fn get_system_mute() -> Option<bool> {
     {
         use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
         use windows::Win32::Media::Audio::{
-            eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
+            IMMDeviceEnumerator, MMDeviceEnumerator, eMultimedia, eRender,
         };
         use windows::Win32::System::Com::{
-            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+            CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
         };
 
         unsafe {
@@ -153,24 +153,29 @@ pub fn get_main_display_brightness() -> Option<u8> {
         ) -> BOOL {
             let percent_ptr = lparam.0 as *mut u32;
             let mut count: u32 = 0;
-            if GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count).is_ok() {
+            if unsafe { GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count) }.is_ok() {
                 let mut monitors = vec![PHYSICAL_MONITOR::default(); count as usize];
-                if GetPhysicalMonitorsFromHMONITOR(hmonitor, &mut monitors).is_ok() {
+                if unsafe { GetPhysicalMonitorsFromHMONITOR(hmonitor, &mut monitors) }.is_ok() {
                     if let Some(m) = monitors.first() {
                         let mut min = 0u32;
                         let mut cur = 0u32;
                         let mut max = 0u32;
-                        if GetMonitorBrightness(m.hPhysicalMonitor, &mut min, &mut cur, &mut max)
-                            != 0
+                        if unsafe {
+                            GetMonitorBrightness(m.hPhysicalMonitor, &mut min, &mut cur, &mut max)
+                        } != 0
                         {
                             if max > min {
-                                *percent_ptr = ((cur - min) * 100 / (max - min)) as u32;
+                                unsafe {
+                                    *percent_ptr = (cur - min) * 100 / (max - min);
+                                }
                             } else {
-                                *percent_ptr = 0;
+                                unsafe {
+                                    *percent_ptr = 0;
+                                }
                             }
                         }
                     }
-                    let _ = DestroyPhysicalMonitors(&monitors);
+                    let _ = unsafe { DestroyPhysicalMonitors(&monitors) };
                 }
             }
             false.into()
@@ -273,10 +278,11 @@ fn parse_powercfg_list(output: &str) -> Vec<PowerPlan> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
     use super::*;
 
-    #[test]
     #[cfg(target_os = "windows")]
+    #[test]
     fn parse_powercfg_output() {
         let sample = r#"
 Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced) *
@@ -309,11 +315,10 @@ pub fn recycle_clean() {
 }
 
 pub fn browser_tab_switch(runtime_id: &[i32]) {
-    use windows::core::VARIANT;
     use windows::Win32::Foundation::{HWND, POINT};
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-        COINIT_APARTMENTTHREADED,
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        CoUninitialize,
     };
     use windows::Win32::System::Ole::{
         SafeArrayCreateVector, SafeArrayDestroy, SafeArrayPutElement,
@@ -321,10 +326,11 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
     use windows::Win32::System::Variant::VT_I4;
     use windows::Win32::UI::Accessibility::*;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-        MOUSEINPUT,
+        INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
+        SendInput,
     };
     use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
+    use windows::core::VARIANT;
 
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -491,8 +497,8 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
                                                                 );
                                                                 let _ = SetCursorPos(old.x, old.y);
                                                                 tracing::debug!(
-                                                                        "simulated click for browser tab"
-                                                                    );
+                                                                    "simulated click for browser tab"
+                                                                );
                                                             }
                                                         }
 

@@ -955,7 +955,7 @@ mod tests {
 
         assert_eq!(app.usage.get(&action.action), Some(&1));
         let history_entries = history::get_history();
-        assert!(history_entries.len() >= before_len + 1);
+        assert!(history_entries.len() > before_len);
         let latest = history_entries.front().expect("latest history entry");
         assert_eq!(latest.action.action, action.action);
         assert_eq!(latest.query, "track me");

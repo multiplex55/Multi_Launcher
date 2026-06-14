@@ -1,5 +1,5 @@
 use crate::multi_manager::model::MmRect;
-use anyhow::{anyhow, Error};
+use anyhow::{Error, anyhow};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedWindow {
@@ -171,7 +171,7 @@ pub fn is_valid_window(_hwnd: usize) -> bool {
 #[cfg(windows)]
 pub fn move_window_to_rect(hwnd: usize, rect: MmRect) -> Result<(), MmWindowError> {
     use windows::Win32::UI::WindowsAndMessaging::{
-        IsIconic, MoveWindow, ShowWindowAsync, SW_RESTORE,
+        IsIconic, MoveWindow, SW_RESTORE, ShowWindowAsync,
     };
 
     if !is_valid_window(hwnd) {
@@ -253,6 +253,35 @@ mod tests {
         .expect_err("non-Windows movement must fail");
         assert!(err.to_string().contains("unsupported"));
     }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_capture_and_query_stubs_are_safe() {
+        assert!(active_window().is_none());
+        assert!(window_rect(1).is_none());
+        assert!(window_title(1).is_none());
+        assert!(!is_valid_window(1));
+        assert!(!is_window_at_rect(
+            1,
+            MmRect {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100
+            }
+        ));
+        assert!(!is_hotkey_pressed("Ctrl+Shift+A"));
+        assert!(poll_capture_keys().is_none());
+    }
+
+    // Manual Windows smoke tests for embedded MultiManager:
+    // 1. Capture a Notepad window into a workspace.
+    // 2. Set and verify distinct home and target rectangles.
+    // 3. Toggle the workspace with its configured hotkey.
+    // 4. Rotate two or three captured windows through their slots.
+    // 5. Close a captured window and verify recapture rejects/handles the invalid HWND safely.
+    // 6. Save, restart the launcher, and verify the workspace and bindings load correctly.
+    // 7. Verify launcher self-capture is rejected when that safety setting is enabled.
 
     #[cfg(windows)]
     #[test]

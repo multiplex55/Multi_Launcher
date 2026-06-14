@@ -1,10 +1,10 @@
 pub(crate) fn set_system_volume(percent: u32) {
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::Media::Audio::{
-        eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
+        IMMDeviceEnumerator, MMDeviceEnumerator, eMultimedia, eRender,
     };
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     };
 
     unsafe {
@@ -26,10 +26,10 @@ pub(crate) fn set_system_volume(percent: u32) {
 pub(crate) fn toggle_system_mute() {
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::Media::Audio::{
-        eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
+        IMMDeviceEnumerator, MMDeviceEnumerator, eMultimedia, eRender,
     };
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     };
 
     unsafe {
@@ -52,7 +52,7 @@ pub(crate) fn toggle_system_mute() {
 #[cfg(test)]
 mod tests {
     use crate::actions::Action;
-    use crate::launcher::parse::{parse_action_kind, ActionKind};
+    use crate::launcher::parse::{ActionKind, parse_action_kind};
 
     #[test]
     fn parse_volume_pid_toggle_mute() {
@@ -147,15 +147,15 @@ mod tests {
 }
 
 pub(crate) fn mute_active_window() {
-    use windows::core::Interface;
     use windows::Win32::Media::Audio::{
-        eMultimedia, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator,
-        ISimpleAudioVolume, MMDeviceEnumerator,
+        IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, ISimpleAudioVolume,
+        MMDeviceEnumerator, eMultimedia, eRender,
     };
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     };
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    use windows::core::Interface;
 
     unsafe {
         let hwnd = GetForegroundWindow();
@@ -192,14 +192,14 @@ pub(crate) fn mute_active_window() {
 }
 
 pub(crate) fn set_process_volume(pid: u32, level: u32) {
-    use windows::core::Interface;
     use windows::Win32::Media::Audio::{
-        eMultimedia, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator,
-        ISimpleAudioVolume, MMDeviceEnumerator,
+        IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, ISimpleAudioVolume,
+        MMDeviceEnumerator, eMultimedia, eRender,
     };
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     };
+    use windows::core::Interface;
 
     let level = level.min(100);
     unsafe {
@@ -237,14 +237,14 @@ pub(crate) fn set_process_volume(pid: u32, level: u32) {
 }
 
 pub(crate) fn toggle_process_mute(pid: u32) {
-    use windows::core::Interface;
     use windows::Win32::Media::Audio::{
-        eMultimedia, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator,
-        ISimpleAudioVolume, MMDeviceEnumerator,
+        IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, ISimpleAudioVolume,
+        MMDeviceEnumerator, eMultimedia, eRender,
     };
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     };
+    use windows::core::Interface;
 
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -282,7 +282,7 @@ pub(crate) fn toggle_process_mute(pid: u32) {
 pub(crate) fn set_display_brightness(percent: u32) {
     use windows::Win32::Devices::Display::{
         DestroyPhysicalMonitors, GetNumberOfPhysicalMonitorsFromHMONITOR,
-        GetPhysicalMonitorsFromHMONITOR, SetMonitorBrightness, PHYSICAL_MONITOR,
+        GetPhysicalMonitorsFromHMONITOR, PHYSICAL_MONITOR, SetMonitorBrightness,
     };
     use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
@@ -295,13 +295,13 @@ pub(crate) fn set_display_brightness(percent: u32) {
     ) -> BOOL {
         let percent = lparam.0 as u32;
         let mut count: u32 = 0;
-        if GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count).is_ok() {
+        if unsafe { GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count) }.is_ok() {
             let mut monitors = vec![PHYSICAL_MONITOR::default(); count as usize];
-            if GetPhysicalMonitorsFromHMONITOR(hmonitor, &mut monitors).is_ok() {
+            if unsafe { GetPhysicalMonitorsFromHMONITOR(hmonitor, &mut monitors) }.is_ok() {
                 for m in &monitors {
-                    let _ = SetMonitorBrightness(m.hPhysicalMonitor, percent);
+                    let _ = unsafe { SetMonitorBrightness(m.hPhysicalMonitor, percent) };
                 }
-                let _ = DestroyPhysicalMonitors(&monitors);
+                let _ = unsafe { DestroyPhysicalMonitors(&monitors) };
             }
         }
         true.into()
@@ -319,7 +319,7 @@ pub(crate) fn set_display_brightness(percent: u32) {
 
 pub(crate) fn clean_recycle_bin() -> windows::core::Result<()> {
     use windows::Win32::UI::Shell::{
-        SHEmptyRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND,
+        SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND, SHEmptyRecycleBinW,
     };
     unsafe {
         SHEmptyRecycleBinW(
@@ -338,7 +338,7 @@ pub(crate) struct RecycleBinInfo {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn query_recycle_bin() -> Option<RecycleBinInfo> {
-    use windows::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
+    use windows::Win32::UI::Shell::{SHQUERYRBINFO, SHQueryRecycleBinW};
     let mut info = SHQUERYRBINFO {
         cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32,
         ..Default::default()

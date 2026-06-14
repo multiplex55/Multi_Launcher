@@ -1,6 +1,6 @@
 pub use crate::platform::windows_api::{
-    clear_mock_mouse_position, current_mouse_position, mock_mouse_position_is_set,
-    set_mock_mouse_position, MOCK_MOUSE_LOCK,
+    MOCK_MOUSE_LOCK, clear_mock_mouse_position, current_mouse_position, mock_mouse_position_is_set,
+    set_mock_mouse_position,
 };
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -138,8 +138,8 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 #[cfg(windows)]
 mod virtual_desktop {
-    use windows::core::{IUnknown, IUnknown_Vtbl, Interface, GUID, HRESULT, HSTRING};
     use windows::Win32::UI::Shell::Common::IObjectArray;
+    use windows::core::{GUID, HRESULT, HSTRING, IUnknown, IUnknown_Vtbl, Interface};
 
     #[repr(transparent)]
     #[derive(Clone, PartialEq, Eq)]
@@ -169,12 +169,14 @@ mod virtual_desktop {
     impl IVirtualDesktop {
         pub unsafe fn get_id(&self) -> windows::core::Result<GUID> {
             let mut result = GUID::zeroed();
-            (Interface::vtable(self).GetID)(Interface::as_raw(self), &mut result).map(|| result)
+            unsafe { (Interface::vtable(self).GetID)(Interface::as_raw(self), &mut result) }
+                .map(|| result)
         }
 
         pub unsafe fn get_name(&self) -> windows::core::Result<HSTRING> {
             let mut result = HSTRING::new();
-            (Interface::vtable(self).GetName)(Interface::as_raw(self), &mut result).map(|| result)
+            unsafe { (Interface::vtable(self).GetName)(Interface::as_raw(self), &mut result) }
+                .map(|| result)
         }
     }
 
@@ -279,8 +281,14 @@ mod virtual_desktop {
             hwnd_or_mon: isize,
         ) -> windows::core::Result<IObjectArray> {
             let mut result = core::ptr::null_mut();
-            (Interface::vtable(self).GetDesktops)(Interface::as_raw(self), hwnd_or_mon, &mut result)
-                .and_then(|| windows::core::Type::from_abi(result))
+            unsafe {
+                (Interface::vtable(self).GetDesktops)(
+                    Interface::as_raw(self),
+                    hwnd_or_mon,
+                    &mut result,
+                )
+            }
+            .and_then(|| unsafe { windows::core::Type::from_abi(result) })
         }
     }
 }
@@ -292,7 +300,7 @@ mod virtual_desktop {
 /// of the foreground window.
 pub fn move_to_current_desktop(hwnd: windows::Win32::Foundation::HWND) {
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     };
     use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
     use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
@@ -351,7 +359,7 @@ fn parse_desktop_id(value: &str) -> Option<windows::core::GUID> {
 #[cfg(windows)]
 pub fn resolve_virtual_desktop_name(desktop_id: &windows::core::GUID) -> Option<String> {
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     };
 
     unsafe {
@@ -389,7 +397,7 @@ pub fn resolve_virtual_desktop_name(desktop_id: &windows::core::GUID) -> Option<
 #[cfg(windows)]
 fn resolve_virtual_desktop_id_by_name(name: &str) -> Option<windows::core::GUID> {
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     };
 
     let trimmed = name.trim();
@@ -428,7 +436,7 @@ fn resolve_virtual_desktop_id_by_name(name: &str) -> Option<windows::core::GUID>
 #[cfg(windows)]
 pub fn window_desktop_label(hwnd: windows::Win32::Foundation::HWND) -> Option<String> {
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     };
     use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
 
@@ -450,7 +458,7 @@ pub fn window_desktop_label(hwnd: windows::Win32::Foundation::HWND) -> Option<St
 #[cfg(windows)]
 pub fn move_window_to_desktop(hwnd: windows::Win32::Foundation::HWND, target: &str) -> bool {
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     };
     use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
 
@@ -483,8 +491,8 @@ pub fn move_window_to_desktop(hwnd: windows::Win32::Foundation::HWND, target: &s
 pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow, ShowWindowAsync,
-        SW_RESTORE,
+        GetForegroundWindow, GetWindowThreadProcessId, SW_RESTORE, SetForegroundWindow,
+        ShowWindowAsync,
     };
     unsafe {
         move_to_current_desktop(hwnd);
@@ -520,15 +528,20 @@ pub fn get_hwnd(frame: &eframe::Frame) -> Option<windows::Win32::Foundation::HWN
 pub fn activate_process(pid: u32) {
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindow, GetWindowThreadProcessId, IsWindowVisible, GW_OWNER,
+        EnumWindows, GW_OWNER, GetWindow, GetWindowThreadProcessId, IsWindowVisible,
     };
     unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let target = lparam.0 as u32;
         let mut pid: u32 = 0;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        }
         if pid == target
-            && IsWindowVisible(hwnd).as_bool()
-            && GetWindow(hwnd, GW_OWNER).unwrap_or_default().0.is_null()
+            && unsafe { IsWindowVisible(hwnd) }.as_bool()
+            && unsafe { GetWindow(hwnd, GW_OWNER) }
+                .unwrap_or_default()
+                .0
+                .is_null()
         {
             crate::window_manager::force_restore_and_foreground(hwnd);
             return BOOL(0);
@@ -556,7 +569,7 @@ pub fn close_window(hwnd: usize) {
 
 pub fn send_end_key() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
         VIRTUAL_KEY, VK_END,
     };
     unsafe {

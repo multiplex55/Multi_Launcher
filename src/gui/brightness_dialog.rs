@@ -71,22 +71,29 @@ fn get_main_display_brightness() -> Option<u8> {
     ) -> BOOL {
         let percent_ptr = lparam.0 as *mut u32;
         let mut count: u32 = 0;
-        if GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count).is_ok() {
+        if unsafe { GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count) }.is_ok() {
             let mut monitors = vec![PHYSICAL_MONITOR::default(); count as usize];
-            if GetPhysicalMonitorsFromHMONITOR(hmonitor, &mut monitors).is_ok() {
+            if unsafe { GetPhysicalMonitorsFromHMONITOR(hmonitor, &mut monitors) }.is_ok() {
                 if let Some(m) = monitors.first() {
                     let mut min = 0u32;
                     let mut cur = 0u32;
                     let mut max = 0u32;
-                    if GetMonitorBrightness(m.hPhysicalMonitor, &mut min, &mut cur, &mut max) != 0 {
+                    if unsafe {
+                        GetMonitorBrightness(m.hPhysicalMonitor, &mut min, &mut cur, &mut max)
+                    } != 0
+                    {
                         if max > min {
-                            *percent_ptr = ((cur - min) * 100 / (max - min)) as u32;
+                            unsafe {
+                                *percent_ptr = (cur - min) * 100 / (max - min);
+                            }
                         } else {
-                            *percent_ptr = 0;
+                            unsafe {
+                                *percent_ptr = 0;
+                            }
                         }
                     }
                 }
-                let _ = DestroyPhysicalMonitors(&monitors);
+                let _ = unsafe { DestroyPhysicalMonitors(&monitors) };
             }
         }
         false.into()

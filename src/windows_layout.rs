@@ -97,21 +97,21 @@ fn enumerate_windows(options: LayoutWindowOptions) -> anyhow::Result<Vec<Enumera
     use std::os::windows::ffi::OsStringExt;
     use std::path::Path;
 
-    use windows::core::PWSTR;
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
+        GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW, MonitorFromWindow,
     };
     use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
-        PROCESS_QUERY_LIMITED_INFORMATION,
+        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
-        GetWindowPlacement, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-        IsWindowVisible, GWL_EXSTYLE, GW_OWNER, SW_MINIMIZE, SW_SHOWMINIMIZED, WINDOWPLACEMENT,
+        EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindow,
+        GetWindowLongPtrW, GetWindowPlacement, GetWindowTextLengthW, GetWindowTextW,
+        GetWindowThreadProcessId, IsWindowVisible, SW_MINIMIZE, SW_SHOWMINIMIZED, WINDOWPLACEMENT,
         WS_EX_TOOLWINDOW,
     };
+    use windows::core::PWSTR;
 
     struct Ctx {
         options: LayoutWindowOptions,
@@ -171,24 +171,28 @@ fn enumerate_windows(options: LayoutWindowOptions) -> anyhow::Result<Vec<Enumera
     }
 
     unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let ctx = &mut *(lparam.0 as *mut Ctx);
-        if !IsWindowVisible(hwnd).as_bool() {
+        let ctx = unsafe { &mut *(lparam.0 as *mut Ctx) };
+        if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
             return BOOL(1);
         }
-        if !GetWindow(hwnd, GW_OWNER).unwrap_or_default().0.is_null() {
+        if !unsafe { GetWindow(hwnd, GW_OWNER) }
+            .unwrap_or_default()
+            .0
+            .is_null()
+        {
             return BOOL(1);
         }
-        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
         if ex_style & WS_EX_TOOLWINDOW.0 != 0 {
             return BOOL(1);
         }
 
-        let title_len = GetWindowTextLengthW(hwnd);
+        let title_len = unsafe { GetWindowTextLengthW(hwnd) };
         if title_len <= 0 {
             return BOOL(1);
         }
         let mut title_buf = vec![0u16; title_len as usize + 1];
-        let title_read = GetWindowTextW(hwnd, &mut title_buf);
+        let title_read = unsafe { GetWindowTextW(hwnd, &mut title_buf) };
         if title_read == 0 {
             return BOOL(1);
         }
@@ -209,7 +213,7 @@ fn enumerate_windows(options: LayoutWindowOptions) -> anyhow::Result<Vec<Enumera
 
         let mut placement = WINDOWPLACEMENT::default();
         placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
-        if GetWindowPlacement(hwnd, &mut placement).is_err() {
+        if unsafe { GetWindowPlacement(hwnd, &mut placement) }.is_err() {
             return BOOL(1);
         }
         let minimized = placement.showCmd == SW_SHOWMINIMIZED.0 as u32
@@ -226,7 +230,7 @@ fn enumerate_windows(options: LayoutWindowOptions) -> anyhow::Result<Vec<Enumera
         }
 
         let mut class_buf = vec![0u16; 256];
-        let class_len = GetClassNameW(hwnd, &mut class_buf) as usize;
+        let class_len = unsafe { GetClassNameW(hwnd, &mut class_buf) } as usize;
         let class = if class_len > 0 {
             Some(wide_to_string(&class_buf[..class_len]))
         } else {
@@ -359,11 +363,13 @@ fn list_monitors() -> Vec<(String, windows::Win32::Graphics::Gdi::MONITORINFOEXW
         _rect: *mut RECT,
         lparam: LPARAM,
     ) -> BOOL {
-        let monitors = &mut *(lparam.0 as *mut Vec<(String, MONITORINFOEXW)>);
+        let monitors = unsafe { &mut *(lparam.0 as *mut Vec<(String, MONITORINFOEXW)>) };
         let mut info = MONITORINFOEXW::default();
         info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
-        if windows::Win32::Graphics::Gdi::GetMonitorInfoW(monitor, &mut info as *mut _ as *mut _)
-            .as_bool()
+        if unsafe {
+            windows::Win32::Graphics::Gdi::GetMonitorInfoW(monitor, &mut info as *mut _ as *mut _)
+        }
+        .as_bool()
         {
             let name = wide_to_string(&info.szDevice);
             monitors.push((name, info));
@@ -617,7 +623,7 @@ pub fn plan_layout_restore(
 #[cfg(windows)]
 pub fn apply_layout_restore_plan(plan: &LayoutRestorePlan) -> anyhow::Result<()> {
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowPlacement, SetWindowPlacement, ShowWindow, SW_SHOWNORMAL, WINDOWPLACEMENT,
+        GetWindowPlacement, SW_SHOWNORMAL, SetWindowPlacement, ShowWindow, WINDOWPLACEMENT,
     };
 
     for action in &plan.actions {

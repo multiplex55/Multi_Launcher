@@ -1,4 +1,4 @@
-use crate::multi_manager::model::{new_workspace_id, MmWorkspace};
+use crate::multi_manager::model::{MmWorkspace, new_workspace_id};
 use anyhow::{Context, Result};
 use std::fs::{self, File};
 use std::io::Write;
@@ -127,6 +127,27 @@ mod tests {
     }
 
     #[test]
+    fn old_workspace_json_loads_with_safe_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspaces.json");
+        fs::write(
+            &path,
+            r#"[{"name":"Legacy","windows":[{"title":"Notepad","home_rect":[0,0,640,480]}]}]"#,
+        )
+        .unwrap();
+
+        let loaded = load_workspaces(&path).unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "Legacy");
+        assert!(!loaded[0].id.is_empty());
+        assert!(loaded[0].valid);
+        assert!(!loaded[0].disabled);
+        assert_eq!(loaded[0].windows[0].title, "Notepad");
+        assert!(loaded[0].windows[0].valid);
+    }
+
+    #[test]
     fn named_rect_json_loads_correctly() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspaces.json");
@@ -239,6 +260,41 @@ mod tests {
         assert!(!raw.contains("rotation_offset"));
         let loaded = load_workspaces(&path).unwrap();
         assert_eq!(loaded[0].rotation_offset, 0);
+    }
+
+    #[test]
+    fn atomic_save_leaves_valid_final_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspaces.json");
+        save_workspaces(
+            &path,
+            &[MmWorkspace {
+                id: "first".into(),
+                name: "First".into(),
+                ..MmWorkspace::default()
+            }],
+        )
+        .unwrap();
+        save_workspaces(
+            &path,
+            &[MmWorkspace {
+                id: "second".into(),
+                name: "Second".into(),
+                windows: vec![MmWindow {
+                    title: "Window".into(),
+                    ..MmWindow::default()
+                }],
+                ..MmWorkspace::default()
+            }],
+        )
+        .unwrap();
+
+        let raw = fs::read_to_string(&path).unwrap();
+        let parsed: Vec<MmWorkspace> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, "second");
+        assert_eq!(load_workspaces(&path).unwrap()[0].name, "Second");
+        assert!(!tmp_path_for(&path).exists());
     }
 
     #[test]

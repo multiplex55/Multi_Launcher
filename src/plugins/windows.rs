@@ -14,21 +14,24 @@ impl Plugin for WindowsPlugin {
         let filter = rest.to_lowercase();
         use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
         use windows::Win32::UI::WindowsAndMessaging::{
-            EnumWindows, GetWindow, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible, GW_OWNER,
+            EnumWindows, GW_OWNER, GetWindow, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
         };
         struct Ctx {
             filter: String,
             out: Vec<Action>,
         }
         unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
-            let ctx = &mut *(lparam.0 as *mut Ctx);
-            if IsWindowVisible(hwnd).as_bool()
-                && GetWindow(hwnd, GW_OWNER).unwrap_or_default().0.is_null()
+            let ctx = unsafe { &mut *(lparam.0 as *mut Ctx) };
+            if unsafe { IsWindowVisible(hwnd) }.as_bool()
+                && unsafe { GetWindow(hwnd, GW_OWNER) }
+                    .unwrap_or_default()
+                    .0
+                    .is_null()
             {
-                let len = GetWindowTextLengthW(hwnd);
+                let len = unsafe { GetWindowTextLengthW(hwnd) };
                 if len > 0 {
                     let mut buf = vec![0u16; len as usize + 1];
-                    let read = GetWindowTextW(hwnd, &mut buf);
+                    let read = unsafe { GetWindowTextW(hwnd, &mut buf) };
                     let title = String::from_utf16_lossy(&buf[..read as usize]);
                     if title.to_lowercase().contains(&ctx.filter) {
                         ctx.out.push(Action {
