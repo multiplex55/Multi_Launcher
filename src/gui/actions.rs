@@ -476,6 +476,30 @@ impl LauncherApp {
             if a.action != "help:show" {
                 self.record_history_usage(&a, &current, source);
             }
+        } else if a.action == "mm:open" {
+            self.open_multi_manager();
+        } else if a.action == "mm:settings" {
+            self.open_multi_manager_settings();
+        } else if a.action == "mm:save" {
+            self.multi_manager_save();
+        } else if a.action == "mm:reload" {
+            self.multi_manager_reload();
+        } else if a.action == "mm:import" {
+            self.multi_manager_import();
+        } else if a.action == "mm:recapture-all" {
+            self.multi_manager_start_recapture_all();
+        } else if let Some(workspace_id) = a.action.strip_prefix("mm:toggle:") {
+            self.multi_manager_toggle_workspace(workspace_id);
+        } else if let Some(workspace_id) = a.action.strip_prefix("mm:home:") {
+            self.multi_manager_send_home(workspace_id);
+        } else if let Some(workspace_id) = a.action.strip_prefix("mm:target:") {
+            self.multi_manager_send_target(workspace_id);
+        } else if let Some(workspace_id) = a.action.strip_prefix("mm:capture:") {
+            self.multi_manager_start_capture(workspace_id);
+        } else if let Some(workspace_id) = a.action.strip_prefix("mm:disable:") {
+            self.multi_manager_set_workspace_disabled(workspace_id, true);
+        } else if let Some(workspace_id) = a.action.strip_prefix("mm:enable:") {
+            self.multi_manager_set_workspace_disabled(workspace_id, false);
         } else if let Some(mode) = a.action.strip_prefix("screenshot:") {
             use crate::actions::screenshot::Mode as ScreenshotMode;
             let (mode, clip, tool) = match mode {
