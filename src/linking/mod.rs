@@ -1,5 +1,3 @@
-use crate::plugins::note::Note;
-use crate::plugins::todo::TodoEntry;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
@@ -103,6 +101,8 @@ fn rank_search_result(
 mod tests {
     use super::*;
     use crate::common::entity_ref::{EntityKind, EntityRef};
+    use crate::plugins::note::Note;
+    use crate::plugins::todo::TodoEntry;
     use std::path::PathBuf;
 
     struct ProviderFixture {

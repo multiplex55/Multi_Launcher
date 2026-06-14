@@ -273,10 +273,11 @@ fn parse_powercfg_list(output: &str) -> Vec<PowerPlan> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
     use super::*;
 
-    #[test]
     #[cfg(target_os = "windows")]
+    #[test]
     fn parse_powercfg_output() {
         let sample = r#"
 Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced) *

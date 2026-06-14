@@ -257,9 +257,9 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn non_windows_capture_and_query_stubs_are_safe() {
-        assert_eq!(active_window(), None);
-        assert_eq!(window_rect(1), None);
-        assert_eq!(window_title(1), None);
+        assert!(active_window().is_none());
+        assert!(window_rect(1).is_none());
+        assert!(window_title(1).is_none());
         assert!(!is_valid_window(1));
         assert!(!is_window_at_rect(
             1,
@@ -271,17 +271,17 @@ mod tests {
             }
         ));
         assert!(!is_hotkey_pressed("Ctrl+Shift+A"));
-        assert_eq!(poll_capture_keys(), None);
+        assert!(poll_capture_keys().is_none());
     }
 
-    /// Manual Windows smoke tests for embedded MultiManager:
-    /// 1. Capture a Notepad window into a workspace.
-    /// 2. Set and verify distinct home and target rectangles.
-    /// 3. Toggle the workspace with its configured hotkey.
-    /// 4. Rotate two or three captured windows through their slots.
-    /// 5. Close a captured window and verify recapture rejects/handles the invalid HWND safely.
-    /// 6. Save, restart the launcher, and verify the workspace and bindings load correctly.
-    /// 7. Verify launcher self-capture is rejected when that safety setting is enabled.
+    // Manual Windows smoke tests for embedded MultiManager:
+    // 1. Capture a Notepad window into a workspace.
+    // 2. Set and verify distinct home and target rectangles.
+    // 3. Toggle the workspace with its configured hotkey.
+    // 4. Rotate two or three captured windows through their slots.
+    // 5. Close a captured window and verify recapture rejects/handles the invalid HWND safely.
+    // 6. Save, restart the launcher, and verify the workspace and bindings load correctly.
+    // 7. Verify launcher self-capture is rejected when that safety setting is enabled.
 
     #[cfg(windows)]
     #[test]

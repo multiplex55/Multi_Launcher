@@ -181,7 +181,7 @@ fn mass_factor(u: &str) -> Option<f64> {
         "kg" => Some(1.0),
         "g" => Some(0.001),
         "lb" => Some(0.453_592),
-        "oz" => Some(0.028_3495),
+        "oz" => Some(0.028_349_5),
         _ => None,
     }
 }
@@ -192,7 +192,7 @@ fn volume_factor(u: &str) -> Option<f64> {
         "ml" => Some(0.001),
         "gal" => Some(3.785_41),
         // fluid ounce
-        "oz" => Some(0.029_5735),
+        "oz" => Some(0.029_573_5),
         _ => None,
     }
 }

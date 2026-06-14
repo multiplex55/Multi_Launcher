@@ -1,9 +1,7 @@
 pub mod apply;
 pub mod plan;
 
-use crate::plugins::layouts_storage::{
-    Layout, LayoutMatch, LayoutPlacement, LayoutWindow, LayoutWindowState,
-};
+use crate::plugins::layouts_storage::{Layout, LayoutMatch, LayoutWindow, LayoutWindowState};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LayoutWindowOptions {
