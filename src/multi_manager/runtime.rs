@@ -1,1 +1,477 @@
+use crate::multi_manager::model::{MmHotkey, MmRect, MmWorkspace};
+use crate::multi_manager::win;
+use crate::settings::MultiManagerSettings;
+use anyhow::Result;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
+const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(250);
+
+pub trait WindowOps {
+    fn is_window_at_rect(&self, hwnd: usize, rect: MmRect) -> bool;
+    fn move_window_to_rect(&self, hwnd: usize, rect: MmRect) -> Result<()>;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WinWindowOps;
+
+impl WindowOps for WinWindowOps {
+    fn is_window_at_rect(&self, hwnd: usize, rect: MmRect) -> bool {
+        win::is_window_at_rect(hwnd, rect)
+    }
+
+    fn move_window_to_rect(&self, hwnd: usize, rect: MmRect) -> Result<()> {
+        win::move_window_to_rect(hwnd, rect)
+    }
+}
+
+pub trait HotkeyOps {
+    fn is_hotkey_pressed(&self, sequence: &str) -> bool;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WinHotkeyOps;
+
+impl HotkeyOps for WinHotkeyOps {
+    fn is_hotkey_pressed(&self, sequence: &str) -> bool {
+        win::is_hotkey_pressed(sequence)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct RuntimeControl {
+    pub enabled: AtomicBool,
+    pub capture_pending: AtomicBool,
+    pub shutdown: AtomicBool,
+}
+
+impl RuntimeControl {
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled: AtomicBool::new(enabled),
+            capture_pending: AtomicBool::new(false),
+            shutdown: AtomicBool::new(false),
+        }
+    }
+}
+
+pub struct MultiManagerRuntime {
+    pub workspaces: Arc<Mutex<Vec<MmWorkspace>>>,
+    pub control: Arc<RuntimeControl>,
+    pub last_hotkey_info: Arc<Mutex<Option<(String, Instant)>>>,
+    pub join_handle: Option<JoinHandle<()>>,
+}
+
+impl MultiManagerRuntime {
+    pub fn start(workspaces: Arc<Mutex<Vec<MmWorkspace>>>, settings: MultiManagerSettings) -> Self {
+        let control = Arc::new(RuntimeControl::new(settings.enabled));
+        let last_hotkey_info = Arc::new(Mutex::new(None));
+        let thread_workspaces = Arc::clone(&workspaces);
+        let thread_control = Arc::clone(&control);
+        let thread_last_hotkey_info = Arc::clone(&last_hotkey_info);
+        let poll = Duration::from_millis(settings.hotkey_poll_ms);
+        let join_handle = thread::spawn(move || {
+            let mut debounce = HashMap::new();
+            let win_ops = WinWindowOps;
+            let hotkey_ops = WinHotkeyOps;
+            while !thread_control.shutdown.load(Ordering::Relaxed) {
+                thread::sleep(poll);
+                if let Ok(mut workspaces) = thread_workspaces.lock() {
+                    runtime_tick(
+                        &mut workspaces,
+                        &thread_control,
+                        &thread_last_hotkey_info,
+                        &mut debounce,
+                        DEFAULT_DEBOUNCE,
+                        &win_ops,
+                        &hotkey_ops,
+                        Instant::now(),
+                    );
+                }
+            }
+        });
+
+        Self {
+            workspaces,
+            control,
+            last_hotkey_info,
+            join_handle: Some(join_handle),
+        }
+    }
+
+    pub fn shutdown(&mut self) {
+        self.control.shutdown.store(true, Ordering::Relaxed);
+        if let Some(join_handle) = self.join_handle.take() {
+            let _ = join_handle.join();
+        }
+    }
+}
+
+impl Drop for MultiManagerRuntime {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+pub fn send_workspace_home(workspace: &MmWorkspace) {
+    send_workspace_home_with(workspace, &WinWindowOps);
+}
+
+pub fn send_workspace_target(workspace: &MmWorkspace) {
+    send_workspace_target_with(workspace, &WinWindowOps);
+}
+
+pub fn send_all_home(workspaces: &[MmWorkspace]) {
+    let ops = WinWindowOps;
+    for workspace in workspaces {
+        send_workspace_home_with(workspace, &ops);
+    }
+}
+
+pub fn toggle_workspace(workspace: &mut MmWorkspace) {
+    toggle_workspace_with(workspace, &WinWindowOps);
+}
+
+pub fn rotate_workspace(workspace: &mut MmWorkspace) {
+    rotate_workspace_with(workspace, &WinWindowOps);
+}
+
+pub fn send_workspace_home_with(workspace: &MmWorkspace, ops: &impl WindowOps) {
+    move_workspace_windows(workspace, RectKind::Home, ops);
+}
+
+pub fn send_workspace_target_with(workspace: &MmWorkspace, ops: &impl WindowOps) {
+    move_workspace_windows(workspace, RectKind::Target, ops);
+}
+
+pub fn toggle_workspace_with(workspace: &mut MmWorkspace, ops: &impl WindowOps) {
+    if workspace.disabled || !workspace.valid {
+        return;
+    }
+    if workspace.rotate {
+        rotate_workspace_with(workspace, ops);
+        return;
+    }
+
+    let all_at_home = workspace
+        .windows
+        .iter()
+        .filter(|w| !w.disabled && w.valid && w.hwnd != 0)
+        .all(|w| {
+            w.home_rect
+                .is_some_and(|rect| ops.is_window_at_rect(w.hwnd, rect))
+        });
+
+    if all_at_home {
+        send_workspace_target_with(workspace, ops);
+    } else {
+        send_workspace_home_with(workspace, ops);
+    }
+}
+
+pub fn rotate_workspace_with(workspace: &mut MmWorkspace, ops: &impl WindowOps) {
+    if workspace.disabled || !workspace.valid {
+        return;
+    }
+
+    let valid_indices: Vec<usize> = workspace
+        .windows
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, window)| {
+            (!window.disabled && window.valid && window.hwnd != 0).then_some(idx)
+        })
+        .collect();
+    if valid_indices.is_empty() {
+        return;
+    }
+
+    let primary = workspace.windows[valid_indices[0]].target_rect;
+    let slots: Vec<MmRect> = valid_indices
+        .iter()
+        .filter_map(|&idx| workspace.windows[idx].home_rect)
+        .collect();
+    if slots.is_empty() {
+        return;
+    }
+
+    let offset = workspace.rotation_offset % valid_indices.len();
+    for (slot_idx, &window_idx) in valid_indices
+        .iter()
+        .cycle()
+        .skip(offset)
+        .take(valid_indices.len())
+        .enumerate()
+    {
+        let target = if slot_idx == 0 {
+            primary
+        } else {
+            slots.get(slot_idx - 1).copied()
+        };
+        if let Some(rect) = target {
+            let _ = ops.move_window_to_rect(workspace.windows[window_idx].hwnd, rect);
+        }
+    }
+    workspace.rotation_offset = workspace.rotation_offset.wrapping_add(1);
+}
+
+#[derive(Clone, Copy)]
+enum RectKind {
+    Home,
+    Target,
+}
+
+fn move_workspace_windows(workspace: &MmWorkspace, kind: RectKind, ops: &impl WindowOps) {
+    if workspace.disabled || !workspace.valid {
+        return;
+    }
+    for window in &workspace.windows {
+        if window.disabled || !window.valid || window.hwnd == 0 {
+            continue;
+        }
+        let rect = match kind {
+            RectKind::Home => window.home_rect.or(workspace.home_rect),
+            RectKind::Target => window.target_rect.or(workspace.target_rect),
+        };
+        if let Some(rect) = rect {
+            let _ = ops.move_window_to_rect(window.hwnd, rect);
+        }
+    }
+}
+
+fn hotkey_sequence(hotkey: &MmHotkey) -> Option<String> {
+    let key = hotkey.key.trim();
+    if key.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if hotkey.ctrl {
+        parts.push("Ctrl");
+    }
+    if hotkey.shift {
+        parts.push("Shift");
+    }
+    if hotkey.alt {
+        parts.push("Alt");
+    }
+    if hotkey.win {
+        parts.push("Win");
+    }
+    parts.push(key);
+    Some(parts.join("+"))
+}
+
+pub fn runtime_tick(
+    workspaces: &mut [MmWorkspace],
+    control: &RuntimeControl,
+    last_hotkey_info: &Arc<Mutex<Option<(String, Instant)>>>,
+    debounce: &mut HashMap<String, Instant>,
+    debounce_duration: Duration,
+    window_ops: &impl WindowOps,
+    hotkey_ops: &impl HotkeyOps,
+    now: Instant,
+) {
+    if !control.enabled.load(Ordering::Relaxed) || control.capture_pending.load(Ordering::Relaxed) {
+        return;
+    }
+    for workspace in workspaces.iter_mut().filter(|w| !w.disabled && w.valid) {
+        let Some(sequence) = workspace.hotkey.as_ref().and_then(hotkey_sequence) else {
+            continue;
+        };
+        if !hotkey_ops.is_hotkey_pressed(&sequence) {
+            continue;
+        }
+        if debounce
+            .get(&workspace.id)
+            .is_some_and(|last| now.duration_since(*last) < debounce_duration)
+        {
+            continue;
+        }
+        debounce.insert(workspace.id.clone(), now);
+        toggle_workspace_with(workspace, window_ops);
+        if let Ok(mut info) = last_hotkey_info.lock() {
+            *info = Some((workspace.id.clone(), now));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::multi_manager::model::{MmHotkey, MmWindow};
+    use std::cell::RefCell;
+
+    fn rect(x: i32) -> MmRect {
+        MmRect {
+            x,
+            y: 0,
+            w: 10,
+            h: 10,
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeWindowOps {
+        at_home: HashMap<usize, MmRect>,
+        moves: RefCell<Vec<(usize, MmRect)>>,
+    }
+
+    impl WindowOps for FakeWindowOps {
+        fn is_window_at_rect(&self, hwnd: usize, rect: MmRect) -> bool {
+            self.at_home.get(&hwnd).copied() == Some(rect)
+        }
+        fn move_window_to_rect(&self, hwnd: usize, rect: MmRect) -> Result<()> {
+            self.moves.borrow_mut().push((hwnd, rect));
+            Ok(())
+        }
+    }
+
+    struct FakeHotkeyOps(bool);
+    impl HotkeyOps for FakeHotkeyOps {
+        fn is_hotkey_pressed(&self, _sequence: &str) -> bool {
+            self.0
+        }
+    }
+
+    fn window(hwnd: usize, valid: bool, home: MmRect, target: MmRect) -> MmWindow {
+        MmWindow {
+            hwnd,
+            valid,
+            home_rect: Some(home),
+            target_rect: Some(target),
+            ..MmWindow::default()
+        }
+    }
+
+    fn workspace() -> MmWorkspace {
+        MmWorkspace {
+            id: "ws".into(),
+            windows: vec![
+                window(1, true, rect(1), rect(11)),
+                window(2, true, rect(2), rect(12)),
+            ],
+            hotkey: Some(MmHotkey {
+                key: "F9".into(),
+                ..MmHotkey::default()
+            }),
+            ..MmWorkspace::default()
+        }
+    }
+
+    #[test]
+    fn disabled_workspace_does_not_toggle() {
+        let mut ws = workspace();
+        ws.disabled = true;
+        let ops = FakeWindowOps::default();
+        toggle_workspace_with(&mut ws, &ops);
+        assert!(ops.moves.borrow().is_empty());
+    }
+
+    #[test]
+    fn invalid_windows_are_skipped() {
+        let mut ws = workspace();
+        ws.windows[1].valid = false;
+        let mut ops = FakeWindowOps::default();
+        ops.at_home.insert(1, rect(1));
+        toggle_workspace_with(&mut ws, &ops);
+        assert_eq!(*ops.moves.borrow(), vec![(1, rect(11))]);
+    }
+
+    #[test]
+    fn normal_toggle_home_to_target() {
+        let mut ws = workspace();
+        let mut ops = FakeWindowOps::default();
+        ops.at_home.insert(1, rect(1));
+        ops.at_home.insert(2, rect(2));
+        toggle_workspace_with(&mut ws, &ops);
+        assert_eq!(*ops.moves.borrow(), vec![(1, rect(11)), (2, rect(12))]);
+    }
+
+    #[test]
+    fn normal_toggle_target_or_mixed_to_home() {
+        let mut ws = workspace();
+        let mut ops = FakeWindowOps::default();
+        ops.at_home.insert(1, rect(1));
+        toggle_workspace_with(&mut ws, &ops);
+        assert_eq!(*ops.moves.borrow(), vec![(1, rect(1)), (2, rect(2))]);
+    }
+
+    #[test]
+    fn rotate_increments_rotation_offset() {
+        let mut ws = workspace();
+        ws.rotate = true;
+        let ops = FakeWindowOps::default();
+        rotate_workspace_with(&mut ws, &ops);
+        assert_eq!(ws.rotation_offset, 1);
+        assert_eq!(*ops.moves.borrow(), vec![(1, rect(11)), (2, rect(1))]);
+    }
+
+    #[test]
+    fn rotate_skips_invalid_windows() {
+        let mut ws = workspace();
+        ws.rotate = true;
+        ws.windows[0].valid = false;
+        let ops = FakeWindowOps::default();
+        rotate_workspace_with(&mut ws, &ops);
+        assert_eq!(ws.rotation_offset, 1);
+        assert_eq!(*ops.moves.borrow(), vec![(2, rect(12))]);
+    }
+
+    #[test]
+    fn runtime_skips_when_capture_pending_is_true() {
+        let mut workspaces = vec![workspace()];
+        let control = RuntimeControl::new(true);
+        control.capture_pending.store(true, Ordering::Relaxed);
+        let info = Arc::new(Mutex::new(None));
+        let mut debounce = HashMap::new();
+        let ops = FakeWindowOps::default();
+        runtime_tick(
+            &mut workspaces,
+            &control,
+            &info,
+            &mut debounce,
+            DEFAULT_DEBOUNCE,
+            &ops,
+            &FakeHotkeyOps(true),
+            Instant::now(),
+        );
+        assert!(ops.moves.borrow().is_empty());
+        assert!(info.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn debounce_prevents_repeat_trigger_spam() {
+        let mut workspaces = vec![workspace()];
+        let control = RuntimeControl::new(true);
+        let info = Arc::new(Mutex::new(None));
+        let mut debounce = HashMap::new();
+        let mut ops = FakeWindowOps::default();
+        ops.at_home.insert(1, rect(1));
+        ops.at_home.insert(2, rect(2));
+        let now = Instant::now();
+        runtime_tick(
+            &mut workspaces,
+            &control,
+            &info,
+            &mut debounce,
+            DEFAULT_DEBOUNCE,
+            &ops,
+            &FakeHotkeyOps(true),
+            now,
+        );
+        runtime_tick(
+            &mut workspaces,
+            &control,
+            &info,
+            &mut debounce,
+            DEFAULT_DEBOUNCE,
+            &ops,
+            &FakeHotkeyOps(true),
+            now + Duration::from_millis(100),
+        );
+        assert_eq!(ops.moves.borrow().len(), 2);
+    }
+}

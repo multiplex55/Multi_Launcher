@@ -83,6 +83,8 @@ pub struct MmWindow {
     pub disabled: bool,
     #[serde(default = "default_true")]
     pub valid: bool,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub hwnd: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
