@@ -484,6 +484,10 @@ impl LauncherApp {
             self.multi_manager_save();
         } else if a.action == "mm:reload" {
             self.multi_manager_reload();
+        } else if a.action == "mm:save-bindings" {
+            self.multi_manager_save_bindings();
+        } else if a.action == "mm:restore-bindings" {
+            self.multi_manager_restore_bindings();
         } else if a.action == "mm:import" {
             self.multi_manager_import();
         } else if a.action == "mm:recapture-all" {

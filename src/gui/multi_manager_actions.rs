@@ -1,5 +1,6 @@
 use super::*;
-use crate::multi_manager::model::{MmWindow, PendingCaptureAction, RecaptureQueueItem};
+use crate::multi_manager::bindings;
+use crate::multi_manager::model::{PendingCaptureAction, RecaptureQueueItem};
 use crate::multi_manager::win::{self, CaptureKeyAction};
 use std::sync::atomic::Ordering;
 
@@ -40,13 +41,13 @@ impl LauncherApp {
     }
 
     pub fn multi_manager_start_recapture_all(&mut self) {
-        let workspace_ids = self.multi_manager.workspaces.lock().ok().map(|workspaces| {
-            workspaces
-                .iter()
-                .map(|workspace| workspace.id.clone())
-                .collect::<Vec<_>>()
-        });
-        let Some(workspace_ids) = workspace_ids else {
+        let queue = self
+            .multi_manager
+            .workspaces
+            .lock()
+            .ok()
+            .map(|workspaces| build_recapture_queue(&workspaces));
+        let Some(queue) = queue else {
             self.report_error_message(
                 "multi_manager.recapture",
                 "Failed to lock MultiManager workspaces for recapture",
@@ -54,20 +55,79 @@ impl LauncherApp {
             return;
         };
 
-        if workspace_ids.is_empty() {
+        if queue.is_empty() {
             self.report_error_message(
                 "multi_manager.recapture",
-                "No MultiManager workspaces to recapture",
+                "No invalid or missing MultiManager window bindings to recapture",
             );
             return;
         }
 
-        self.multi_manager.recapture_queue = workspace_ids
-            .into_iter()
-            .map(|workspace_id| RecaptureQueueItem { workspace_id })
-            .collect();
+        self.multi_manager.recapture_queue = queue.into();
         self.multi_manager.recapture_active = true;
-        self.add_success_toast("Started MultiManager recapture for all workspaces");
+        self.add_success_toast("Started MultiManager window recapture queue");
+    }
+
+    pub fn multi_manager_save_bindings(&mut self) {
+        let result = self
+            .multi_manager
+            .workspaces
+            .lock()
+            .map_err(|_| anyhow::anyhow!("MultiManager workspace lock poisoned"))
+            .and_then(|workspaces| {
+                bindings::save_bindings(&self.multi_manager.bindings_path, &workspaces)
+            });
+        match result {
+            Ok(()) => self.add_success_toast("Saved MultiManager window bindings"),
+            Err(err) => self.report_error_message(
+                "multi_manager.bindings",
+                format!("Failed to save bindings: {err}"),
+            ),
+        }
+    }
+
+    pub fn multi_manager_restore_bindings(&mut self) {
+        match bindings::load_bindings(&self.multi_manager.bindings_path) {
+            Ok(snapshots) => {
+                let restored =
+                    self.multi_manager.workspaces.lock().map(|mut workspaces| {
+                        bindings::restore_bindings(&mut workspaces, &snapshots)
+                    });
+                match restored {
+                    Ok(()) => {
+                        self.multi_manager.mark_dirty();
+                        self.add_success_toast("Restored MultiManager window bindings");
+                    }
+                    Err(_) => self.report_error_message(
+                        "multi_manager.bindings",
+                        "Failed to lock workspaces for binding restore",
+                    ),
+                }
+            }
+            Err(err) => self.report_error_message(
+                "multi_manager.bindings",
+                format!("Failed to load bindings: {err}"),
+            ),
+        }
+    }
+
+    pub fn multi_manager_refresh_titles(&mut self) {
+        let changed = self
+            .multi_manager
+            .workspaces
+            .lock()
+            .map(|mut workspaces| bindings::refresh_titles(&mut workspaces));
+        match changed {
+            Ok(true) => {
+                self.multi_manager.mark_dirty();
+                self.add_success_toast("Refreshed MultiManager window titles");
+            }
+            Ok(false) => self.add_success_toast("MultiManager window titles already current"),
+            Err(_) => self.report_error_message(
+                "multi_manager.titles",
+                "Failed to lock workspaces for title refresh",
+            ),
+        }
     }
 
     pub fn multi_manager_toggle_workspace(&mut self, workspace_id: &str) {
@@ -171,10 +231,10 @@ impl LauncherApp {
     pub fn multi_manager_poll_capture(&mut self, ctx: &eframe::egui::Context) {
         if self.multi_manager.pending_capture.is_none() && self.multi_manager.recapture_active {
             if let Some(item) = self.multi_manager.recapture_queue.pop_front() {
-                self.multi_manager.pending_capture =
-                    Some(PendingCaptureAction::RecaptureWorkspace {
-                        workspace_id: item.workspace_id,
-                    });
+                self.multi_manager.pending_capture = Some(PendingCaptureAction::RecaptureWindow {
+                    workspace_id: item.workspace_id,
+                    window_id: item.window_index.to_string(),
+                });
                 self.multi_manager
                     .runtime
                     .control
@@ -225,9 +285,8 @@ impl LauncherApp {
             return;
         }
         match action {
-            PendingCaptureAction::CaptureWorkspace { workspace_id }
-            | PendingCaptureAction::RecaptureWorkspace { workspace_id } => {
-                let window = MmWindow {
+            PendingCaptureAction::CaptureWorkspace { workspace_id } => {
+                let window = crate::multi_manager::model::MmWindow {
                     alias: captured.title.clone(),
                     title: captured.title,
                     hwnd: captured.hwnd,
@@ -236,11 +295,13 @@ impl LauncherApp {
                     ..Default::default()
                 };
                 self.multi_manager
-                    .with_workspace_mut(&workspace_id, |workspace| {
-                        workspace.windows.push(window);
-                    });
+                    .with_workspace_mut(&workspace_id, |workspace| workspace.windows.push(window));
             }
             PendingCaptureAction::CaptureWindow {
+                workspace_id,
+                window_id,
+            }
+            | PendingCaptureAction::RecaptureWindow {
                 workspace_id,
                 window_id,
             } => {
@@ -289,5 +350,58 @@ impl LauncherApp {
                 options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
             });
         }
+    }
+}
+
+pub(crate) fn build_recapture_queue(
+    workspaces: &[crate::multi_manager::model::MmWorkspace],
+) -> Vec<RecaptureQueueItem> {
+    workspaces
+        .iter()
+        .flat_map(|workspace| {
+            workspace
+                .windows
+                .iter()
+                .enumerate()
+                .filter_map(|(window_index, window)| {
+                    (window.hwnd == 0 || !win::is_valid_window(window.hwnd)).then(|| {
+                        RecaptureQueueItem {
+                            workspace_id: workspace.id.clone(),
+                            window_index,
+                        }
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_recapture_queue;
+    use crate::multi_manager::model::{MmWindow, MmWorkspace};
+    use std::collections::VecDeque;
+
+    #[test]
+    fn recapture_queue_skips_cancels_and_advances() {
+        let workspaces = vec![MmWorkspace {
+            id: "w".into(),
+            windows: vec![
+                MmWindow {
+                    hwnd: 0,
+                    ..Default::default()
+                },
+                MmWindow {
+                    hwnd: 0,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }];
+        let mut queue: VecDeque<_> = build_recapture_queue(&workspaces).into();
+        assert_eq!(queue.pop_front().unwrap().window_index, 0); // current item skipped
+        assert_eq!(queue.pop_front().unwrap().window_index, 1); // queue advanced
+        queue.clear(); // Escape cancels remaining queue
+        assert!(queue.is_empty());
     }
 }

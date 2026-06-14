@@ -1,10 +1,20 @@
 use crate::actions::Action;
 
-const COMMANDS: [(&str, &str, &str); 6] = [
+const COMMANDS: [(&str, &str, &str); 8] = [
     ("mm", "Open MultiManager", "mm:open"),
     ("mm settings", "Open MultiManager settings", "mm:settings"),
     ("mm save", "Save MultiManager workspaces", "mm:save"),
     ("mm reload", "Reload MultiManager workspaces", "mm:reload"),
+    (
+        "mm save bindings",
+        "Save MultiManager window bindings",
+        "mm:save-bindings",
+    ),
+    (
+        "mm restore bindings",
+        "Restore MultiManager window bindings",
+        "mm:restore-bindings",
+    ),
     (
         "mm recapture all",
         "Recapture all MultiManager workspaces",
