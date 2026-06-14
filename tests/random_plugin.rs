@@ -6,8 +6,8 @@ fn generate_number() {
     let plugin = RandomPlugin::from_seed(1);
     let results = plugin.search("rand number 10");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].label, "7");
-    assert_eq!(results[0].action, "clipboard:7");
+    assert_eq!(results[0].label, "10");
+    assert_eq!(results[0].action, "clipboard:10");
 }
 
 #[test]
