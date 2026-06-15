@@ -107,3 +107,45 @@ fn activating_mm_save_reports_error_without_panicking() {
             .is_some_and(|msg| msg.contains("Failed to save MultiManager workspaces"))
     );
 }
+
+
+#[test]
+fn activating_mm_send_all_home_reports_success_without_panicking() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_multi_manager_paths(dir.path());
+    let mut app = new_app(settings);
+    app.enable_toasts = true;
+
+    app.activate_action(action("mm:send-all-home"), None, ActivationSource::Enter);
+
+    assert!(app.error.is_none());
+}
+
+#[test]
+fn activating_mm_reconnect_reports_error_without_panicking_when_bindings_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_multi_manager_paths(dir.path());
+    let mut app = new_app(settings);
+    app.show_inline_errors = true;
+
+    app.activate_action(action("mm:reconnect"), None, ActivationSource::Enter);
+
+    assert!(
+        app.error
+            .as_deref()
+            .is_some_and(|msg| msg.contains("Failed to load bindings"))
+    );
+}
+
+#[test]
+fn activating_mm_reconnect_reports_success_without_panicking_with_bindings_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("bindings.json"), "[]").unwrap();
+    let settings = settings_with_multi_manager_paths(dir.path());
+    let mut app = new_app(settings);
+    app.enable_toasts = true;
+
+    app.activate_action(action("mm:reconnect"), None, ActivationSource::Enter);
+
+    assert!(app.error.is_none());
+}
