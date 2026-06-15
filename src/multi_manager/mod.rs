@@ -1,4 +1,5 @@
 pub mod bindings;
+pub mod capture;
 pub mod commands;
 pub mod model;
 pub mod runtime;

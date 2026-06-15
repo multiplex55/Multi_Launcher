@@ -1,7 +1,8 @@
 use super::*;
 use crate::multi_manager::bindings;
+use crate::multi_manager::capture;
 use crate::multi_manager::model::{PendingCaptureAction, RecaptureQueueItem};
-use crate::multi_manager::win::{self, CaptureKeyAction};
+use crate::multi_manager::win::{self, CaptureKeyAction, CapturedWindow};
 use std::sync::atomic::Ordering;
 
 impl LauncherApp {
@@ -167,6 +168,7 @@ impl LauncherApp {
             self.multi_manager.pending_capture = Some(PendingCaptureAction::CaptureWorkspace {
                 workspace_id: workspace_id.to_string(),
             });
+            self.multi_manager.capture_session = None;
             self.multi_manager
                 .runtime
                 .control
@@ -224,6 +226,7 @@ impl LauncherApp {
     }
 
     pub fn multi_manager_cancel_capture(&mut self) {
+        self.multi_manager.capture_session = None;
         self.multi_manager.pending_capture = None;
         self.multi_manager.recapture_active = false;
         self.multi_manager.recapture_queue.clear();
@@ -262,26 +265,37 @@ impl LauncherApp {
             }
         }
         if self.multi_manager.pending_capture.is_none() {
+            self.multi_manager.capture_session = None;
             return;
         }
-        ctx.request_repaint();
-        match win::poll_capture_keys() {
-            Some(CaptureKeyAction::Cancel) => self.multi_manager_cancel_capture(),
-            Some(CaptureKeyAction::Skip) => {
-                if self.multi_manager.recapture_active {
-                    self.multi_manager.pending_capture = None;
+        if self.multi_manager.capture_session.is_none() {
+            self.multi_manager.capture_session = Some(capture::start_capture_session(ctx.clone()));
+        }
+
+        let event = self
+            .multi_manager
+            .capture_session
+            .as_ref()
+            .and_then(|session| session.rx.try_recv().ok());
+        if let Some(event) = event {
+            self.multi_manager.capture_session = None;
+            match event.action {
+                CaptureKeyAction::Cancel => self.multi_manager_cancel_capture(),
+                CaptureKeyAction::Skip => {
+                    if self.multi_manager.recapture_active {
+                        self.multi_manager.pending_capture = None;
+                    }
                 }
+                CaptureKeyAction::Confirm => self.multi_manager_complete_capture(event.captured),
             }
-            Some(CaptureKeyAction::Confirm) => self.multi_manager_complete_capture(),
-            None => {}
         }
     }
 
-    fn multi_manager_complete_capture(&mut self) {
+    fn multi_manager_complete_capture(&mut self, captured: Option<CapturedWindow>) {
         let Some(action) = self.multi_manager.pending_capture.clone() else {
             return;
         };
-        let Some(captured) = win::active_window() else {
+        let Some(captured) = captured else {
             self.report_error_message("multi_manager.capture", "No active window to capture");
             return;
         };
@@ -332,6 +346,7 @@ impl LauncherApp {
                 }
             }
         }
+        self.multi_manager.capture_session = None;
         self.multi_manager.pending_capture = None;
         if !self.multi_manager.recapture_active {
             self.multi_manager
@@ -397,7 +412,7 @@ mod tests {
     use crate::plugin::PluginManager;
     use crate::settings::Settings;
     use std::collections::VecDeque;
-    use std::sync::{atomic::AtomicBool, Arc};
+    use std::sync::{Arc, atomic::AtomicBool};
 
     fn test_app() -> LauncherApp {
         let ctx = eframe::egui::Context::default();
