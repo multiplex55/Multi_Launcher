@@ -44,15 +44,18 @@ impl LauncherApp {
     }
 
     pub fn multi_manager_send_all_home(&mut self) {
-        let workspaces = match self.multi_manager.workspaces.lock() {
-            Ok(workspaces) => workspaces.clone(),
-            Err(_) => {
-                self.report_error_message(
-                    "multi_manager.send_all_home",
-                    "Failed to lock MultiManager workspaces to send all windows home",
-                );
-                return;
-            }
+        let workspaces = self
+            .multi_manager
+            .workspaces
+            .lock()
+            .ok()
+            .map(|workspaces| workspaces.clone());
+        let Some(workspaces) = workspaces else {
+            self.report_error_message(
+                "multi_manager.send_all_home",
+                "Failed to lock MultiManager workspaces to send all windows home",
+            );
+            return;
         };
 
         crate::multi_manager::runtime::send_all_home(&workspaces);
