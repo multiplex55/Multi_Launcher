@@ -63,11 +63,18 @@ impl LauncherApp {
     }
 
     pub fn multi_manager_reconnect_windows(&mut self) {
-        let summary = match self.multi_manager.workspaces.lock() {
-            Ok(mut workspaces) => {
+        let reconnect_result = self
+            .multi_manager
+            .workspaces
+            .lock()
+            .map(|mut workspaces| {
                 crate::multi_manager::reconnect::reconnect_workspaces(&mut workspaces)
-            }
-            Err(_) => {
+            })
+            .map_err(|_| ());
+
+        let summary = match reconnect_result {
+            Ok(summary) => summary,
+            Err(()) => {
                 self.report_error_message(
                     "multi_manager.reconnect",
                     "Failed to lock MultiManager workspaces to reconnect windows",
