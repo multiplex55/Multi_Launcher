@@ -1,4 +1,5 @@
 use super::*;
+use crate::multi_manager::apply_capture::{self, ApplyCaptureResult};
 use crate::multi_manager::bindings;
 use crate::multi_manager::capture;
 use crate::multi_manager::model::{PendingCaptureAction, RecaptureQueueItem};
@@ -406,35 +407,29 @@ impl LauncherApp {
             return;
         }
         let keep_pending = matches!(action, PendingCaptureAction::CaptureMultipleWindows { .. });
-        match action {
-            PendingCaptureAction::CaptureOneWindow { workspace_id }
-            | PendingCaptureAction::CaptureMultipleWindows { workspace_id } => {
-                let window = crate::multi_manager::model::MmWindow {
-                    alias: captured.title.clone(),
-                    title: captured.title,
-                    hwnd: captured.hwnd,
-                    home_rect: Some(captured.rect),
-                    target_rect: Some(captured.rect),
-                    ..Default::default()
-                };
-                self.multi_manager
-                    .with_workspace_mut(&workspace_id, |workspace| workspace.windows.push(window));
+        let result = self
+            .multi_manager
+            .workspaces
+            .lock()
+            .map(|mut workspaces| {
+                apply_capture::apply_capture_to_workspaces(&mut workspaces, &action, captured)
+            })
+            .unwrap_or(ApplyCaptureResult::MissingWorkspace);
+        match result {
+            ApplyCaptureResult::Applied => self.multi_manager.mark_dirty(),
+            ApplyCaptureResult::MissingWorkspace => {
+                self.report_error_message(
+                    "multi_manager.capture",
+                    "Failed to apply capture: workspace not found",
+                );
+                return;
             }
-            PendingCaptureAction::RecaptureWindow {
-                workspace_id,
-                window_index,
-            } => {
-                self.multi_manager
-                    .with_workspace_mut(&workspace_id, |workspace| {
-                        if let Some(window) = workspace.windows.get_mut(window_index) {
-                            window.title = captured.title.clone();
-                            window.alias = captured.title;
-                            window.hwnd = captured.hwnd;
-                            window.home_rect = Some(captured.rect);
-                            window.target_rect = Some(captured.rect);
-                            window.valid = true;
-                        }
-                    });
+            ApplyCaptureResult::MissingWindow => {
+                self.report_error_message(
+                    "multi_manager.capture",
+                    "Failed to apply capture: window not found",
+                );
+                return;
             }
         }
         self.multi_manager.capture_session = None;
@@ -506,8 +501,8 @@ mod tests {
     use crate::settings::Settings;
     use std::collections::VecDeque;
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     };
 
     fn test_app() -> LauncherApp {
@@ -599,12 +594,13 @@ mod tests {
         app.multi_manager_complete_capture(Some(captured(7, "Editor")));
 
         assert_eq!(app.multi_manager.pending_capture, None);
-        assert!(!app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            !app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 1);
         assert_eq!(workspaces[0].windows[0].title, "Editor");
@@ -638,12 +634,13 @@ mod tests {
                 workspace_id: "w".into()
             })
         );
-        assert!(app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 2);
         assert_eq!(workspaces[0].windows[0].title, "One");
