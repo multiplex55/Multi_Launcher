@@ -76,6 +76,9 @@ impl MultiManagerDialog {
                         if ui.button("Restore Bindings").clicked() {
                             app.multi_manager_restore_bindings();
                         }
+                        if ui.button("Reconnect Windows").clicked() {
+                            app.multi_manager_reconnect_windows();
+                        }
                         if ui.button("Refresh Titles").clicked() {
                             app.multi_manager_refresh_titles();
                         }

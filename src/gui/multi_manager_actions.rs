@@ -63,7 +63,21 @@ impl LauncherApp {
     }
 
     pub fn multi_manager_reconnect_windows(&mut self) {
-        self.multi_manager_restore_bindings();
+        let summary = match self.multi_manager.workspaces.lock() {
+            Ok(mut workspaces) => {
+                crate::multi_manager::reconnect::reconnect_workspaces(&mut workspaces)
+            }
+            Err(_) => {
+                self.report_error_message(
+                    "multi_manager.reconnect",
+                    "Failed to lock MultiManager workspaces to reconnect windows",
+                );
+                return;
+            }
+        };
+
+        self.multi_manager.mark_dirty();
+        self.add_success_toast(format_reconnect_summary(summary));
     }
 
     pub fn multi_manager_start_recapture_all(&mut self) {
@@ -525,6 +539,15 @@ impl LauncherApp {
     }
 }
 
+pub(crate) fn format_reconnect_summary(
+    summary: crate::multi_manager::reconnect::ReconnectSummary,
+) -> String {
+    format!(
+        "Reconnected MultiManager windows: {} reconnected, {} missing, {} ambiguous",
+        summary.reconnected, summary.missing, summary.ambiguous
+    )
+}
+
 pub(crate) fn build_recapture_queue(
     workspaces: &[crate::multi_manager::model::MmWorkspace],
 ) -> Vec<RecaptureQueueItem> {
@@ -550,7 +573,7 @@ pub(crate) fn build_recapture_queue(
 
 #[cfg(test)]
 mod tests {
-    use super::build_recapture_queue;
+    use super::{build_recapture_queue, format_reconnect_summary};
     use crate::gui::LauncherApp;
     use crate::multi_manager::capture::CaptureEvent;
     use crate::multi_manager::model::{
@@ -561,9 +584,25 @@ mod tests {
     use crate::settings::Settings;
     use std::collections::VecDeque;
     use std::sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     };
+
+    #[test]
+    fn reconnect_summary_format_includes_action_counts() {
+        let summary = crate::multi_manager::reconnect::ReconnectSummary {
+            reconnected: 2,
+            missing: 3,
+            ambiguous: 4,
+            ..Default::default()
+        };
+
+        let text = format_reconnect_summary(summary);
+
+        assert!(text.contains("2 reconnected"));
+        assert!(text.contains("3 missing"));
+        assert!(text.contains("4 ambiguous"));
+    }
 
     fn test_app() -> LauncherApp {
         let ctx = eframe::egui::Context::default();
@@ -660,13 +699,12 @@ mod tests {
         );
 
         assert_eq!(app.multi_manager.pending_capture, None);
-        assert!(
-            !app.multi_manager
-                .runtime
-                .control
-                .capture_pending
-                .load(Ordering::Relaxed)
-        );
+        assert!(!app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 1);
         assert_eq!(workspaces[0].windows[0].title, "Editor");
@@ -706,13 +744,12 @@ mod tests {
                 workspace_id: "w".into()
             })
         );
-        assert!(
-            app.multi_manager
-                .runtime
-                .control
-                .capture_pending
-                .load(Ordering::Relaxed)
-        );
+        assert!(app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 2);
         assert_eq!(workspaces[0].windows[0].title, "One");
@@ -749,13 +786,12 @@ mod tests {
 
         assert_eq!(app.multi_manager.pending_capture, None);
         assert!(app.multi_manager.capture_session.is_none());
-        assert!(
-            !app.multi_manager
-                .runtime
-                .control
-                .capture_pending
-                .load(Ordering::Relaxed)
-        );
+        assert!(!app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 1);
         assert_eq!(workspaces[0].windows[0].title, "Editor");
@@ -796,13 +832,12 @@ mod tests {
             })
         );
         assert!(app.multi_manager.capture_session.is_some());
-        assert!(
-            app.multi_manager
-                .runtime
-                .control
-                .capture_pending
-                .load(Ordering::Relaxed)
-        );
+        assert!(app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
     }
 
     #[test]
@@ -835,13 +870,12 @@ mod tests {
         assert_eq!(app.multi_manager.pending_capture, None);
         assert!(app.multi_manager.recapture_active);
         assert_eq!(app.multi_manager.recapture_queue.len(), 1);
-        assert!(
-            app.multi_manager
-                .runtime
-                .control
-                .capture_pending
-                .load(Ordering::Relaxed)
-        );
+        assert!(app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
     }
 
     #[test]
@@ -878,13 +912,12 @@ mod tests {
         assert!(app.multi_manager.capture_session.is_none());
         assert!(!app.multi_manager.recapture_active);
         assert!(app.multi_manager.recapture_queue.is_empty());
-        assert!(
-            !app.multi_manager
-                .runtime
-                .control
-                .capture_pending
-                .load(Ordering::Relaxed)
-        );
+        assert!(!app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
     }
 
     #[test]
@@ -917,13 +950,12 @@ mod tests {
         assert!(app.multi_manager.capture_session.is_none());
         assert!(app.multi_manager.recapture_active);
         assert_eq!(app.multi_manager.recapture_queue.len(), 2);
-        assert!(
-            app.multi_manager
-                .runtime
-                .control
-                .capture_pending
-                .load(Ordering::Relaxed)
-        );
+        assert!(app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
     }
 
     #[test]
