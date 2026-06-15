@@ -592,6 +592,31 @@ mod tests {
     }
 
     #[test]
+    fn old_multi_manager_settings_default_reconnect_fields() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "multi_manager": {
+                    "enabled": true,
+                    "workspaces_path": "legacy_workspaces.json",
+                    "bindings_path": "legacy_bindings.json",
+                    "auto_save": false,
+                    "save_on_exit": false,
+                    "developer_debugging": true,
+                    "show_force_recapture_prompt": true,
+                    "hotkey_poll_ms": 100,
+                    "hide_launcher_before_toggle": true,
+                    "ignore_launcher_window_on_capture": false
+                }
+            }"#,
+        )
+        .expect("legacy settings should deserialize");
+
+        assert!(parsed.multi_manager.auto_reconnect_on_load);
+        assert!(parsed.multi_manager.auto_reconnect_missing_windows);
+        assert_eq!(parsed.multi_manager.auto_reconnect_interval_ms, 3000);
+    }
+
+    #[test]
     fn query_results_layout_defaults_are_backward_compatible() {
         let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
         assert_eq!(
