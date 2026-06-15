@@ -1,7 +1,7 @@
 use crate::gui::LauncherApp;
 use crate::multi_manager::bindings;
 use crate::multi_manager::model::{
-    MmHotkey, MmRect, MmWindow, MmWorkspace, PendingCaptureAction, new_workspace_id,
+    new_workspace_id, MmHotkey, MmRect, MmWindow, MmWorkspace, PendingCaptureAction,
 };
 use crate::multi_manager::win;
 use eframe::egui;
@@ -56,87 +56,89 @@ impl MultiManagerDialog {
             .vscroll(true)
             .show(ctx, |ui| {
                 self.capture_banner(ui, app);
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Add Workspace").clicked() {
-                        add_workspace(app);
-                    }
-                    if ui.button("Save").clicked() {
-                        app.multi_manager_save();
-                    }
-                    if ui.button("Reload").clicked() {
-                        self.confirm.reload = true;
-                    }
-                    if ui.button("Save Bindings").clicked() {
-                        app.multi_manager_save_bindings();
-                    }
-                    if ui.button("Restore Bindings").clicked() {
-                        app.multi_manager_restore_bindings();
-                    }
-                    if ui.button("Refresh Titles").clicked() {
-                        app.multi_manager_refresh_titles();
-                    }
-                    if ui.button("Send All Home").clicked() {
-                        send_all(app, true);
-                    }
-                    if ui.button("Recapture All").clicked() {
-                        app.multi_manager_start_recapture_all();
-                    }
-                    if ui
-                        .button(if self.expanded_all {
-                            "Collapse All"
+                ui.add_enabled_ui(app.multi_manager.pending_capture.is_none(), |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Add Workspace").clicked() {
+                            add_workspace(app);
+                        }
+                        if ui.button("Save").clicked() {
+                            app.multi_manager_save();
+                        }
+                        if ui.button("Reload").clicked() {
+                            self.confirm.reload = true;
+                        }
+                        if ui.button("Save Bindings").clicked() {
+                            app.multi_manager_save_bindings();
+                        }
+                        if ui.button("Restore Bindings").clicked() {
+                            app.multi_manager_restore_bindings();
+                        }
+                        if ui.button("Refresh Titles").clicked() {
+                            app.multi_manager_refresh_titles();
+                        }
+                        if ui.button("Send All Home").clicked() {
+                            send_all(app, true);
+                        }
+                        if ui.button("Recapture All").clicked() {
+                            app.multi_manager_start_recapture_all();
+                        }
+                        if ui
+                            .button(if self.expanded_all {
+                                "Collapse All"
+                            } else {
+                                "Expand All"
+                            })
+                            .clicked()
+                        {
+                            self.expanded_all = !self.expanded_all;
+                        }
+                        ui.label(if app.multi_manager.dirty {
+                            "● dirty"
                         } else {
-                            "Expand All"
-                        })
-                        .clicked()
-                    {
-                        self.expanded_all = !self.expanded_all;
+                            "saved"
+                        });
+                        let last = app
+                            .multi_manager
+                            .last_hotkey_info
+                            .lock()
+                            .ok()
+                            .and_then(|g| g.clone())
+                            .map(|(s, _)| s)
+                            .unwrap_or_else(|| "none".into());
+                        ui.label(format!("last hotkey: {last}"));
+                    });
+                    if self.confirm.reload {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(
+                                egui::Color32::YELLOW,
+                                "Reload and discard unsaved changes?",
+                            );
+                            if ui.button("Confirm").clicked() {
+                                app.multi_manager_reload();
+                                self.confirm.reload = false;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.confirm.reload = false;
+                            }
+                        });
                     }
-                    ui.label(if app.multi_manager.dirty {
-                        "● dirty"
-                    } else {
-                        "saved"
-                    });
-                    let last = app
+                    let ids = app
                         .multi_manager
-                        .last_hotkey_info
+                        .workspaces
                         .lock()
-                        .ok()
-                        .and_then(|g| g.clone())
-                        .map(|(s, _)| s)
-                        .unwrap_or_else(|| "none".into());
-                    ui.label(format!("last hotkey: {last}"));
+                        .map(|w| w.iter().map(|x| x.id.clone()).collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    for id in ids {
+                        self.workspace_card(ui, app, &id);
+                    }
                 });
-                if self.confirm.reload {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(
-                            egui::Color32::YELLOW,
-                            "Reload and discard unsaved changes?",
-                        );
-                        if ui.button("Confirm").clicked() {
-                            app.multi_manager_reload();
-                            self.confirm.reload = false;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.confirm.reload = false;
-                        }
-                    });
-                }
-                let ids = app
-                    .multi_manager
-                    .workspaces
-                    .lock()
-                    .map(|w| w.iter().map(|x| x.id.clone()).collect::<Vec<_>>())
-                    .unwrap_or_default();
-                for id in ids {
-                    self.workspace_card(ui, app, &id);
-                }
             });
         self.open = open;
     }
 
     fn capture_banner(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
         if let Some(action) = &app.multi_manager.pending_capture {
-            ui.colored_label(egui::Color32::LIGHT_BLUE, "Capture mode active: press Enter to capture active window, S to skip current item, or Escape to cancel remaining queue.");
+            ui.colored_label(egui::Color32::LIGHT_BLUE, capture_banner_text(action));
             match action {
                 PendingCaptureAction::CaptureOneWindow { workspace_id } => {
                     ui.label(format!("Capturing one window for workspace {workspace_id}"));
@@ -150,8 +152,9 @@ impl MultiManagerDialog {
                     workspace_id,
                     window_index,
                 } => {
+                    let workspace_label = workspace_display_label(app, workspace_id);
                     ui.label(format!(
-                        "Recapturing workspace {workspace_id}, window {}",
+                        "Recapturing workspace {workspace_label}, window {}",
                         window_index + 1
                     ));
                 }
@@ -411,6 +414,32 @@ impl MultiManagerDialog {
     }
 }
 
+fn capture_banner_text(action: &PendingCaptureAction) -> &'static str {
+    match action {
+        PendingCaptureAction::CaptureOneWindow { .. } => {
+            "Capture mode: focus a window, then press Enter. Escape cancels."
+        }
+        PendingCaptureAction::CaptureMultipleWindows { .. } => {
+            "Multi-capture mode: focus a window and press Enter to add it. Escape finishes."
+        }
+        PendingCaptureAction::RecaptureWindow { .. } => {
+            "Recapture mode: focus the replacement window, press Enter. S skips. Escape cancels queue."
+        }
+    }
+}
+
+fn workspace_display_label(app: &LauncherApp, id: &str) -> String {
+    get_ws(app, id)
+        .and_then(|workspace| {
+            if workspace.name.is_empty() {
+                None
+            } else {
+                Some(format!("{id} ({})", workspace.name))
+            }
+        })
+        .unwrap_or_else(|| id.into())
+}
+
 impl MultiManagerSettingsDialog {
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         if !self.open {
@@ -628,6 +657,43 @@ mod tests {
     fn default_dialog_state_is_closed() {
         assert!(!MultiManagerDialog::default().open);
         assert!(!MultiManagerSettingsDialog::default().open);
+    }
+
+    #[test]
+    fn capture_banner_text_explains_single_capture_controls() {
+        let action = PendingCaptureAction::CaptureOneWindow {
+            workspace_id: "workspace".into(),
+        };
+
+        assert_eq!(
+            capture_banner_text(&action),
+            "Capture mode: focus a window, then press Enter. Escape cancels."
+        );
+    }
+
+    #[test]
+    fn capture_banner_text_explains_multi_capture_controls() {
+        let action = PendingCaptureAction::CaptureMultipleWindows {
+            workspace_id: "workspace".into(),
+        };
+
+        assert_eq!(
+            capture_banner_text(&action),
+            "Multi-capture mode: focus a window and press Enter to add it. Escape finishes."
+        );
+    }
+
+    #[test]
+    fn capture_banner_text_explains_recapture_controls() {
+        let action = PendingCaptureAction::RecaptureWindow {
+            workspace_id: "workspace".into(),
+            window_index: 0,
+        };
+
+        assert_eq!(
+            capture_banner_text(&action),
+            "Recapture mode: focus the replacement window, press Enter. S skips. Escape cancels queue."
+        );
     }
 
     #[test]
