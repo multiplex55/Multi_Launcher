@@ -1,7 +1,8 @@
 use crate::gui::LauncherApp;
 use crate::multi_manager::bindings;
 use crate::multi_manager::model::{
-    new_workspace_id, MmHotkey, MmRect, MmWindow, MmWorkspace, PendingCaptureAction,
+    MmHotkey, MmHotkeyValidation, MmRect, MmWindow, MmWorkspace, PendingCaptureAction,
+    new_workspace_id,
 };
 use crate::multi_manager::win;
 use eframe::egui;
@@ -13,6 +14,7 @@ pub struct MultiManagerDialog {
     expanded_all: bool,
     rename: WorkspaceRenameState,
     hotkey_editor: HotkeyEditorState,
+    hotkey_editor_needs_focus: bool,
     confirm: DeleteConfirmState,
 }
 
@@ -267,44 +269,71 @@ impl MultiManagerDialog {
     fn hotkey_ui(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, id: &str) {
         if self.hotkey_editor.workspace_id != id {
             if ui.button("Edit hotkey").clicked() {
-                self.hotkey_editor.workspace_id = id.into();
-                if let Some(h) = get_ws(app, id).and_then(|w| w.hotkey) {
-                    self.hotkey_editor.key = h.key;
-                    self.hotkey_editor.ctrl = h.ctrl;
-                    self.hotkey_editor.shift = h.shift;
-                    self.hotkey_editor.alt = h.alt;
-                    self.hotkey_editor.win = h.win;
-                }
+                begin_hotkey_edit(
+                    &mut self.hotkey_editor,
+                    id,
+                    get_ws(app, id)
+                        .and_then(|workspace| workspace.hotkey)
+                        .as_ref(),
+                );
+                self.hotkey_editor_needs_focus = true;
             }
             return;
         }
+
+        let escape_pressed = ui.input(|input| input.key_pressed(egui::Key::Escape));
+        if escape_pressed {
+            cancel_hotkey_edit(&mut self.hotkey_editor);
+            self.hotkey_editor_needs_focus = false;
+            return;
+        }
+
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.hotkey_editor.ctrl, "Ctrl");
             ui.checkbox(&mut self.hotkey_editor.shift, "Shift");
             ui.checkbox(&mut self.hotkey_editor.alt, "Alt");
             ui.checkbox(&mut self.hotkey_editor.win, "Win");
-            ui.add(
+            let response = ui.add(
                 egui::TextEdit::singleline(&mut self.hotkey_editor.key)
                     .id_source(("mm_workspace_hotkey_key", id)),
             );
-            let valid = !self.hotkey_editor.key.trim().is_empty();
-            ui.label(if valid { "valid" } else { "invalid" });
-            if ui.button("Set").clicked() && valid {
-                let h = MmHotkey {
-                    key: self.hotkey_editor.key.clone(),
-                    ctrl: self.hotkey_editor.ctrl,
-                    shift: self.hotkey_editor.shift,
-                    alt: self.hotkey_editor.alt,
-                    win: self.hotkey_editor.win,
-                };
+            if self.hotkey_editor_needs_focus {
+                response.request_focus();
+                self.hotkey_editor_needs_focus = false;
+            }
+
+            let candidate = hotkey_from_editor(&self.hotkey_editor);
+            match candidate.validate() {
+                MmHotkeyValidation::Valid => {
+                    ui.colored_label(egui::Color32::GREEN, MmHotkeyValidation::Valid.label());
+                }
+                validation if hotkey_editor_is_empty(&self.hotkey_editor) => {
+                    ui.colored_label(egui::Color32::GRAY, "no hotkey set");
+                    let _ = validation;
+                }
+                validation => {
+                    ui.colored_label(egui::Color32::RED, validation.label());
+                }
+            }
+
+            if ui
+                .add_enabled(
+                    hotkey_set_enabled(&self.hotkey_editor),
+                    egui::Button::new("Set"),
+                )
+                .clicked()
+            {
                 app.multi_manager
-                    .with_workspace_mut(id, |w| w.hotkey = Some(h));
+                    .with_workspace_mut(id, |w| w.hotkey = Some(candidate));
                 self.hotkey_editor = Default::default();
             }
             if ui.button("Reset").clicked() {
                 app.multi_manager
-                    .with_workspace_mut(id, |w| w.hotkey = None);
+                    .with_workspace_mut(id, reset_workspace_hotkey);
                 self.hotkey_editor = Default::default();
+            }
+            if ui.button("Cancel").clicked() {
+                cancel_hotkey_edit(&mut self.hotkey_editor);
             }
         });
     }
@@ -717,6 +746,52 @@ fn move_window(w: &MmWindow, home: bool) {
     }
 }
 
+fn begin_hotkey_edit(
+    editor: &mut HotkeyEditorState,
+    workspace_id: &str,
+    hotkey: Option<&MmHotkey>,
+) {
+    *editor = hotkey
+        .map(|hotkey| HotkeyEditorState {
+            workspace_id: workspace_id.into(),
+            key: hotkey.key.clone(),
+            ctrl: hotkey.ctrl,
+            shift: hotkey.shift,
+            alt: hotkey.alt,
+            win: hotkey.win,
+        })
+        .unwrap_or_else(|| HotkeyEditorState {
+            workspace_id: workspace_id.into(),
+            ..Default::default()
+        });
+}
+
+fn cancel_hotkey_edit(editor: &mut HotkeyEditorState) {
+    *editor = Default::default();
+}
+
+fn reset_workspace_hotkey(workspace: &mut MmWorkspace) {
+    workspace.hotkey = None;
+}
+
+fn hotkey_from_editor(editor: &HotkeyEditorState) -> MmHotkey {
+    MmHotkey {
+        key: editor.key.clone(),
+        ctrl: editor.ctrl,
+        shift: editor.shift,
+        alt: editor.alt,
+        win: editor.win,
+    }
+}
+
+fn hotkey_set_enabled(editor: &HotkeyEditorState) -> bool {
+    hotkey_from_editor(editor).validate() == MmHotkeyValidation::Valid
+}
+
+fn hotkey_editor_is_empty(editor: &HotkeyEditorState) -> bool {
+    editor.key.trim().is_empty() && !editor.ctrl && !editor.shift && !editor.alt && !editor.win
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,6 +879,129 @@ mod tests {
         };
 
         assert_eq!(workspace_header_label(&workspace), "workspace-id");
+    }
+
+    #[test]
+    fn invalid_hotkey_editor_state_disables_set() {
+        let editor = HotkeyEditorState {
+            workspace_id: "workspace".into(),
+            key: "Ctrl+A".into(),
+            ctrl: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            hotkey_from_editor(&editor).validate(),
+            MmHotkeyValidation::KeyContainsPlus
+        );
+        assert!(!hotkey_set_enabled(&editor));
+    }
+
+    #[test]
+    fn valid_hotkey_editor_state_enables_set() {
+        let editor = HotkeyEditorState {
+            workspace_id: "workspace".into(),
+            key: "F9".into(),
+            ctrl: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            hotkey_from_editor(&editor).validate(),
+            MmHotkeyValidation::Valid
+        );
+        assert!(hotkey_set_enabled(&editor));
+    }
+
+    #[test]
+    fn begin_hotkey_edit_loads_existing_hotkey() {
+        let mut editor = HotkeyEditorState::default();
+        let hotkey = MmHotkey {
+            key: "F8".into(),
+            ctrl: true,
+            alt: true,
+            ..Default::default()
+        };
+
+        begin_hotkey_edit(&mut editor, "workspace", Some(&hotkey));
+
+        assert_eq!(editor.workspace_id, "workspace");
+        assert_eq!(editor.key, "F8");
+        assert!(editor.ctrl);
+        assert!(editor.alt);
+        assert!(!editor.shift);
+        assert!(!editor.win);
+    }
+
+    #[test]
+    fn begin_hotkey_edit_resets_editor_when_workspace_has_no_hotkey() {
+        let mut editor = HotkeyEditorState {
+            workspace_id: "old".into(),
+            key: "F8".into(),
+            ctrl: true,
+            shift: true,
+            alt: true,
+            win: true,
+        };
+
+        begin_hotkey_edit(&mut editor, "workspace", None);
+
+        assert_eq!(editor.workspace_id, "workspace");
+        assert!(editor.key.is_empty());
+        assert!(!editor.ctrl);
+        assert!(!editor.shift);
+        assert!(!editor.alt);
+        assert!(!editor.win);
+        assert!(hotkey_editor_is_empty(&editor));
+    }
+
+    #[test]
+    fn cancel_hotkey_edit_leaves_stored_workspace_hotkey_unchanged() {
+        let stored = MmHotkey {
+            key: "F7".into(),
+            ctrl: true,
+            ..Default::default()
+        };
+        let mut workspace = MmWorkspace {
+            id: "workspace".into(),
+            hotkey: Some(stored.clone()),
+            ..Default::default()
+        };
+        let mut editor = HotkeyEditorState {
+            workspace_id: "workspace".into(),
+            key: "NoSuchKey".into(),
+            alt: true,
+            ..Default::default()
+        };
+
+        cancel_hotkey_edit(&mut editor);
+
+        assert_eq!(workspace.hotkey, Some(stored));
+        assert!(editor.workspace_id.is_empty());
+        assert!(editor.key.is_empty());
+        // Keep the mutable binding meaningful for this helper-level transition test.
+        workspace.name = "unchanged hotkey".into();
+        assert_eq!(
+            workspace.hotkey.as_ref().map(|hotkey| hotkey.key.as_str()),
+            Some("F7")
+        );
+    }
+
+    #[test]
+    fn reset_workspace_hotkey_clears_stored_hotkey() {
+        let mut workspace = MmWorkspace {
+            id: "workspace".into(),
+            hotkey: Some(MmHotkey {
+                key: "F7".into(),
+                ctrl: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        reset_workspace_hotkey(&mut workspace);
+
+        assert_eq!(workspace.hotkey, None);
     }
 
     #[test]
