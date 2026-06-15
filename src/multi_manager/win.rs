@@ -11,6 +11,16 @@ pub struct CapturedWindow {
     pub process_path: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumeratedWindow {
+    pub hwnd: usize,
+    pub title: String,
+    pub executable: String,
+    pub class_name: String,
+    pub process_path: String,
+    pub rect: MmRect,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureKeyAction {
     Confirm,
@@ -88,6 +98,14 @@ fn rect_from_win32(rect: windows::Win32::Foundation::RECT) -> MmRect {
         w: rect.right - rect.left,
         h: rect.bottom - rect.top,
     }
+}
+
+fn executable_from_process_path(process_path: &str) -> Option<String> {
+    process_path
+        .rsplit(['\\', '/'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 #[cfg(windows)]
@@ -232,13 +250,7 @@ pub fn window_process_path(_hwnd: usize) -> Option<String> {
 
 #[cfg(windows)]
 pub fn window_executable(hwnd: usize) -> Option<String> {
-    use std::path::Path;
-
-    window_process_path(hwnd).and_then(|process_path| {
-        Path::new(&process_path)
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-    })
+    window_process_path(hwnd).and_then(|process_path| executable_from_process_path(&process_path))
 }
 
 #[cfg(not(windows))]
@@ -255,6 +267,77 @@ pub fn is_valid_window(hwnd: usize) -> bool {
 #[cfg(not(windows))]
 pub fn is_valid_window(_hwnd: usize) -> bool {
     false
+}
+
+#[cfg(windows)]
+pub fn enumerate_top_level_windows() -> anyhow::Result<Vec<EnumeratedWindow>> {
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindow, GetWindowLongPtrW, IsWindow, IsWindowVisible, GWL_EXSTYLE,
+        GW_OWNER, WS_EX_TOOLWINDOW,
+    };
+
+    struct Ctx {
+        windows: Vec<EnumeratedWindow>,
+    }
+
+    fn hwnd_to_usize(hwnd: HWND) -> usize {
+        hwnd.0 as usize
+    }
+
+    unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let ctx = unsafe { &mut *(lparam.0 as *mut Ctx) };
+        if hwnd.0.is_null() || !unsafe { IsWindow(hwnd) }.as_bool() {
+            return BOOL(1);
+        }
+        if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            return BOOL(1);
+        }
+        if !unsafe { GetWindow(hwnd, GW_OWNER) }
+            .unwrap_or_default()
+            .0
+            .is_null()
+        {
+            return BOOL(1);
+        }
+        let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+        if ex_style & WS_EX_TOOLWINDOW.0 != 0 {
+            return BOOL(1);
+        }
+
+        let hwnd_value = hwnd_to_usize(hwnd);
+        let Some(title) = window_title(hwnd_value).filter(|title| !title.trim().is_empty()) else {
+            return BOOL(1);
+        };
+        let Some(rect) = window_rect(hwnd_value) else {
+            return BOOL(1);
+        };
+
+        ctx.windows.push(EnumeratedWindow {
+            hwnd: hwnd_value,
+            title,
+            executable: window_executable(hwnd_value).unwrap_or_default(),
+            class_name: window_class_name(hwnd_value).unwrap_or_default(),
+            process_path: window_process_path(hwnd_value).unwrap_or_default(),
+            rect,
+        });
+        BOOL(1)
+    }
+
+    let mut ctx = Ctx {
+        windows: Vec::new(),
+    };
+    unsafe {
+        let ctx_ptr = &mut ctx as *mut Ctx;
+        EnumWindows(Some(enum_cb), LPARAM(ctx_ptr as isize))
+            .map_err(|err| anyhow!("failed to enumerate top-level windows: {err}"))?;
+    }
+    Ok(ctx.windows)
+}
+
+#[cfg(not(windows))]
+pub fn enumerate_top_level_windows() -> anyhow::Result<Vec<EnumeratedWindow>> {
+    Ok(Vec::new())
 }
 
 #[cfg(windows)]
@@ -349,6 +432,21 @@ mod tests {
         assert!(!hotkey_pressed_with("Ctrl+", down));
     }
 
+    #[test]
+    fn executable_from_process_path_handles_common_path_styles() {
+        assert_eq!(
+            executable_from_process_path(r"C:\Program Files\App\app.exe"),
+            Some("app.exe".to_string())
+        );
+        assert_eq!(
+            executable_from_process_path("/usr/bin/app"),
+            Some("app".to_string())
+        );
+        assert_eq!(executable_from_process_path("app"), Some("app".to_string()));
+        assert_eq!(executable_from_process_path(""), None);
+        assert_eq!(executable_from_process_path(r"C:\Program Files\App\"), None);
+    }
+
     #[cfg(windows)]
     #[test]
     #[ignore = "Windows smoke test checklist: use a real, non-elevated application window HWND and verify minimized windows restore, the window is brought foreground, it is not left topmost, and elevated/inaccessible windows surface an error."]
@@ -383,6 +481,9 @@ mod tests {
     #[test]
     fn non_windows_capture_and_query_stubs_are_safe() {
         assert!(active_window().is_none());
+        assert!(enumerate_top_level_windows()
+            .expect("non-Windows enumeration stub must succeed")
+            .is_empty());
         assert!(window_rect(1).is_none());
         assert!(window_title(1).is_none());
         assert!(!is_valid_window(1));
