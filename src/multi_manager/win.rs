@@ -6,6 +6,9 @@ pub struct CapturedWindow {
     pub hwnd: usize,
     pub title: String,
     pub rect: MmRect,
+    pub executable: String,
+    pub class_name: String,
+    pub process_path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +114,9 @@ pub fn active_window() -> Option<CapturedWindow> {
         hwnd: hwnd_value,
         title: window_title(hwnd_value)?,
         rect: window_rect(hwnd_value)?,
+        executable: window_executable(hwnd_value).unwrap_or_default(),
+        class_name: window_class_name(hwnd_value).unwrap_or_default(),
+        process_path: window_process_path(hwnd_value).unwrap_or_default(),
     })
 }
 
@@ -154,6 +160,89 @@ pub fn window_title(hwnd: usize) -> Option<String> {
 
 #[cfg(not(windows))]
 pub fn window_title(_hwnd: usize) -> Option<String> {
+    None
+}
+
+#[cfg(windows)]
+pub fn window_class_name(hwnd: usize) -> Option<String> {
+    use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+
+    let mut buffer = vec![0u16; 256];
+    let copied = unsafe { GetClassNameW(hwnd_from_usize(hwnd), &mut buffer) };
+    if copied <= 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buffer[..copied as usize]))
+}
+
+#[cfg(not(windows))]
+pub fn window_class_name(_hwnd: usize) -> Option<String> {
+    None
+}
+
+#[cfg(windows)]
+pub fn window_process_path(hwnd: usize) -> Option<String> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
+    let mut pid = 0u32;
+    unsafe {
+        let _ = GetWindowThreadProcessId(hwnd_from_usize(hwnd), Some(&mut pid));
+    }
+    if pid == 0 {
+        return None;
+    }
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut buffer = vec![0u16; 1024];
+    let mut size = buffer.len() as u32;
+    let result = unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        )
+    };
+    let _ = unsafe { CloseHandle(handle) };
+
+    if result.is_err() || size == 0 {
+        return None;
+    }
+
+    Some(
+        OsString::from_wide(&buffer[..size as usize])
+            .to_string_lossy()
+            .to_string(),
+    )
+}
+
+#[cfg(not(windows))]
+pub fn window_process_path(_hwnd: usize) -> Option<String> {
+    None
+}
+
+#[cfg(windows)]
+pub fn window_executable(hwnd: usize) -> Option<String> {
+    use std::path::Path;
+
+    window_process_path(hwnd).and_then(|process_path| {
+        Path::new(&process_path)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+    })
+}
+
+#[cfg(not(windows))]
+pub fn window_executable(_hwnd: usize) -> Option<String> {
     None
 }
 

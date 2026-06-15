@@ -602,6 +602,9 @@ mod tests {
                 w: 100,
                 h: 100,
             },
+            executable: format!("{title}.exe"),
+            class_name: format!("{title}Class"),
+            process_path: format!("C:/Apps/{title}.exe"),
         }
     }
 

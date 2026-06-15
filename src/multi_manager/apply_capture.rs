@@ -29,6 +29,9 @@ pub fn apply_capture_to_workspaces(
                 hwnd: captured.hwnd,
                 home_rect: Some(captured.rect),
                 target_rect: Some(captured.rect),
+                executable: captured.executable,
+                class_name: captured.class_name,
+                process_path: captured.process_path,
                 valid: true,
                 ..Default::default()
             });
@@ -50,6 +53,9 @@ pub fn apply_capture_to_workspaces(
 
             window.hwnd = captured.hwnd;
             window.title = captured.title.clone();
+            window.executable = captured.executable;
+            window.class_name = captured.class_name;
+            window.process_path = captured.process_path;
             window.valid = true;
             if window.alias.trim().is_empty() {
                 window.alias = captured.title;
@@ -76,10 +82,31 @@ mod tests {
     }
 
     fn captured(hwnd: usize, title: &str, rect: MmRect) -> CapturedWindow {
+        captured_with_metadata(
+            hwnd,
+            title,
+            rect,
+            &format!("{title}.exe"),
+            &format!("{title}Class"),
+            &format!("C:/Apps/{title}.exe"),
+        )
+    }
+
+    fn captured_with_metadata(
+        hwnd: usize,
+        title: &str,
+        rect: MmRect,
+        executable: &str,
+        class_name: &str,
+        process_path: &str,
+    ) -> CapturedWindow {
         CapturedWindow {
             hwnd,
             title: title.to_string(),
             rect,
+            executable: executable.to_string(),
+            class_name: class_name.to_string(),
+            process_path: process_path.to_string(),
         }
     }
 
@@ -103,6 +130,9 @@ mod tests {
         assert_eq!(window.hwnd, 7);
         assert_eq!(window.home_rect, Some(capture_rect));
         assert_eq!(window.target_rect, Some(capture_rect));
+        assert_eq!(window.executable, "Editor.exe");
+        assert_eq!(window.class_name, "EditorClass");
+        assert_eq!(window.process_path, "C:/Apps/Editor.exe");
         assert!(window.valid);
     }
 
@@ -161,6 +191,9 @@ mod tests {
         assert_eq!(result, ApplyCaptureResult::Applied);
         assert_eq!(workspaces[0].windows[0].hwnd, 99);
         assert_eq!(workspaces[0].windows[0].title, "New");
+        assert_eq!(workspaces[0].windows[0].executable, "New.exe");
+        assert_eq!(workspaces[0].windows[0].class_name, "NewClass");
+        assert_eq!(workspaces[0].windows[0].process_path, "C:/Apps/New.exe");
         assert!(workspaces[0].windows[0].valid);
     }
 
@@ -190,6 +223,55 @@ mod tests {
         assert_eq!(result, ApplyCaptureResult::Applied);
         assert_eq!(workspaces[0].windows[0].home_rect, Some(home));
         assert_eq!(workspaces[0].windows[0].target_rect, Some(target));
+    }
+
+    #[test]
+    fn recapturing_preserves_rectangles_but_updates_identity_metadata() {
+        let home = rect(10, 20, 300, 400);
+        let target = rect(50, 60, 700, 800);
+        let mut workspaces = vec![MmWorkspace {
+            id: "w".into(),
+            windows: vec![MmWindow {
+                alias: "Stable Alias".into(),
+                title: "Old Title".into(),
+                hwnd: 11,
+                executable: "old.exe".into(),
+                class_name: "OldClass".into(),
+                process_path: "C:/Old/old.exe".into(),
+                home_rect: Some(home),
+                target_rect: Some(target),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+
+        let result = apply_capture_to_workspaces(
+            &mut workspaces,
+            &PendingCaptureAction::RecaptureWindow {
+                workspace_id: "w".into(),
+                window_index: 0,
+            },
+            captured_with_metadata(
+                22,
+                "New Title",
+                rect(1, 2, 3, 4),
+                "new.exe",
+                "NewClass",
+                "C:/New/new.exe",
+            ),
+        );
+
+        let window = &workspaces[0].windows[0];
+        assert_eq!(result, ApplyCaptureResult::Applied);
+        assert_eq!(window.alias, "Stable Alias");
+        assert_eq!(window.hwnd, 22);
+        assert_eq!(window.title, "New Title");
+        assert_eq!(window.executable, "new.exe");
+        assert_eq!(window.class_name, "NewClass");
+        assert_eq!(window.process_path, "C:/New/new.exe");
+        assert_eq!(window.home_rect, Some(home));
+        assert_eq!(window.target_rect, Some(target));
+        assert!(window.valid);
     }
 
     #[test]
