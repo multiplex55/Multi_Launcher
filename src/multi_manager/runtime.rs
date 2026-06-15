@@ -430,6 +430,37 @@ mod tests {
     }
 
     #[test]
+    fn send_home_uses_window_rect_before_workspace_fallback() {
+        let mut ws = workspace();
+        ws.home_rect = Some(rect(99));
+        ws.windows[1].home_rect = None;
+        let ops = FakeWindowOps::default();
+        send_workspace_home_with(&ws, &ops);
+        assert_eq!(*ops.moves.borrow(), vec![(1, rect(1)), (2, rect(99))]);
+    }
+
+    #[test]
+    fn send_target_uses_window_rect_before_workspace_fallback() {
+        let mut ws = workspace();
+        ws.target_rect = Some(rect(88));
+        ws.windows[0].target_rect = None;
+        let ops = FakeWindowOps::default();
+        send_workspace_target_with(&ws, &ops);
+        assert_eq!(*ops.moves.borrow(), vec![(1, rect(88)), (2, rect(12))]);
+    }
+
+    #[test]
+    fn movement_skips_disabled_invalid_and_zero_handle_windows() {
+        let mut ws = workspace();
+        ws.windows[0].disabled = true;
+        ws.windows[1].hwnd = 0;
+        ws.windows.push(window(3, false, rect(3), rect(13)));
+        let ops = FakeWindowOps::default();
+        send_workspace_target_with(&ws, &ops);
+        assert!(ops.moves.borrow().is_empty());
+    }
+
+    #[test]
     fn runtime_skips_when_capture_pending_is_true() {
         let mut workspaces = vec![workspace()];
         let control = RuntimeControl::new(true);
