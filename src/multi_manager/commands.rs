@@ -1,10 +1,16 @@
 use crate::actions::Action;
 
-const COMMANDS: [(&str, &str, &str); 8] = [
+const COMMANDS: [(&str, &str, &str); 10] = [
     ("mm", "Open MultiManager", "mm:open"),
     ("mm settings", "Open MultiManager settings", "mm:settings"),
     ("mm save", "Save MultiManager workspaces", "mm:save"),
     ("mm reload", "Reload MultiManager workspaces", "mm:reload"),
+    (
+        "mm send all home",
+        "Send all MultiManager windows home",
+        "mm:send-all-home",
+    ),
+    ("mm reconnect", "Reconnect MultiManager windows", "mm:reconnect"),
     (
         "mm save bindings",
         "Save MultiManager window bindings",
@@ -50,9 +56,9 @@ mod tests {
     use super::search_mm_commands;
 
     #[test]
-    fn mm_returns_open() {
+    fn exact_mm_returns_open_first() {
         let actions = search_mm_commands("mm");
-        assert!(actions.iter().any(|a| a.action == "mm:open"));
+        assert_eq!(actions.first().map(|a| a.action.as_str()), Some("mm:open"));
     }
 
     #[test]
@@ -77,6 +83,18 @@ mod tests {
     fn mm_recapture_all_returns_recapture_all() {
         let actions = search_mm_commands("mm recapture all");
         assert!(actions.iter().any(|a| a.action == "mm:recapture-all"));
+    }
+
+    #[test]
+    fn mm_send_all_home_returns_send_all_home() {
+        let actions = search_mm_commands("mm send all home");
+        assert!(actions.iter().any(|a| a.action == "mm:send-all-home"));
+    }
+
+    #[test]
+    fn mm_reconnect_returns_reconnect() {
+        let actions = search_mm_commands("mm reconnect");
+        assert!(actions.iter().any(|a| a.action == "mm:reconnect"));
     }
 
     #[test]

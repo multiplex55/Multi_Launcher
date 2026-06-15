@@ -43,6 +43,29 @@ impl LauncherApp {
         );
     }
 
+    pub fn multi_manager_send_all_home(&mut self) {
+        let workspaces = self
+            .multi_manager
+            .workspaces
+            .lock()
+            .ok()
+            .map(|workspaces| workspaces.clone());
+        let Some(workspaces) = workspaces else {
+            self.report_error_message(
+                "multi_manager.send_all_home",
+                "Failed to lock MultiManager workspaces to send all windows home",
+            );
+            return;
+        };
+
+        crate::multi_manager::runtime::send_all_home(&workspaces);
+        self.add_success_toast("Sent all MultiManager windows home");
+    }
+
+    pub fn multi_manager_reconnect_windows(&mut self) {
+        self.multi_manager_restore_bindings();
+    }
+
     pub fn multi_manager_start_recapture_all(&mut self) {
         let queue = self
             .multi_manager
