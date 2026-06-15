@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 impl LauncherApp {
     pub fn open_multi_manager(&mut self) {
         self.multi_manager_dialog.open = true;
+        self.focus_query = false;
     }
 
     pub fn open_multi_manager_settings(&mut self) {
