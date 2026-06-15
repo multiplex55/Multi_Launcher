@@ -611,16 +611,48 @@ fn capture_rect(app: &mut LauncherApp, id: &str, index: usize, home: bool) {
         return;
     };
 
-    let updated = app.multi_manager.with_workspace_mut(id, |workspace| {
-        set_window_rect(workspace, index, home, rect)
-    });
+    let updated = match app.multi_manager.workspaces.lock() {
+        Ok(mut workspaces) => set_window_rect_in_workspaces(&mut workspaces, id, index, home, rect),
+        Err(_) => RectCaptureMutationResult::LockFailed,
+    };
     match updated {
-        Some(Ok(())) => {}
-        Some(Err(err)) => app.report_error_message("multi_manager.capture_rect", err),
-        None => app.report_error_message(
+        RectCaptureMutationResult::Applied => app.multi_manager.mark_dirty(),
+        RectCaptureMutationResult::MissingWorkspace => app.report_error_message(
             "multi_manager.capture_rect",
             format!("Missing workspace for capture: {id}"),
         ),
+        RectCaptureMutationResult::MissingWindow(err) => {
+            app.report_error_message("multi_manager.capture_rect", err)
+        }
+        RectCaptureMutationResult::LockFailed => app.report_error_message(
+            "multi_manager.capture_rect",
+            "Failed to lock MultiManager workspaces for capture",
+        ),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RectCaptureMutationResult {
+    Applied,
+    MissingWorkspace,
+    MissingWindow(String),
+    LockFailed,
+}
+
+fn set_window_rect_in_workspaces(
+    workspaces: &mut [MmWorkspace],
+    id: &str,
+    index: usize,
+    home: bool,
+    rect: MmRect,
+) -> RectCaptureMutationResult {
+    let Some(workspace) = workspaces.iter_mut().find(|workspace| workspace.id == id) else {
+        return RectCaptureMutationResult::MissingWorkspace;
+    };
+
+    match set_window_rect(workspace, index, home, rect) {
+        Ok(()) => RectCaptureMutationResult::Applied,
+        Err(err) => RectCaptureMutationResult::MissingWindow(err),
     }
 }
 
@@ -767,6 +799,46 @@ mod tests {
 
         assert!(err.contains("Missing window row for capture"));
         assert!(workspace.windows.is_empty());
+    }
+
+    #[test]
+    fn set_window_rect_in_workspaces_missing_workspace_returns_controlled_result() {
+        let mut workspaces = vec![workspace_with_window(None, None)];
+        let rect = MmRect {
+            x: 1,
+            y: 2,
+            w: 30,
+            h: 40,
+        };
+
+        let result = set_window_rect_in_workspaces(&mut workspaces, "missing", 0, true, rect);
+
+        assert_eq!(result, RectCaptureMutationResult::MissingWorkspace);
+        assert_eq!(workspaces[0].windows[0].home_rect, None);
+        assert_eq!(workspaces[0].windows[0].target_rect, None);
+    }
+
+    #[test]
+    fn set_window_rect_in_workspaces_missing_window_returns_controlled_result() {
+        let mut workspaces = vec![MmWorkspace {
+            id: "workspace".into(),
+            ..Default::default()
+        }];
+        let rect = MmRect {
+            x: 1,
+            y: 2,
+            w: 30,
+            h: 40,
+        };
+
+        let result = set_window_rect_in_workspaces(&mut workspaces, "workspace", 0, false, rect);
+
+        assert!(matches!(
+            result,
+            RectCaptureMutationResult::MissingWindow(ref err)
+                if err.contains("Missing window row for capture")
+        ));
+        assert!(workspaces[0].windows.is_empty());
     }
 
     fn workspace_with_window(
