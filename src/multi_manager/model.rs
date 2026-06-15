@@ -66,11 +66,66 @@ pub struct MmHotkey {
 }
 
 impl MmHotkey {
-    pub fn is_valid(&self) -> bool {
+    pub fn sequence(&self) -> Option<String> {
         let key = self.key.trim();
-        !key.is_empty()
-            && !key.contains('+')
-            && crate::window_manager::virtual_key_from_string(key).is_some()
+        if key.is_empty() {
+            return None;
+        }
+
+        let mut parts = Vec::new();
+        if self.ctrl {
+            parts.push("Ctrl");
+        }
+        if self.shift {
+            parts.push("Shift");
+        }
+        if self.alt {
+            parts.push("Alt");
+        }
+        if self.win {
+            parts.push("Win");
+        }
+        parts.push(key);
+
+        Some(parts.join("+"))
+    }
+
+    pub fn validate(&self) -> MmHotkeyValidation {
+        let key = self.key.trim();
+        if key.is_empty() {
+            return MmHotkeyValidation::MissingKey;
+        }
+        if key.contains('+') {
+            return MmHotkeyValidation::KeyContainsPlus;
+        }
+        if crate::window_manager::virtual_key_from_string(key).is_none() {
+            return MmHotkeyValidation::UnsupportedKey(key.to_string());
+        }
+
+        MmHotkeyValidation::Valid
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.validate() == MmHotkeyValidation::Valid
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MmHotkeyValidation {
+    Valid,
+    MissingKey,
+    KeyContainsPlus,
+    UnsupportedKey(String),
+}
+
+impl MmHotkeyValidation {
+    pub fn label(&self) -> &'static str {
+        match self {
+            MmHotkeyValidation::Valid => "valid",
+            MmHotkeyValidation::MissingKey => "missing key",
+            MmHotkeyValidation::KeyContainsPlus => "put modifiers in checkboxes",
+            MmHotkeyValidation::UnsupportedKey(_) => "unsupported key",
+        }
     }
 }
 
@@ -263,29 +318,71 @@ mod tests {
                 ..MmHotkey::default()
             },
         ] {
+            assert_eq!(hotkey.validate(), MmHotkeyValidation::Valid, "{hotkey:?}");
             assert!(hotkey.is_valid(), "{hotkey:?}");
         }
     }
 
     #[test]
-    fn hotkey_validation_rejects_malformed_combinations() {
-        for hotkey in [
-            MmHotkey::default(),
-            MmHotkey {
-                key: "NoSuchKey".into(),
-                ctrl: true,
-                ..MmHotkey::default()
-            },
-            MmHotkey {
-                key: "Ctrl+A".into(),
-                ..MmHotkey::default()
-            },
-            MmHotkey {
-                key: "+".into(),
-                ..MmHotkey::default()
-            },
-        ] {
-            assert!(!hotkey.is_valid(), "{hotkey:?}");
-        }
+    fn hotkey_validation_reports_empty_key_as_missing() {
+        let hotkey = MmHotkey::default();
+
+        assert_eq!(hotkey.validate(), MmHotkeyValidation::MissingKey);
+        assert_eq!(hotkey.validate().label(), "missing key");
+        assert!(!hotkey.is_valid());
+    }
+
+    #[test]
+    fn hotkey_validation_rejects_modifiers_entered_in_key_field() {
+        let hotkey = MmHotkey {
+            key: "Ctrl+A".into(),
+            ..MmHotkey::default()
+        };
+
+        assert_eq!(hotkey.validate(), MmHotkeyValidation::KeyContainsPlus);
+        assert_eq!(hotkey.validate().label(), "put modifiers in checkboxes");
+        assert!(!hotkey.is_valid());
+    }
+
+    #[test]
+    fn hotkey_validation_reports_unknown_key_as_unsupported() {
+        let hotkey = MmHotkey {
+            key: "NoSuchKey".into(),
+            ctrl: true,
+            ..MmHotkey::default()
+        };
+
+        assert_eq!(
+            hotkey.validate(),
+            MmHotkeyValidation::UnsupportedKey("NoSuchKey".into())
+        );
+        assert_eq!(hotkey.validate().label(), "unsupported key");
+        assert!(!hotkey.is_valid());
+    }
+
+    #[test]
+    fn hotkey_sequence_preserves_modifier_order() {
+        let hotkey = MmHotkey {
+            key: " Key ".into(),
+            ctrl: true,
+            shift: true,
+            alt: true,
+            win: true,
+        };
+
+        assert_eq!(hotkey.sequence().as_deref(), Some("Ctrl+Shift+Alt+Win+Key"));
+    }
+
+    #[test]
+    fn hotkey_sequence_returns_none_for_blank_key() {
+        let hotkey = MmHotkey {
+            key: "   ".into(),
+            ctrl: true,
+            shift: true,
+            alt: true,
+            win: true,
+        };
+
+        assert_eq!(hotkey.sequence(), None);
     }
 }
