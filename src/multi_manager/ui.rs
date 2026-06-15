@@ -1,8 +1,8 @@
 use crate::gui::LauncherApp;
 use crate::multi_manager::bindings;
 use crate::multi_manager::model::{
-    MmHotkey, MmHotkeyValidation, MmRect, MmWindow, MmWorkspace, PendingCaptureAction,
-    new_workspace_id,
+    new_workspace_id, MmHotkey, MmHotkeyValidation, MmRect, MmWindow, MmWorkspace,
+    PendingCaptureAction,
 };
 use crate::multi_manager::win;
 use eframe::egui;
@@ -11,7 +11,8 @@ use std::sync::atomic::Ordering;
 #[derive(Debug, Default)]
 pub struct MultiManagerDialog {
     pub open: bool,
-    expanded_all: bool,
+    all_expanded: bool,
+    expand_all_signal: Option<bool>,
     rename: WorkspaceRenameState,
     hotkey_editor: HotkeyEditorState,
     hotkey_editor_needs_focus: bool,
@@ -85,14 +86,10 @@ impl MultiManagerDialog {
                             app.multi_manager_start_recapture_all();
                         }
                         if ui
-                            .button(if self.expanded_all {
-                                "Collapse All"
-                            } else {
-                                "Expand All"
-                            })
+                            .button(expand_all_button_label(self.all_expanded))
                             .clicked()
                         {
-                            self.expanded_all = !self.expanded_all;
+                            toggle_expand_all(&mut self.all_expanded, &mut self.expand_all_signal);
                         }
                         ui.label(if app.multi_manager.dirty {
                             "● dirty"
@@ -133,6 +130,7 @@ impl MultiManagerDialog {
                     for id in ids {
                         self.workspace_card(ui, app, &id);
                     }
+                    self.expand_all_signal = None;
                 });
             });
         self.open = open;
@@ -171,15 +169,13 @@ impl MultiManagerDialog {
         });
         let label = workspace_header_label(&workspace);
         let color = workspace_header_color(&workspace);
-        let collapsing_id = ui.make_persistent_id(("multi_manager_workspace_header", id));
         let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
             ui.ctx(),
-            collapsing_id,
-            self.expanded_all,
+            egui::Id::new(("multi_manager_workspace_header", id)),
+            self.all_expanded,
         );
-        if self.expanded_all {
-            state.set_open(true);
-            state.store(ui.ctx());
+        if let Some(expand) = self.expand_all_signal {
+            state.set_open(expand);
         }
         state
             .show_header(ui, |ui| {
@@ -457,6 +453,19 @@ fn capture_banner_text(action: &PendingCaptureAction) -> &'static str {
             "Recapture mode: focus the replacement window, press Enter. S skips. Escape cancels queue."
         }
     }
+}
+
+fn expand_all_button_label(all_expanded: bool) -> &'static str {
+    if all_expanded {
+        "Collapse All"
+    } else {
+        "Expand All"
+    }
+}
+
+fn toggle_expand_all(all_expanded: &mut bool, expand_all_signal: &mut Option<bool>) {
+    *all_expanded = !*all_expanded;
+    *expand_all_signal = Some(*all_expanded);
 }
 
 fn workspace_display_label(app: &LauncherApp, id: &str) -> String {
@@ -798,7 +807,11 @@ mod tests {
 
     #[test]
     fn default_dialog_state_is_closed() {
-        assert!(!MultiManagerDialog::default().open);
+        let dialog = MultiManagerDialog::default();
+
+        assert!(!dialog.open);
+        assert!(!dialog.all_expanded);
+        assert_eq!(dialog.expand_all_signal, None);
         assert!(!MultiManagerSettingsDialog::default().open);
     }
 
@@ -837,6 +850,34 @@ mod tests {
             capture_banner_text(&action),
             "Recapture mode: focus the replacement window, press Enter. S skips. Escape cancels queue."
         );
+    }
+
+    #[test]
+    fn expand_all_button_label_reflects_current_global_state() {
+        assert_eq!(expand_all_button_label(false), "Expand All");
+        assert_eq!(expand_all_button_label(true), "Collapse All");
+    }
+
+    #[test]
+    fn toggle_expand_all_sets_one_shot_expand_signal() {
+        let mut all_expanded = false;
+        let mut signal = None;
+
+        toggle_expand_all(&mut all_expanded, &mut signal);
+
+        assert!(all_expanded);
+        assert_eq!(signal, Some(true));
+    }
+
+    #[test]
+    fn toggle_expand_all_sets_one_shot_collapse_signal() {
+        let mut all_expanded = true;
+        let mut signal = None;
+
+        toggle_expand_all(&mut all_expanded, &mut signal);
+
+        assert!(!all_expanded);
+        assert_eq!(signal, Some(false));
     }
 
     #[test]
