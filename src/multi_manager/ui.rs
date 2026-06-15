@@ -163,25 +163,27 @@ impl MultiManagerDialog {
     }
 
     fn workspace_card(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, id: &str) {
-        let name = app
-            .multi_manager
-            .workspaces
-            .lock()
-            .ok()
-            .and_then(|w| {
-                w.iter().find(|x| x.id == id).map(|x| {
-                    if x.name.is_empty() {
-                        x.id.clone()
-                    } else {
-                        x.name.clone()
-                    }
-                })
+        let workspace = get_ws(app, id).unwrap_or_else(|| MmWorkspace {
+            id: id.into(),
+            ..Default::default()
+        });
+        let label = workspace_header_label(&workspace);
+        let color = workspace_header_color(&workspace);
+        let collapsing_id = ui.make_persistent_id(("multi_manager_workspace_header", id));
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(),
+            collapsing_id,
+            self.expanded_all,
+        );
+        if self.expanded_all {
+            state.set_open(true);
+            state.store(ui.ctx());
+        }
+        state
+            .show_header(ui, |ui| {
+                ui.label(egui::RichText::new(label).color(color));
             })
-            .unwrap_or_else(|| id.into());
-        egui::CollapsingHeader::new(name)
-            .id_source(("multi_manager_workspace_header", id))
-            .default_open(self.expanded_all)
-            .show(ui, |ui| {
+            .body(|ui| {
                 ui.push_id(("multi_manager_workspace", id), |ui| {
                     ui.horizontal(|ui| {
                         if self.rename.workspace_id == id {
@@ -438,6 +440,40 @@ fn workspace_display_label(app: &LauncherApp, id: &str) -> String {
             }
         })
         .unwrap_or_else(|| id.into())
+}
+
+fn workspace_header_label(workspace: &MmWorkspace) -> String {
+    let mut label = if workspace.name.trim().is_empty() {
+        workspace.id.clone()
+    } else {
+        workspace.name.clone()
+    };
+
+    if let Some(sequence) = workspace
+        .hotkey
+        .as_ref()
+        .and_then(|hotkey| hotkey.sequence())
+    {
+        label.push_str(" - ");
+        label.push_str(&sequence);
+    }
+
+    label
+}
+
+fn workspace_header_color(workspace: &MmWorkspace) -> egui::Color32 {
+    if workspace.disabled {
+        egui::Color32::YELLOW
+    } else if workspace.valid
+        && workspace
+            .hotkey
+            .as_ref()
+            .is_some_and(|hotkey| hotkey.is_valid())
+    {
+        egui::Color32::GREEN
+    } else {
+        egui::Color32::RED
+    }
 }
 
 impl MultiManagerSettingsDialog {
@@ -726,6 +762,48 @@ mod tests {
             capture_banner_text(&action),
             "Recapture mode: focus the replacement window, press Enter. S skips. Escape cancels queue."
         );
+    }
+
+    #[test]
+    fn workspace_header_label_includes_name_and_hotkey_sequence() {
+        let workspace = MmWorkspace {
+            id: "workspace-id".into(),
+            name: "Workspace Name".into(),
+            hotkey: Some(MmHotkey {
+                key: "F9".into(),
+                ctrl: true,
+                alt: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            workspace_header_label(&workspace),
+            "Workspace Name - Ctrl+Alt+F9"
+        );
+    }
+
+    #[test]
+    fn workspace_header_label_without_hotkey_uses_name_only() {
+        let workspace = MmWorkspace {
+            id: "workspace-id".into(),
+            name: "Workspace Name".into(),
+            ..Default::default()
+        };
+
+        assert_eq!(workspace_header_label(&workspace), "Workspace Name");
+    }
+
+    #[test]
+    fn workspace_header_label_blank_name_falls_back_to_workspace_id() {
+        let workspace = MmWorkspace {
+            id: "workspace-id".into(),
+            name: "   ".into(),
+            ..Default::default()
+        };
+
+        assert_eq!(workspace_header_label(&workspace), "workspace-id");
     }
 
     #[test]
