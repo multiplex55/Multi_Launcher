@@ -137,15 +137,24 @@ impl MultiManagerDialog {
     fn capture_banner(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
         if let Some(action) = &app.multi_manager.pending_capture {
             ui.colored_label(egui::Color32::LIGHT_BLUE, "Capture mode active: press Enter to capture active window, S to skip current item, or Escape to cancel remaining queue.");
-            if let PendingCaptureAction::RecaptureWindow {
-                workspace_id,
-                window_id,
-            } = action
-            {
-                ui.label(format!(
-                    "Recapturing workspace {workspace_id}, window {}",
-                    window_id.parse::<usize>().map(|i| i + 1).unwrap_or(1)
-                ));
+            match action {
+                PendingCaptureAction::CaptureOneWindow { workspace_id } => {
+                    ui.label(format!("Capturing one window for workspace {workspace_id}"));
+                }
+                PendingCaptureAction::CaptureMultipleWindows { workspace_id } => {
+                    ui.label(format!(
+                        "Capturing multiple windows for workspace {workspace_id}; press Escape when done"
+                    ));
+                }
+                PendingCaptureAction::RecaptureWindow {
+                    workspace_id,
+                    window_index,
+                } => {
+                    ui.label(format!(
+                        "Recapturing workspace {workspace_id}, window {}",
+                        window_index + 1
+                    ));
+                }
             }
         }
     }
@@ -230,10 +239,10 @@ impl MultiManagerDialog {
                     }
                     ui.horizontal_wrapped(|ui| {
                         if ui.button("Capture Active Window").clicked() {
-                            app.multi_manager_start_capture(id);
+                            app.multi_manager_start_capture_one(id, ui.ctx());
                         }
                         if ui.button("Capture Multiple Windows").clicked() {
-                            app.multi_manager_start_capture(id);
+                            app.multi_manager_start_capture_multiple(id, ui.ctx());
                         }
                         if ui.button("Send Home").clicked() {
                             app.multi_manager_send_home(id);
@@ -357,16 +366,7 @@ impl MultiManagerDialog {
                         move_window(&win, false);
                     }
                     if ui.button("Recapture").clicked() {
-                        app.multi_manager.pending_capture =
-                            Some(PendingCaptureAction::CaptureWindow {
-                                workspace_id: id.into(),
-                                window_id: index.to_string(),
-                            });
-                        app.multi_manager
-                            .runtime
-                            .control
-                            .capture_pending
-                            .store(true, Ordering::Relaxed);
+                        app.multi_manager_start_recapture_window(id, index, ui.ctx());
                     }
                     if ui.button("Swap Home/Target").clicked() {
                         app.multi_manager.with_workspace_mut(id, |w| {

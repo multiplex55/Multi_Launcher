@@ -162,16 +162,15 @@ impl Default for MmWorkspace {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum PendingCaptureAction {
-    CaptureWorkspace {
+    CaptureOneWindow {
         workspace_id: String,
     },
-    CaptureWindow {
+    CaptureMultipleWindows {
         workspace_id: String,
-        window_id: String,
     },
     RecaptureWindow {
         workspace_id: String,
-        window_id: String,
+        window_index: usize,
     },
 }
 
