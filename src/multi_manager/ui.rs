@@ -167,77 +167,86 @@ impl MultiManagerDialog {
             })
             .unwrap_or_else(|| id.into());
         egui::CollapsingHeader::new(name)
+            .id_source(("multi_manager_workspace_header", id))
             .default_open(self.expanded_all)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if self.rename.workspace_id == id {
-                        if ui.text_edit_singleline(&mut self.rename.value).changed() {}
-                        if ui.button("Apply").clicked() {
-                            let val = self.rename.value.clone();
-                            app.multi_manager.with_workspace_mut(id, |w| w.name = val);
-                            self.rename = Default::default();
-                        }
-                    } else if ui.button("Rename").clicked() {
-                        self.rename.workspace_id = id.into();
-                        self.rename.value = app
-                            .multi_manager
-                            .workspaces
-                            .lock()
-                            .ok()
-                            .and_then(|w| w.iter().find(|x| x.id == id).map(|x| x.name.clone()))
-                            .unwrap_or_default();
-                    }
-                    let mut disabled = get_ws(app, id).map(|w| w.disabled).unwrap_or(false);
-                    if ui.checkbox(&mut disabled, "Disabled").changed() {
-                        app.multi_manager
-                            .with_workspace_mut(id, |w| w.disabled = disabled);
-                    }
-                    let mut rotate = get_ws(app, id).map(|w| w.rotate).unwrap_or(false);
-                    if ui.checkbox(&mut rotate, "Rotate").changed() {
-                        app.multi_manager
-                            .with_workspace_mut(id, |w| w.rotate = rotate);
-                    }
-                    if ui.button("↑").clicked() {
-                        reorder_workspace(app, id, -1);
-                    }
-                    if ui.button("↓").clicked() {
-                        reorder_workspace(app, id, 1);
-                    }
-                    if ui.button("Delete").clicked() {
-                        self.confirm.workspace_id = Some(id.into());
-                    }
-                });
-                self.hotkey_ui(ui, app, id);
-                if self.confirm.workspace_id.as_deref() == Some(id) {
+                ui.push_id(("multi_manager_workspace", id), |ui| {
                     ui.horizontal(|ui| {
-                        ui.colored_label(egui::Color32::RED, "Confirm delete workspace?");
-                        if ui.button("Delete").clicked() {
-                            delete_workspace(app, id);
-                            self.confirm.workspace_id = None;
+                        if self.rename.workspace_id == id {
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut self.rename.value)
+                                        .id_source(("mm_workspace_rename", id)),
+                                )
+                                .changed()
+                            {}
+                            if ui.button("Apply").clicked() {
+                                let val = self.rename.value.clone();
+                                app.multi_manager.with_workspace_mut(id, |w| w.name = val);
+                                self.rename = Default::default();
+                            }
+                        } else if ui.button("Rename").clicked() {
+                            self.rename.workspace_id = id.into();
+                            self.rename.value = app
+                                .multi_manager
+                                .workspaces
+                                .lock()
+                                .ok()
+                                .and_then(|w| w.iter().find(|x| x.id == id).map(|x| x.name.clone()))
+                                .unwrap_or_default();
                         }
-                        if ui.button("Cancel").clicked() {
-                            self.confirm.workspace_id = None;
+                        let mut disabled = get_ws(app, id).map(|w| w.disabled).unwrap_or(false);
+                        if ui.checkbox(&mut disabled, "Disabled").changed() {
+                            app.multi_manager
+                                .with_workspace_mut(id, |w| w.disabled = disabled);
+                        }
+                        let mut rotate = get_ws(app, id).map(|w| w.rotate).unwrap_or(false);
+                        if ui.checkbox(&mut rotate, "Rotate").changed() {
+                            app.multi_manager
+                                .with_workspace_mut(id, |w| w.rotate = rotate);
+                        }
+                        if ui.button("↑").clicked() {
+                            reorder_workspace(app, id, -1);
+                        }
+                        if ui.button("↓").clicked() {
+                            reorder_workspace(app, id, 1);
+                        }
+                        if ui.button("Delete").clicked() {
+                            self.confirm.workspace_id = Some(id.into());
                         }
                     });
-                }
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Capture Active Window").clicked() {
-                        app.multi_manager_start_capture(id);
+                    self.hotkey_ui(ui, app, id);
+                    if self.confirm.workspace_id.as_deref() == Some(id) {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(egui::Color32::RED, "Confirm delete workspace?");
+                            if ui.button("Delete").clicked() {
+                                delete_workspace(app, id);
+                                self.confirm.workspace_id = None;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.confirm.workspace_id = None;
+                            }
+                        });
                     }
-                    if ui.button("Capture Multiple Windows").clicked() {
-                        app.multi_manager_start_capture(id);
-                    }
-                    if ui.button("Send Home").clicked() {
-                        app.multi_manager_send_home(id);
-                    }
-                    if ui.button("Move Target").clicked() {
-                        app.multi_manager_send_target(id);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Capture Active Window").clicked() {
+                            app.multi_manager_start_capture(id);
+                        }
+                        if ui.button("Capture Multiple Windows").clicked() {
+                            app.multi_manager_start_capture(id);
+                        }
+                        if ui.button("Send Home").clicked() {
+                            app.multi_manager_send_home(id);
+                        }
+                        if ui.button("Move Target").clicked() {
+                            app.multi_manager_send_target(id);
+                        }
+                    });
+                    let count = get_ws(app, id).map(|w| w.windows.len()).unwrap_or(0);
+                    for i in 0..count {
+                        self.window_card(ui, app, id, i);
                     }
                 });
-                let count = get_ws(app, id).map(|w| w.windows.len()).unwrap_or(0);
-                for i in 0..count {
-                    self.window_card(ui, app, id, i);
-                }
             });
     }
 
@@ -260,7 +269,10 @@ impl MultiManagerDialog {
             ui.checkbox(&mut self.hotkey_editor.shift, "Shift");
             ui.checkbox(&mut self.hotkey_editor.alt, "Alt");
             ui.checkbox(&mut self.hotkey_editor.win, "Win");
-            ui.text_edit_singleline(&mut self.hotkey_editor.key);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.hotkey_editor.key)
+                    .id_source(("mm_workspace_hotkey_key", id)),
+            );
             let valid = !self.hotkey_editor.key.trim().is_empty();
             ui.label(if valid { "valid" } else { "invalid" });
             if ui.button("Set").clicked() && valid {
@@ -284,101 +296,117 @@ impl MultiManagerDialog {
     }
 
     fn window_card(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, id: &str, index: usize) {
-        ui.group(|ui| {
-            let win = get_ws(app, id)
-                .and_then(|w| w.windows.get(index).cloned())
-                .unwrap_or_default();
-            ui.label(format!("Window {}", index + 1));
-            let mut alias = win.alias.clone();
-            if ui.text_edit_singleline(&mut alias).changed() {
-                app.multi_manager.with_workspace_mut(id, |w| {
-                    if let Some(x) = w.windows.get_mut(index) {
-                        x.alias = alias
-                    }
-                });
-            }
-            ui.label(format!("Original title: {}", win.title));
-            ui.label(format!("HWND: {}", win.hwnd));
-            if is_duplicate_hwnd(app, win.hwnd, id, index) {
-                ui.colored_label(egui::Color32::YELLOW, "⚠ duplicate HWND");
-            }
-            ui.label(if win.valid { "valid" } else { "invalid" });
-            rect_ui(ui, "Home", win.home_rect, |r| {
-                app.multi_manager.with_workspace_mut(id, |w| {
-                    if let Some(x) = w.windows.get_mut(index) {
-                        x.home_rect = Some(r);
-                    }
-                })
-            });
-            rect_ui(ui, "Target", win.target_rect, |r| {
-                app.multi_manager.with_workspace_mut(id, |w| {
-                    if let Some(x) = w.windows.get_mut(index) {
-                        x.target_rect = Some(r);
-                    }
-                })
-            });
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("Capture Home").clicked() {
-                    capture_rect(app, id, index, true);
-                }
-                if ui.button("Capture Target").clicked() {
-                    capture_rect(app, id, index, false);
-                }
-                if ui.button("Move Home").clicked() {
-                    move_window(&win, true);
-                }
-                if ui.button("Move Target").clicked() {
-                    move_window(&win, false);
-                }
-                if ui.button("Recapture").clicked() {
-                    app.multi_manager.pending_capture = Some(PendingCaptureAction::CaptureWindow {
-                        workspace_id: id.into(),
-                        window_id: index.to_string(),
-                    });
-                    app.multi_manager
-                        .runtime
-                        .control
-                        .capture_pending
-                        .store(true, Ordering::Relaxed);
-                }
-                if ui.button("Swap Home/Target").clicked() {
+        ui.push_id(("multi_manager_window", id, index), |ui| {
+            ui.group(|ui| {
+                let win = get_ws(app, id)
+                    .and_then(|w| w.windows.get(index).cloned())
+                    .unwrap_or_default();
+                ui.label(format!("Window {}", index + 1));
+                let mut alias = win.alias.clone();
+                if ui
+                    .add(egui::TextEdit::singleline(&mut alias).id_source((
+                        "mm_window_alias",
+                        id,
+                        index,
+                    )))
+                    .changed()
+                {
                     app.multi_manager.with_workspace_mut(id, |w| {
                         if let Some(x) = w.windows.get_mut(index) {
-                            std::mem::swap(&mut x.home_rect, &mut x.target_rect);
+                            x.alias = alias
                         }
                     });
                 }
-                if ui.button("↑").clicked() {
-                    reorder_window(app, id, index, -1);
+                ui.label(format!("Original title: {}", win.title));
+                ui.label(format!("HWND: {}", win.hwnd));
+                if is_duplicate_hwnd(app, win.hwnd, id, index) {
+                    ui.colored_label(egui::Color32::YELLOW, "⚠ duplicate HWND");
                 }
-                if ui.button("↓").clicked() {
-                    reorder_window(app, id, index, 1);
-                }
-                if ui.button("Delete").clicked() {
-                    self.confirm.window = Some((id.into(), index));
-                }
-            });
-            if self
-                .confirm
-                .window
-                .as_ref()
-                .is_some_and(|(wid, i)| wid == id && *i == index)
-            {
-                ui.horizontal(|ui| {
-                    ui.colored_label(egui::Color32::RED, "Confirm delete window?");
-                    if ui.button("Delete").clicked() {
+                ui.label(if win.valid { "valid" } else { "invalid" });
+                rect_ui(ui, ("home_rect", id, index), "Home", win.home_rect, |r| {
+                    app.multi_manager.with_workspace_mut(id, |w| {
+                        if let Some(x) = w.windows.get_mut(index) {
+                            x.home_rect = Some(r);
+                        }
+                    })
+                });
+                rect_ui(
+                    ui,
+                    ("target_rect", id, index),
+                    "Target",
+                    win.target_rect,
+                    |r| {
                         app.multi_manager.with_workspace_mut(id, |w| {
-                            if index < w.windows.len() {
-                                w.windows.remove(index);
+                            if let Some(x) = w.windows.get_mut(index) {
+                                x.target_rect = Some(r);
+                            }
+                        })
+                    },
+                );
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Capture Home").clicked() {
+                        capture_rect(app, id, index, true);
+                    }
+                    if ui.button("Capture Target").clicked() {
+                        capture_rect(app, id, index, false);
+                    }
+                    if ui.button("Move Home").clicked() {
+                        move_window(&win, true);
+                    }
+                    if ui.button("Move Target").clicked() {
+                        move_window(&win, false);
+                    }
+                    if ui.button("Recapture").clicked() {
+                        app.multi_manager.pending_capture =
+                            Some(PendingCaptureAction::CaptureWindow {
+                                workspace_id: id.into(),
+                                window_id: index.to_string(),
+                            });
+                        app.multi_manager
+                            .runtime
+                            .control
+                            .capture_pending
+                            .store(true, Ordering::Relaxed);
+                    }
+                    if ui.button("Swap Home/Target").clicked() {
+                        app.multi_manager.with_workspace_mut(id, |w| {
+                            if let Some(x) = w.windows.get_mut(index) {
+                                std::mem::swap(&mut x.home_rect, &mut x.target_rect);
                             }
                         });
-                        self.confirm.window = None;
                     }
-                    if ui.button("Cancel").clicked() {
-                        self.confirm.window = None;
+                    if ui.button("↑").clicked() {
+                        reorder_window(app, id, index, -1);
+                    }
+                    if ui.button("↓").clicked() {
+                        reorder_window(app, id, index, 1);
+                    }
+                    if ui.button("Delete").clicked() {
+                        self.confirm.window = Some((id.into(), index));
                     }
                 });
-            }
+                if self
+                    .confirm
+                    .window
+                    .as_ref()
+                    .is_some_and(|(wid, i)| wid == id && *i == index)
+                {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(egui::Color32::RED, "Confirm delete window?");
+                        if ui.button("Delete").clicked() {
+                            app.multi_manager.with_workspace_mut(id, |w| {
+                                if index < w.windows.len() {
+                                    w.windows.remove(index);
+                                }
+                            });
+                            self.confirm.window = None;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.confirm.window = None;
+                        }
+                    });
+                }
+            });
         });
     }
 }
@@ -506,6 +534,7 @@ fn send_all(app: &mut LauncherApp, home: bool) {
 }
 fn rect_ui(
     ui: &mut egui::Ui,
+    id_source: impl std::hash::Hash,
     label: &str,
     rect: Option<MmRect>,
     mut set: impl FnMut(MmRect) -> Option<()>,
@@ -516,20 +545,22 @@ fn rect_ui(
         w: 800,
         h: 600,
     });
-    ui.horizontal(|ui| {
-        ui.label(label);
-        let mut changed = false;
-        changed |= ui.add(egui::DragValue::new(&mut r.x)).changed();
-        changed |= ui.add(egui::DragValue::new(&mut r.y)).changed();
-        changed |= ui
-            .add(egui::DragValue::new(&mut r.w).clamp_range(1..=10000))
-            .changed();
-        changed |= ui
-            .add(egui::DragValue::new(&mut r.h).clamp_range(1..=10000))
-            .changed();
-        if changed {
-            let _ = set(r);
-        }
+    ui.push_id(id_source, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            let mut changed = false;
+            changed |= ui.add(egui::DragValue::new(&mut r.x)).changed();
+            changed |= ui.add(egui::DragValue::new(&mut r.y)).changed();
+            changed |= ui
+                .add(egui::DragValue::new(&mut r.w).clamp_range(1..=10000))
+                .changed();
+            changed |= ui
+                .add(egui::DragValue::new(&mut r.h).clamp_range(1..=10000))
+                .changed();
+            if changed {
+                let _ = set(r);
+            }
+        });
     });
 }
 fn capture_rect(app: &mut LauncherApp, id: &str, index: usize, home: bool) {

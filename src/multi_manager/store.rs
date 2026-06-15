@@ -1,4 +1,4 @@
-use crate::multi_manager::model::{MmWorkspace, new_workspace_id};
+use crate::multi_manager::model::{new_workspace_id, MmWorkspace};
 use anyhow::{Context, Result};
 use std::fs::{self, File};
 use std::io::Write;
@@ -176,6 +176,27 @@ mod tests {
         let loaded = load_workspaces(&path).unwrap();
         assert!(loaded.iter().all(|workspace| !workspace.id.is_empty()));
         assert_ne!(loaded[0].id, loaded[1].id);
+    }
+
+    #[test]
+    fn duplicate_workspace_names_receive_distinct_generated_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspaces.json");
+        fs::write(
+            &path,
+            r#"[{"name":"New Workspace"},{"name":"New Workspace"},{"name":"New Workspace"}]"#,
+        )
+        .unwrap();
+
+        let loaded = load_workspaces(&path).unwrap();
+
+        assert_eq!(loaded.len(), 3);
+        assert!(loaded
+            .iter()
+            .all(|workspace| workspace.name == "New Workspace" && !workspace.id.is_empty()));
+        assert_ne!(loaded[0].id, loaded[1].id);
+        assert_ne!(loaded[0].id, loaded[2].id);
+        assert_ne!(loaded[1].id, loaded[2].id);
     }
 
     #[test]
