@@ -390,10 +390,10 @@ impl MultiManagerDialog {
                         capture_rect(app, id, index, false);
                     }
                     if ui.button("Move Home").clicked() {
-                        move_window(&win, true);
+                        move_window(app, &win, true);
                     }
                     if ui.button("Move Target").clicked() {
-                        move_window(&win, false);
+                        move_window(app, &win, false);
                     }
                     if ui.button("Recapture").clicked() {
                         app.multi_manager_start_recapture_window(id, index, ui.ctx());
@@ -749,9 +749,11 @@ fn set_window_rect(
     }
     Ok(())
 }
-fn move_window(w: &MmWindow, home: bool) {
+fn move_window(app: &mut LauncherApp, w: &MmWindow, home: bool) {
     if let Some(r) = if home { w.home_rect } else { w.target_rect } {
-        let _ = win::move_window_to_rect(w.hwnd, r);
+        if let Err(err) = win::move_window_to_rect(w.hwnd, r) {
+            app.report_error_message("multi_manager.move_window", format!("{err}"));
+        }
     }
 }
 

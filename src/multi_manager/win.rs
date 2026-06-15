@@ -1,5 +1,5 @@
 use crate::multi_manager::model::MmRect;
-use anyhow::{Error, anyhow};
+use anyhow::{anyhow, Error};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedWindow {
@@ -171,7 +171,8 @@ pub fn is_valid_window(_hwnd: usize) -> bool {
 #[cfg(windows)]
 pub fn move_window_to_rect(hwnd: usize, rect: MmRect) -> Result<(), MmWindowError> {
     use windows::Win32::UI::WindowsAndMessaging::{
-        IsIconic, MoveWindow, SW_RESTORE, ShowWindowAsync,
+        BringWindowToTop, IsIconic, SetForegroundWindow, SetWindowPos, ShowWindowAsync,
+        HWND_NOTOPMOST, HWND_TOPMOST, SWP_SHOWWINDOW, SW_RESTORE,
     };
 
     if !is_valid_window(hwnd) {
@@ -183,8 +184,29 @@ pub fn move_window_to_rect(hwnd: usize, rect: MmRect) -> Result<(), MmWindowErro
         if IsIconic(hwnd).as_bool() {
             let _ = ShowWindowAsync(hwnd, SW_RESTORE);
         }
-        MoveWindow(hwnd, rect.x, rect.y, rect.w, rect.h, true)
-            .map_err(|err| anyhow!("failed to move window to rect: {err}"))
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetForegroundWindow(hwnd);
+
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            SWP_SHOWWINDOW,
+        )
+        .map_err(|err| anyhow!("failed to move window to rect as temporary topmost: {err}"))?;
+        SetWindowPos(
+            hwnd,
+            HWND_NOTOPMOST,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            SWP_SHOWWINDOW,
+        )
+        .map_err(|err| anyhow!("failed to remove temporary topmost after move: {err}"))
     }
 }
 
@@ -236,6 +258,20 @@ mod tests {
         assert!(!hotkey_pressed_with("Ctrl+NoSuchKey", down));
         assert!(!hotkey_pressed_with("Ctrl+A+B", down));
         assert!(!hotkey_pressed_with("Ctrl+", down));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Windows smoke test checklist: use a real, non-elevated application window HWND and verify minimized windows restore, the window is brought foreground, it is not left topmost, and elevated/inaccessible windows surface an error."]
+    fn windows_move_window_to_rect_smoke_checklist() {
+        // Manual checklist for move_window_to_rect:
+        // 1. Capture a normal application HWND and minimize it.
+        // 2. Call move_window_to_rect(hwnd, target_rect) and verify the window is restored.
+        // 3. Verify the window is brought to the foreground/top for the move.
+        // 4. Open another always-on-top candidate afterward and verify the moved window was
+        //    returned to NOTOPMOST rather than remaining permanently topmost.
+        // 5. Try an elevated/inaccessible target from a non-elevated launcher and verify the
+        //    returned error is surfaced by the UI as multi_manager.move_window.
     }
 
     #[cfg(not(windows))]
