@@ -15,6 +15,7 @@ pub struct MultiManagerState {
     pub pending_capture: Option<PendingCaptureAction>,
     pub recapture_queue: VecDeque<RecaptureQueueItem>,
     pub recapture_active: bool,
+    pub capture_session: Option<crate::multi_manager::capture::CaptureSession>,
     pub workspaces: Arc<Mutex<Vec<MmWorkspace>>>,
     pub runtime: MultiManagerRuntime,
     pub last_hotkey_info: Arc<Mutex<Option<(String, Instant)>>>,
@@ -46,6 +47,7 @@ impl MultiManagerState {
             pending_capture: None,
             recapture_queue: VecDeque::new(),
             recapture_active: false,
+            capture_session: None,
             workspaces,
             runtime,
             last_hotkey_info,
@@ -115,6 +117,7 @@ impl MultiManagerState {
     }
 
     pub fn shutdown(&mut self) {
+        self.capture_session = None;
         self.runtime.shutdown();
     }
 

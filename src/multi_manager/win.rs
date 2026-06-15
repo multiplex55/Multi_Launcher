@@ -88,13 +88,13 @@ fn rect_from_win32(rect: windows::Win32::Foundation::RECT) -> MmRect {
 }
 
 #[cfg(windows)]
-fn key_is_down(vk: u32) -> bool {
+pub(crate) fn capture_key_is_down(vk: u32) -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
     unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 }
 }
 
 #[cfg(not(windows))]
-fn key_is_down(_vk: u32) -> bool {
+pub(crate) fn capture_key_is_down(_vk: u32) -> bool {
     false
 }
 
@@ -200,7 +200,7 @@ pub fn is_window_at_rect(hwnd: usize, rect: MmRect) -> bool {
 }
 
 pub fn is_hotkey_pressed(sequence: &str) -> bool {
-    hotkey_pressed_with(sequence, key_is_down)
+    hotkey_pressed_with(sequence, capture_key_is_down)
 }
 
 pub fn poll_capture_keys() -> Option<CaptureKeyAction> {
