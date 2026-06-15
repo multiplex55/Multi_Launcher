@@ -3,7 +3,7 @@ use crate::multi_manager::{reconnect, win};
 use crate::settings::MultiManagerSettings;
 use anyhow::Result;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -46,6 +46,8 @@ pub struct RuntimeControl {
     pub enabled: AtomicBool,
     pub capture_pending: AtomicBool,
     pub shutdown: AtomicBool,
+    pub auto_reconnect_missing_windows: AtomicBool,
+    pub auto_reconnect_interval_ms: AtomicU64,
 }
 
 impl RuntimeControl {
@@ -54,6 +56,8 @@ impl RuntimeControl {
             enabled: AtomicBool::new(enabled),
             capture_pending: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
+            auto_reconnect_missing_windows: AtomicBool::new(true),
+            auto_reconnect_interval_ms: AtomicU64::new(3000),
         }
     }
 }
@@ -77,13 +81,18 @@ impl MultiManagerRuntime {
 
     pub fn start(workspaces: Arc<Mutex<Vec<MmWorkspace>>>, settings: MultiManagerSettings) -> Self {
         let control = Arc::new(RuntimeControl::new(settings.enabled));
+        control
+            .auto_reconnect_missing_windows
+            .store(settings.auto_reconnect_missing_windows, Ordering::Relaxed);
+        control
+            .auto_reconnect_interval_ms
+            .store(settings.auto_reconnect_interval_ms, Ordering::Relaxed);
         let last_hotkey_info = Arc::new(Mutex::new(None));
         let thread_workspaces = Arc::clone(&workspaces);
         let thread_control = Arc::clone(&control);
         let thread_last_hotkey_info = Arc::clone(&last_hotkey_info);
         let poll = Duration::from_millis(settings.hotkey_poll_ms);
         let reconnect_interval = Duration::from_millis(settings.auto_reconnect_interval_ms);
-        let auto_reconnect_missing_windows = settings.auto_reconnect_missing_windows;
         let join_handle = thread::spawn(move || {
             let mut debounce = HashMap::new();
             let mut last_reconnect = Instant::now() - reconnect_interval;
@@ -95,9 +104,7 @@ impl MultiManagerRuntime {
                 maybe_runtime_reconnect(
                     &thread_workspaces,
                     &thread_control,
-                    auto_reconnect_missing_windows,
                     &mut last_reconnect,
-                    reconnect_interval,
                     now,
                     || win::enumerate_top_level_windows().unwrap_or_default(),
                 );
@@ -289,14 +296,16 @@ fn hotkey_sequence(hotkey: &MmHotkey) -> Option<String> {
 pub fn maybe_runtime_reconnect(
     workspaces: &Arc<Mutex<Vec<MmWorkspace>>>,
     control: &RuntimeControl,
-    auto_reconnect_missing_windows: bool,
     last_reconnect: &mut Instant,
-    reconnect_interval: Duration,
     now: Instant,
     enumerate: impl FnOnce() -> Vec<win::EnumeratedWindow>,
 ) -> bool {
+    let reconnect_interval =
+        Duration::from_millis(control.auto_reconnect_interval_ms.load(Ordering::Relaxed));
     if !control.enabled.load(Ordering::Relaxed)
-        || !auto_reconnect_missing_windows
+        || !control
+            .auto_reconnect_missing_windows
+            .load(Ordering::Relaxed)
         || control.capture_pending.load(Ordering::Relaxed)
         || now.duration_since(*last_reconnect) < reconnect_interval
     {
@@ -553,18 +562,10 @@ mod tests {
         let mut last = now - Duration::from_secs(10);
         let enumerated = RefCell::new(false);
 
-        let reconnected = maybe_runtime_reconnect(
-            &workspaces,
-            &control,
-            true,
-            &mut last,
-            Duration::from_millis(1),
-            now,
-            || {
-                *enumerated.borrow_mut() = true;
-                vec![live(10, "anything")]
-            },
-        );
+        let reconnected = maybe_runtime_reconnect(&workspaces, &control, &mut last, now, || {
+            *enumerated.borrow_mut() = true;
+            vec![live(10, "anything")]
+        });
 
         assert!(!reconnected);
         assert!(!*enumerated.borrow());
@@ -578,18 +579,10 @@ mod tests {
         let mut last = now - Duration::from_secs(10);
         let enumerated = RefCell::new(false);
 
-        let reconnected = maybe_runtime_reconnect(
-            &workspaces,
-            &control,
-            true,
-            &mut last,
-            Duration::from_millis(1),
-            now,
-            || {
-                *enumerated.borrow_mut() = true;
-                Vec::new()
-            },
-        );
+        let reconnected = maybe_runtime_reconnect(&workspaces, &control, &mut last, now, || {
+            *enumerated.borrow_mut() = true;
+            Vec::new()
+        });
 
         assert!(!reconnected);
         assert!(!*enumerated.borrow());
@@ -610,15 +603,9 @@ mod tests {
         let now = Instant::now();
         let mut last = now - Duration::from_secs(10);
 
-        let reconnected = maybe_runtime_reconnect(
-            &workspaces,
-            &control,
-            true,
-            &mut last,
-            Duration::from_millis(1),
-            now,
-            || vec![live(42, "Notes")],
-        );
+        let reconnected = maybe_runtime_reconnect(&workspaces, &control, &mut last, now, || {
+            vec![live(42, "Notes")]
+        });
 
         assert!(reconnected);
         assert_eq!(workspaces.lock().unwrap()[0].windows[0].hwnd, 42);
@@ -641,9 +628,7 @@ mod tests {
         assert!(maybe_runtime_reconnect(
             &workspaces,
             &control,
-            true,
             &mut last,
-            Duration::from_millis(1),
             now,
             || vec![live(42, "Notes")],
         ));
