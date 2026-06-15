@@ -3,6 +3,7 @@ pub mod bindings;
 pub mod capture;
 pub mod commands;
 pub mod model;
+pub mod reconnect;
 pub mod runtime;
 pub mod state;
 pub mod store;
