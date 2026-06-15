@@ -1,7 +1,7 @@
 use crate::gui::LauncherApp;
 use crate::multi_manager::bindings;
 use crate::multi_manager::model::{
-    new_workspace_id, MmHotkey, MmRect, MmWindow, MmWorkspace, PendingCaptureAction,
+    MmHotkey, MmRect, MmWindow, MmWorkspace, PendingCaptureAction, new_workspace_id,
 };
 use crate::multi_manager::win;
 use eframe::egui;
@@ -564,19 +564,55 @@ fn rect_ui(
     });
 }
 fn capture_rect(app: &mut LauncherApp, id: &str, index: usize, home: bool) {
-    if let Some(c) = win::active_window() {
-        app.multi_manager.with_workspace_mut(id, |w| {
-            if let Some(x) = w.windows.get_mut(index) {
-                if home {
-                    x.home_rect = Some(c.rect)
-                } else {
-                    x.target_rect = Some(c.rect)
-                };
-                x.hwnd = c.hwnd;
-                x.title = c.title;
-            }
-        });
+    let Some(hwnd) = get_ws(app, id)
+        .and_then(|workspace| workspace.windows.get(index).map(|window| window.hwnd))
+    else {
+        app.report_error_message(
+            "multi_manager.capture_rect",
+            format!("Missing workspace or window row for capture: {id} #{index}"),
+        );
+        return;
+    };
+
+    let Some(rect) = win::window_rect(hwnd) else {
+        app.report_error_message(
+            "multi_manager.capture_rect",
+            format!("Tracked window is missing or invalid: HWND {hwnd}"),
+        );
+        return;
+    };
+
+    let updated = app.multi_manager.with_workspace_mut(id, |workspace| {
+        set_window_rect(workspace, index, home, rect)
+    });
+    match updated {
+        Some(Ok(())) => {}
+        Some(Err(err)) => app.report_error_message("multi_manager.capture_rect", err),
+        None => app.report_error_message(
+            "multi_manager.capture_rect",
+            format!("Missing workspace for capture: {id}"),
+        ),
     }
+}
+
+fn set_window_rect(
+    workspace: &mut MmWorkspace,
+    index: usize,
+    home: bool,
+    rect: MmRect,
+) -> Result<(), String> {
+    let Some(window) = workspace.windows.get_mut(index) else {
+        return Err(format!(
+            "Missing window row for capture: {} #{}",
+            workspace.id, index
+        ));
+    };
+    if home {
+        window.home_rect = Some(rect);
+    } else {
+        window.target_rect = Some(rect);
+    }
+    Ok(())
 }
 fn move_window(w: &MmWindow, home: bool) {
     if let Some(r) = if home { w.home_rect } else { w.target_rect } {
@@ -592,6 +628,98 @@ mod tests {
     fn default_dialog_state_is_closed() {
         assert!(!MultiManagerDialog::default().open);
         assert!(!MultiManagerSettingsDialog::default().open);
+    }
+
+    #[test]
+    fn set_window_rect_home_does_not_alter_target() {
+        let target = MmRect {
+            x: 10,
+            y: 20,
+            w: 300,
+            h: 400,
+        };
+        let home = MmRect {
+            x: 1,
+            y: 2,
+            w: 30,
+            h: 40,
+        };
+        let mut workspace = workspace_with_window(Some(target), None);
+
+        set_window_rect(&mut workspace, 0, true, home).expect("home rect should be set");
+
+        let window = &workspace.windows[0];
+        assert_eq!(window.home_rect, Some(home));
+        assert_eq!(window.target_rect, Some(target));
+        assert_eq!(window.alias, "Alias");
+        assert_eq!(window.title, "Title");
+        assert_eq!(window.hwnd, 42);
+        assert!(window.valid);
+    }
+
+    #[test]
+    fn set_window_rect_target_does_not_alter_home() {
+        let home = MmRect {
+            x: 10,
+            y: 20,
+            w: 300,
+            h: 400,
+        };
+        let target = MmRect {
+            x: 1,
+            y: 2,
+            w: 30,
+            h: 40,
+        };
+        let mut workspace = workspace_with_window(None, Some(home));
+
+        set_window_rect(&mut workspace, 0, false, target).expect("target rect should be set");
+
+        let window = &workspace.windows[0];
+        assert_eq!(window.home_rect, Some(home));
+        assert_eq!(window.target_rect, Some(target));
+        assert_eq!(window.alias, "Alias");
+        assert_eq!(window.title, "Title");
+        assert_eq!(window.hwnd, 42);
+        assert!(window.valid);
+    }
+
+    #[test]
+    fn set_window_rect_missing_window_returns_controlled_error() {
+        let mut workspace = MmWorkspace {
+            id: "workspace".into(),
+            ..Default::default()
+        };
+        let rect = MmRect {
+            x: 1,
+            y: 2,
+            w: 30,
+            h: 40,
+        };
+
+        let err = set_window_rect(&mut workspace, 0, true, rect).expect_err("missing row errors");
+
+        assert!(err.contains("Missing window row for capture"));
+        assert!(workspace.windows.is_empty());
+    }
+
+    fn workspace_with_window(
+        target_rect: Option<MmRect>,
+        home_rect: Option<MmRect>,
+    ) -> MmWorkspace {
+        MmWorkspace {
+            id: "workspace".into(),
+            windows: vec![MmWindow {
+                alias: "Alias".into(),
+                title: "Title".into(),
+                home_rect,
+                target_rect,
+                hwnd: 42,
+                valid: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
     }
 }
 
