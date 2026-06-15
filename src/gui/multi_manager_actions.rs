@@ -342,15 +342,11 @@ impl LauncherApp {
     pub fn multi_manager_poll_capture(&mut self, ctx: &eframe::egui::Context) {
         if self.multi_manager.pending_capture.is_none() && self.multi_manager.recapture_active {
             if let Some(item) = self.multi_manager.recapture_queue.pop_front() {
-                self.multi_manager.pending_capture = Some(PendingCaptureAction::RecaptureWindow {
-                    workspace_id: item.workspace_id,
-                    window_index: item.window_index,
-                });
-                self.multi_manager
-                    .runtime
-                    .control
-                    .capture_pending
-                    .store(true, Ordering::Relaxed);
+                self.multi_manager_start_recapture_window(
+                    &item.workspace_id,
+                    item.window_index,
+                    ctx,
+                );
             } else {
                 self.multi_manager.recapture_active = false;
                 self.multi_manager
@@ -358,41 +354,69 @@ impl LauncherApp {
                     .control
                     .capture_pending
                     .store(false, Ordering::Relaxed);
+                ctx.request_repaint();
             }
         }
-        if self.multi_manager.pending_capture.is_none() {
-            self.multi_manager.capture_session = None;
+
+        if self.multi_manager.capture_session.is_none() {
             return;
         }
-        if self.multi_manager.capture_session.is_none() {
-            self.multi_manager.capture_session = Some(capture::start_capture_session(ctx.clone()));
+
+        let mut events = Vec::new();
+        if let Some(session) = self.multi_manager.capture_session.as_ref() {
+            while let Ok(event) = session.rx.try_recv() {
+                events.push(event);
+            }
         }
 
-        let event = self
-            .multi_manager
-            .capture_session
-            .as_ref()
-            .and_then(|session| session.rx.try_recv().ok());
-        if let Some(event) = event {
-            self.multi_manager.capture_session = None;
-            match event.action {
-                CaptureKeyAction::Cancel => self.multi_manager_cancel_capture(),
-                CaptureKeyAction::Skip => {
-                    if self.multi_manager.recapture_active {
-                        self.multi_manager.pending_capture = None;
-                    }
+        for event in events {
+            self.handle_capture_event(ctx, event);
+        }
+    }
+
+    fn handle_capture_event(&mut self, ctx: &eframe::egui::Context, event: capture::CaptureEvent) {
+        match event.action {
+            CaptureKeyAction::Cancel => {
+                self.multi_manager_cancel_capture();
+                ctx.request_repaint();
+            }
+            CaptureKeyAction::Skip => {
+                if self.multi_manager.recapture_active {
+                    self.multi_manager.pending_capture = None;
+                    self.multi_manager.capture_session = None;
+                    ctx.request_repaint();
                 }
-                CaptureKeyAction::Confirm => self.multi_manager_complete_capture(event.captured),
+            }
+            CaptureKeyAction::Confirm => {
+                self.multi_manager_complete_capture(ctx, event.captured);
+                ctx.request_repaint();
             }
         }
     }
 
-    fn multi_manager_complete_capture(&mut self, captured: Option<CapturedWindow>) {
+    fn multi_manager_restart_capture_session(&mut self, ctx: &eframe::egui::Context) {
+        self.multi_manager.capture_session = Some(capture::start_capture_session(ctx.clone()));
+        self.multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .store(true, Ordering::Relaxed);
+    }
+
+    fn multi_manager_complete_capture(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        captured: Option<CapturedWindow>,
+    ) {
         let Some(action) = self.multi_manager.pending_capture.clone() else {
             return;
         };
         let Some(captured) = captured else {
-            self.report_error_message("multi_manager.capture", "No active window to capture");
+            self.report_error_message(
+                "multi_manager.capture",
+                "No active window to capture; focus a window and press Enter",
+            );
+            self.multi_manager_restart_capture_session(ctx);
             return;
         };
         if self
@@ -404,6 +428,7 @@ impl LauncherApp {
                 "multi_manager.capture",
                 "Ignoring launcher window; focus another window and press Enter",
             );
+            self.multi_manager_restart_capture_session(ctx);
             return;
         }
         let keep_pending = matches!(action, PendingCaptureAction::CaptureMultipleWindows { .. });
@@ -433,15 +458,17 @@ impl LauncherApp {
             }
         }
         self.multi_manager.capture_session = None;
-        if !keep_pending {
+        if keep_pending {
+            self.multi_manager_restart_capture_session(ctx);
+        } else {
             self.multi_manager.pending_capture = None;
-        }
-        if !self.multi_manager.recapture_active && !keep_pending {
-            self.multi_manager
-                .runtime
-                .control
-                .capture_pending
-                .store(false, Ordering::Relaxed);
+            if !self.multi_manager.recapture_active {
+                self.multi_manager
+                    .runtime
+                    .control
+                    .capture_pending
+                    .store(false, Ordering::Relaxed);
+            }
         }
     }
 
@@ -495,14 +522,17 @@ pub(crate) fn build_recapture_queue(
 mod tests {
     use super::build_recapture_queue;
     use crate::gui::LauncherApp;
-    use crate::multi_manager::model::{MmRect, MmWindow, MmWorkspace, PendingCaptureAction};
-    use crate::multi_manager::win::CapturedWindow;
+    use crate::multi_manager::capture::CaptureEvent;
+    use crate::multi_manager::model::{
+        MmRect, MmWindow, MmWorkspace, PendingCaptureAction, RecaptureQueueItem,
+    };
+    use crate::multi_manager::win::{CaptureKeyAction, CapturedWindow};
     use crate::plugin::PluginManager;
     use crate::settings::Settings;
     use std::collections::VecDeque;
     use std::sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     };
 
     fn test_app() -> LauncherApp {
@@ -591,16 +621,18 @@ mod tests {
             .capture_pending
             .store(true, Ordering::Relaxed);
 
-        app.multi_manager_complete_capture(Some(captured(7, "Editor")));
+        app.multi_manager_complete_capture(
+            &eframe::egui::Context::default(),
+            Some(captured(7, "Editor")),
+        );
 
         assert_eq!(app.multi_manager.pending_capture, None);
-        assert!(
-            !app.multi_manager
-                .runtime
-                .control
-                .capture_pending
-                .load(Ordering::Relaxed)
-        );
+        assert!(!app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 1);
         assert_eq!(workspaces[0].windows[0].title, "Editor");
@@ -625,8 +657,14 @@ mod tests {
             .capture_pending
             .store(true, Ordering::Relaxed);
 
-        app.multi_manager_complete_capture(Some(captured(1, "One")));
-        app.multi_manager_complete_capture(Some(captured(2, "Two")));
+        app.multi_manager_complete_capture(
+            &eframe::egui::Context::default(),
+            Some(captured(1, "One")),
+        );
+        app.multi_manager_complete_capture(
+            &eframe::egui::Context::default(),
+            Some(captured(2, "Two")),
+        );
 
         assert_eq!(
             app.multi_manager.pending_capture,
@@ -634,17 +672,180 @@ mod tests {
                 workspace_id: "w".into()
             })
         );
-        assert!(
-            app.multi_manager
-                .runtime
-                .control
-                .capture_pending
-                .load(Ordering::Relaxed)
-        );
+        assert!(app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 2);
         assert_eq!(workspaces[0].windows[0].title, "One");
         assert_eq!(workspaces[0].windows[1].title, "Two");
+    }
+
+    #[test]
+    fn confirm_event_in_one_shot_mode_clears_pending_capture() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = test_app();
+        set_workspaces(
+            &mut app,
+            vec![MmWorkspace {
+                id: "w".into(),
+                ..Default::default()
+            }],
+        );
+        app.multi_manager.pending_capture = Some(PendingCaptureAction::CaptureOneWindow {
+            workspace_id: "w".into(),
+        });
+        app.multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .store(true, Ordering::Relaxed);
+
+        app.handle_capture_event(
+            &ctx,
+            CaptureEvent {
+                action: CaptureKeyAction::Confirm,
+                captured: Some(captured(7, "Editor")),
+            },
+        );
+
+        assert_eq!(app.multi_manager.pending_capture, None);
+        assert!(app.multi_manager.capture_session.is_none());
+        assert!(!app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
+        let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
+        assert_eq!(workspaces[0].windows.len(), 1);
+        assert_eq!(workspaces[0].windows[0].title, "Editor");
+    }
+
+    #[test]
+    fn confirm_event_in_multi_capture_mode_keeps_pending_capture() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = test_app();
+        set_workspaces(
+            &mut app,
+            vec![MmWorkspace {
+                id: "w".into(),
+                ..Default::default()
+            }],
+        );
+        app.multi_manager.pending_capture = Some(PendingCaptureAction::CaptureMultipleWindows {
+            workspace_id: "w".into(),
+        });
+        app.multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .store(true, Ordering::Relaxed);
+
+        app.handle_capture_event(
+            &ctx,
+            CaptureEvent {
+                action: CaptureKeyAction::Confirm,
+                captured: Some(captured(1, "One")),
+            },
+        );
+
+        assert_eq!(
+            app.multi_manager.pending_capture,
+            Some(PendingCaptureAction::CaptureMultipleWindows {
+                workspace_id: "w".into()
+            })
+        );
+        assert!(app.multi_manager.capture_session.is_some());
+        assert!(app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn skip_event_during_recapture_clears_only_current_item() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = test_app();
+        app.multi_manager.recapture_active = true;
+        app.multi_manager.recapture_queue = VecDeque::from(vec![RecaptureQueueItem {
+            workspace_id: "w".into(),
+            window_index: 1,
+        }]);
+        app.multi_manager.pending_capture = Some(PendingCaptureAction::RecaptureWindow {
+            workspace_id: "w".into(),
+            window_index: 0,
+        });
+        app.multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .store(true, Ordering::Relaxed);
+
+        app.handle_capture_event(
+            &ctx,
+            CaptureEvent {
+                action: CaptureKeyAction::Skip,
+                captured: None,
+            },
+        );
+
+        assert_eq!(app.multi_manager.pending_capture, None);
+        assert!(app.multi_manager.recapture_active);
+        assert_eq!(app.multi_manager.recapture_queue.len(), 1);
+        assert!(app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn cancel_event_clears_queue_and_pending_session() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = test_app();
+        app.multi_manager.recapture_active = true;
+        app.multi_manager.recapture_queue = VecDeque::from(vec![RecaptureQueueItem {
+            workspace_id: "w".into(),
+            window_index: 1,
+        }]);
+        app.multi_manager.pending_capture = Some(PendingCaptureAction::RecaptureWindow {
+            workspace_id: "w".into(),
+            window_index: 0,
+        });
+        app.multi_manager.capture_session = Some(
+            crate::multi_manager::capture::start_capture_session(ctx.clone()),
+        );
+        app.multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .store(true, Ordering::Relaxed);
+
+        app.handle_capture_event(
+            &ctx,
+            CaptureEvent {
+                action: CaptureKeyAction::Cancel,
+                captured: None,
+            },
+        );
+
+        assert_eq!(app.multi_manager.pending_capture, None);
+        assert!(app.multi_manager.capture_session.is_none());
+        assert!(!app.multi_manager.recapture_active);
+        assert!(app.multi_manager.recapture_queue.is_empty());
+        assert!(!app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
     }
 
     #[test]
@@ -681,7 +882,10 @@ mod tests {
             .capture_pending
             .store(true, Ordering::Relaxed);
 
-        app.multi_manager_complete_capture(Some(captured(22, "New")));
+        app.multi_manager_complete_capture(
+            &eframe::egui::Context::default(),
+            Some(captured(22, "New")),
+        );
 
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 2);
