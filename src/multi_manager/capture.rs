@@ -81,7 +81,7 @@ impl CaptureKeyEdgeDetector {
     }
 }
 
-pub fn start_capture_session(ctx: egui::Context) -> CaptureSession {
+pub fn start_capture_session(ctx: eframe::egui::Context) -> CaptureSession {
     let (tx, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let thread_cancel = Arc::clone(&cancel);
