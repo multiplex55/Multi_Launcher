@@ -235,6 +235,16 @@ mod tests {
     }
 
     #[test]
+    fn new_workspace_ids_are_non_empty_and_unique() {
+        let first = new_workspace_id();
+        let second = new_workspace_id();
+
+        assert!(!first.is_empty());
+        assert!(!second.is_empty());
+        assert_ne!(first, second);
+    }
+
+    #[test]
     fn hotkey_validation_accepts_supported_combinations() {
         for hotkey in [
             MmHotkey {
