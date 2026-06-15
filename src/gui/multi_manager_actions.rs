@@ -234,6 +234,12 @@ impl LauncherApp {
             .store(false, Ordering::Relaxed);
     }
 
+    fn is_launcher_capture(&self, captured: &crate::multi_manager::win::CapturedWindow) -> bool {
+        self.launcher_hwnd == Some(captured.hwnd)
+            || captured.title.contains("Multi Lnchr")
+            || captured.title.contains("Multi Launcher")
+    }
+
     pub fn multi_manager_poll_capture(&mut self, ctx: &eframe::egui::Context) {
         if self.multi_manager.pending_capture.is_none() && self.multi_manager.recapture_active {
             if let Some(item) = self.multi_manager.recapture_queue.pop_front() {
@@ -282,7 +288,7 @@ impl LauncherApp {
         if self
             .multi_manager_settings
             .ignore_launcher_window_on_capture
-            && self.launcher_hwnd == Some(captured.hwnd)
+            && self.is_launcher_capture(&captured)
         {
             self.report_error_message(
                 "multi_manager.capture",
@@ -385,8 +391,53 @@ pub(crate) fn build_recapture_queue(
 #[cfg(test)]
 mod tests {
     use super::build_recapture_queue;
-    use crate::multi_manager::model::{MmWindow, MmWorkspace};
+    use crate::gui::LauncherApp;
+    use crate::multi_manager::model::{MmRect, MmWindow, MmWorkspace};
+    use crate::multi_manager::win::CapturedWindow;
+    use crate::plugin::PluginManager;
+    use crate::settings::Settings;
     use std::collections::VecDeque;
+    use std::sync::{atomic::AtomicBool, Arc};
+
+    fn test_app() -> LauncherApp {
+        let ctx = eframe::egui::Context::default();
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("actions.json");
+        std::fs::write(&path, "[]").expect("write actions file");
+        LauncherApp::new(
+            &ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new(),
+            path.to_string_lossy().to_string(),
+            tempdir
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .to_string(),
+            Settings::default(),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    fn captured(hwnd: usize, title: &str) -> CapturedWindow {
+        CapturedWindow {
+            hwnd,
+            title: title.to_string(),
+            rect: MmRect {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100,
+            },
+        }
+    }
 
     #[test]
     fn recapture_queue_skips_cancels_and_advances() {
@@ -409,5 +460,35 @@ mod tests {
         assert_eq!(queue.pop_front().unwrap().window_index, 1); // queue advanced
         queue.clear(); // Escape cancels remaining queue
         assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn is_launcher_capture_matches_launcher_hwnd() {
+        let mut app = test_app();
+        app.launcher_hwnd = Some(42);
+
+        assert!(app.is_launcher_capture(&captured(42, "Notepad")));
+    }
+
+    #[test]
+    fn is_launcher_capture_matches_multi_lnchr_title() {
+        let app = test_app();
+
+        assert!(app.is_launcher_capture(&captured(100, "Multi Lnchr")));
+    }
+
+    #[test]
+    fn is_launcher_capture_matches_multi_launcher_title() {
+        let app = test_app();
+
+        assert!(app.is_launcher_capture(&captured(100, "Multi Launcher")));
+    }
+
+    #[test]
+    fn is_launcher_capture_ignores_unrelated_capture() {
+        let mut app = test_app();
+        app.launcher_hwnd = Some(42);
+
+        assert!(!app.is_launcher_capture(&captured(100, "Notepad")));
     }
 }

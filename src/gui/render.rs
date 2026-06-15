@@ -624,6 +624,9 @@ impl eframe::App for LauncherApp {
         use egui::*;
 
         // tracing::debug!("LauncherApp::update called");
+        if let Some(hwnd) = crate::window_manager::get_hwnd(_frame) {
+            self.launcher_hwnd = Some(hwnd.0 as usize);
+        }
         if self.enable_toasts {
             self.toasts.show(ctx);
         }
