@@ -1,8 +1,8 @@
 use crate::gui::LauncherApp;
 use crate::multi_manager::bindings;
 use crate::multi_manager::model::{
-    new_workspace_id, MmHotkey, MmHotkeyValidation, MmRect, MmWindow, MmWorkspace,
-    PendingCaptureAction,
+    MmHotkey, MmHotkeyValidation, MmRect, MmWindow, MmWorkspace, PendingCaptureAction,
+    new_workspace_id,
 };
 use crate::multi_manager::win;
 use eframe::egui;
@@ -359,12 +359,17 @@ impl MultiManagerDialog {
                         }
                     });
                 }
-                ui.label(format!("Original title: {}", win.title));
                 ui.label(format!("HWND: {}", win.hwnd));
+                let (status_text, status_color) = window_status_text_color(
+                    &win,
+                    win.hwnd != 0 && crate::multi_manager::win::is_valid_window(win.hwnd),
+                    false,
+                );
+                ui.colored_label(status_color, status_text);
                 if is_duplicate_hwnd(app, win.hwnd, id, index) {
                     ui.colored_label(egui::Color32::YELLOW, "⚠ duplicate HWND");
                 }
-                ui.label(if win.valid { "valid" } else { "invalid" });
+                window_metadata_ui(ui, &win);
                 rect_ui(ui, ("home_rect", id, index), "Home", win.home_rect, |r| {
                     app.multi_manager.with_workspace_mut(id, |w| {
                         if let Some(x) = w.windows.get_mut(index) {
@@ -514,6 +519,35 @@ fn workspace_header_color(workspace: &MmWorkspace) -> egui::Color32 {
         egui::Color32::GREEN
     } else {
         egui::Color32::RED
+    }
+}
+
+fn window_status_text_color(
+    win: &MmWindow,
+    hwnd_is_currently_valid: bool,
+    ambiguous: bool,
+) -> (&'static str, egui::Color32) {
+    if ambiguous {
+        ("ambiguous", egui::Color32::YELLOW)
+    } else if win.hwnd == 0 {
+        ("missing HWND", egui::Color32::RED)
+    } else if !win.valid {
+        ("invalid", egui::Color32::RED)
+    } else if !hwnd_is_currently_valid {
+        ("stale HWND", egui::Color32::YELLOW)
+    } else {
+        ("valid", egui::Color32::GREEN)
+    }
+}
+
+fn window_metadata_ui(ui: &mut egui::Ui, win: &MmWindow) {
+    ui.label(format!("Title: {}", win.title));
+    ui.label(format!("Class: {}", win.class_name));
+    ui.label(format!("Executable: {}", win.executable));
+    if !win.process_path.trim().is_empty() {
+        ui.collapsing("Process", |ui| {
+            ui.label(format!("Process: {}", win.process_path));
+        });
     }
 }
 
@@ -883,6 +917,76 @@ mod tests {
 
         assert!(!all_expanded);
         assert_eq!(signal, Some(false));
+    }
+
+    #[test]
+    fn window_status_reports_missing_hwnd() {
+        let window = MmWindow {
+            hwnd: 0,
+            valid: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            window_status_text_color(&window, false, false),
+            ("missing HWND", egui::Color32::RED)
+        );
+    }
+
+    #[test]
+    fn window_status_reports_invalid() {
+        let window = MmWindow {
+            hwnd: 42,
+            valid: false,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            window_status_text_color(&window, true, false),
+            ("invalid", egui::Color32::RED)
+        );
+    }
+
+    #[test]
+    fn window_status_reports_stale_hwnd() {
+        let window = MmWindow {
+            hwnd: 42,
+            valid: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            window_status_text_color(&window, false, false),
+            ("stale HWND", egui::Color32::YELLOW)
+        );
+    }
+
+    #[test]
+    fn window_status_reports_valid() {
+        let window = MmWindow {
+            hwnd: 42,
+            valid: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            window_status_text_color(&window, true, false),
+            ("valid", egui::Color32::GREEN)
+        );
+    }
+
+    #[test]
+    fn window_status_reports_ambiguous_when_recorded() {
+        let window = MmWindow {
+            hwnd: 42,
+            valid: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            window_status_text_color(&window, true, true),
+            ("ambiguous", egui::Color32::YELLOW)
+        );
     }
 
     #[test]
