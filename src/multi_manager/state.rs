@@ -1,6 +1,6 @@
 use crate::multi_manager::model::{MmWorkspace, PendingCaptureAction, RecaptureQueueItem};
 use crate::multi_manager::runtime::MultiManagerRuntime;
-use crate::multi_manager::store;
+use crate::multi_manager::{reconnect, store};
 use crate::settings::MultiManagerSettings;
 use anyhow::{Context, Result};
 use std::collections::VecDeque;
@@ -22,6 +22,9 @@ pub struct MultiManagerState {
     pub workspace_path: PathBuf,
     pub bindings_path: PathBuf,
     pub auto_save: bool,
+    pub auto_reconnect_on_load: bool,
+    pub auto_reconnect_missing_windows: bool,
+    pub reconnect_interval: Duration,
     save_debounce: Duration,
     dirty_since: Option<Instant>,
     last_save_attempt: Option<Instant>,
@@ -34,7 +37,11 @@ impl MultiManagerState {
             .unwrap_or_else(|| Path::new("."));
         let workspace_path = resolve_relative_to(settings_dir, &settings.workspaces_path);
         let bindings_path = resolve_relative_to(settings_dir, &settings.bindings_path);
-        let workspaces = Arc::new(Mutex::new(store::load_or_default(&workspace_path)));
+        let mut loaded = store::load_or_default(&workspace_path);
+        if settings.auto_reconnect_on_load {
+            reconnect::reconnect_workspaces(&mut loaded);
+        }
+        let workspaces = Arc::new(Mutex::new(loaded));
         let runtime = if settings.enabled {
             MultiManagerRuntime::start(Arc::clone(&workspaces), settings.clone())
         } else {
@@ -54,6 +61,9 @@ impl MultiManagerState {
             workspace_path,
             bindings_path,
             auto_save: settings.auto_save,
+            auto_reconnect_on_load: settings.auto_reconnect_on_load,
+            auto_reconnect_missing_windows: settings.auto_reconnect_missing_windows,
+            reconnect_interval: Duration::from_millis(settings.auto_reconnect_interval_ms),
             save_debounce: AUTO_SAVE_DEBOUNCE,
             dirty_since: None,
             last_save_attempt: None,
@@ -78,7 +88,10 @@ impl MultiManagerState {
     }
 
     pub fn reload(&mut self) -> Result<()> {
-        let loaded = store::load_workspaces(&self.workspace_path)?;
+        let mut loaded = store::load_workspaces(&self.workspace_path)?;
+        if self.auto_reconnect_on_load {
+            reconnect::reconnect_workspaces(&mut loaded);
+        }
         let mut workspaces = self
             .workspaces
             .lock()

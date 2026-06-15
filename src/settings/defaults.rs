@@ -112,3 +112,6 @@ pub fn default_multi_manager_bindings_path() -> String {
 pub fn default_multi_manager_hotkey_poll_ms() -> u64 {
     50
 }
+pub fn default_multi_manager_reconnect_interval_ms() -> u64 {
+    3000
+}

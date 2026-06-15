@@ -294,6 +294,12 @@ pub struct MultiManagerSettings {
     pub show_force_recapture_prompt: bool,
     #[serde(default = "default_multi_manager_hotkey_poll_ms")]
     pub hotkey_poll_ms: u64,
+    #[serde(default = "default_true")]
+    pub auto_reconnect_on_load: bool,
+    #[serde(default = "default_true")]
+    pub auto_reconnect_missing_windows: bool,
+    #[serde(default = "default_multi_manager_reconnect_interval_ms")]
+    pub auto_reconnect_interval_ms: u64,
     #[serde(default)]
     pub hide_launcher_before_toggle: bool,
     #[serde(default = "default_true")]
@@ -311,6 +317,9 @@ impl Default for MultiManagerSettings {
             developer_debugging: false,
             show_force_recapture_prompt: false,
             hotkey_poll_ms: default_multi_manager_hotkey_poll_ms(),
+            auto_reconnect_on_load: true,
+            auto_reconnect_missing_windows: true,
+            auto_reconnect_interval_ms: default_multi_manager_reconnect_interval_ms(),
             hide_launcher_before_toggle: false,
             ignore_launcher_window_on_capture: true,
         }
@@ -572,6 +581,17 @@ mod tests {
     }
 
     #[test]
+    fn multi_manager_reconnect_settings_round_trip_serialization() {
+        let mut settings = Settings::default();
+        settings.multi_manager.auto_reconnect_on_load = false;
+        settings.multi_manager.auto_reconnect_missing_windows = false;
+        settings.multi_manager.auto_reconnect_interval_ms = 7500;
+        let json = serde_json::to_string(&settings).expect("serialize settings");
+        let restored: Settings = serde_json::from_str(&json).expect("deserialize settings");
+        assert_eq!(restored.multi_manager, settings.multi_manager);
+    }
+
+    #[test]
     fn query_results_layout_defaults_are_backward_compatible() {
         let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
         assert_eq!(
@@ -609,6 +629,9 @@ mod tests {
                 "developer_debugging": parsed.multi_manager.developer_debugging,
                 "show_force_recapture_prompt": parsed.multi_manager.show_force_recapture_prompt,
                 "hotkey_poll_ms": parsed.multi_manager.hotkey_poll_ms,
+                "auto_reconnect_on_load": parsed.multi_manager.auto_reconnect_on_load,
+                "auto_reconnect_missing_windows": parsed.multi_manager.auto_reconnect_missing_windows,
+                "auto_reconnect_interval_ms": parsed.multi_manager.auto_reconnect_interval_ms,
                 "hide_launcher_before_toggle": parsed.multi_manager.hide_launcher_before_toggle,
                 "ignore_launcher_window_on_capture": parsed.multi_manager.ignore_launcher_window_on_capture,
             },
@@ -622,7 +645,7 @@ mod tests {
         });
         assert_eq!(
             serde_json::to_string_pretty(&snapshot).unwrap(),
-            "{\n  \"multi_manager\": {\n    \"auto_save\": true,\n    \"bindings_path\": \"multi_manager_bindings.json\",\n    \"developer_debugging\": false,\n    \"enabled\": true,\n    \"hide_launcher_before_toggle\": false,\n    \"hotkey_poll_ms\": 50,\n    \"ignore_launcher_window_on_capture\": true,\n    \"save_on_exit\": true,\n    \"show_force_recapture_prompt\": false,\n    \"workspaces_path\": \"multi_manager_workspaces.json\"\n  },\n  \"note_show_details\": false,\n  \"query_results_layout\": {\n    \"cols\": 2,\n    \"enabled\": false,\n    \"plugin_opt_out\": [],\n    \"respect_plugin_capability\": true,\n    \"rows\": 3\n  },\n  \"show_error_toasts\": true,\n  \"show_inline_errors\": true\n}"
+            "{\n  \"multi_manager\": {\n    \"auto_reconnect_interval_ms\": 3000,\n    \"auto_reconnect_missing_windows\": true,\n    \"auto_reconnect_on_load\": true,\n    \"auto_save\": true,\n    \"bindings_path\": \"multi_manager_bindings.json\",\n    \"developer_debugging\": false,\n    \"enabled\": true,\n    \"hide_launcher_before_toggle\": false,\n    \"hotkey_poll_ms\": 50,\n    \"ignore_launcher_window_on_capture\": true,\n    \"save_on_exit\": true,\n    \"show_force_recapture_prompt\": false,\n    \"workspaces_path\": \"multi_manager_workspaces.json\"\n  },\n  \"note_show_details\": false,\n  \"query_results_layout\": {\n    \"cols\": 2,\n    \"enabled\": false,\n    \"plugin_opt_out\": [],\n    \"respect_plugin_capability\": true,\n    \"rows\": 3\n  },\n  \"show_error_toasts\": true,\n  \"show_inline_errors\": true\n}"
         );
     }
 }
