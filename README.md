@@ -57,12 +57,13 @@ Multi Launcher is centered around a **single query box**:
   - optional indexing of folders (fast file search)
 
 - Most functionality is accessed via **prefix commands** like:
-  - `b ...` (bookmarks)
+  - `bm ...` (bookmarks)
   - `note ...` (notes)
   - `todo ...` (tasks)
   - `tab ...` (browser tabs)
   - `mg ...` (mouse gestures)
   - `layout ...` (window layouts)
+  - `mm ...` (MultiManager window workspaces)
 
 ---
 
@@ -72,12 +73,10 @@ Multi Launcher is centered around a **single query box**:
 
 | Prefix | What it does | Examples |
 |---|---|---|
-| `?` | Search web (default browser) | `? rust egui` |
-| `s` | Search with Google | `s rust borrow checker` |
-| `d` | Search with DuckDuckGo | `d windows ui automation` |
+| `g` | Search Google | `g rust borrow checker` |
 | `=` | Calculator | `= (145*3) / 7` |
 | `= history` / `calc list` | Calculator history | `= history` |
-| `b` | Bookmarks | `b youtube` |
+| `bm` | Bookmarks | `bm youtube` |
 | `f` | Saved folders | `f downloads` |
 | `cb` | Clipboard history | `cb list` / `cb clear` |
 | `ss` / `shot` | Screenshot actions | `ss` / `shot region markup` |
@@ -89,13 +88,14 @@ Multi Launcher is centered around a **single query box**:
 | `lorem` | Lorem ipsum generator | `lorem 40` |
 | `note` | Notes | `note list` / `note add project ideas` |
 | `todo` | Todo/tasks | `todo add p2 #work fix indexing` |
-| `snip` | Snippets | `snip json` |
+| `cs` | Snippets | `cs json` / `cs list` |
 | `macro` | Macros | `macro add` / `macro list` |
 | `tab` | Browser tabs (UIA) | `tab slack` / `tab cache` |
 | `fav` | Favorites (pinned commands) | `fav` / `fav add build` |
 | `mg` | Mouse gesture management | `mg settings` / `mg add` |
+| `mm` | MultiManager window workspaces | `mm` / `mm reconnect` / `mm send all home` |
 | `keys` / `key` | Send keystrokes | `keys ctrl+shift+t` |
-| `layout` | Window layouts | `layout add work` / `layout run work` |
+| `layout` | Window layouts | `layout save work` / `layout load work` |
 | `win` | Window list / focus | `win terminal` |
 | `ps` | Processes list | `ps chrome` |
 | `tm` | Task Manager | `tm` |
@@ -287,23 +287,23 @@ Layouts let you capture and restore a **window arrangement** (great for “work 
 
 ### Commands
 - Create a layout from current windows:
-  - `layout add Work`
+  - `layout save Work`
 - List layouts:
   - `layout list`
 - Run (apply) a layout:
-  - `layout run Work`
+  - `layout load Work`
 - Edit layouts file:
   - `layout edit`
 
 ### Useful flags
 - Dry run (preview without changing anything):
-  - `layout run Work --dry-run`
+  - `layout load Work --dry-run`
 - Don’t launch missing apps:
-  - `layout run Work --no-launch`
+  - `layout load Work --no-launch`
 - Only affect the active monitor:
-  - `layout run Work --only-active-monitor`
+  - `layout load Work --only-active-monitor`
 - Filter windows included:
-  - `layout run Work --filter chrome`
+  - `layout load Work --filter chrome`
 
 ### File
 - `layouts.json`
@@ -385,7 +385,7 @@ Minimal example:
   "enable_toasts": true,
   "index_paths": ["C:\\Workspaces", "C:\\Users\\You\\Documents"]
 }
-````
+```
 
 Notable settings (high impact):
 
