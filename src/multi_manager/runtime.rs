@@ -617,6 +617,7 @@ mod tests {
         {
             let mut locked = workspaces.lock().unwrap();
             locked[0].windows[0].hwnd = 7;
+            locked[0].windows[0].valid = false;
             locked[0].windows[0].title = "Notes".into();
             locked[0].windows[0].executable = "app.exe".into();
             locked[0].windows[0].class_name = "AppClass".into();
