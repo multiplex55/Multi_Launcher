@@ -5,20 +5,7 @@ pub struct MultiManagerPlugin;
 
 impl MultiManagerPlugin {
     pub fn commands() -> Vec<Action> {
-        vec![
-            Action {
-                label: "mm".into(),
-                desc: "MultiManager".into(),
-                action: "query:mm".into(),
-                args: None,
-            },
-            Action {
-                label: "mm settings".into(),
-                desc: "MultiManager settings".into(),
-                action: "query:mm settings".into(),
-                args: None,
-            },
-        ]
+        crate::multi_manager::commands::all_mm_commands()
     }
 }
 
