@@ -612,6 +612,32 @@ mod tests {
     }
 
     #[test]
+    fn runtime_reconnect_runs_when_existing_hwnd_is_stale() {
+        let workspaces = Arc::new(Mutex::new(vec![workspace()]));
+        {
+            let mut locked = workspaces.lock().unwrap();
+            locked[0].windows[0].hwnd = 7;
+            locked[0].windows[0].title = "Notes".into();
+            locked[0].windows[0].executable = "app.exe".into();
+            locked[0].windows[0].class_name = "AppClass".into();
+            locked[0].windows[0].process_path = "C:/app.exe".into();
+        }
+        let control = RuntimeControl::new(true);
+        let now = Instant::now();
+        let mut last = now - Duration::from_secs(10);
+        let enumerated = RefCell::new(false);
+
+        let reconnected = maybe_runtime_reconnect(&workspaces, &control, &mut last, now, || {
+            *enumerated.borrow_mut() = true;
+            vec![live(42, "Notes")]
+        });
+
+        assert!(reconnected);
+        assert!(*enumerated.borrow());
+        assert_eq!(workspaces.lock().unwrap()[0].windows[0].hwnd, 42);
+    }
+
+    #[test]
     fn runtime_hotkey_toggle_works_after_reconnect_assigns_hwnd() {
         let workspaces = Arc::new(Mutex::new(vec![workspace()]));
         {
@@ -686,5 +712,17 @@ mod tests {
             now + Duration::from_millis(100),
         );
         assert_eq!(ops.moves.borrow().len(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Manual Windows desktop smoke test: use a visible non-elevated HWND and verify send/toggle restores activation, temporarily uses topmost as needed, and does not leave the window permanently topmost."]
+    fn windows_activation_and_topmost_smoke_checklist() {
+        // Manual checklist for real desktop behavior that fake WindowOps cannot prove:
+        // 1. Capture a normal non-elevated window into a workspace with home/target rects.
+        // 2. Minimize or cover the window, then trigger send target/home and hotkey toggle.
+        // 3. Verify the window is restored/activated for movement.
+        // 4. Verify any temporary topmost behavior is cleared after movement.
+        // 5. Repeat with an elevated/inaccessible window and verify the error is surfaced.
     }
 }

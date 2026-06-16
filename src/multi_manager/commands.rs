@@ -10,7 +10,11 @@ const COMMANDS: [(&str, &str, &str); 10] = [
         "Send all MultiManager windows home",
         "mm:send-all-home",
     ),
-    ("mm reconnect", "Reconnect MultiManager windows", "mm:reconnect"),
+    (
+        "mm reconnect",
+        "Reconnect MultiManager windows",
+        "mm:reconnect",
+    ),
     (
         "mm save bindings",
         "Save MultiManager window bindings",
@@ -88,18 +92,26 @@ mod tests {
     #[test]
     fn mm_send_all_home_returns_send_all_home() {
         let actions = search_mm_commands("mm send all home");
-        assert!(actions.iter().any(|a| a.action == "mm:send-all-home"));
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, "mm:send-all-home");
     }
 
     #[test]
     fn mm_reconnect_returns_reconnect() {
         let actions = search_mm_commands("mm reconnect");
-        assert!(actions.iter().any(|a| a.action == "mm:reconnect"));
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, "mm:reconnect");
     }
 
     #[test]
-    fn non_mm_input_returns_no_result() {
-        assert!(search_mm_commands("todo list").is_empty());
-        assert!(search_mm_commands("mms").is_empty());
+    fn non_mm_queries_return_no_multi_manager_commands() {
+        for query in ["todo list", "mms", "multi manager", ""] {
+            assert!(
+                search_mm_commands(query)
+                    .iter()
+                    .all(|action| !action.action.starts_with("mm:")),
+                "{query:?} should not return MultiManager commands"
+            );
+        }
     }
 }
