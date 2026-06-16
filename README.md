@@ -443,6 +443,27 @@ Notable settings (high impact):
 * `follow_mouse`, `always_on_top`, `hide_after_run`
 * screenshot settings (`screenshot_dir`, `screenshot_auto_save`, `screenshot_use_editor`)
 * dashboard settings (`dashboard.*`)
+* MultiManager settings (`multi_manager.*`)
+
+MultiManager paths can be customized under the `multi_manager` settings object:
+
+```json
+{
+  "multi_manager": {
+    "enabled": true,
+    "workspaces_path": "multi_manager_workspaces.json",
+    "bindings_path": "multi_manager_bindings.json",
+    "auto_save": true,
+    "save_on_exit": true,
+    "auto_reconnect_on_load": true,
+    "auto_reconnect_missing_windows": true,
+    "auto_reconnect_interval_ms": 3000,
+    "ignore_launcher_window_on_capture": true
+  }
+}
+```
+
+`workspaces_path` controls where MultiManager stores workspace state, and `bindings_path` controls the optional live-window binding snapshot location. `ignore_launcher_window_on_capture` is a safety setting that helps prevent capture flows from saving the launcher window instead of the intended target window.
 
 Disable the default hotkey entirely (useful if you bind your own trigger elsewhere):
 
@@ -483,8 +504,8 @@ These are created/updated as you use the app (typically in the working directory
 * `calc_history.json` — calculator history
 * `fav.json` — favorites
 * `layouts.json` — window layouts
-* `multi_manager_workspaces.json` — MultiManager workspaces
-* `multi_manager_bindings.json` — MultiManager HWND binding snapshots
+* `multi_manager_workspaces.json` — stores MultiManager workspaces, captured windows, aliases, hotkeys, and home/target rectangles
+* `multi_manager_bindings.json` — optional HWND binding snapshot used to restore live window handles
 * `mouse_gestures.json` — mouse gestures
 * `mouse_gestures_usage.json` — mouse gesture usage stats
 * `calendar/events.json` — calendar events
