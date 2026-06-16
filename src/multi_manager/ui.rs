@@ -1,8 +1,8 @@
 use crate::gui::LauncherApp;
 use crate::multi_manager::bindings;
 use crate::multi_manager::model::{
-    new_workspace_id, MmHotkey, MmHotkeyValidation, MmRect, MmWindow, MmWorkspace,
-    PendingCaptureAction,
+    MmHotkey, MmHotkeyValidation, MmRect, MmWindow, MmWorkspace, PendingCaptureAction,
+    new_workspace_id,
 };
 use crate::multi_manager::win;
 use eframe::egui;
@@ -70,10 +70,10 @@ impl MultiManagerDialog {
                         if ui.button("Reload").clicked() {
                             self.confirm.reload = true;
                         }
-                        if ui.button("Save Bindings").clicked() {
+                        if ui.button("Save HWND Snapshot").clicked() {
                             app.multi_manager_save_bindings();
                         }
-                        if ui.button("Restore Bindings").clicked() {
+                        if ui.button("Restore HWND Snapshot").clicked() {
                             app.multi_manager_restore_bindings();
                         }
                         if ui.button("Reconnect Windows").clicked() {

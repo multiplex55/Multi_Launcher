@@ -1,5 +1,6 @@
-use crate::multi_manager::model::MmWorkspace;
-use crate::multi_manager::win;
+use crate::multi_manager::model::{MmWindow, MmWorkspace};
+use crate::multi_manager::reconnect;
+use crate::multi_manager::win::{self, EnumeratedWindow};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -20,6 +21,9 @@ pub struct WindowBindingSnapshot {
     pub title: String,
     pub alias: Option<String>,
     pub hwnd: usize,
+    pub executable: Option<String>,
+    pub class_name: Option<String>,
+    pub process_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +49,9 @@ pub fn save_bindings(path: &Path, workspaces: &[MmWorkspace]) -> Result<()> {
                     title: window.title.clone(),
                     alias: (!window.alias.is_empty()).then(|| window.alias.clone()),
                     hwnd: window.hwnd,
+                    executable: non_empty_string(&window.executable),
+                    class_name: non_empty_string(&window.class_name),
+                    process_path: non_empty_string(&window.process_path),
                 })
                 .collect(),
         })
@@ -62,13 +69,14 @@ pub fn load_bindings(path: &Path) -> Result<Vec<WorkspaceBindingSnapshot>> {
 }
 
 pub fn restore_bindings(workspaces: &mut [MmWorkspace], snapshots: &[WorkspaceBindingSnapshot]) {
-    restore_bindings_with_validator(workspaces, snapshots, win::is_valid_window);
+    let live = win::enumerate_top_level_windows().unwrap_or_default();
+    restore_bindings_with_windows(workspaces, snapshots, &live);
 }
 
-fn restore_bindings_with_validator(
+fn restore_bindings_with_windows(
     workspaces: &mut [MmWorkspace],
     snapshots: &[WorkspaceBindingSnapshot],
-    is_valid: impl Fn(usize) -> bool,
+    live: &[EnumeratedWindow],
 ) {
     for snapshot in snapshots {
         let workspace_index = snapshot
@@ -86,11 +94,17 @@ fn restore_bindings_with_validator(
         };
         let workspace = &mut workspaces[workspace_index];
         for window_snapshot in &snapshot.windows {
-            if window_snapshot.hwnd == 0 || !is_valid(window_snapshot.hwnd) {
+            let Some(window_index) = find_window_index(workspace, window_snapshot) else {
                 continue;
-            }
-            if let Some(window_index) = find_window_index(workspace, window_snapshot) {
-                workspace.windows[window_index].hwnd = window_snapshot.hwnd;
+            };
+            let saved_window = window_from_snapshot(window_snapshot);
+            let (_, hwnd) = reconnect::match_saved_window_against_candidates(&saved_window, live);
+            if let Some(hwnd) = hwnd {
+                workspace.windows[window_index].hwnd = hwnd;
+                workspace.windows[window_index].valid = true;
+            } else if workspace.windows[window_index].hwnd == window_snapshot.hwnd {
+                workspace.windows[window_index].hwnd = 0;
+                workspace.windows[window_index].valid = false;
             }
         }
     }
@@ -119,6 +133,22 @@ fn find_window_index(workspace: &MmWorkspace, snapshot: &WindowBindingSnapshot) 
         }
     }
     (snapshot.window_index < workspace.windows.len()).then_some(snapshot.window_index)
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    (!value.trim().is_empty()).then(|| value.to_string())
+}
+
+fn window_from_snapshot(snapshot: &WindowBindingSnapshot) -> MmWindow {
+    MmWindow {
+        alias: snapshot.alias.clone().unwrap_or_default(),
+        title: snapshot.title.clone(),
+        executable: snapshot.executable.clone().unwrap_or_default(),
+        class_name: snapshot.class_name.clone().unwrap_or_default(),
+        process_path: snapshot.process_path.clone().unwrap_or_default(),
+        hwnd: snapshot.hwnd,
+        ..Default::default()
+    }
 }
 
 pub fn duplicate_hwnds(workspaces: &[MmWorkspace]) -> Vec<DuplicateHwnd> {
@@ -189,6 +219,28 @@ mod tests {
         }
     }
 
+    fn live(
+        hwnd: usize,
+        title: &str,
+        executable: &str,
+        class_name: &str,
+        process_path: &str,
+    ) -> EnumeratedWindow {
+        EnumeratedWindow {
+            hwnd,
+            title: title.into(),
+            executable: executable.into(),
+            class_name: class_name.into(),
+            process_path: process_path.into(),
+            rect: crate::multi_manager::model::MmRect {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100,
+            },
+        }
+    }
+
     #[test]
     fn binding_save_omits_invalid_hwnds() {
         let dir = tempfile::tempdir().unwrap();
@@ -201,34 +253,36 @@ mod tests {
     #[test]
     fn restore_prefers_workspace_id_over_name() {
         let mut workspaces = vec![
-            ws("target", "same", vec![win("", "", 0)]),
-            ws("other", "old", vec![win("", "", 0)]),
+            ws("target", "same", vec![win("", "Doc", 0)]),
+            ws("other", "old", vec![win("", "Doc", 0)]),
         ];
         let snapshots = vec![WorkspaceBindingSnapshot {
             workspace_id: Some("target".into()),
             workspace_name: "old".into(),
             windows: vec![WindowBindingSnapshot {
                 hwnd: 7,
+                title: "Doc".into(),
                 ..Default::default()
             }],
         }];
-        restore_bindings_with_validator(&mut workspaces, &snapshots, |_| true);
+        restore_bindings_with_windows(&mut workspaces, &snapshots, &[live(7, "Doc", "", "", "")]);
         assert_eq!(workspaces[0].windows[0].hwnd, 7);
         assert_eq!(workspaces[1].windows[0].hwnd, 0);
     }
 
     #[test]
     fn restore_falls_back_to_name_when_id_absent() {
-        let mut workspaces = vec![ws("id", "name", vec![win("", "", 0)])];
+        let mut workspaces = vec![ws("id", "name", vec![win("", "Doc", 0)])];
         let snapshots = vec![WorkspaceBindingSnapshot {
             workspace_id: None,
             workspace_name: "name".into(),
             windows: vec![WindowBindingSnapshot {
                 hwnd: 8,
+                title: "Doc".into(),
                 ..Default::default()
             }],
         }];
-        restore_bindings_with_validator(&mut workspaces, &snapshots, |_| true);
+        restore_bindings_with_windows(&mut workspaces, &snapshots, &[live(8, "Doc", "", "", "")]);
         assert_eq!(workspaces[0].windows[0].hwnd, 8);
     }
 
@@ -243,8 +297,84 @@ mod tests {
                 ..Default::default()
             }],
         }];
-        restore_bindings_with_validator(&mut workspaces, &snapshots, |_| false);
+        restore_bindings_with_windows(&mut workspaces, &snapshots, &[]);
         assert_eq!(workspaces[0].windows[0].hwnd, 0);
+    }
+
+    #[test]
+    fn old_snapshots_without_metadata_still_load() {
+        let json = r#"[{
+            "workspace_id": "id",
+            "workspace_name": "name",
+            "windows": [{
+                "window_id": 0,
+                "window_index": 0,
+                "title": "Legacy",
+                "alias": "legacy",
+                "hwnd": 42
+            }]
+        }]"#;
+
+        let snapshots: Vec<WorkspaceBindingSnapshot> = serde_json::from_str(json).unwrap();
+
+        assert_eq!(snapshots[0].windows[0].executable, None);
+        assert_eq!(snapshots[0].windows[0].class_name, None);
+        assert_eq!(snapshots[0].windows[0].process_path, None);
+    }
+
+    #[test]
+    fn reused_hwnd_with_mismatched_metadata_is_not_restored() {
+        let mut workspaces = vec![ws("id", "name", vec![win("", "Doc", 44)])];
+        let snapshots = vec![WorkspaceBindingSnapshot {
+            workspace_id: Some("id".into()),
+            workspace_name: "name".into(),
+            windows: vec![WindowBindingSnapshot {
+                hwnd: 44,
+                title: "Doc".into(),
+                executable: Some("editor.exe".into()),
+                class_name: Some("Editor".into()),
+                process_path: Some("C:/Apps/editor.exe".into()),
+                ..Default::default()
+            }],
+        }];
+
+        restore_bindings_with_windows(
+            &mut workspaces,
+            &snapshots,
+            &[live(44, "Other", "other.exe", "Other", "C:/Other.exe")],
+        );
+
+        assert_eq!(workspaces[0].windows[0].hwnd, 0);
+        assert!(!workspaces[0].windows[0].valid);
+    }
+
+    #[test]
+    fn fallback_reconnect_can_restore_safe_replacement() {
+        let mut workspaces = vec![ws("id", "name", vec![win("", "Doc", 0)])];
+        let snapshots = vec![WorkspaceBindingSnapshot {
+            workspace_id: Some("id".into()),
+            workspace_name: "name".into(),
+            windows: vec![WindowBindingSnapshot {
+                hwnd: 44,
+                title: "Doc".into(),
+                executable: Some("editor.exe".into()),
+                class_name: Some("Editor".into()),
+                process_path: Some("C:/Apps/editor.exe".into()),
+                ..Default::default()
+            }],
+        }];
+
+        restore_bindings_with_windows(
+            &mut workspaces,
+            &snapshots,
+            &[
+                live(44, "Other", "other.exe", "Other", "C:/Other.exe"),
+                live(55, "Doc", "editor.exe", "Editor", "C:/Apps/editor.exe"),
+            ],
+        );
+
+        assert_eq!(workspaces[0].windows[0].hwnd, 55);
+        assert!(workspaces[0].windows[0].valid);
     }
 
     #[test]
