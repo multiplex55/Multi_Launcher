@@ -5,6 +5,7 @@ pub mod commands;
 pub mod model;
 pub mod reconnect;
 pub mod runtime;
+pub mod settings;
 pub mod state;
 pub mod store;
 pub mod ui;
