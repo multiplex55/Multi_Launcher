@@ -23,6 +23,7 @@ It’s designed to be “one hotkey away” from:
 - [Dashboard](#dashboard)
 - [Mouse gestures](#mouse-gestures)
 - [Layouts](#layouts)
+- [MultiManager](#multimanager)
 - [Calendar](#calendar)
 - [Screenshot capture + markup editor](#screenshot-capture--markup-editor)
 - [Configuration](#configuration)
@@ -310,6 +311,51 @@ Layouts let you capture and restore a **window arrangement** (great for “work 
 
 ---
 
+## MultiManager
+
+MultiManager is a **Windows-oriented embedded window workspace manager** for keeping groups of real application windows organized inside named workspaces. It is designed for day-to-day window orchestration: capture the windows you care about, define where they should live, assign shortcuts, and quickly move or recover them later.
+
+MultiManager is separate from saved `layout` commands. A saved `layout` is a named window arrangement that can be loaded from `layouts.json`; a MultiManager workspace tracks windows as workspace members, including their current Win32 window bindings and per-window home/target rectangles. Use `layout ...` for simple saved arrangements, and use `mm ...` when you want an interactive workspace manager that can keep reconnecting and recapturing tracked windows.
+
+Because MultiManager works with live Windows desktop windows, it uses Win32 concepts such as:
+
+- **HWNDs** as the native identifiers for tracked windows.
+- **Foreground-window capture** to add the currently active window to a workspace.
+- **Top-level window enumeration** to find candidate windows and recover missing entries.
+- **Reconnecting stale window handles** when a previously captured window was closed, relaunched, or received a new HWND.
+
+### Commands
+
+- `mm` — open MultiManager.
+- `mm settings` — open MultiManager settings.
+- `mm save` — save workspaces.
+- `mm reload` — reload workspaces from disk.
+- `mm reconnect` — reconnect missing/stale windows.
+- `mm send all home` — send tracked windows to home rectangles.
+- `mm save bindings` — save HWND binding snapshot.
+- `mm restore bindings` — restore HWND binding snapshot.
+- `mm recapture all` — recapture missing/stale windows.
+
+### Typical workflow
+
+1. Run `mm` to open MultiManager.
+2. Add a workspace for a task or context.
+3. Capture windows into that workspace.
+4. Set each window's home and target rectangles.
+5. Assign a hotkey for quick workspace actions.
+6. Toggle, send home, send target, rotate, reconnect, or recapture windows as your session changes.
+
+### Capture and recapture controls
+
+- **Enter** captures the active foreground window.
+- **Escape** cancels the current capture or recapture flow.
+- **S** skips the current recapture item.
+
+### Files
+
+- `multi_manager_workspaces.json` — saved MultiManager workspaces.
+- `multi_manager_bindings.json` — saved HWND binding snapshots.
+
 ## Calendar
 
 Lightweight reminders/events that show up in search and can be displayed via widgets.
@@ -437,6 +483,8 @@ These are created/updated as you use the app (typically in the working directory
 * `calc_history.json` — calculator history
 * `fav.json` — favorites
 * `layouts.json` — window layouts
+* `multi_manager_workspaces.json` — MultiManager workspaces
+* `multi_manager_bindings.json` — MultiManager HWND binding snapshots
 * `mouse_gestures.json` — mouse gestures
 * `mouse_gestures_usage.json` — mouse gesture usage stats
 * `calendar/events.json` — calendar events
