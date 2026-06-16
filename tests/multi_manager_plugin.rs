@@ -77,7 +77,7 @@ fn non_mm_queries_do_not_call_multi_manager_plugin() {
 #[test]
 fn mm_returns_open() {
     let actions = search_mm_commands("mm");
-    assert!(actions.iter().any(|a| a.action == "mm:open"));
+    assert_eq!(actions.first().map(|a| a.action.as_str()), Some("mm:open"));
 }
 
 #[test]
@@ -94,6 +94,26 @@ fn mm_recapture_all_returns_recapture_all() {
 
 #[test]
 fn non_mm_command_parser_input_returns_no_result() {
-    assert!(search_mm_commands("todo list").is_empty());
-    assert!(search_mm_commands("mms").is_empty());
+    for query in ["todo list", "mms", "multi manager"] {
+        assert!(
+            search_mm_commands(query)
+                .iter()
+                .all(|a| !a.action.starts_with("mm:")),
+            "{query:?} returned a MultiManager command"
+        );
+    }
+}
+
+#[test]
+fn mm_send_all_home_returns_send_all_home() {
+    let actions = search_mm_commands("mm send all home");
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].action, "mm:send-all-home");
+}
+
+#[test]
+fn mm_reconnect_returns_reconnect() {
+    let actions = search_mm_commands("mm reconnect");
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].action, "mm:reconnect");
 }

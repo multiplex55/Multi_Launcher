@@ -324,6 +324,20 @@ mod tests {
     }
 
     #[test]
+    fn hotkey_validation_accepts_valid_key_with_all_modifiers() {
+        let hotkey = MmHotkey {
+            key: "F12".into(),
+            ctrl: true,
+            shift: true,
+            alt: true,
+            win: true,
+        };
+
+        assert_eq!(hotkey.validate(), MmHotkeyValidation::Valid);
+        assert!(hotkey.is_valid());
+    }
+
+    #[test]
     fn hotkey_validation_reports_empty_key_as_missing() {
         let hotkey = MmHotkey::default();
 
@@ -371,6 +385,18 @@ mod tests {
         };
 
         assert_eq!(hotkey.sequence().as_deref(), Some("Ctrl+Shift+Alt+Win+Key"));
+    }
+
+    #[test]
+    fn valid_hotkey_sequence_formats_key_and_modifiers() {
+        let hotkey = MmHotkey {
+            key: "F9".into(),
+            ctrl: true,
+            alt: true,
+            ..MmHotkey::default()
+        };
+
+        assert_eq!(hotkey.sequence().as_deref(), Some("Ctrl+Alt+F9"));
     }
 
     #[test]
