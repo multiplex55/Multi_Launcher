@@ -637,6 +637,17 @@ impl MultiManagerSettingsDialog {
                         .auto_reconnect_interval_ms
                         .store(s.auto_reconnect_interval_ms, Ordering::Relaxed);
                 }
+                ui.separator();
+                if ui.button("Save MultiManager Settings").clicked() {
+                    match crate::multi_manager::settings::save_multi_manager_settings(
+                        &app.settings_path,
+                        app.multi_manager_settings.clone(),
+                    ) {
+                        Ok(()) => app.add_success_toast("Saved MultiManager settings"),
+                        Err(err) => app
+                            .report_error_message("multi_manager.settings.save", format!("{err}")),
+                    }
+                }
             });
         self.open = open;
     }
