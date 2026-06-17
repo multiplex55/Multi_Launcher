@@ -2081,7 +2081,13 @@ mod tests {
     use super::*;
     use crate::{plugin::PluginManager, settings::Settings};
     use eframe::egui;
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::{
+        fs,
+        sync::{Arc, Mutex, MutexGuard, atomic::AtomicBool},
+    };
+    use tempfile::{TempDir, tempdir};
+
+    static NOTES_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
@@ -2115,10 +2121,138 @@ mod tests {
         }
     }
 
+    struct TempNotesDir {
+        _guard: MutexGuard<'static, ()>,
+        dir: TempDir,
+        previous_notes_dir: Option<String>,
+    }
+
+    impl TempNotesDir {
+        fn new() -> Self {
+            let guard = NOTES_ENV_LOCK.lock().expect("notes env lock");
+            let previous_notes_dir = std::env::var("ML_NOTES_DIR").ok();
+            let dir = tempdir().expect("temp notes dir");
+            unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
+            Self {
+                _guard: guard,
+                dir,
+                previous_notes_dir,
+            }
+        }
+
+        fn write_note(&self, file_name: &str, content: &str) {
+            fs::write(self.dir.path().join(file_name), content).expect("write note markdown");
+        }
+
+        fn refresh_cache(&self) {
+            crate::plugins::note::refresh_cache().unwrap();
+        }
+    }
+
+    impl Drop for TempNotesDir {
+        fn drop(&mut self) {
+            if let Some(previous_notes_dir) = &self.previous_notes_dir {
+                unsafe { std::env::set_var("ML_NOTES_DIR", previous_notes_dir) };
+            } else {
+                unsafe { std::env::remove_var("ML_NOTES_DIR") };
+            }
+            crate::plugins::note::refresh_cache().unwrap();
+        }
+    }
+
+    fn note_with_slug(title: &str, slug: &str) -> Note {
+        Note {
+            title: title.into(),
+            path: std::path::PathBuf::new(),
+            content: format!("# {title}\n\nBody"),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: slug.into(),
+            alias: None,
+            entity_refs: Vec::new(),
+        }
+    }
+
     fn render_panel_once(ctx: &egui::Context, panel: &mut NotePanel, app: &mut LauncherApp) {
         let _ = ctx.run(Default::default(), |ctx| {
             panel.ui(ctx, app);
         });
+    }
+
+    #[test]
+    fn link_menu_targets_are_cached_by_note_version() {
+        let notes_dir = TempNotesDir::new();
+        notes_dir.write_note("alpha.md", "# Alpha\n\nAlpha body");
+        notes_dir.write_note("beta.md", "# Beta\n\nBeta body");
+        notes_dir.refresh_cache();
+
+        let mut panel = NotePanel::from_note(note_with_slug("Current", "current"));
+        panel.refresh_link_menu_results_if_needed();
+        let target_refresh_count = panel.link_menu_target_refresh_count;
+
+        panel.refresh_link_menu_results_if_needed();
+
+        assert_eq!(panel.link_menu_target_refresh_count, target_refresh_count);
+    }
+
+    #[test]
+    fn link_menu_search_reuses_targets_but_refreshes_results() {
+        let notes_dir = TempNotesDir::new();
+        notes_dir.write_note("alpha.md", "# Alpha\n\nAlpha body");
+        notes_dir.write_note("beta.md", "# Beta\n\nBeta body");
+        notes_dir.refresh_cache();
+
+        let mut panel = NotePanel::from_note(note_with_slug("Current", "current"));
+        panel.refresh_link_menu_results_if_needed();
+        let target_refresh_count = panel.link_menu_target_refresh_count;
+        let result_refresh_count = panel.link_menu_result_refresh_count;
+
+        panel.link_search = "alp".into();
+        panel.refresh_link_menu_results_if_needed();
+
+        assert_eq!(panel.link_menu_target_refresh_count, target_refresh_count);
+        assert!(panel.link_menu_result_refresh_count > result_refresh_count);
+        assert!(
+            panel
+                .link_menu_results
+                .iter()
+                .any(|result| result.display_title == "Alpha")
+        );
+        assert!(
+            !panel
+                .link_menu_results
+                .iter()
+                .any(|result| result.display_title == "Beta")
+        );
+    }
+
+    #[test]
+    fn link_menu_excludes_current_note_by_slug() {
+        let notes_dir = TempNotesDir::new();
+        notes_dir.write_note("alpha.md", "# Alpha\n\nAlpha body");
+        notes_dir.refresh_cache();
+
+        let mut panel = NotePanel::from_note(note_with_slug("Alpha", "alpha"));
+        let results = panel.link_menu_results_snapshot();
+
+        assert!(!results.iter().any(|result| result.slug == "alpha"));
+    }
+
+    #[test]
+    fn link_menu_targets_refresh_when_note_version_changes() {
+        let notes_dir = TempNotesDir::new();
+        notes_dir.write_note("alpha.md", "# Alpha\n\nAlpha body");
+        notes_dir.refresh_cache();
+
+        let mut panel = NotePanel::from_note(note_with_slug("Current", "current"));
+        let results = panel.link_menu_results_snapshot();
+        assert!(results.iter().any(|result| result.display_title == "Alpha"));
+
+        notes_dir.write_note("beta.md", "# Beta\n\nBeta body");
+        notes_dir.refresh_cache();
+        let results = panel.link_menu_results_snapshot();
+
+        assert!(results.iter().any(|result| result.display_title == "Beta"));
     }
 
     #[test]
