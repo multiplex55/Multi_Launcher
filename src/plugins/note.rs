@@ -3,14 +3,14 @@ use crate::common::entity_ref::{EntityKind, EntityRef};
 use crate::common::query::parse_query_filters;
 use crate::common::slug::{register_slug, reset_slug_lookup, slugify, unique_slug};
 use crate::linking::{
-    build_index_from_notes_and_todos, format_link_id, EntityKey, LinkRef, LinkTarget,
+    EntityKey, LinkRef, LinkTarget, build_index_from_notes_and_todos, format_link_id,
 };
 use crate::plugin::Plugin;
 use crate::plugins::todo::TODO_DATA;
 use chrono::Local;
 use eframe::egui;
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +53,30 @@ pub struct Note {
     pub slug: String,
     pub alias: Option<String>,
     pub entity_refs: Vec<EntityRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoteLinkMenuTarget {
+    pub slug: String,
+    pub title: String,
+    pub alias: Option<String>,
+}
+
+impl NoteLinkMenuTarget {
+    pub fn display_title(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.title)
+    }
+
+    pub fn search_text(&self) -> String {
+        let mut text = self.title.clone();
+        if let Some(alias) = &self.alias {
+            text.push('\n');
+            text.push_str(alias);
+        }
+        text.push('\n');
+        text.push_str(&self.slug);
+        text
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -636,6 +660,23 @@ pub fn note_version() -> u64 {
 /// Return a snapshot of notes from the in-memory cache without hitting disk.
 pub fn note_cache_snapshot() -> Vec<Note> {
     CACHE.lock().map(|c| c.notes.clone()).unwrap_or_default()
+}
+
+/// Return lightweight note link menu targets from the in-memory cache without hitting disk.
+pub fn note_link_menu_targets_snapshot() -> Vec<NoteLinkMenuTarget> {
+    CACHE
+        .lock()
+        .map(|c| {
+            c.notes
+                .iter()
+                .map(|note| NoteLinkMenuTarget {
+                    slug: note.slug.clone(),
+                    title: note.title.clone(),
+                    alias: note.alias.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Return a list of all unique tags from the cached notes.
@@ -1226,7 +1267,7 @@ impl Plugin for NotePlugin {
                                 desc: "Links".into(),
                                 action: "query:note links ".into(),
                                 args: None,
-                            }]
+                            }];
                         }
                     };
 
@@ -1895,9 +1936,11 @@ Body",
         };
 
         let links = plugin.search("note links Second");
-        assert!(links
-            .iter()
-            .any(|a| a.label.contains("status=mentioned_by") && a.label.contains("type=note")));
+        assert!(
+            links
+                .iter()
+                .any(|a| a.label.contains("status=mentioned_by") && a.label.contains("type=note"))
+        );
         assert!(links.iter().any(|a| a.action.starts_with("note:open:")));
 
         restore_cache(original);
@@ -1935,15 +1978,21 @@ Body",
             watcher: None,
         };
         let links = plugin.search("note links Roadmap");
-        assert!(links
-            .iter()
-            .any(|a| a.label.starts_with("Ambiguous note query")));
-        assert!(links
-            .iter()
-            .any(|a| a.action == "query:note links slug:roadmap-a"));
-        assert!(links
-            .iter()
-            .any(|a| a.action == "query:note links slug:roadmap-b"));
+        assert!(
+            links
+                .iter()
+                .any(|a| a.label.starts_with("Ambiguous note query"))
+        );
+        assert!(
+            links
+                .iter()
+                .any(|a| a.action == "query:note links slug:roadmap-a")
+        );
+        assert!(
+            links
+                .iter()
+                .any(|a| a.action == "query:note links slug:roadmap-b")
+        );
         restore_cache(original);
     }
     #[test]
