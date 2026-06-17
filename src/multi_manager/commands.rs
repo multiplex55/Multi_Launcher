@@ -1,6 +1,6 @@
 use crate::actions::Action;
 
-const COMMANDS: [(&str, &str, &str); 10] = [
+const COMMANDS: [(&str, &str, &str); 9] = [
     ("mm", "Open MultiManager", "mm:open"),
     ("mm settings", "Open MultiManager settings", "mm:settings"),
     ("mm save", "Save MultiManager workspaces", "mm:save"),
@@ -30,7 +30,6 @@ const COMMANDS: [(&str, &str, &str); 10] = [
         "Recapture all MultiManager workspaces",
         "mm:recapture-all",
     ),
-    ("mm import", "Import MultiManager workspaces", "mm:import"),
 ];
 
 pub fn all_mm_commands() -> Vec<Action> {
@@ -79,7 +78,6 @@ mod tests {
             "mm:save-bindings",
             "mm:restore-bindings",
             "mm:recapture-all",
-            "mm:import",
         ];
 
         for expected_action in expected {
@@ -177,10 +175,9 @@ mod tests {
     }
 
     #[test]
-    fn mm_import_returns_import() {
+    fn mm_import_is_not_advertised_until_wired() {
         let actions = search_mm_commands("mm import");
-        assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].action, "mm:import");
+        assert!(actions.is_empty());
     }
 
     #[test]
