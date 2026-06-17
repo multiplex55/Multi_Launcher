@@ -1222,6 +1222,8 @@ impl NotePanel {
                 self.refresh_fast_derived();
                 self.refresh_heavy_derived(true);
                 self.finish_save(app);
+                self.link_menu_targets_version = None;
+                self.invalidate_link_menu_results();
             }
             Ok(false) => {
                 self.overwrite_prompt = true;
@@ -1725,6 +1727,8 @@ impl NotePanel {
                     );
                     return;
                 }
+                self.link_menu_targets_version = None;
+                self.invalidate_link_menu_results();
                 target_slug = slugify(normalized_name);
                 link_target = target_slug.clone();
             }
