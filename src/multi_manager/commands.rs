@@ -79,6 +79,7 @@ mod tests {
             "mm:save-bindings",
             "mm:restore-bindings",
             "mm:recapture-all",
+            "mm:import",
         ];
 
         for expected_action in expected {
@@ -120,9 +121,11 @@ mod tests {
     }
 
     #[test]
-    fn mm_save_returns_save() {
+    fn mm_save_returns_save_and_save_bindings() {
         let actions = search_mm_commands("mm save");
-        assert!(actions.iter().any(|a| a.action == "mm:save"));
+        let action_ids: Vec<_> = actions.iter().map(|a| a.action.as_str()).collect();
+
+        assert_eq!(action_ids, ["mm:save", "mm:save-bindings"]);
     }
 
     #[test]
@@ -134,7 +137,29 @@ mod tests {
     #[test]
     fn mm_recapture_all_returns_recapture_all() {
         let actions = search_mm_commands("mm recapture all");
-        assert!(actions.iter().any(|a| a.action == "mm:recapture-all"));
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, "mm:recapture-all");
+    }
+
+    #[test]
+    fn mm_save_bindings_returns_save_bindings() {
+        let actions = search_mm_commands("mm save bindings");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, "mm:save-bindings");
+    }
+
+    #[test]
+    fn mm_restore_bindings_returns_restore_bindings() {
+        let actions = search_mm_commands("mm restore bindings");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, "mm:restore-bindings");
+    }
+
+    #[test]
+    fn mm_commands_are_case_insensitive() {
+        let actions = search_mm_commands("MM RECONNECT");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, "mm:reconnect");
     }
 
     #[test]
@@ -149,6 +174,13 @@ mod tests {
         let actions = search_mm_commands("mm reconnect");
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].action, "mm:reconnect");
+    }
+
+    #[test]
+    fn mm_import_returns_import() {
+        let actions = search_mm_commands("mm import");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, "mm:import");
     }
 
     #[test]
