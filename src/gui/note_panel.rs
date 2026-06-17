@@ -1693,15 +1693,15 @@ impl NotePanel {
         id: egui::Id,
         app: &mut LauncherApp,
     ) {
-        let normalized_name = self.link_new_name.trim();
+        let normalized_name = self.link_new_name.trim().to_string();
         if normalized_name.is_empty() {
             return;
         }
 
-        let mut target_slug = slugify(normalized_name);
+        let mut target_slug = slugify(&normalized_name);
         let mut link_target = normalized_name.to_string();
 
-        match resolve_note_query(normalized_name) {
+        match resolve_note_query(&normalized_name) {
             NoteTarget::Resolved(slug) => {
                 target_slug = slug.clone();
                 if let Some(note) = load_notes()
@@ -1720,7 +1720,7 @@ impl NotePanel {
                 }
             }
             NoteTarget::Broken => {
-                if let Err(err) = append_note(normalized_name, "") {
+                if let Err(err) = append_note(&normalized_name, "") {
                     app.report_error(
                         "ui operation",
                         format!("Failed to create note while linking: {err}"),
@@ -1729,7 +1729,7 @@ impl NotePanel {
                 }
                 self.link_menu_targets_version = None;
                 self.invalidate_link_menu_results();
-                target_slug = slugify(normalized_name);
+                target_slug = slugify(&normalized_name);
                 link_target = target_slug.clone();
             }
         }
