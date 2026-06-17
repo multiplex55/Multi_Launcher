@@ -14,6 +14,7 @@ It’s designed to be “one hotkey away” from:
 
 ---
 
+
 ## Table of contents
 
 - [Quick start](#quick-start)
@@ -30,6 +31,7 @@ It’s designed to be “one hotkey away” from:
 - [Data files](#data-files)
 - [Building](#building)
 - [Troubleshooting](#troubleshooting)
+- [Manual smoke tests](#manual-smoke-tests)
 
 ---
 
@@ -527,6 +529,12 @@ These are created/updated as you use the app (typically in the working directory
 cargo build --release
 ```
 
+### Run from source
+
+```bash
+cargo run
+```
+
 ### Notes
 
 * The project uses `rdev` and may require the `unstable_grab` feature for global input capture in some environments.
@@ -563,3 +571,8 @@ cargo build --release
 * If capture keeps selecting the launcher, keep `ignore_launcher_window_on_capture` enabled, focus the target window, and then press `Enter`.
 
 ---
+
+## Manual smoke tests
+
+Win32/UI Automation behavior is intentionally validated manually instead of in CI. Use [`docs/manual-smoke-tests.md`](docs/manual-smoke-tests.md) for MultiManager capture/reconnect/recapture checks, browser-tab activation, and mouse gesture verification.
+

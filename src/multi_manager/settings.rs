@@ -21,6 +21,11 @@ mod tests {
 
         let mut original = Settings::default();
         original.hotkey = Some("Ctrl+Alt+M".to_string());
+        original.enable_toasts = false;
+        original.plugin_settings.insert(
+            "mouse_gestures".to_string(),
+            serde_json::json!({ "enabled": true, "debug": true }),
+        );
         original
             .save(&settings_path)
             .expect("save original settings");
@@ -46,6 +51,11 @@ mod tests {
 
         let restored = Settings::load(&settings_path).expect("reload settings");
         assert_eq!(restored.hotkey, Some("Ctrl+Alt+M".to_string()));
+        assert!(!restored.enable_toasts);
+        assert_eq!(
+            restored.plugin_settings.get("mouse_gestures"),
+            Some(&serde_json::json!({ "enabled": true, "debug": true }))
+        );
         assert_eq!(restored.multi_manager, updated);
     }
 }
