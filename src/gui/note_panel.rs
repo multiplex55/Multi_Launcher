@@ -1659,6 +1659,7 @@ impl NotePanel {
                     egui::text::CCursor::new(cursor),
                 )));
             state.store(ctx, id);
+            self.mark_content_changed(ctx.input(|i| i.time));
             return;
         }
 
@@ -1677,6 +1678,7 @@ impl NotePanel {
                 egui::text::CCursor::new(cursor),
             )));
         state.store(ctx, id);
+        self.mark_content_changed(ctx.input(|i| i.time));
     }
 
     pub fn set_link_new_name(&mut self, name: impl Into<String>) {
@@ -2147,6 +2149,60 @@ mod tests {
         panel.insert_link(&ctx, id);
         assert_eq!(panel.note.content, "hello [world](http://example.com)");
         assert!(panel.pending_selection.is_none());
+    }
+
+    #[test]
+    fn programmatic_selection_insertion_marks_derived_dirty_and_preserves_cursor() {
+        let ctx = egui::Context::default();
+        let mut panel = NotePanel::from_note(empty_note("hello world"));
+        let id = egui::Id::new("note_content");
+        panel.pending_selection = Some((6, 11));
+        assert!(!panel.fast_derived_dirty);
+        assert!(!panel.heavy_recompute_requested);
+
+        panel.insert_text_at_cursor_or_selection(&ctx, id, "[[Other]]");
+
+        assert_eq!(panel.note.content, "hello [[Other]]");
+        let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
+        let idx = state.cursor.char_range().unwrap().primary.index;
+        assert_eq!(idx, "hello [[Other]]".chars().count());
+        assert!(panel.fast_derived_dirty);
+        assert!(panel.heavy_recompute_requested);
+        assert!(panel.last_edit_at_secs.is_some());
+
+        panel.refresh_fast_derived();
+        assert_eq!(panel.derived.wiki_links, vec!["Other".to_string()]);
+        assert!(!panel.fast_derived_dirty);
+    }
+
+    #[test]
+    fn programmatic_cursor_insertion_marks_derived_dirty_and_preserves_cursor() {
+        let ctx = egui::Context::default();
+        let mut panel = NotePanel::from_note(empty_note("hello "));
+        let id = egui::Id::new("note_content");
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(6),
+            )));
+        state.store(&ctx, id);
+        assert!(!panel.fast_derived_dirty);
+        assert!(!panel.heavy_recompute_requested);
+
+        panel.insert_text_at_cursor_or_selection(&ctx, id, "[[Other]]");
+
+        assert_eq!(panel.note.content, "hello [[Other]]");
+        let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
+        let idx = state.cursor.char_range().unwrap().primary.index;
+        assert_eq!(idx, "hello [[Other]]".chars().count());
+        assert!(panel.fast_derived_dirty);
+        assert!(panel.heavy_recompute_requested);
+        assert!(panel.last_edit_at_secs.is_some());
+
+        panel.refresh_fast_derived();
+        assert_eq!(panel.derived.wiki_links, vec!["Other".to_string()]);
+        assert!(!panel.fast_derived_dirty);
     }
 
     #[test]
