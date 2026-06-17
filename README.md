@@ -553,4 +553,13 @@ cargo build --release
 * Run `tab cache` to rebuild the UI Automation cache.
 * Some browsers / window states may block UIA access; the plugin may fall back to click simulation.
 
+### MultiManager cannot find or move a window
+
+* Run `mm reconnect` after restarting apps or the launcher so MultiManager can refresh stale window handles.
+* Use `mm recapture all` when a window is missing, closed and reopened, or ambiguous.
+* Ensure the target app is not running elevated while Multi Launcher is running non-elevated.
+* Check whether the workspace or window is disabled before sending, restoring, or moving it.
+* Use **Refresh Titles** if a captured app changed its window title.
+* If capture keeps selecting the launcher, keep `ignore_launcher_window_on_capture` enabled, focus the target window, and then press `Enter`.
+
 ---
