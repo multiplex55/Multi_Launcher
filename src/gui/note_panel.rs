@@ -1,17 +1,17 @@
-use crate::actions::screenshot::{capture, Mode as ScreenshotMode};
+use crate::actions::screenshot::{Mode as ScreenshotMode, capture};
 use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
-use crate::plugin::Plugin;
 use crate::plugins::note::{
-    append_note, assets_dir, available_tags, image_files, load_notes, note_cache_snapshot,
-    note_version, resolve_note_query, save_note, Note, NoteExternalOpen, NotePlugin, NoteTarget,
+    Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget, append_note, assets_dir,
+    available_tags, image_files, load_notes, note_cache_snapshot, note_link_menu_targets_snapshot,
+    note_version, resolve_note_query, save_note,
 };
-use crate::plugins::todo::{load_todos, todo_version, TODO_FILE};
-use eframe::egui::{self, popup, Color32, FontId, Key};
+use crate::plugins::todo::{TODO_FILE, load_todos, todo_version};
+use eframe::egui::{self, Color32, FontId, Key, popup};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use image::imageops::FilterType;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -29,6 +29,7 @@ use url::Url;
 
 const BACKLINK_PAGE_SIZE: usize = 12;
 const HEAVY_RECOMPUTE_IDLE_DEBOUNCE: Duration = Duration::from_millis(250);
+const NOTE_LINK_CONTEXT_MENU_RESULT_LIMIT: usize = 50;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BacklinkTab {
@@ -55,6 +56,20 @@ struct BacklinkRow {
     snippet: String,
     note_slug: Option<String>,
     todo_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LinkMenuResultsKey {
+    notes_version: u64,
+    current_slug: String,
+    query: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LinkMenuResult {
+    slug: String,
+    display_title: String,
+    search_text: String,
 }
 
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
@@ -154,6 +169,14 @@ pub struct NotePanel {
     pub open: bool,
     note: Note,
     link_search: String,
+    link_menu_targets: Vec<LinkMenuResult>,
+    link_menu_targets_version: Option<u64>,
+    link_menu_results: Vec<LinkMenuResult>,
+    link_menu_results_key: Option<LinkMenuResultsKey>,
+    #[cfg(test)]
+    link_menu_target_refresh_count: usize,
+    #[cfg(test)]
+    link_menu_result_refresh_count: usize,
     image_search: String,
     tag_search: String,
     preview_mode: bool,
@@ -261,6 +284,14 @@ impl NotePanel {
             open: true,
             note,
             link_search: String::new(),
+            link_menu_targets: Vec::new(),
+            link_menu_targets_version: None,
+            link_menu_results: Vec::new(),
+            link_menu_results_key: None,
+            #[cfg(test)]
+            link_menu_target_refresh_count: 0,
+            #[cfg(test)]
+            link_menu_result_refresh_count: 0,
             image_search: String::new(),
             tag_search: String::new(),
             preview_mode: true,
@@ -371,6 +402,97 @@ impl NotePanel {
         if self.heavy_recompute_requested {
             ctx.request_repaint_after(HEAVY_RECOMPUTE_IDLE_DEBOUNCE);
         }
+    }
+
+    fn refresh_link_menu_targets_if_needed(&mut self) {
+        let current_version = note_version();
+        if self.link_menu_targets_version == Some(current_version) {
+            return;
+        }
+
+        self.link_menu_targets = note_link_menu_targets_snapshot()
+            .into_iter()
+            .map(|target: NoteLinkMenuTarget| LinkMenuResult {
+                display_title: target.display_title().to_string(),
+                search_text: target.search_text(),
+                slug: target.slug,
+            })
+            .collect();
+        self.link_menu_targets_version = Some(current_version);
+        self.invalidate_link_menu_results();
+        #[cfg(test)]
+        {
+            self.link_menu_target_refresh_count += 1;
+        }
+    }
+
+    fn refresh_link_menu_results_if_needed(&mut self) {
+        self.refresh_link_menu_targets_if_needed();
+
+        let current_version = note_version();
+        let query = self.link_search.trim().to_lowercase();
+        let key = LinkMenuResultsKey {
+            notes_version: current_version,
+            current_slug: self.note.slug.clone(),
+            query: query.clone(),
+        };
+        if self.link_menu_results_key.as_ref() == Some(&key) {
+            return;
+        }
+
+        let mut results: Vec<LinkMenuResult> = self
+            .link_menu_targets
+            .iter()
+            .filter(|target| target.slug != self.note.slug)
+            .cloned()
+            .collect();
+
+        if query.is_empty() {
+            results.sort_by(|a, b| {
+                a.display_title
+                    .to_lowercase()
+                    .cmp(&b.display_title.to_lowercase())
+                    .then_with(|| a.slug.cmp(&b.slug))
+            });
+        } else {
+            let matcher = SkimMatcherV2::default();
+            let mut scored: Vec<(i64, LinkMenuResult)> = results
+                .into_iter()
+                .filter_map(|target| {
+                    matcher
+                        .fuzzy_match(&target.search_text, &query)
+                        .map(|score| (score, target))
+                })
+                .collect();
+            scored.sort_by(|(score_a, a), (score_b, b)| {
+                score_b
+                    .cmp(score_a)
+                    .then_with(|| {
+                        a.display_title
+                            .to_lowercase()
+                            .cmp(&b.display_title.to_lowercase())
+                    })
+                    .then_with(|| a.slug.cmp(&b.slug))
+            });
+            results = scored.into_iter().map(|(_, target)| target).collect();
+        }
+
+        results.truncate(NOTE_LINK_CONTEXT_MENU_RESULT_LIMIT);
+        self.link_menu_results = results;
+        self.link_menu_results_key = Some(key);
+        #[cfg(test)]
+        {
+            self.link_menu_result_refresh_count += 1;
+        }
+    }
+
+    fn link_menu_results_snapshot(&mut self) -> Vec<LinkMenuResult> {
+        self.refresh_link_menu_results_if_needed();
+        self.link_menu_results.clone()
+    }
+
+    fn invalidate_link_menu_results(&mut self) {
+        self.link_menu_results_key = None;
     }
 
     pub fn note_slug(&self) -> &str {
@@ -1275,22 +1397,25 @@ impl NotePanel {
                 }
             });
             ui.text_edit_singleline(&mut self.link_search);
-            let plugin = NotePlugin::default();
-            let results = plugin.search(&format!("note open {}", self.link_search));
+            let results = self.link_menu_results_snapshot();
             egui::ScrollArea::vertical()
                 .max_height(200.0)
                 .show(ui, |ui| {
-                    for action in &results {
-                        let title = action.label.clone();
-                        if slugify(&title) == self.note.slug {
-                            continue;
-                        }
+                    if results.is_empty() {
+                        ui.label("No matching notes");
+                    }
+                    for target in &results {
+                        let title = target.display_title.clone();
                         if ui.button(&title).clicked() {
                             let insert = format!("[[{title}]]");
                             self.insert_text_at_cursor_or_selection(ctx, id, &insert);
                             self.link_search.clear();
+                            self.invalidate_link_menu_results();
                             ui.close_menu();
                         }
+                    }
+                    if results.len() == NOTE_LINK_CONTEXT_MENU_RESULT_LIMIT {
+                        ui.small("Showing first 50 matches. Type to narrow results.");
                     }
                 });
         });
@@ -1950,7 +2075,7 @@ mod tests {
     use super::*;
     use crate::{plugin::PluginManager, settings::Settings};
     use eframe::egui;
-    use std::sync::{atomic::AtomicBool, Arc};
+    use std::sync::{Arc, atomic::AtomicBool};
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
