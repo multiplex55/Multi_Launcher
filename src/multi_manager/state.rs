@@ -13,6 +13,7 @@ const AUTO_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 pub struct MultiManagerState {
     pub dirty: bool,
     pub pending_capture: Option<PendingCaptureAction>,
+    pub queued_capture: Option<PendingCaptureAction>,
     pub recapture_queue: VecDeque<RecaptureQueueItem>,
     pub recapture_active: bool,
     pub capture_session: Option<crate::multi_manager::capture::CaptureSession>,
@@ -52,6 +53,7 @@ impl MultiManagerState {
         Self {
             dirty: false,
             pending_capture: None,
+            queued_capture: None,
             recapture_queue: VecDeque::new(),
             recapture_active: false,
             capture_session: None,
@@ -131,6 +133,8 @@ impl MultiManagerState {
 
     pub fn shutdown(&mut self) {
         self.capture_session = None;
+        self.pending_capture = None;
+        self.queued_capture = None;
         self.runtime.shutdown();
     }
 
