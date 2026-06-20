@@ -297,6 +297,8 @@ impl LauncherApp {
         }
 
         self.multi_manager.queued_capture = None;
+        self.multi_manager_pop_recapture_queue_front_for_action(&action);
+
         self.multi_manager.pending_capture = Some(action);
         self.multi_manager_start_capture_session(ctx);
         self.multi_manager
@@ -306,6 +308,28 @@ impl LauncherApp {
             .store(true, Ordering::Relaxed);
         self.add_success_toast(success_message);
         self.multi_manager_validate_capture_state();
+    }
+
+    fn multi_manager_pop_recapture_queue_front_for_action(
+        &mut self,
+        action: &PendingCaptureAction,
+    ) {
+        if let PendingCaptureAction::RecaptureWindow {
+            workspace_id,
+            window_index,
+        } = action
+        {
+            if self
+                .multi_manager
+                .recapture_queue
+                .front()
+                .is_some_and(|item| {
+                    item.workspace_id == *workspace_id && item.window_index == *window_index
+                })
+            {
+                self.multi_manager.recapture_queue.pop_front();
+            }
+        }
     }
 
     fn multi_manager_capture_target_exists(
@@ -440,6 +464,8 @@ impl LauncherApp {
             return;
         }
 
+        self.multi_manager_pop_recapture_queue_front_for_action(&action);
+
         self.multi_manager.pending_capture = Some(action);
         self.multi_manager_start_capture_session(ctx);
         self.multi_manager
@@ -486,7 +512,15 @@ impl LauncherApp {
         self.multi_manager.capture_session = None;
         let recapture_has_more_work =
             self.multi_manager.recapture_active && !self.multi_manager.recapture_queue.is_empty();
-        if !recapture_has_more_work {
+        if recapture_has_more_work {
+            self.multi_manager.queued_capture =
+                self.multi_manager.recapture_queue.front().map(|item| {
+                    PendingCaptureAction::RecaptureWindow {
+                        workspace_id: item.workspace_id.clone(),
+                        window_index: item.window_index,
+                    }
+                });
+        } else {
             self.multi_manager.recapture_active = false;
             self.multi_manager
                 .runtime
