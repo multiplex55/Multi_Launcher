@@ -36,17 +36,24 @@ pub struct CaptureSession {
 
 impl Drop for CaptureSession {
     fn drop(&mut self) {
-        info!("stopping capture session");
+        info!("capture session shutdown requested");
         self.cancel.store(true, Ordering::Relaxed);
         #[cfg(windows)]
         if let Some(thread_id) = &self.hook_thread_id {
             let thread_id = thread_id.load(Ordering::Relaxed);
             if thread_id != 0 {
                 windows_backend::post_stop_message(thread_id);
+            } else {
+                debug!("capture hook thread id unavailable during shutdown");
             }
         }
         if let Some(join) = self.join.take() {
-            let _ = join.join();
+            if join.join().is_err() {
+                #[cfg(windows)]
+                warn!("capture session thread panicked during shutdown");
+                #[cfg(not(windows))]
+                debug!("capture session thread panicked during shutdown");
+            }
         }
     }
 }
@@ -61,6 +68,33 @@ pub struct CaptureKeySnapshot {
 impl CaptureKeySnapshot {
     fn any_down(self) -> bool {
         self.enter || self.escape || self.s
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct HookLifecycleState {
+    installed: bool,
+    callback_state_present: bool,
+}
+
+impl HookLifecycleState {
+    fn reserve(&mut self) -> Result<(), &'static str> {
+        if self.callback_state_present {
+            return Err("another keyboard hook capture session is already active");
+        }
+        self.callback_state_present = true;
+        Ok(())
+    }
+
+    fn mark_installed(&mut self) {
+        self.installed = true;
+    }
+
+    fn clear(&mut self) -> bool {
+        let was_stale = self.callback_state_present && !self.installed;
+        self.installed = false;
+        self.callback_state_present = false;
+        was_stale
     }
 }
 
@@ -183,10 +217,17 @@ mod windows_backend {
         SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_QUIT, WM_SYSKEYDOWN,
     };
 
-    struct HookState {
+    #[derive(Clone)]
+    struct HookCallbackState {
         tx: mpsc::Sender<CaptureEvent>,
         ctx: eframe::egui::Context,
+        cancel: Arc<AtomicBool>,
         thread_id: u32,
+    }
+
+    struct HookState {
+        callback: HookCallbackState,
+        lifecycle: HookLifecycleState,
     }
 
     static HOOK_STATE: OnceLock<Mutex<Option<HookState>>> = OnceLock::new();
@@ -207,9 +248,27 @@ mod windows_backend {
             let state_lock = HOOK_STATE.get_or_init(|| Mutex::new(None));
             match state_lock.lock() {
                 Ok(mut state) if state.is_none() => {
-                    *state = Some(HookState { tx, ctx, thread_id });
+                    let mut lifecycle = HookLifecycleState::default();
+                    if let Err(err) = lifecycle.reserve() {
+                        let _ = setup_tx.send(Err(err.to_string()));
+                        return;
+                    }
+                    *state = Some(HookState {
+                        callback: HookCallbackState {
+                            tx,
+                            ctx,
+                            cancel: Arc::clone(&thread_cancel),
+                            thread_id,
+                        },
+                        lifecycle,
+                    });
                 }
-                Ok(_) => {
+                Ok(mut state) => {
+                    if let Some(stale) = state.as_mut().filter(|state| !state.lifecycle.installed) {
+                        warn!("cleaning up stale Windows capture hook state before startup");
+                        stale.lifecycle.clear();
+                        *state = None;
+                    }
                     let _ = setup_tx.send(Err(
                         "another keyboard hook capture session is already active".to_string(),
                     ));
@@ -230,6 +289,7 @@ mod windows_backend {
                 )
             } {
                 Ok(hook) => {
+                    mark_installed();
                     info!("Windows capture keyboard hook installed");
                     let _ = setup_tx.send(Ok(()));
                     hook
@@ -250,10 +310,10 @@ mod windows_backend {
                 }
             }
 
-            info!("Windows hook capture session stopped");
+            info!("Windows hook capture session message loop exiting");
             match unsafe { UnhookWindowsHookEx(hook) } {
-                Ok(()) => info!("Windows capture keyboard hook cleaned up"),
-                Err(err) => warn!(error = %err, "Windows capture keyboard hook cleanup failed"),
+                Ok(()) => info!("Windows capture keyboard hook uninstall succeeded"),
+                Err(err) => warn!(error = %err, "Windows capture keyboard hook uninstall failed"),
             }
             clear_state();
         });
@@ -277,8 +337,11 @@ mod windows_backend {
     }
 
     pub fn post_stop_message(thread_id: u32) {
-        unsafe {
-            let _ = PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+        match unsafe { PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) } {
+            Ok(()) => debug!(thread_id, "posted capture hook message-loop wake"),
+            Err(err) => {
+                warn!(thread_id, error = %err, "failed to post capture hook message-loop wake")
+            }
         }
     }
 
@@ -300,18 +363,16 @@ mod windows_backend {
                     ?action,
                     "capture control key received by Windows hook backend"
                 );
-                let captured = (action == CaptureKeyAction::Confirm)
-                    .then(win::active_window)
-                    .flatten();
-                log_capture_metadata(&captured);
-                if let Some(state_lock) = HOOK_STATE.get() {
-                    if let Ok(state) = state_lock.lock() {
-                        if let Some(state) = state.as_ref() {
-                            let _ = state.tx.send(CaptureEvent { action, captured });
-                            state.ctx.request_repaint();
-                            post_stop_message(state.thread_id);
-                        }
-                    }
+                let callback = hook_callback_state();
+                if let Some(callback) = callback {
+                    callback.cancel.store(true, Ordering::Relaxed);
+                    let captured = (action == CaptureKeyAction::Confirm)
+                        .then(win::active_window)
+                        .flatten();
+                    log_capture_metadata(&captured);
+                    let _ = callback.tx.send(CaptureEvent { action, captured });
+                    callback.ctx.request_repaint();
+                    post_stop_message(callback.thread_id);
                 }
                 return LRESULT(1);
             }
@@ -319,9 +380,31 @@ mod windows_backend {
         unsafe { CallNextHookEx(HHOOK::default(), code, wparam, lparam) }
     }
 
+    fn hook_callback_state() -> Option<HookCallbackState> {
+        HOOK_STATE
+            .get()
+            .and_then(|state_lock| state_lock.lock().ok())
+            .and_then(|state| state.as_ref().map(|state| state.callback.clone()))
+    }
+
+    fn mark_installed() {
+        if let Some(state_lock) = HOOK_STATE.get() {
+            if let Ok(mut state) = state_lock.lock() {
+                if let Some(state) = state.as_mut() {
+                    state.lifecycle.mark_installed();
+                }
+            }
+        }
+    }
+
     fn clear_state() {
         if let Some(state_lock) = HOOK_STATE.get() {
             if let Ok(mut state) = state_lock.lock() {
+                if let Some(state) = state.as_mut() {
+                    if state.lifecycle.clear() {
+                        warn!("cleaning up stale Windows capture hook state");
+                    }
+                }
                 *state = None;
             }
         }
@@ -334,6 +417,33 @@ mod tests {
 
     fn snap(enter: bool, escape: bool, s: bool) -> CaptureKeySnapshot {
         CaptureKeySnapshot { enter, escape, s }
+    }
+
+    #[test]
+    fn lifecycle_rejects_second_active_session() {
+        let mut lifecycle = HookLifecycleState::default();
+        assert_eq!(lifecycle.reserve(), Ok(()));
+        assert_eq!(
+            lifecycle.reserve(),
+            Err("another keyboard hook capture session is already active")
+        );
+    }
+
+    #[test]
+    fn lifecycle_reports_stale_cleanup_before_install() {
+        let mut lifecycle = HookLifecycleState::default();
+        assert_eq!(lifecycle.reserve(), Ok(()));
+        assert!(lifecycle.clear());
+        assert_eq!(lifecycle, HookLifecycleState::default());
+    }
+
+    #[test]
+    fn lifecycle_clear_after_install_is_not_stale() {
+        let mut lifecycle = HookLifecycleState::default();
+        assert_eq!(lifecycle.reserve(), Ok(()));
+        lifecycle.mark_installed();
+        assert!(!lifecycle.clear());
+        assert_eq!(lifecycle, HookLifecycleState::default());
     }
 
     #[test]
