@@ -397,6 +397,7 @@ impl LauncherApp {
                     item.window_index,
                     ctx,
                 );
+                self.multi_manager_validate_capture_state();
             } else {
                 self.multi_manager_finish_recapture_queue();
                 ctx.request_repaint();
@@ -477,6 +478,7 @@ impl LauncherApp {
                 ctx.request_repaint();
             }
         }
+        self.multi_manager_validate_capture_state();
     }
 
     fn multi_manager_finish_capture(&mut self) {
@@ -526,6 +528,7 @@ impl LauncherApp {
             .control
             .capture_pending
             .store(true, Ordering::Relaxed);
+        self.multi_manager_validate_capture_state();
     }
 
     fn multi_manager_start_recapture_queue(&mut self, queue: Vec<RecaptureQueueItem>) {
@@ -544,6 +547,7 @@ impl LauncherApp {
     }
 
     fn multi_manager_validate_capture_state(&self) {
+        self.multi_manager.validate_capture_state_debug();
         debug_assert!(
             self.multi_manager.pending_capture.is_some()
                 || self.multi_manager.capture_session.is_none(),
