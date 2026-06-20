@@ -1,9 +1,19 @@
+//! Capture mode is a temporary, process-global input state used while the user
+//! focuses the target application they want to capture. Because focus is outside
+//! Multi Launcher during this mode, capture-control keys must be observed
+//! globally rather than through egui focus. `Enter`, `Escape`, and `S` are the
+//! capture-control keys; whenever this module handles one of them it must
+//! suppress that key so the focused target application does not also receive it.
+
 use crate::multi_manager::win::{self, CaptureKeyAction, CapturedWindow};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use tracing::{debug, info};
+#[cfg(windows)]
+use tracing::{error, warn};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(12);
 const VK_ENTER: u32 = 0x0D;
@@ -20,11 +30,21 @@ pub struct CaptureSession {
     pub rx: mpsc::Receiver<CaptureEvent>,
     cancel: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
+    #[cfg(windows)]
+    hook_thread_id: Option<Arc<std::sync::atomic::AtomicU32>>,
 }
 
 impl Drop for CaptureSession {
     fn drop(&mut self) {
+        info!("stopping capture session");
         self.cancel.store(true, Ordering::Relaxed);
+        #[cfg(windows)]
+        if let Some(thread_id) = &self.hook_thread_id {
+            let thread_id = thread_id.load(Ordering::Relaxed);
+            if thread_id != 0 {
+                windows_backend::post_stop_message(thread_id);
+            }
+        }
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
@@ -81,7 +101,26 @@ impl CaptureKeyEdgeDetector {
     }
 }
 
+#[cfg(windows)]
 pub fn start_capture_session(ctx: eframe::egui::Context) -> CaptureSession {
+    info!("starting capture session with Windows hook backend");
+    match windows_backend::start_hook_capture_session(ctx.clone()) {
+        Ok(session) => session,
+        Err(err) => {
+            warn!(error = %err, "Windows hook capture setup failed; falling back to polling backend");
+            start_polling_capture_session(ctx)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn start_capture_session(ctx: eframe::egui::Context) -> CaptureSession {
+    info!("starting capture session with portable polling backend");
+    start_polling_capture_session(ctx)
+}
+
+fn start_polling_capture_session(ctx: eframe::egui::Context) -> CaptureSession {
+    info!("starting polling capture session");
     let (tx, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let thread_cancel = Arc::clone(&cancel);
@@ -90,20 +129,25 @@ pub fn start_capture_session(ctx: eframe::egui::Context) -> CaptureSession {
         while !thread_cancel.load(Ordering::Relaxed) {
             thread::sleep(POLL_INTERVAL);
             if let Some(action) = detector.update(current_snapshot()) {
+                info!(?action, "capture control key received by polling backend");
                 let captured = (action == CaptureKeyAction::Confirm)
                     .then(win::active_window)
                     .flatten();
+                log_capture_metadata(&captured);
                 let _ = tx.send(CaptureEvent { action, captured });
                 ctx.request_repaint();
                 break;
             }
         }
+        debug!("polling capture session stopped");
     });
 
     CaptureSession {
         rx,
         cancel,
         join: Some(join),
+        #[cfg(windows)]
+        hook_thread_id: None,
     }
 }
 
@@ -112,6 +156,175 @@ fn current_snapshot() -> CaptureKeySnapshot {
         enter: win::capture_key_is_down(VK_ENTER),
         escape: win::capture_key_is_down(VK_ESCAPE),
         s: win::capture_key_is_down(VK_S),
+    }
+}
+
+fn log_capture_metadata(captured: &Option<CapturedWindow>) {
+    if let Some(window) = captured {
+        info!(title = %window.title, executable = %window.executable, process_path = ?window.process_path, "captured foreground window metadata");
+    } else {
+        info!("no foreground window metadata captured");
+    }
+}
+
+#[cfg(windows)]
+mod windows_backend {
+    use super::*;
+    use std::sync::Mutex;
+    use std::sync::OnceLock;
+    use std::sync::atomic::AtomicU32;
+    use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        VK_ESCAPE as WIN_VK_ESCAPE, VK_RETURN, VK_S,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, PostThreadMessageW,
+        SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_QUIT, WM_SYSKEYDOWN,
+    };
+
+    struct HookState {
+        tx: mpsc::Sender<CaptureEvent>,
+        ctx: eframe::egui::Context,
+        thread_id: u32,
+    }
+
+    static HOOK_STATE: OnceLock<Mutex<Option<HookState>>> = OnceLock::new();
+
+    pub fn start_hook_capture_session(
+        ctx: eframe::egui::Context,
+    ) -> Result<CaptureSession, String> {
+        let (tx, rx) = mpsc::channel();
+        let (setup_tx, setup_rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let thread_cancel = Arc::clone(&cancel);
+        let hook_thread_id = Arc::new(AtomicU32::new(0));
+        let hook_thread_id_for_thread = Arc::clone(&hook_thread_id);
+
+        let join = thread::spawn(move || {
+            let thread_id = unsafe { GetCurrentThreadId() };
+            hook_thread_id_for_thread.store(thread_id, Ordering::Relaxed);
+            let state_lock = HOOK_STATE.get_or_init(|| Mutex::new(None));
+            match state_lock.lock() {
+                Ok(mut state) if state.is_none() => {
+                    *state = Some(HookState { tx, ctx, thread_id });
+                }
+                Ok(_) => {
+                    let _ = setup_tx.send(Err(
+                        "another keyboard hook capture session is already active".to_string(),
+                    ));
+                    return;
+                }
+                Err(_) => {
+                    let _ = setup_tx.send(Err("keyboard hook state lock is poisoned".to_string()));
+                    return;
+                }
+            }
+
+            let hook = match unsafe {
+                SetWindowsHookExW(
+                    WH_KEYBOARD_LL,
+                    Some(low_level_keyboard_proc),
+                    HINSTANCE::default(),
+                    0,
+                )
+            } {
+                Ok(hook) => {
+                    info!("Windows capture keyboard hook installed");
+                    let _ = setup_tx.send(Ok(()));
+                    hook
+                }
+                Err(err) => {
+                    clear_state();
+                    error!(error = %err, "failed to install Windows capture keyboard hook");
+                    let _ = setup_tx.send(Err(err.to_string()));
+                    return;
+                }
+            };
+
+            let mut msg = MSG::default();
+            while !thread_cancel.load(Ordering::Relaxed) {
+                let result = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+                if result.0 <= 0 || msg.message == WM_QUIT {
+                    break;
+                }
+            }
+
+            info!("Windows hook capture session stopped");
+            match unsafe { UnhookWindowsHookEx(hook) } {
+                Ok(()) => info!("Windows capture keyboard hook cleaned up"),
+                Err(err) => warn!(error = %err, "Windows capture keyboard hook cleanup failed"),
+            }
+            clear_state();
+        });
+
+        match setup_rx.recv() {
+            Ok(Ok(())) => Ok(CaptureSession {
+                rx,
+                cancel,
+                join: Some(join),
+                hook_thread_id: Some(hook_thread_id),
+            }),
+            Ok(Err(err)) => {
+                let _ = join.join();
+                Err(err)
+            }
+            Err(err) => {
+                let _ = join.join();
+                Err(err.to_string())
+            }
+        }
+    }
+
+    pub fn post_stop_message(thread_id: u32) {
+        unsafe {
+            let _ = PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+        }
+    }
+
+    unsafe extern "system" fn low_level_keyboard_proc(
+        code: i32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if code >= 0 && (wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN) {
+            let kb = unsafe { *(lparam.0 as *const KBDLLHOOKSTRUCT) };
+            let action = match kb.vkCode {
+                x if x == VK_RETURN.0 as u32 => Some(CaptureKeyAction::Confirm),
+                x if x == WIN_VK_ESCAPE.0 as u32 => Some(CaptureKeyAction::Cancel),
+                x if x == VK_S.0 as u32 => Some(CaptureKeyAction::Skip),
+                _ => None,
+            };
+            if let Some(action) = action {
+                info!(
+                    ?action,
+                    "capture control key received by Windows hook backend"
+                );
+                let captured = (action == CaptureKeyAction::Confirm)
+                    .then(win::active_window)
+                    .flatten();
+                log_capture_metadata(&captured);
+                if let Some(state_lock) = HOOK_STATE.get() {
+                    if let Ok(state) = state_lock.lock() {
+                        if let Some(state) = state.as_ref() {
+                            let _ = state.tx.send(CaptureEvent { action, captured });
+                            state.ctx.request_repaint();
+                            post_stop_message(state.thread_id);
+                        }
+                    }
+                }
+                return LRESULT(1);
+            }
+        }
+        unsafe { CallNextHookEx(HHOOK::default(), code, wparam, lparam) }
+    }
+
+    fn clear_state() {
+        if let Some(state_lock) = HOOK_STATE.get() {
+            if let Ok(mut state) = state_lock.lock() {
+                *state = None;
+            }
+        }
     }
 }
 
