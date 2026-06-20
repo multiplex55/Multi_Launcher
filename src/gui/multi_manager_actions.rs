@@ -494,10 +494,8 @@ impl LauncherApp {
                 ctx.request_repaint();
             }
             CaptureKeyAction::Skip => {
-                if self.multi_manager.recapture_active {
-                    self.multi_manager_finish_current_capture_item();
-                    ctx.request_repaint();
-                }
+                self.multi_manager_skip_capture(ctx);
+                ctx.request_repaint();
             }
             CaptureKeyAction::Confirm => {
                 self.multi_manager_complete_capture(ctx, event.captured);
@@ -533,6 +531,47 @@ impl LauncherApp {
 
     fn multi_manager_finish_current_capture_item(&mut self) {
         self.multi_manager_finish_capture();
+    }
+
+    fn multi_manager_clear_current_capture_item(&mut self) {
+        self.multi_manager.pending_capture = None;
+        self.multi_manager.capture_session = None;
+        self.multi_manager.queued_capture = None;
+    }
+
+    fn multi_manager_start_next_recapture_item(&mut self, ctx: &egui::Context) -> bool {
+        let Some(item) = self.multi_manager.recapture_queue.pop_front() else {
+            return false;
+        };
+        self.multi_manager.pending_capture = Some(PendingCaptureAction::RecaptureWindow {
+            workspace_id: item.workspace_id,
+            window_index: item.window_index,
+        });
+        self.multi_manager_start_capture_session(ctx);
+        self.multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .store(true, Ordering::Relaxed);
+        true
+    }
+
+    fn multi_manager_skip_capture(&mut self, ctx: &egui::Context) {
+        if self.multi_manager.recapture_active {
+            self.multi_manager_clear_current_capture_item();
+            if !self.multi_manager_start_next_recapture_item(ctx) {
+                self.multi_manager_finish_capture();
+            }
+            self.multi_manager_validate_capture_state();
+            return;
+        }
+
+        if self.multi_manager.pending_capture.is_some() {
+            self.multi_manager_restart_capture_listener(ctx);
+        } else {
+            self.multi_manager_finish_capture();
+        }
+        self.multi_manager_validate_capture_state();
     }
 
     fn multi_manager_start_capture_session(&mut self, ctx: &egui::Context) {
@@ -613,14 +652,22 @@ impl LauncherApp {
         captured: Option<CapturedWindow>,
     ) {
         let Some(action) = self.multi_manager.pending_capture.clone() else {
+            tracing::warn!("MultiManager capture confirm ignored without a pending action");
+            self.multi_manager_finish_capture();
             return;
         };
         let Some(captured) = captured else {
+            tracing::warn!(
+                ?action,
+                "MultiManager capture confirm had no active foreground window"
+            );
             self.report_error_message(
                 "multi_manager.capture",
                 "No active window to capture; focus a window and press Enter",
             );
-            self.multi_manager_restart_capture_listener(ctx);
+            if self.multi_manager.pending_capture.is_some() {
+                self.multi_manager_restart_capture_listener(ctx);
+            }
             return;
         };
         if self
@@ -628,6 +675,13 @@ impl LauncherApp {
             .ignore_launcher_window_on_capture
             && self.is_launcher_capture(&captured)
         {
+            tracing::warn!(
+                hwnd = captured.hwnd,
+                title = %captured.title,
+                executable = %captured.executable,
+                class_name = %captured.class_name,
+                "Ignoring launcher window during MultiManager capture"
+            );
             self.report_error_message(
                 "multi_manager.capture",
                 "Ignoring launcher window; focus another window and press Enter",
@@ -635,7 +689,7 @@ impl LauncherApp {
             self.multi_manager_restart_capture_listener(ctx);
             return;
         }
-        let keep_pending = matches!(action, PendingCaptureAction::CaptureMultipleWindows { .. });
+
         let result = self
             .multi_manager
             .workspaces
@@ -651,6 +705,7 @@ impl LauncherApp {
                     "multi_manager.capture",
                     "Failed to apply capture: workspace not found",
                 );
+                self.multi_manager_finish_capture();
                 return;
             }
             ApplyCaptureResult::MissingWindow => {
@@ -658,13 +713,22 @@ impl LauncherApp {
                     "multi_manager.capture",
                     "Failed to apply capture: window not found",
                 );
+                self.multi_manager_finish_capture();
                 return;
             }
         }
-        if keep_pending {
-            self.multi_manager_restart_capture_listener(ctx);
-        } else {
-            self.multi_manager_finish_capture();
+
+        match action {
+            PendingCaptureAction::CaptureOneWindow { .. } => self.multi_manager_finish_capture(),
+            PendingCaptureAction::CaptureMultipleWindows { .. } => {
+                self.multi_manager_restart_capture_listener(ctx);
+            }
+            PendingCaptureAction::RecaptureWindow { .. } => {
+                self.multi_manager_clear_current_capture_item();
+                if !self.multi_manager_start_next_recapture_item(ctx) {
+                    self.multi_manager_finish_capture();
+                }
+            }
         }
     }
 
@@ -1002,6 +1066,117 @@ mod tests {
     }
 
     #[test]
+    fn confirm_event_without_foreground_window_restarts_listener() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = test_app();
+        set_workspaces(
+            &mut app,
+            vec![MmWorkspace {
+                id: "w".into(),
+                ..Default::default()
+            }],
+        );
+        begin_one_window_capture(&mut app, &ctx);
+
+        app.handle_capture_event(
+            &ctx,
+            CaptureEvent {
+                action: CaptureKeyAction::Confirm,
+                captured: None,
+            },
+        );
+
+        assert_eq!(
+            app.multi_manager.pending_capture,
+            Some(PendingCaptureAction::CaptureOneWindow {
+                workspace_id: "w".into()
+            })
+        );
+        assert!(app.multi_manager.capture_session.is_some());
+        assert!(app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
+        let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
+        assert!(workspaces[0].windows.is_empty());
+    }
+
+    #[test]
+    fn ignored_launcher_capture_restarts_listener_without_applying() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = test_app();
+        app.launcher_hwnd = Some(7);
+        app.multi_manager_settings.ignore_launcher_window_on_capture = true;
+        set_workspaces(
+            &mut app,
+            vec![MmWorkspace {
+                id: "w".into(),
+                ..Default::default()
+            }],
+        );
+        begin_one_window_capture(&mut app, &ctx);
+
+        app.handle_capture_event(
+            &ctx,
+            CaptureEvent {
+                action: CaptureKeyAction::Confirm,
+                captured: Some(captured(7, "Multi Launcher")),
+            },
+        );
+
+        assert_eq!(
+            app.multi_manager.pending_capture,
+            Some(PendingCaptureAction::CaptureOneWindow {
+                workspace_id: "w".into()
+            })
+        );
+        assert!(app.multi_manager.capture_session.is_some());
+        let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
+        assert!(workspaces[0].windows.is_empty());
+    }
+
+    #[test]
+    fn recapture_confirm_advances_queue_and_restarts_listener() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = test_app();
+        set_workspaces(
+            &mut app,
+            vec![MmWorkspace {
+                id: "w".into(),
+                windows: vec![MmWindow::default(), MmWindow::default()],
+                ..Default::default()
+            }],
+        );
+        app.multi_manager_start_recapture_queue(vec![RecaptureQueueItem {
+            workspace_id: "w".into(),
+            window_index: 1,
+        }]);
+        begin_recapture(&mut app, &ctx, 0);
+
+        app.handle_capture_event(
+            &ctx,
+            CaptureEvent {
+                action: CaptureKeyAction::Confirm,
+                captured: Some(captured(10, "New")),
+            },
+        );
+
+        assert_eq!(
+            app.multi_manager.pending_capture,
+            Some(PendingCaptureAction::RecaptureWindow {
+                workspace_id: "w".into(),
+                window_index: 1,
+            })
+        );
+        assert!(app.multi_manager.capture_session.is_some());
+        assert!(app.multi_manager.recapture_queue.is_empty());
+        let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
+        assert_eq!(workspaces[0].windows[0].title, "New");
+    }
+
+    #[test]
     fn skip_event_during_recapture_clears_only_current_item() {
         let ctx = eframe::egui::Context::default();
         let mut app = test_app();
@@ -1027,9 +1202,16 @@ mod tests {
             },
         );
 
-        assert_eq!(app.multi_manager.pending_capture, None);
+        assert_eq!(
+            app.multi_manager.pending_capture,
+            Some(PendingCaptureAction::RecaptureWindow {
+                workspace_id: "w".into(),
+                window_index: 1,
+            })
+        );
+        assert!(app.multi_manager.capture_session.is_some());
         assert!(app.multi_manager.recapture_active);
-        assert_eq!(app.multi_manager.recapture_queue.len(), 1);
+        assert!(app.multi_manager.recapture_queue.is_empty());
         assert!(app
             .multi_manager
             .runtime
