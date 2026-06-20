@@ -5,6 +5,7 @@ use crate::settings::MultiManagerSettings;
 use anyhow::{Context, Result};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -131,6 +132,35 @@ impl MultiManagerState {
         }
     }
 
+    pub fn validate_capture_state_debug(&self) {
+        if let (Some(pending), Some(queued)) =
+            (self.pending_capture.as_ref(), self.queued_capture.as_ref())
+        {
+            debug_assert_eq!(
+                capture_action_target(pending),
+                capture_action_target(queued),
+                "queued capture must not coexist with unrelated active pending_capture"
+            );
+        }
+
+        debug_assert!(
+            capture_state_invariant_violations(
+                self.runtime.control.capture_pending.load(Ordering::Relaxed),
+                self.capture_session.is_some(),
+                self.pending_capture.as_ref(),
+                self.queued_capture.as_ref(),
+            )
+            .is_empty(),
+            "invalid MultiManager capture state: {:?}",
+            capture_state_invariant_violations(
+                self.runtime.control.capture_pending.load(Ordering::Relaxed),
+                self.capture_session.is_some(),
+                self.pending_capture.as_ref(),
+                self.queued_capture.as_ref(),
+            )
+        );
+    }
+
     pub fn shutdown(&mut self) {
         self.capture_session = None;
         self.pending_capture = None;
@@ -158,6 +188,44 @@ impl MultiManagerState {
     }
 }
 
+pub(crate) fn capture_state_invariant_violations(
+    capture_pending: bool,
+    capture_session_active: bool,
+    pending_capture: Option<&PendingCaptureAction>,
+    queued_capture: Option<&PendingCaptureAction>,
+) -> Vec<&'static str> {
+    let has_active_or_queued_listener = capture_session_active || queued_capture.is_some();
+    let mut violations = Vec::new();
+
+    if capture_pending && !has_active_or_queued_listener {
+        violations.push("capture_pending requires an active capture session or queued capture");
+    }
+
+    if pending_capture.is_some() && !has_active_or_queued_listener {
+        violations.push("pending_capture requires an active capture session or queued capture");
+    }
+
+    if let (Some(pending), Some(queued)) = (pending_capture, queued_capture) {
+        if capture_action_target(pending) != capture_action_target(queued) {
+            violations
+                .push("queued_capture must not coexist with unrelated active pending_capture");
+        }
+    }
+
+    violations
+}
+
+fn capture_action_target(action: &PendingCaptureAction) -> (&str, Option<usize>) {
+    match action {
+        PendingCaptureAction::CaptureOneWindow { workspace_id }
+        | PendingCaptureAction::CaptureMultipleWindows { workspace_id } => (workspace_id, None),
+        PendingCaptureAction::RecaptureWindow {
+            workspace_id,
+            window_index,
+        } => (workspace_id, Some(*window_index)),
+    }
+}
+
 fn resolve_relative_to(base: &Path, path: &str) -> PathBuf {
     let path = PathBuf::from(path);
     if path.is_absolute() {
@@ -171,6 +239,66 @@ fn resolve_relative_to(base: &Path, path: &str) -> PathBuf {
 mod tests {
     use super::*;
     use crate::multi_manager::model::MmWorkspace;
+
+    fn capture_one(workspace_id: &str) -> PendingCaptureAction {
+        PendingCaptureAction::CaptureOneWindow {
+            workspace_id: workspace_id.into(),
+        }
+    }
+
+    #[test]
+    fn capture_state_invariants_accept_active_session_with_pending_capture() {
+        let pending = capture_one("w");
+
+        let violations = capture_state_invariant_violations(true, true, Some(&pending), None);
+
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn capture_state_invariants_accept_queued_capture_without_session() {
+        let queued = capture_one("w");
+
+        let violations = capture_state_invariant_violations(true, false, None, Some(&queued));
+
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn capture_state_invariants_reject_pending_without_active_or_queued_listener() {
+        let pending = capture_one("w");
+
+        let violations = capture_state_invariant_violations(false, false, Some(&pending), None);
+
+        assert_eq!(
+            violations,
+            vec!["pending_capture requires an active capture session or queued capture"]
+        );
+    }
+
+    #[test]
+    fn capture_state_invariants_reject_capture_pending_without_listener() {
+        let violations = capture_state_invariant_violations(true, false, None, None);
+
+        assert_eq!(
+            violations,
+            vec!["capture_pending requires an active capture session or queued capture"]
+        );
+    }
+
+    #[test]
+    fn capture_state_invariants_reject_unrelated_pending_and_queued_capture() {
+        let pending = capture_one("active");
+        let queued = capture_one("queued");
+
+        let violations =
+            capture_state_invariant_violations(true, true, Some(&pending), Some(&queued));
+
+        assert_eq!(
+            violations,
+            vec!["queued_capture must not coexist with unrelated active pending_capture"]
+        );
+    }
 
     #[test]
     fn default_state_resolves_paths() {
