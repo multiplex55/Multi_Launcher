@@ -556,6 +556,7 @@ impl LauncherApp {
         self.multi_manager_validate_capture_state();
     }
 
+    #[cfg(test)]
     fn multi_manager_finish_current_capture_item(&mut self) {
         self.multi_manager_finish_capture();
     }
@@ -1653,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    fn start_capture_session_replaces_existing_session_field() {
+    fn begin_capture_sets_pending_replaces_listener_and_sets_runtime_flag() {
         let ctx = eframe::egui::Context::default();
         let mut app = test_app();
         set_workspaces(
@@ -1665,12 +1666,68 @@ mod tests {
         );
 
         begin_one_window_capture(&mut app, &ctx);
-        assert!(app.multi_manager.capture_session.is_some());
+        let first_session = app
+            .multi_manager
+            .capture_session
+            .as_ref()
+            .map(crate::multi_manager::capture::CaptureSession::test_id);
+        assert_eq!(
+            app.multi_manager.pending_capture,
+            Some(PendingCaptureAction::CaptureOneWindow {
+                workspace_id: "w".into()
+            })
+        );
+        assert!(first_session.is_some());
+        assert!(app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
 
-        begin_one_window_capture(&mut app, &ctx);
-        assert!(app.multi_manager.capture_session.is_some());
+        begin_multi_window_capture(&mut app, &ctx);
+        let second_session = app
+            .multi_manager
+            .capture_session
+            .as_ref()
+            .map(crate::multi_manager::capture::CaptureSession::test_id);
+        assert_eq!(
+            app.multi_manager.pending_capture,
+            Some(PendingCaptureAction::CaptureMultipleWindows {
+                workspace_id: "w".into()
+            })
+        );
+        assert!(second_session.is_some());
+        assert_ne!(first_session, second_session);
+        assert!(app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
 
         app.multi_manager_cancel_capture();
+    }
+
+    #[test]
+    fn no_pending_capture_exists_without_active_or_queued_listener() {
+        let mut app = test_app();
+
+        assert_eq!(app.multi_manager.pending_capture, None);
+        assert_eq!(app.multi_manager.queued_capture, None);
+        assert!(app.multi_manager.capture_session.is_none());
+        assert!(!app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
+
+        app.multi_manager_cancel_capture();
+        assert_eq!(app.multi_manager.pending_capture, None);
+        assert_eq!(app.multi_manager.queued_capture, None);
+        assert!(app.multi_manager.capture_session.is_none());
+        assert!(!app.multi_manager.recapture_active);
     }
 
     #[test]
