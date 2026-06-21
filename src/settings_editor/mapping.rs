@@ -1,7 +1,7 @@
 use super::state::SettingsEditor;
 use crate::hotkey::parse_hotkey;
 use crate::plugins::screenshot::ScreenshotPluginSettings;
-use crate::settings::{QueryResultsLayoutSettings, Settings};
+use crate::settings::{NoteSettings, QueryResultsLayoutSettings, Settings};
 
 impl SettingsEditor {
     pub fn from_settings(settings: &Settings) -> Self {
@@ -72,6 +72,20 @@ impl SettingsEditor {
             note_images_as_links: settings.note_images_as_links,
             note_show_details: settings.note_show_details,
             note_more_limit: settings.note_more_limit,
+            note_rich_markdown_enabled: settings.note.rich_markdown_enabled,
+            note_task_lists_enabled: settings.note.task_lists_enabled,
+            note_interactive_checkboxes_enabled: settings.note.interactive_checkboxes_enabled,
+            note_collapsible_sections_enabled: settings.note.collapsible_sections_enabled,
+            note_outline_sidebar_enabled: settings.note.outline_sidebar_enabled,
+            note_outline_sidebar_default_open: settings.note.outline_sidebar_default_open,
+            note_split_view_enabled: settings.note.split_view_enabled,
+            note_default_view_mode: settings.note.default_view_mode,
+            note_callouts_enabled: settings.note.callouts_enabled,
+            note_backlinks_enabled: settings.note.backlinks_enabled,
+            note_aliases_enabled: settings.note.aliases_enabled,
+            note_templates_enabled: settings.note.templates_enabled,
+            note_max_outline_depth: settings.note.max_outline_depth.clamp(1, 6),
+            note_collapsed_sections_persist: settings.note.collapsed_sections_persist,
             query_scale: settings.query_scale.unwrap_or(1.0),
             list_scale: settings.list_scale.unwrap_or(1.0),
             history_limit: settings.history_limit,
@@ -289,7 +303,22 @@ impl SettingsEditor {
                 show_when_query_empty: self.dashboard_show_when_empty,
             },
             theme: current.theme.clone(),
-            note: current.note.clone(),
+            note: NoteSettings {
+                rich_markdown_enabled: self.note_rich_markdown_enabled,
+                task_lists_enabled: self.note_task_lists_enabled,
+                interactive_checkboxes_enabled: self.note_interactive_checkboxes_enabled,
+                collapsible_sections_enabled: self.note_collapsible_sections_enabled,
+                outline_sidebar_enabled: self.note_outline_sidebar_enabled,
+                outline_sidebar_default_open: self.note_outline_sidebar_default_open,
+                split_view_enabled: self.note_split_view_enabled,
+                default_view_mode: self.note_default_view_mode,
+                callouts_enabled: self.note_callouts_enabled,
+                backlinks_enabled: self.note_backlinks_enabled,
+                aliases_enabled: self.note_aliases_enabled,
+                templates_enabled: self.note_templates_enabled,
+                max_outline_depth: self.note_max_outline_depth.clamp(1, 6),
+                collapsed_sections_persist: self.note_collapsed_sections_persist,
+            },
             note_graph: current.note_graph.clone(),
             multi_manager: current.multi_manager.clone(),
         }
@@ -318,16 +347,67 @@ mod tests {
     }
 
     #[test]
-    fn note_settings_survive_editor_conversion() {
+    fn note_settings_round_trip_editor_conversion() {
         let mut initial = Settings::default();
         initial.note.rich_markdown_enabled = false;
+        initial.note.task_lists_enabled = false;
+        initial.note.interactive_checkboxes_enabled = false;
+        initial.note.collapsible_sections_enabled = false;
+        initial.note.outline_sidebar_enabled = false;
         initial.note.outline_sidebar_default_open = true;
+        initial.note.split_view_enabled = false;
+        initial.note.default_view_mode = crate::settings::NoteViewMode::Edit;
+        initial.note.callouts_enabled = false;
+        initial.note.backlinks_enabled = false;
+        initial.note.aliases_enabled = false;
+        initial.note.templates_enabled = false;
         initial.note.max_outline_depth = 3;
+        initial.note.collapsed_sections_persist = false;
 
         let editor = SettingsEditor::new(&initial);
         let saved = editor.to_settings(&initial);
 
         assert_eq!(saved.note, initial.note);
+    }
+
+    #[test]
+    fn note_settings_editor_updates_saved_note_block_and_clamps_depth() {
+        let initial = Settings::default();
+        let mut editor = SettingsEditor::new(&initial);
+        editor.note_rich_markdown_enabled = false;
+        editor.note_task_lists_enabled = false;
+        editor.note_interactive_checkboxes_enabled = false;
+        editor.note_collapsible_sections_enabled = false;
+        editor.note_outline_sidebar_enabled = false;
+        editor.note_outline_sidebar_default_open = true;
+        editor.note_split_view_enabled = false;
+        editor.note_default_view_mode = crate::settings::NoteViewMode::Split;
+        editor.note_callouts_enabled = false;
+        editor.note_backlinks_enabled = false;
+        editor.note_aliases_enabled = false;
+        editor.note_templates_enabled = false;
+        editor.note_max_outline_depth = 99;
+        editor.note_collapsed_sections_persist = false;
+
+        let saved = editor.to_settings(&initial);
+
+        assert!(!saved.note.rich_markdown_enabled);
+        assert!(!saved.note.task_lists_enabled);
+        assert!(!saved.note.interactive_checkboxes_enabled);
+        assert!(!saved.note.collapsible_sections_enabled);
+        assert!(!saved.note.outline_sidebar_enabled);
+        assert!(saved.note.outline_sidebar_default_open);
+        assert!(!saved.note.split_view_enabled);
+        assert_eq!(
+            saved.note.default_view_mode,
+            crate::settings::NoteViewMode::Split
+        );
+        assert!(!saved.note.callouts_enabled);
+        assert!(!saved.note.backlinks_enabled);
+        assert!(!saved.note.aliases_enabled);
+        assert!(!saved.note.templates_enabled);
+        assert_eq!(saved.note.max_outline_depth, 6);
+        assert!(!saved.note.collapsed_sections_persist);
     }
 
     #[test]
