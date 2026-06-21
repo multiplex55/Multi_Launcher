@@ -452,13 +452,13 @@ impl MultiManagerDialog {
 fn capture_banner_text(action: &PendingCaptureAction) -> &'static str {
     match action {
         PendingCaptureAction::CaptureOneWindow { .. } => {
-            "Capture mode: focus a window, then press Enter. Escape cancels."
+            "Capture mode active: focus the target window, then press Enter. Escape cancels."
         }
         PendingCaptureAction::CaptureMultipleWindows { .. } => {
-            "Multi-capture mode: focus a window and press Enter to add it. Escape finishes."
+            "Multi-capture active: focus a target window and press Enter. Repeat for each window. Escape finishes/cancels."
         }
         PendingCaptureAction::RecaptureWindow { .. } => {
-            "Recapture mode: focus the replacement window, press Enter. S skips. Escape cancels queue."
+            "Recapture active: focus the replacement window and press Enter. Press S to skip this item. Escape cancels the queue."
         }
     }
 }
@@ -901,7 +901,7 @@ mod tests {
 
         assert_eq!(
             capture_banner_text(&action),
-            "Capture mode: focus a window, then press Enter. Escape cancels."
+            "Capture mode active: focus the target window, then press Enter. Escape cancels."
         );
     }
 
@@ -913,7 +913,7 @@ mod tests {
 
         assert_eq!(
             capture_banner_text(&action),
-            "Multi-capture mode: focus a window and press Enter to add it. Escape finishes."
+            "Multi-capture active: focus a target window and press Enter. Repeat for each window. Escape finishes/cancels."
         );
     }
 
@@ -926,7 +926,7 @@ mod tests {
 
         assert_eq!(
             capture_banner_text(&action),
-            "Recapture mode: focus the replacement window, press Enter. S skips. Escape cancels queue."
+            "Recapture active: focus the replacement window and press Enter. Press S to skip this item. Escape cancels the queue."
         );
     }
 
