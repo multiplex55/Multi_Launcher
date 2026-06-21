@@ -81,6 +81,9 @@ pub fn default_note_show_details() -> bool {
 pub fn default_note_more_limit() -> usize {
     5
 }
+pub fn default_note_max_outline_depth() -> usize {
+    6
+}
 pub fn default_query_results_layout_rows() -> usize {
     3
 }
