@@ -1,6 +1,7 @@
 use super::state::SettingsEditor;
 use crate::gui::LauncherApp;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
+use crate::settings::NoteViewMode;
 use eframe::egui;
 
 impl SettingsEditor {
@@ -201,12 +202,6 @@ impl SettingsEditor {
             ui.label("Y");
             ui.add(egui::DragValue::new(&mut self.offscreen_y));
         });
-        ui.horizontal(|ui| {
-            ui.label("Note panel W");
-            ui.add(egui::DragValue::new(&mut self.note_panel_w));
-            ui.label("H");
-            ui.add(egui::DragValue::new(&mut self.note_panel_h));
-        });
         let follow_mouse_resp = ui.checkbox(&mut self.follow_mouse, "Follow mouse");
         if follow_mouse_resp.changed() && self.follow_mouse {
             self.static_enabled = false;
@@ -367,6 +362,73 @@ impl SettingsEditor {
                 ui.label("Note settings");
             })
             .body(|ui| {
+                ui.heading("Notes / Markdown");
+                ui.checkbox(&mut self.note_rich_markdown_enabled, "Enable rich Markdown");
+                ui.checkbox(&mut self.note_task_lists_enabled, "Enable task lists");
+                ui.checkbox(
+                    &mut self.note_interactive_checkboxes_enabled,
+                    "Enable interactive checkboxes",
+                );
+                ui.checkbox(
+                    &mut self.note_collapsible_sections_enabled,
+                    "Enable collapsible sections",
+                );
+                ui.checkbox(
+                    &mut self.note_outline_sidebar_enabled,
+                    "Enable outline sidebar",
+                );
+                ui.add_enabled_ui(self.note_outline_sidebar_enabled, |ui| {
+                    ui.checkbox(
+                        &mut self.note_outline_sidebar_default_open,
+                        "Open outline sidebar by default",
+                    );
+                });
+                ui.checkbox(&mut self.note_split_view_enabled, "Enable split view");
+                egui::ComboBox::from_label("Default view mode")
+                    .selected_text(match self.note_default_view_mode {
+                        NoteViewMode::Edit => "Edit",
+                        NoteViewMode::Preview => "Preview",
+                        NoteViewMode::Split => "Split",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.note_default_view_mode,
+                            NoteViewMode::Edit,
+                            "Edit",
+                        );
+                        ui.selectable_value(
+                            &mut self.note_default_view_mode,
+                            NoteViewMode::Preview,
+                            "Preview",
+                        );
+                        ui.add_enabled_ui(self.note_split_view_enabled, |ui| {
+                            ui.selectable_value(
+                                &mut self.note_default_view_mode,
+                                NoteViewMode::Split,
+                                "Split",
+                            );
+                        });
+                    });
+                ui.checkbox(&mut self.note_callouts_enabled, "Enable callouts");
+                ui.checkbox(&mut self.note_backlinks_enabled, "Enable backlinks");
+                ui.checkbox(&mut self.note_aliases_enabled, "Enable aliases");
+                ui.checkbox(&mut self.note_templates_enabled, "Enable templates");
+                ui.checkbox(
+                    &mut self.note_collapsed_sections_persist,
+                    "Remember collapsed sections",
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Max outline depth");
+                    ui.add(
+                        egui::DragValue::new(&mut self.note_max_outline_depth)
+                            .clamp_range(1..=6)
+                            .speed(1),
+                    );
+                });
+                self.note_max_outline_depth = self.note_max_outline_depth.clamp(1, 6);
+
+                ui.separator();
+                ui.heading("Legacy note options");
                 ui.checkbox(&mut self.note_save_on_close, "Save note on close (Esc)");
                 ui.checkbox(
                     &mut self.note_always_overwrite,
@@ -379,6 +441,12 @@ impl SettingsEditor {
                     ui.add(
                         egui::DragValue::new(&mut self.note_more_limit).clamp_range(1..=usize::MAX),
                     );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Note panel W");
+                    ui.add(egui::DragValue::new(&mut self.note_panel_w));
+                    ui.label("H");
+                    ui.add(egui::DragValue::new(&mut self.note_panel_h));
                 });
                 let mut cfg = self
                     .plugin_settings
