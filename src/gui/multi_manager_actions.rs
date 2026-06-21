@@ -405,10 +405,36 @@ impl LauncherApp {
         self.multi_manager_validate_capture_state();
     }
 
-    fn is_launcher_capture(&self, captured: &crate::multi_manager::win::CapturedWindow) -> bool {
-        self.launcher_hwnd == Some(captured.hwnd)
-            || captured.title.contains("Multi Lnchr")
-            || captured.title.contains("Multi Launcher")
+    fn launcher_capture_match_reason(&self, captured: &CapturedWindow) -> Option<&'static str> {
+        if self.launcher_hwnd == Some(captured.hwnd) {
+            return Some("hwnd");
+        }
+
+        if captured.title.contains("Multi Lnchr") {
+            return Some("title contains Multi Lnchr");
+        }
+
+        if captured.title.contains("Multi Launcher") {
+            return Some("title contains Multi Launcher");
+        }
+
+        None
+    }
+
+    fn is_launcher_capture(&self, captured: &CapturedWindow) -> bool {
+        let match_reason = self.launcher_capture_match_reason(captured);
+        tracing::debug!(
+            hwnd = captured.hwnd,
+            title = %captured.title,
+            executable = %captured.executable,
+            class_name = %captured.class_name,
+            process_path = %captured.process_path,
+            launcher_hwnd = ?self.launcher_hwnd,
+            match_reason = ?match_reason,
+            is_match = match_reason.is_some(),
+            "Evaluated MultiManager launcher capture criteria"
+        );
+        match_reason.is_some()
     }
 
     pub fn multi_manager_poll_capture(&mut self, ctx: &eframe::egui::Context) {
@@ -697,11 +723,16 @@ impl LauncherApp {
             .ignore_launcher_window_on_capture
             && self.is_launcher_capture(&captured)
         {
+            let match_reason = self.launcher_capture_match_reason(&captured);
             tracing::warn!(
                 hwnd = captured.hwnd,
                 title = %captured.title,
                 executable = %captured.executable,
                 class_name = %captured.class_name,
+                process_path = %captured.process_path,
+                launcher_hwnd = ?self.launcher_hwnd,
+                match_reason = ?match_reason,
+                ?action,
                 "Ignoring launcher window during MultiManager capture"
             );
             self.report_error_message(
@@ -1277,6 +1308,99 @@ mod tests {
         assert!(app.multi_manager.capture_session.is_some());
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert!(workspaces[0].windows.is_empty());
+    }
+
+    #[test]
+    fn ignored_launcher_title_during_multi_capture_restarts_without_appending() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = test_app();
+        app.multi_manager_settings.ignore_launcher_window_on_capture = true;
+        set_workspaces(
+            &mut app,
+            vec![MmWorkspace {
+                id: "w".into(),
+                windows: vec![MmWindow {
+                    title: "Existing".into(),
+                    hwnd: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        begin_multi_window_capture(&mut app, &ctx);
+
+        app.handle_capture_event(
+            &ctx,
+            CaptureEvent {
+                action: CaptureKeyAction::Confirm,
+                captured: Some(captured(99, "Multi Launcher")),
+            },
+        );
+
+        assert_eq!(
+            app.multi_manager.pending_capture,
+            Some(PendingCaptureAction::CaptureMultipleWindows {
+                workspace_id: "w".into()
+            })
+        );
+        assert!(app.multi_manager.capture_session.is_some());
+        assert!(app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
+        let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
+        assert_eq!(workspaces[0].windows.len(), 1);
+        assert_eq!(workspaces[0].windows[0].title, "Existing");
+    }
+
+    #[test]
+    fn ignored_launcher_hwnd_during_recapture_restarts_without_updating_current_item() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = test_app();
+        app.launcher_hwnd = Some(55);
+        app.multi_manager_settings.ignore_launcher_window_on_capture = true;
+        set_workspaces(
+            &mut app,
+            vec![MmWorkspace {
+                id: "w".into(),
+                windows: vec![MmWindow {
+                    title: "Old".into(),
+                    hwnd: 10,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        begin_recapture(&mut app, &ctx, 0);
+
+        app.handle_capture_event(
+            &ctx,
+            CaptureEvent {
+                action: CaptureKeyAction::Confirm,
+                captured: Some(captured(55, "Settings")),
+            },
+        );
+
+        assert_eq!(
+            app.multi_manager.pending_capture,
+            Some(PendingCaptureAction::RecaptureWindow {
+                workspace_id: "w".into(),
+                window_index: 0,
+            })
+        );
+        assert!(app.multi_manager.capture_session.is_some());
+        assert!(app
+            .multi_manager
+            .runtime
+            .control
+            .capture_pending
+            .load(Ordering::Relaxed));
+        let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
+        assert_eq!(workspaces[0].windows.len(), 1);
+        assert_eq!(workspaces[0].windows[0].title, "Old");
+        assert_eq!(workspaces[0].windows[0].hwnd, 10);
     }
 
     #[test]
