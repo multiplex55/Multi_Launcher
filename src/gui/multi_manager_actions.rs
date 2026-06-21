@@ -556,6 +556,7 @@ impl LauncherApp {
         self.multi_manager_validate_capture_state();
     }
 
+    #[cfg(test)]
     fn multi_manager_finish_current_capture_item(&mut self) {
         self.multi_manager_finish_capture();
     }

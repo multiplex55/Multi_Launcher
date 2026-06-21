@@ -365,6 +365,8 @@ mod windows_backend {
                 cancel,
                 join: Some(join),
                 hook_thread_id: Some(hook_thread_id),
+                #[cfg(test)]
+                test_id: NEXT_TEST_CAPTURE_SESSION_ID.fetch_add(1, Ordering::Relaxed),
             }),
             Ok(Err(err)) => {
                 let _ = join.join();
