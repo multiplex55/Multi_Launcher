@@ -6,9 +6,11 @@
 //! suppress that key so the focused target application does not also receive it.
 
 use crate::multi_manager::win::{self, CaptureKeyAction, CapturedWindow};
-use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tracing::{debug, info};
@@ -32,6 +34,31 @@ pub struct CaptureSession {
     join: Option<JoinHandle<()>>,
     #[cfg(windows)]
     hook_thread_id: Option<Arc<std::sync::atomic::AtomicU32>>,
+    #[cfg(test)]
+    test_id: usize,
+}
+
+#[cfg(test)]
+static NEXT_TEST_CAPTURE_SESSION_ID: AtomicUsize = AtomicUsize::new(1);
+
+impl CaptureSession {
+    #[cfg(test)]
+    pub(crate) fn test_empty() -> Self {
+        let (_tx, rx) = mpsc::channel();
+        Self {
+            rx,
+            cancel: Arc::new(AtomicBool::new(false)),
+            join: None,
+            #[cfg(windows)]
+            hook_thread_id: None,
+            test_id: NEXT_TEST_CAPTURE_SESSION_ID.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_id(&self) -> usize {
+        self.test_id
+    }
 }
 
 impl Drop for CaptureSession {
@@ -135,7 +162,7 @@ impl CaptureKeyEdgeDetector {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 pub fn start_capture_session(ctx: eframe::egui::Context) -> CaptureSession {
     info!("starting capture session with Windows hook backend");
     match windows_backend::start_hook_capture_session(ctx.clone()) {
@@ -147,10 +174,16 @@ pub fn start_capture_session(ctx: eframe::egui::Context) -> CaptureSession {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(test)))]
 pub fn start_capture_session(ctx: eframe::egui::Context) -> CaptureSession {
     info!("starting capture session with portable polling backend");
     start_polling_capture_session(ctx)
+}
+
+#[cfg(test)]
+pub fn start_capture_session(_ctx: eframe::egui::Context) -> CaptureSession {
+    info!("starting lightweight test capture session");
+    CaptureSession::test_empty()
 }
 
 fn start_polling_capture_session(ctx: eframe::egui::Context) -> CaptureSession {
@@ -182,6 +215,17 @@ fn start_polling_capture_session(ctx: eframe::egui::Context) -> CaptureSession {
         join: Some(join),
         #[cfg(windows)]
         hook_thread_id: None,
+        #[cfg(test)]
+        test_id: NEXT_TEST_CAPTURE_SESSION_ID.fetch_add(1, Ordering::Relaxed),
+    }
+}
+
+fn virtual_key_to_capture_action(vk_code: u32) -> Option<CaptureKeyAction> {
+    match vk_code {
+        VK_ENTER => Some(CaptureKeyAction::Confirm),
+        VK_ESCAPE => Some(CaptureKeyAction::Cancel),
+        VK_S => Some(CaptureKeyAction::Skip),
+        _ => None,
     }
 }
 
@@ -204,17 +248,14 @@ fn log_capture_metadata(captured: &Option<CapturedWindow>) {
 #[cfg(windows)]
 mod windows_backend {
     use super::*;
+    use std::sync::atomic::AtomicU32;
     use std::sync::Mutex;
     use std::sync::OnceLock;
-    use std::sync::atomic::AtomicU32;
     use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::Threading::GetCurrentThreadId;
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        VK_ESCAPE as WIN_VK_ESCAPE, VK_RETURN, VK_S,
-    };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, PostThreadMessageW,
-        SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_QUIT, WM_SYSKEYDOWN,
+        CallNextHookEx, GetMessageW, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
+        HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_QUIT, WM_SYSKEYDOWN,
     };
 
     #[derive(Clone)]
@@ -352,12 +393,7 @@ mod windows_backend {
     ) -> LRESULT {
         if code >= 0 && (wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN) {
             let kb = unsafe { *(lparam.0 as *const KBDLLHOOKSTRUCT) };
-            let action = match kb.vkCode {
-                x if x == VK_RETURN.0 as u32 => Some(CaptureKeyAction::Confirm),
-                x if x == WIN_VK_ESCAPE.0 as u32 => Some(CaptureKeyAction::Cancel),
-                x if x == VK_S.0 as u32 => Some(CaptureKeyAction::Skip),
-                _ => None,
-            };
+            let action = virtual_key_to_capture_action(kb.vkCode);
             if let Some(action) = action {
                 info!(
                     ?action,
@@ -417,6 +453,28 @@ mod tests {
 
     fn snap(enter: bool, escape: bool, s: bool) -> CaptureKeySnapshot {
         CaptureKeySnapshot { enter, escape, s }
+    }
+
+    #[test]
+    fn polling_fallback_helper_name_remains_available() {
+        let _helper: fn(eframe::egui::Context) -> CaptureSession = start_polling_capture_session;
+    }
+
+    #[test]
+    fn virtual_key_mapping_converts_capture_control_keys() {
+        assert_eq!(
+            virtual_key_to_capture_action(VK_ENTER),
+            Some(CaptureKeyAction::Confirm)
+        );
+        assert_eq!(
+            virtual_key_to_capture_action(VK_ESCAPE),
+            Some(CaptureKeyAction::Cancel)
+        );
+        assert_eq!(
+            virtual_key_to_capture_action(VK_S),
+            Some(CaptureKeyAction::Skip)
+        );
+        assert_eq!(virtual_key_to_capture_action(0x41), None);
     }
 
     #[test]
