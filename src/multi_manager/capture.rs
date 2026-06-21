@@ -6,11 +6,11 @@
 //! suppress that key so the focused target application does not also receive it.
 
 use crate::multi_manager::win::{self, CaptureKeyAction, CapturedWindow};
+use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tracing::{debug, info};
@@ -63,7 +63,7 @@ impl CaptureSession {
 
 impl Drop for CaptureSession {
     fn drop(&mut self) {
-        info!("capture session shutdown requested");
+        info!("capture session stop requested");
         self.cancel.store(true, Ordering::Relaxed);
         #[cfg(windows)]
         if let Some(thread_id) = &self.hook_thread_id {
@@ -164,11 +164,12 @@ impl CaptureKeyEdgeDetector {
 
 #[cfg(all(windows, not(test)))]
 pub fn start_capture_session(ctx: eframe::egui::Context) -> CaptureSession {
-    info!("starting capture session with Windows hook backend");
+    info!("capture session start requested");
+    info!(backend = "hook", "selected capture backend");
     match windows_backend::start_hook_capture_session(ctx.clone()) {
         Ok(session) => session,
         Err(err) => {
-            warn!(error = %err, "Windows hook capture setup failed; falling back to polling backend");
+            warn!(error = %err, fallback_backend = "polling", "capture hook install failed; falling back to polling backend");
             start_polling_capture_session(ctx)
         }
     }
@@ -176,18 +177,19 @@ pub fn start_capture_session(ctx: eframe::egui::Context) -> CaptureSession {
 
 #[cfg(all(not(windows), not(test)))]
 pub fn start_capture_session(ctx: eframe::egui::Context) -> CaptureSession {
-    info!("starting capture session with portable polling backend");
+    info!("capture session start requested");
+    info!(backend = "polling", "selected capture backend");
     start_polling_capture_session(ctx)
 }
 
 #[cfg(test)]
 pub fn start_capture_session(_ctx: eframe::egui::Context) -> CaptureSession {
-    info!("starting lightweight test capture session");
+    info!("capture session start requested");
+    info!(backend = "test", "selected capture backend");
     CaptureSession::test_empty()
 }
 
 fn start_polling_capture_session(ctx: eframe::egui::Context) -> CaptureSession {
-    info!("starting polling capture session");
     let (tx, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let thread_cancel = Arc::clone(&cancel);
@@ -197,10 +199,7 @@ fn start_polling_capture_session(ctx: eframe::egui::Context) -> CaptureSession {
             thread::sleep(POLL_INTERVAL);
             if let Some(action) = detector.update(current_snapshot()) {
                 info!(?action, "capture control key received by polling backend");
-                let captured = (action == CaptureKeyAction::Confirm)
-                    .then(win::active_window)
-                    .flatten();
-                log_capture_metadata(&captured);
+                let captured = capture_foreground_window(action);
                 let _ = tx.send(CaptureEvent { action, captured });
                 ctx.request_repaint();
                 break;
@@ -237,25 +236,43 @@ fn current_snapshot() -> CaptureKeySnapshot {
     }
 }
 
+fn capture_foreground_window(action: CaptureKeyAction) -> Option<CapturedWindow> {
+    if action != CaptureKeyAction::Confirm {
+        return None;
+    }
+
+    info!("foreground capture attempted");
+    let captured = win::active_window();
+    log_capture_metadata(&captured);
+    captured
+}
+
 fn log_capture_metadata(captured: &Option<CapturedWindow>) {
     if let Some(window) = captured {
-        info!(title = %window.title, executable = %window.executable, process_path = ?window.process_path, "captured foreground window metadata");
+        info!(
+            hwnd = window.hwnd,
+            title = %window.title,
+            executable = %window.executable,
+            class_name = %window.class_name,
+            process_path = %window.process_path,
+            "foreground capture succeeded"
+        );
     } else {
-        info!("no foreground window metadata captured");
+        info!("foreground capture returned none");
     }
 }
 
 #[cfg(windows)]
 mod windows_backend {
     use super::*;
-    use std::sync::atomic::AtomicU32;
     use std::sync::Mutex;
     use std::sync::OnceLock;
+    use std::sync::atomic::AtomicU32;
     use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, GetMessageW, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
-        HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_QUIT, WM_SYSKEYDOWN,
+        CallNextHookEx, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, PostThreadMessageW,
+        SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_QUIT, WM_SYSKEYDOWN,
     };
 
     #[derive(Clone)]
@@ -331,13 +348,13 @@ mod windows_backend {
             } {
                 Ok(hook) => {
                     mark_installed();
-                    info!("Windows capture keyboard hook installed");
+                    info!("capture hook install succeeded");
                     let _ = setup_tx.send(Ok(()));
                     hook
                 }
                 Err(err) => {
                     clear_state();
-                    error!(error = %err, "failed to install Windows capture keyboard hook");
+                    error!(error = %err, "capture hook install failed");
                     let _ = setup_tx.send(Err(err.to_string()));
                     return;
                 }
@@ -351,10 +368,10 @@ mod windows_backend {
                 }
             }
 
-            info!("Windows hook capture session message loop exiting");
+            info!("capture hook/message-loop cleanup started");
             match unsafe { UnhookWindowsHookEx(hook) } {
-                Ok(()) => info!("Windows capture keyboard hook uninstall succeeded"),
-                Err(err) => warn!(error = %err, "Windows capture keyboard hook uninstall failed"),
+                Ok(()) => info!(result = "succeeded", "capture hook uninstall result"),
+                Err(err) => warn!(result = "failed", error = %err, "capture hook uninstall result"),
             }
             clear_state();
         });
@@ -404,10 +421,7 @@ mod windows_backend {
                 let callback = hook_callback_state();
                 if let Some(callback) = callback {
                     callback.cancel.store(true, Ordering::Relaxed);
-                    let captured = (action == CaptureKeyAction::Confirm)
-                        .then(win::active_window)
-                        .flatten();
-                    log_capture_metadata(&captured);
+                    let captured = capture_foreground_window(action);
                     let _ = callback.tx.send(CaptureEvent { action, captured });
                     callback.ctx.request_repaint();
                     post_stop_message(callback.thread_id);

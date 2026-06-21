@@ -392,6 +392,12 @@ impl LauncherApp {
     }
 
     pub fn multi_manager_cancel_capture(&mut self) {
+        tracing::info!(
+            pending_action = ?self.multi_manager.pending_capture,
+            queued_action = ?self.multi_manager.queued_capture,
+            recapture_active = self.multi_manager.recapture_active,
+            "MultiManager capture canceled"
+        );
         self.multi_manager.pending_capture = None;
         self.multi_manager.capture_session = None;
         self.multi_manager.recapture_queue.clear();
@@ -468,6 +474,7 @@ impl LauncherApp {
         let Some(action) = self.multi_manager.queued_capture.take() else {
             return;
         };
+        tracing::info!(?action, "MultiManager queued capture consumed");
 
         if !self.multi_manager_capture_action_workspace_exists(&action) {
             if self.multi_manager.recapture_active {
@@ -545,6 +552,9 @@ impl LauncherApp {
                         window_index: item.window_index,
                     }
                 });
+            if let Some(action) = &self.multi_manager.queued_capture {
+                tracing::info!(?action, "MultiManager queued capture stored");
+            }
         } else {
             self.multi_manager.recapture_active = false;
             self.multi_manager
@@ -572,6 +582,11 @@ impl LauncherApp {
             if !self
                 .multi_manager_capture_target_exists(&item.workspace_id, Some(item.window_index))
             {
+                tracing::info!(
+                    workspace_id = %item.workspace_id,
+                    window_index = item.window_index,
+                    "MultiManager recapture item skipped"
+                );
                 self.report_error_message(
                     "multi_manager.recapture",
                     format!(
@@ -583,6 +598,11 @@ impl LauncherApp {
                 continue;
             }
 
+            tracing::info!(
+                workspace_id = %item.workspace_id,
+                window_index = item.window_index,
+                "MultiManager recapture item started"
+            );
             self.multi_manager.pending_capture = Some(PendingCaptureAction::RecaptureWindow {
                 workspace_id: item.workspace_id,
                 window_index: item.window_index,
@@ -603,6 +623,10 @@ impl LauncherApp {
 
     fn multi_manager_skip_capture(&mut self, ctx: &egui::Context) {
         if self.multi_manager.recapture_active {
+            tracing::info!(
+                pending_action = ?self.multi_manager.pending_capture,
+                "MultiManager recapture item skipped"
+            );
             self.multi_manager_clear_current_capture_item();
             self.multi_manager_start_next_recapture_item(ctx);
             self.multi_manager_validate_capture_state();
@@ -638,6 +662,7 @@ impl LauncherApp {
     }
 
     fn multi_manager_queue_capture_action(&mut self, action: PendingCaptureAction) {
+        tracing::info!(?action, "MultiManager queued capture stored");
         self.multi_manager.queued_capture = Some(action);
         self.multi_manager
             .runtime
@@ -734,7 +759,7 @@ impl LauncherApp {
                 launcher_hwnd = ?self.launcher_hwnd,
                 match_reason = ?match_reason,
                 ?action,
-                "Ignoring launcher window during MultiManager capture"
+                "MultiManager launcher capture ignored"
             );
             self.report_error_message(
                 "multi_manager.capture",
@@ -749,11 +774,18 @@ impl LauncherApp {
             .workspaces
             .lock()
             .map(|mut workspaces| {
-                apply_capture::apply_capture_to_workspaces(&mut workspaces, &action, captured)
+                apply_capture::apply_capture_to_workspaces(
+                    &mut workspaces,
+                    &action,
+                    captured.clone(),
+                )
             })
             .unwrap_or(ApplyCaptureResult::MissingWorkspace);
         match result {
-            ApplyCaptureResult::Applied => self.multi_manager.mark_dirty(),
+            ApplyCaptureResult::Applied => {
+                log_applied_capture(&action, &captured);
+                self.multi_manager.mark_dirty();
+            }
             ApplyCaptureResult::MissingWorkspace => {
                 self.report_error_message(
                     "multi_manager.capture",
@@ -807,6 +839,42 @@ impl LauncherApp {
     }
 }
 
+fn log_applied_capture(action: &PendingCaptureAction, captured: &CapturedWindow) {
+    match action {
+        PendingCaptureAction::CaptureOneWindow { workspace_id } => tracing::info!(
+            workspace_id = %workspace_id,
+            hwnd = captured.hwnd,
+            title = %captured.title,
+            executable = %captured.executable,
+            class_name = %captured.class_name,
+            process_path = %captured.process_path,
+            "MultiManager one-shot capture applied"
+        ),
+        PendingCaptureAction::CaptureMultipleWindows { workspace_id } => tracing::info!(
+            workspace_id = %workspace_id,
+            hwnd = captured.hwnd,
+            title = %captured.title,
+            executable = %captured.executable,
+            class_name = %captured.class_name,
+            process_path = %captured.process_path,
+            "MultiManager multi-capture applied and listener restarted"
+        ),
+        PendingCaptureAction::RecaptureWindow {
+            workspace_id,
+            window_index,
+        } => tracing::info!(
+            workspace_id = %workspace_id,
+            window_index = *window_index,
+            hwnd = captured.hwnd,
+            title = %captured.title,
+            executable = %captured.executable,
+            class_name = %captured.class_name,
+            process_path = %captured.process_path,
+            "MultiManager recapture item applied"
+        ),
+    }
+}
+
 pub(crate) fn format_reconnect_summary(
     summary: crate::multi_manager::reconnect::ReconnectSummary,
 ) -> String {
@@ -852,8 +920,8 @@ mod tests {
     use crate::settings::Settings;
     use std::collections::VecDeque;
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     };
 
     #[test]
@@ -1012,12 +1080,13 @@ mod tests {
         assert!(app.multi_manager.capture_session.is_none());
         assert!(!app.multi_manager.recapture_active);
         assert!(app.multi_manager.recapture_queue.is_empty());
-        assert!(!app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            !app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
     }
 
     #[test]
@@ -1119,12 +1188,13 @@ mod tests {
         );
 
         assert_eq!(app.multi_manager.pending_capture, None);
-        assert!(!app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            !app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 1);
         assert_eq!(workspaces[0].windows[0].title, "Editor");
@@ -1157,12 +1227,13 @@ mod tests {
                 workspace_id: "w".into()
             })
         );
-        assert!(app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 2);
         assert_eq!(workspaces[0].windows[0].title, "One");
@@ -1192,12 +1263,13 @@ mod tests {
 
         assert_eq!(app.multi_manager.pending_capture, None);
         assert!(app.multi_manager.capture_session.is_none());
-        assert!(!app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            !app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 1);
         assert_eq!(workspaces[0].windows[0].title, "Editor");
@@ -1231,12 +1303,13 @@ mod tests {
             })
         );
         assert!(app.multi_manager.capture_session.is_some());
-        assert!(app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
     }
 
     #[test]
@@ -1267,12 +1340,13 @@ mod tests {
             })
         );
         assert!(app.multi_manager.capture_session.is_some());
-        assert!(app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert!(workspaces[0].windows.is_empty());
     }
@@ -1345,12 +1419,13 @@ mod tests {
             })
         );
         assert!(app.multi_manager.capture_session.is_some());
-        assert!(app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 1);
         assert_eq!(workspaces[0].windows[0].title, "Existing");
@@ -1392,12 +1467,13 @@ mod tests {
             })
         );
         assert!(app.multi_manager.capture_session.is_some());
-        assert!(app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 1);
         assert_eq!(workspaces[0].windows[0].title, "Old");
@@ -1479,12 +1555,13 @@ mod tests {
         assert!(app.multi_manager.capture_session.is_some());
         assert!(app.multi_manager.recapture_active);
         assert!(app.multi_manager.recapture_queue.is_empty());
-        assert!(app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
     }
 
     #[test]
@@ -1517,12 +1594,13 @@ mod tests {
         assert!(app.multi_manager.capture_session.is_none());
         assert!(!app.multi_manager.recapture_active);
         assert!(app.multi_manager.recapture_queue.is_empty());
-        assert!(!app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            !app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
     }
 
     #[test]
@@ -1559,12 +1637,13 @@ mod tests {
         assert!(app.multi_manager.capture_session.is_none());
         assert!(app.multi_manager.recapture_active);
         assert_eq!(app.multi_manager.recapture_queue.len(), 2);
-        assert!(app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
     }
 
     #[test]
@@ -1588,12 +1667,13 @@ mod tests {
         );
         assert_eq!(app.multi_manager.pending_capture, None);
         assert!(app.multi_manager.capture_session.is_none());
-        assert!(app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
     }
 
     #[test]
@@ -1621,12 +1701,13 @@ mod tests {
             })
         );
         assert!(app.multi_manager.capture_session.is_some());
-        assert!(app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
 
         app.multi_manager_cancel_capture();
     }
@@ -1645,12 +1726,13 @@ mod tests {
         assert_eq!(app.multi_manager.queued_capture, None);
         assert_eq!(app.multi_manager.pending_capture, None);
         assert!(app.multi_manager.capture_session.is_none());
-        assert!(!app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            !app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
     }
 
     #[test]
@@ -1678,12 +1760,13 @@ mod tests {
             })
         );
         assert!(first_session.is_some());
-        assert!(app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
 
         begin_multi_window_capture(&mut app, &ctx);
         let second_session = app
@@ -1699,12 +1782,13 @@ mod tests {
         );
         assert!(second_session.is_some());
         assert_ne!(first_session, second_session);
-        assert!(app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
 
         app.multi_manager_cancel_capture();
     }
@@ -1716,12 +1800,13 @@ mod tests {
         assert_eq!(app.multi_manager.pending_capture, None);
         assert_eq!(app.multi_manager.queued_capture, None);
         assert!(app.multi_manager.capture_session.is_none());
-        assert!(!app
-            .multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .load(Ordering::Relaxed));
+        assert!(
+            !app.multi_manager
+                .runtime
+                .control
+                .capture_pending
+                .load(Ordering::Relaxed)
+        );
 
         app.multi_manager_cancel_capture();
         assert_eq!(app.multi_manager.pending_capture, None);
