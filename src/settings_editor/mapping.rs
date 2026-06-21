@@ -289,6 +289,7 @@ impl SettingsEditor {
                 show_when_query_empty: self.dashboard_show_when_empty,
             },
             theme: current.theme.clone(),
+            note: current.note.clone(),
             note_graph: current.note_graph.clone(),
             multi_manager: current.multi_manager.clone(),
         }
@@ -314,6 +315,19 @@ mod tests {
         let editor = SettingsEditor::new(&initial);
         let saved = editor.to_settings(&initial);
         assert_eq!(saved.query_results_layout, initial.query_results_layout);
+    }
+
+    #[test]
+    fn note_settings_survive_editor_conversion() {
+        let mut initial = Settings::default();
+        initial.note.rich_markdown_enabled = false;
+        initial.note.outline_sidebar_default_open = true;
+        initial.note.max_outline_depth = 3;
+
+        let editor = SettingsEditor::new(&initial);
+        let saved = editor.to_settings(&initial);
+
+        assert_eq!(saved.note, initial.note);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::gui::Panel;
 use crate::hotkey::Key;
-use crate::hotkey::{parse_hotkey, Hotkey};
+use crate::hotkey::{Hotkey, parse_hotkey};
 use crate::settings::defaults::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -117,6 +117,92 @@ impl Default for NoteGraphSettings {
             local_graph_depth: default_note_graph_local_graph_depth(),
             include_tags: Vec::new(),
             exclude_tags: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NoteViewMode {
+    Edit,
+    Preview,
+    Split,
+}
+impl Default for NoteViewMode {
+    fn default() -> Self {
+        Self::Preview
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NoteSettings {
+    #[serde(default = "default_true")]
+    pub rich_markdown_enabled: bool,
+    #[serde(default = "default_true")]
+    pub task_lists_enabled: bool,
+    #[serde(default = "default_true")]
+    pub interactive_checkboxes_enabled: bool,
+    #[serde(default = "default_true")]
+    pub collapsible_sections_enabled: bool,
+    #[serde(default = "default_true")]
+    pub outline_sidebar_enabled: bool,
+    #[serde(default)]
+    pub outline_sidebar_default_open: bool,
+    #[serde(default = "default_true")]
+    pub split_view_enabled: bool,
+    #[serde(default)]
+    pub default_view_mode: NoteViewMode,
+    #[serde(default = "default_true")]
+    pub callouts_enabled: bool,
+    #[serde(default = "default_true")]
+    pub backlinks_enabled: bool,
+    #[serde(default = "default_true")]
+    pub aliases_enabled: bool,
+    #[serde(default = "default_true")]
+    pub templates_enabled: bool,
+    #[serde(default = "default_note_max_outline_depth")]
+    pub max_outline_depth: usize,
+    #[serde(default = "default_true")]
+    pub collapsed_sections_persist: bool,
+}
+impl NoteSettings {
+    pub fn effective_default_view_mode(&self) -> NoteViewMode {
+        match self.default_view_mode {
+            NoteViewMode::Split if self.can_use_split() => NoteViewMode::Split,
+            NoteViewMode::Split => NoteViewMode::Preview,
+            mode => mode,
+        }
+    }
+
+    pub fn rich_preview_enabled(&self) -> bool {
+        self.rich_markdown_enabled
+    }
+
+    pub fn can_use_split(&self) -> bool {
+        self.split_view_enabled && self.rich_markdown_enabled
+    }
+
+    pub fn can_render_interactive_tasks(&self) -> bool {
+        self.rich_markdown_enabled && self.task_lists_enabled && self.interactive_checkboxes_enabled
+    }
+}
+impl Default for NoteSettings {
+    fn default() -> Self {
+        Self {
+            rich_markdown_enabled: true,
+            task_lists_enabled: true,
+            interactive_checkboxes_enabled: true,
+            collapsible_sections_enabled: true,
+            outline_sidebar_enabled: true,
+            outline_sidebar_default_open: false,
+            split_view_enabled: true,
+            default_view_mode: NoteViewMode::default(),
+            callouts_enabled: true,
+            backlinks_enabled: true,
+            aliases_enabled: true,
+            templates_enabled: true,
+            max_outline_depth: default_note_max_outline_depth(),
+            collapsed_sections_persist: true,
         }
     }
 }
@@ -430,6 +516,8 @@ pub struct Settings {
     #[serde(default)]
     pub theme: ThemeSettings,
     #[serde(default)]
+    pub note: NoteSettings,
+    #[serde(default)]
     pub note_graph: NoteGraphSettings,
     #[serde(default)]
     pub query_results_layout: QueryResultsLayoutSettings,
@@ -500,6 +588,7 @@ impl Default for Settings {
             show_dashboard_diagnostics: false,
             dashboard: DashboardSettings::default(),
             theme: ThemeSettings::default(),
+            note: NoteSettings::default(),
             note_graph: NoteGraphSettings::default(),
             query_results_layout: QueryResultsLayoutSettings::default(),
             multi_manager: MultiManagerSettings::default(),
@@ -572,7 +661,118 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::{MultiManagerSettings, QueryResultsLayoutSettings, Settings};
+    use super::{
+        MultiManagerSettings, NoteSettings, NoteViewMode, QueryResultsLayoutSettings, Settings,
+    };
+
+    #[test]
+    fn empty_settings_deserializes_with_note_defaults() {
+        let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
+        assert_eq!(parsed.note, NoteSettings::default());
+        assert_eq!(
+            parsed.note.effective_default_view_mode(),
+            NoteViewMode::Preview
+        );
+    }
+
+    #[test]
+    fn old_settings_without_note_deserializes() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "note_panel_default_size": [500.0, 360.0],
+                "note_save_on_close": true,
+                "note_always_overwrite": true,
+                "note_images_as_links": true,
+                "note_show_details": true,
+                "note_more_limit": 9
+            }"#,
+        )
+        .expect("legacy settings without note block should deserialize");
+
+        assert_eq!(parsed.note, NoteSettings::default());
+        assert_eq!(parsed.note_panel_default_size, (500.0, 360.0));
+        assert!(parsed.note_save_on_close);
+        assert!(parsed.note_always_overwrite);
+        assert!(parsed.note_images_as_links);
+        assert!(parsed.note_show_details);
+        assert_eq!(parsed.note_more_limit, 9);
+    }
+
+    #[test]
+    fn partial_note_block_defaults_missing_fields() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "note": {
+                    "rich_markdown_enabled": false,
+                    "default_view_mode": "split",
+                    "max_outline_depth": 3
+                }
+            }"#,
+        )
+        .expect("partial note settings should deserialize");
+
+        assert!(!parsed.note.rich_markdown_enabled);
+        assert_eq!(parsed.note.default_view_mode, NoteViewMode::Split);
+        assert_eq!(
+            parsed.note.effective_default_view_mode(),
+            NoteViewMode::Preview
+        );
+        assert_eq!(parsed.note.max_outline_depth, 3);
+        assert!(parsed.note.task_lists_enabled);
+        assert!(parsed.note.collapsed_sections_persist);
+        assert!(!parsed.note.can_use_split());
+    }
+
+    #[test]
+    fn note_block_round_trips() {
+        let mut settings = Settings::default();
+        settings.note.rich_markdown_enabled = false;
+        settings.note.task_lists_enabled = false;
+        settings.note.interactive_checkboxes_enabled = false;
+        settings.note.collapsible_sections_enabled = false;
+        settings.note.outline_sidebar_enabled = false;
+        settings.note.outline_sidebar_default_open = true;
+        settings.note.split_view_enabled = false;
+        settings.note.default_view_mode = NoteViewMode::Edit;
+        settings.note.callouts_enabled = false;
+        settings.note.backlinks_enabled = false;
+        settings.note.aliases_enabled = false;
+        settings.note.templates_enabled = false;
+        settings.note.max_outline_depth = 2;
+        settings.note.collapsed_sections_persist = false;
+
+        let json = serde_json::to_string(&settings).expect("serialize settings");
+        let restored: Settings = serde_json::from_str(&json).expect("deserialize settings");
+        assert_eq!(restored.note, settings.note);
+    }
+
+    #[test]
+    fn legacy_top_level_note_fields_are_preserved_with_new_note_block() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "note_panel_default_size": [640.0, 480.0],
+                "note_save_on_close": true,
+                "note_always_overwrite": true,
+                "note_images_as_links": true,
+                "note_show_details": true,
+                "note_more_limit": 12,
+                "note": {
+                    "default_view_mode": "edit",
+                    "split_view_enabled": false
+                }
+            }"#,
+        )
+        .expect("settings should deserialize");
+
+        assert_eq!(parsed.note_panel_default_size, (640.0, 480.0));
+        assert!(parsed.note_save_on_close);
+        assert!(parsed.note_always_overwrite);
+        assert!(parsed.note_images_as_links);
+        assert!(parsed.note_show_details);
+        assert_eq!(parsed.note_more_limit, 12);
+        assert_eq!(parsed.note.default_view_mode, NoteViewMode::Edit);
+        assert!(!parsed.note.split_view_enabled);
+    }
 
     #[test]
     fn multi_manager_defaults_are_backward_compatible() {
