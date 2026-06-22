@@ -1,17 +1,18 @@
-use crate::actions::screenshot::{Mode as ScreenshotMode, capture};
+use crate::actions::screenshot::{capture, Mode as ScreenshotMode};
 use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::plugins::note::{
-    Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget, append_note, assets_dir,
-    available_tags, image_files, load_notes, note_cache_snapshot, note_link_menu_targets_snapshot,
-    note_version, resolve_note_query, save_note,
+    append_note, assets_dir, available_tags, image_files, load_notes, note_cache_snapshot,
+    note_link_menu_targets_snapshot, note_version, resolve_note_query, save_note, Note,
+    NoteExternalOpen, NoteLinkMenuTarget, NoteTarget,
 };
-use crate::plugins::todo::{TODO_FILE, load_todos, todo_version};
-use eframe::egui::{self, Color32, FontId, Key, popup};
+use crate::plugins::todo::{load_todos, todo_version, TODO_FILE};
+use crate::settings::{NoteSettings, NoteViewMode};
+use eframe::egui::{self, popup, Color32, FontId, Key};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
-use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use image::imageops::FilterType;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -179,7 +180,7 @@ pub struct NotePanel {
     link_menu_result_refresh_count: usize,
     image_search: String,
     tag_search: String,
-    preview_mode: bool,
+    view_mode: NoteViewMode,
     markdown_cache: CommonMarkCache,
     image_cache: HashMap<std::path::PathBuf, egui::TextureHandle>,
     overwrite_prompt: bool,
@@ -280,6 +281,27 @@ impl NotePanel {
     }
 
     pub fn from_note_with_details(note: Note, show_details: bool) -> Self {
+        Self::from_note_with_details_and_view_mode(note, show_details, NoteViewMode::Preview)
+    }
+
+    pub fn from_note_with_details_and_settings(
+        note: Note,
+        show_details: bool,
+        settings: &NoteSettings,
+    ) -> Self {
+        let view_mode = if settings.rich_markdown_enabled {
+            settings.effective_default_view_mode()
+        } else {
+            NoteViewMode::Edit
+        };
+        Self::from_note_with_details_and_view_mode(note, show_details, view_mode)
+    }
+
+    fn from_note_with_details_and_view_mode(
+        note: Note,
+        show_details: bool,
+        view_mode: NoteViewMode,
+    ) -> Self {
         let mut panel = Self {
             open: true,
             note,
@@ -294,7 +316,7 @@ impl NotePanel {
             link_menu_result_refresh_count: 0,
             image_search: String::new(),
             tag_search: String::new(),
-            preview_mode: true,
+            view_mode,
             markdown_cache: CommonMarkCache::default(),
             image_cache: HashMap::new(),
             overwrite_prompt: false,
@@ -600,19 +622,38 @@ impl NotePanel {
                             self.show_open_with_menu = false;
                         }
                     }
-                    if self.preview_mode {
+                    if !app.note_settings.rich_markdown_enabled
+                        && matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split)
+                    {
+                        self.view_mode = NoteViewMode::Edit;
+                    }
+                    if !app.note_settings.split_view_enabled
+                        && matches!(self.view_mode, NoteViewMode::Split)
+                    {
+                        self.view_mode = NoteViewMode::Preview;
+                    }
+                    if matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split) {
                         if ui.button("Edit").clicked() {
-                            self.preview_mode = false;
+                            self.view_mode = NoteViewMode::Edit;
                             // Defer focus until after the TextEdit has been created; requesting
                             // focus for an ID that doesn't exist in the current frame can trip
                             // AccessKit assertions (focused node missing from node tree).
                             self.focus_textedit_next_frame = true;
                         }
-                    } else if ui.button("Render").clicked() {
-                        self.preview_mode = true;
+                    }
+                    if !matches!(self.view_mode, NoteViewMode::Preview)
+                        && ui.button("Render").clicked()
+                    {
+                        self.view_mode = NoteViewMode::Preview;
                         if let Some(id) = self.last_textedit_id {
                             ui.ctx().memory_mut(|m| m.surrender_focus(id));
                         }
+                    }
+                    if app.note_settings.split_view_enabled
+                        && !matches!(self.view_mode, NoteViewMode::Split)
+                        && ui.button("Split").clicked()
+                    {
+                        self.view_mode = NoteViewMode::Split;
                     }
                     if ui.button(self.details_toggle_label()).clicked() {
                         self.set_show_metadata(app, !self.show_metadata);
@@ -814,7 +855,22 @@ impl NotePanel {
                     .id_source(scroll_id_source)
                     .max_height(remaining)
                     .show(ui, |ui| {
-                        if self.preview_mode {
+                        if matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split) {
+                            let text_response = if matches!(self.view_mode, NoteViewMode::Split) {
+                                let response = ui.add(
+                                    egui::TextEdit::multiline(&mut self.note.content)
+                                        .id_source(text_id_source)
+                                        .desired_width(f32::INFINITY)
+                                        .font(FontId::monospace(app.note_font_size))
+                                        .frame(true)
+                                        .lock_focus(true)
+                                        .desired_rows(10),
+                                );
+                                ui.separator();
+                                Some(response)
+                            } else {
+                                None
+                            };
                             let mut last = 0usize;
                             let content_clone = self.note.content.clone();
                             let mut modified = false;
@@ -935,7 +991,7 @@ impl NotePanel {
                                 self.markdown_cache.clear_scrollable();
                                 self.mark_content_changed(ctx.input(|i| i.time));
                             }
-                            None
+                            text_response
                         } else {
                             Some(
                                 ui.add(
@@ -950,7 +1006,7 @@ impl NotePanel {
                             )
                         }
                     });
-                if !self.preview_mode {
+                if matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split) {
                     if let Some(resp) = resp.inner {
                         if resp.changed() {
                             self.mark_content_changed(ctx.input(|i| i.time));
@@ -2083,9 +2139,9 @@ mod tests {
     use eframe::egui;
     use std::{
         fs,
-        sync::{Arc, Mutex, MutexGuard, atomic::AtomicBool},
+        sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard},
     };
-    use tempfile::{TempDir, tempdir};
+    use tempfile::{tempdir, TempDir};
 
     static NOTES_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -2212,18 +2268,14 @@ mod tests {
 
         assert_eq!(panel.link_menu_target_refresh_count, target_refresh_count);
         assert!(panel.link_menu_result_refresh_count > result_refresh_count);
-        assert!(
-            panel
-                .link_menu_results
-                .iter()
-                .any(|result| result.display_title == "Alpha")
-        );
-        assert!(
-            !panel
-                .link_menu_results
-                .iter()
-                .any(|result| result.display_title == "Beta")
-        );
+        assert!(panel
+            .link_menu_results
+            .iter()
+            .any(|result| result.display_title == "Alpha"));
+        assert!(!panel
+            .link_menu_results
+            .iter()
+            .any(|result| result.display_title == "Beta"));
     }
 
     #[test]
@@ -2556,7 +2608,7 @@ mod tests {
             entity_refs: Vec::new(),
         };
         let mut panel = NotePanel::from_note(note);
-        panel.preview_mode = false;
+        panel.view_mode = NoteViewMode::Edit;
         app.note_panels.push(panel);
 
         let _ = ctx.run(Default::default(), |ctx| {
@@ -2724,7 +2776,7 @@ mod tests {
         let mut panel = NotePanel::from_note(empty_note(
             "#tag [[linked-note]] https://example.com\n\nBody visible always",
         ));
-        panel.preview_mode = false;
+        panel.view_mode = NoteViewMode::Edit;
 
         render_panel_once(&ctx, &mut panel, &mut app);
         assert!(panel.last_ui_sections.tags_visible);
@@ -2738,6 +2790,29 @@ mod tests {
         assert!(!panel.last_ui_sections.links_visible);
         assert!(!panel.last_ui_sections.backlinks_visible);
         assert!(panel.last_ui_sections.content_visible);
+    }
+
+    #[test]
+    fn initializes_view_mode_from_note_settings_default() {
+        let mut settings = NoteSettings::default();
+        settings.default_view_mode = NoteViewMode::Edit;
+
+        let panel =
+            NotePanel::from_note_with_details_and_settings(empty_note("body"), true, &settings);
+
+        assert_eq!(panel.view_mode, NoteViewMode::Edit);
+    }
+
+    #[test]
+    fn split_default_falls_back_to_preview_when_split_disabled() {
+        let mut settings = NoteSettings::default();
+        settings.default_view_mode = NoteViewMode::Split;
+        settings.split_view_enabled = false;
+
+        let panel =
+            NotePanel::from_note_with_details_and_settings(empty_note("body"), true, &settings);
+
+        assert_eq!(panel.view_mode, NoteViewMode::Preview);
     }
 
     #[test]
