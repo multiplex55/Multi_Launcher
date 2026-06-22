@@ -72,6 +72,7 @@ impl SettingsEditor {
             Some(new_settings.screenshot_auto_save),
             Some(new_settings.always_on_top),
             Some(new_settings.page_jump),
+            Some(new_settings.note.clone()),
             Some(new_settings.note_panel_default_size),
             Some(new_settings.note_save_on_close),
             Some(new_settings.note_always_overwrite),

@@ -133,6 +133,7 @@ impl PluginEditor {
                         Some(s.screenshot_auto_save),
                         Some(s.always_on_top),
                         Some(s.page_jump),
+                        Some(s.note.clone()),
                         Some(s.note_panel_default_size),
                         Some(s.note_save_on_close),
                         Some(s.note_always_overwrite),
