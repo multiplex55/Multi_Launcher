@@ -1,24 +1,26 @@
-use crate::actions::screenshot::{capture, Mode as ScreenshotMode};
+use crate::actions::screenshot::{Mode as ScreenshotMode, capture};
 use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
-use crate::notes_markdown::{analyze_markdown, MarkdownAnalysis};
-use crate::plugins::note::{
-    append_note, assets_dir, available_tags, image_files, load_notes, note_cache_snapshot,
-    note_link_menu_targets_snapshot, note_version, resolve_note_query, save_note, Note,
-    NoteExternalOpen, NoteLinkMenuTarget, NoteTarget,
+use crate::notes_markdown::{
+    MarkdownAnalysis, MarkdownTaskItem, analyze_markdown, task_list::toggle_task_marker,
 };
-use crate::plugins::todo::{load_todos, todo_version, TODO_FILE};
+use crate::plugins::note::{
+    Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget, append_note, assets_dir,
+    available_tags, image_files, load_notes, note_cache_snapshot, note_link_menu_targets_snapshot,
+    note_version, resolve_note_query, save_note,
+};
+use crate::plugins::todo::{TODO_FILE, load_todos, todo_version};
 use crate::settings::{NoteSettings, NoteViewMode};
-use eframe::egui::{self, popup, Color32, FontId, Key};
+use eframe::egui::{self, Color32, FontId, Key, popup};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use image::imageops::FilterType;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use rfd::FileDialog;
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -447,17 +449,20 @@ impl NotePanel {
         self.last_edit_at_secs = Some(now_secs);
     }
 
-    fn replace_rendered_checkbox_marker(
+    fn toggle_rendered_checkbox_marker(
         &mut self,
-        marker_offset: usize,
-        checked: bool,
+        task_item: &MarkdownTaskItem,
         now_secs: f64,
-    ) {
-        let repl = if checked { "- [x]" } else { "- [ ]" };
-        self.note
-            .content
-            .replace_range(marker_offset..marker_offset + 5, repl);
-        self.mark_content_changed(now_secs);
+    ) -> bool {
+        if let Some(updated) =
+            toggle_task_marker(&self.note.content, task_item.marker_byte_range.clone())
+        {
+            self.note.content = updated;
+            self.mark_content_changed(now_secs);
+            true
+        } else {
+            false
+        }
     }
 
     fn maybe_refresh_heavy_derived(&mut self, ctx: &egui::Context) {
@@ -1372,6 +1377,58 @@ impl NotePanel {
         }
     }
 
+    fn show_markdown_fragment(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        fragment: &str,
+        cache_id: impl std::fmt::Display,
+    ) {
+        if fragment.is_empty() {
+            return;
+        }
+        ui.scope(|ui| {
+            ui.style_mut().override_font_id = Some(FontId::proportional(app.note_font_size));
+            let processed =
+                preprocess_note_links(fragment, &self.note.slug, &self.derived.todo_label_map);
+            CommonMarkViewer::new(format!("note_seg_{}", cache_id)).show(
+                ui,
+                &mut self.markdown_cache,
+                &processed,
+            );
+            handle_markdown_links(ui, app);
+        });
+    }
+
+    fn render_task_item(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        task_item: &MarkdownTaskItem,
+        interactive: bool,
+        ctx: &egui::Context,
+    ) -> bool {
+        let mut modified = false;
+        ui.horizontal_top(|ui| {
+            ui.add_space(task_item.indent as f32 * 8.0);
+            let mut state = task_item.checked;
+            let resp = ui.add_enabled(interactive, egui::Checkbox::without_text(&mut state));
+            if interactive && resp.changed() {
+                modified = self.toggle_rendered_checkbox_marker(task_item, ctx.input(|i| i.time));
+            }
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width());
+                self.show_markdown_fragment(
+                    ui,
+                    app,
+                    &task_item.text,
+                    format!("task_{}", task_item.marker_byte_range.start),
+                );
+            });
+        });
+        modified
+    }
+
     fn render_segment(
         &mut self,
         ui: &mut egui::Ui,
@@ -1380,78 +1437,54 @@ impl NotePanel {
         start: usize,
         ctx: &egui::Context,
     ) -> bool {
+        if !app.note_settings.task_lists_enabled {
+            self.show_markdown_fragment(ui, app, segment, start);
+            return false;
+        }
+
+        let segment_end = start + segment.len();
+        let task_items: Vec<MarkdownTaskItem> = self
+            .markdown_analysis()
+            .task_items
+            .iter()
+            .filter(|item| {
+                item.line_byte_range.start >= start && item.line_byte_range.end <= segment_end
+            })
+            .cloned()
+            .collect();
+
+        if task_items.is_empty() {
+            self.show_markdown_fragment(ui, app, segment, start);
+            return false;
+        }
+
         let mut modified = false;
-        let mut offset = start;
-        let mut buf_offset = offset;
-        let mut buffer = String::new();
+        let mut cursor = start;
         let old_spacing = ui.spacing().item_spacing;
         ui.spacing_mut().item_spacing.y = 0.0;
-        for line in segment.lines() {
-            if line.starts_with("- [ ]") || line.starts_with("- [x]") || line.starts_with("- [X]") {
-                if !buffer.is_empty() {
-                    ui.scope(|ui| {
-                        ui.style_mut().override_font_id =
-                            Some(FontId::proportional(app.note_font_size));
-                        let processed = preprocess_note_links(
-                            &buffer,
-                            &self.note.slug,
-                            &self.derived.todo_label_map,
-                        );
-                        CommonMarkViewer::new(format!("note_seg_{}", buf_offset)).show(
-                            ui,
-                            &mut self.markdown_cache,
-                            &processed,
-                        );
-                        handle_markdown_links(ui, app);
-                    });
-                    buffer.clear();
-                }
-                let checked = line.as_bytes()[3] == b'x' || line.as_bytes()[3] == b'X';
-                let mut state = checked;
-                ui.horizontal(|ui| {
-                    let resp = ui.checkbox(&mut state, "");
-                    if resp.changed() {
-                        self.replace_rendered_checkbox_marker(offset, state, ctx.input(|i| i.time));
-                        modified = true;
-                    }
-                    ui.scope(|ui| {
-                        ui.style_mut().override_font_id =
-                            Some(FontId::proportional(app.note_font_size));
-                        let rest = preprocess_note_links(
-                            line.get(6..).unwrap_or(""),
-                            &self.note.slug,
-                            &self.derived.todo_label_map,
-                        );
-                        CommonMarkViewer::new(format!("note_seg_{}", offset)).show(
-                            ui,
-                            &mut self.markdown_cache,
-                            &rest,
-                        );
-                        handle_markdown_links(ui, app);
-                    });
-                });
-                offset += line.len() + 1;
-                buf_offset = offset;
-            } else {
-                if !buffer.is_empty() {
-                    buffer.push('\n');
-                }
-                buffer.push_str(line);
-                offset += line.len() + 1;
+        for task_item in task_items {
+            if task_item.line_byte_range.start > cursor {
+                let before = self.note.content[cursor..task_item.line_byte_range.start].to_string();
+                self.show_markdown_fragment(ui, app, &before, cursor);
+            }
+            if self.render_task_item(
+                ui,
+                app,
+                &task_item,
+                app.note_settings.interactive_checkboxes_enabled,
+                ctx,
+            ) {
+                modified = true;
+                break;
+            }
+            cursor = task_item.line_byte_range.end;
+            if self.note.content.as_bytes().get(cursor) == Some(&b'\n') {
+                cursor += 1;
             }
         }
-        if !buffer.is_empty() {
-            ui.scope(|ui| {
-                ui.style_mut().override_font_id = Some(FontId::proportional(app.note_font_size));
-                let processed =
-                    preprocess_note_links(&buffer, &self.note.slug, &self.derived.todo_label_map);
-                CommonMarkViewer::new(format!("note_seg_{}", buf_offset)).show(
-                    ui,
-                    &mut self.markdown_cache,
-                    &processed,
-                );
-                handle_markdown_links(ui, app);
-            });
+        if !modified && cursor < segment_end {
+            let rest = self.note.content[cursor..segment_end].to_string();
+            self.show_markdown_fragment(ui, app, &rest, cursor);
         }
         ui.spacing_mut().item_spacing = old_spacing;
         modified
@@ -2219,9 +2252,9 @@ mod tests {
     use eframe::egui;
     use std::{
         fs,
-        sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard},
+        sync::{Arc, Mutex, MutexGuard, atomic::AtomicBool},
     };
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     static NOTES_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -2348,14 +2381,18 @@ mod tests {
 
         assert_eq!(panel.link_menu_target_refresh_count, target_refresh_count);
         assert!(panel.link_menu_result_refresh_count > result_refresh_count);
-        assert!(panel
-            .link_menu_results
-            .iter()
-            .any(|result| result.display_title == "Alpha"));
-        assert!(!panel
-            .link_menu_results
-            .iter()
-            .any(|result| result.display_title == "Beta"));
+        assert!(
+            panel
+                .link_menu_results
+                .iter()
+                .any(|result| result.display_title == "Alpha")
+        );
+        assert!(
+            !panel
+                .link_menu_results
+                .iter()
+                .any(|result| result.display_title == "Beta")
+        );
     }
 
     #[test]
@@ -3068,7 +3105,8 @@ Body with [[Other]]"
         assert!(!panel.fast_derived_dirty);
         assert!(!panel.heavy_recompute_requested);
 
-        panel.replace_rendered_checkbox_marker(0, true, 2.0);
+        let item = panel.markdown_analysis().task_items[0].clone();
+        panel.toggle_rendered_checkbox_marker(&item, 2.0);
 
         assert_eq!(panel.note.content, "- [x] item");
         assert!(panel.markdown_analysis.is_none());
@@ -3080,6 +3118,56 @@ Body with [[Other]]"
         let analysis = panel.markdown_analysis();
         assert_eq!(analysis.task_items.len(), 1);
         assert!(analysis.task_items[0].checked);
+    }
+
+    #[test]
+    fn disabled_task_lists_use_normal_markdown_without_cached_task_analysis() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_settings.task_lists_enabled = false;
+        let mut panel = NotePanel::from_note(empty_note("- [ ] item"));
+        panel.markdown_analysis = None;
+        panel.markdown_analysis_source_hash = None;
+
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                assert!(!panel.render_segment(ui, &mut app, "- [ ] item", 0, ctx));
+            });
+        });
+
+        assert_eq!(panel.note.content, "- [ ] item");
+        assert!(panel.markdown_analysis.is_none());
+        assert!(panel.markdown_analysis_source_hash.is_none());
+    }
+
+    #[test]
+    fn disabled_interactive_checkboxes_do_not_mutate_during_preview_render() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_settings.task_lists_enabled = true;
+        app.note_settings.interactive_checkboxes_enabled = false;
+        let mut panel =
+            NotePanel::from_note(empty_note("* [ ] item with [[Link]] #tag @todo:missing"));
+
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                assert!(!panel.render_segment(
+                    ui,
+                    &mut app,
+                    "* [ ] item with [[Link]] #tag @todo:missing",
+                    0,
+                    ctx,
+                ));
+            });
+        });
+
+        assert_eq!(
+            panel.note.content,
+            "* [ ] item with [[Link]] #tag @todo:missing"
+        );
+        assert!(!panel.fast_derived_dirty);
+        assert!(!panel.heavy_recompute_requested);
+        assert!(panel.markdown_analysis.is_some());
     }
 
     #[test]
