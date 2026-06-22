@@ -99,7 +99,7 @@ use crate::plugin::{PluginManager, CAP_FORCE_LIST_RESULTS, CAP_GRID_RESULTS_COMP
 use crate::plugin_editor::PluginEditor;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
 use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
-use crate::settings::{MultiManagerSettings, QueryResultsLayoutSettings, Settings};
+use crate::settings::{MultiManagerSettings, NoteSettings, QueryResultsLayoutSettings, Settings};
 use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{append_toast_log, TOAST_LOG_FILE};
 use crate::usage::{self, USAGE_FILE};
@@ -446,6 +446,7 @@ pub struct LauncherApp {
     pub page_jump: usize,
     pub query_results_layout: QueryResultsLayoutSettings,
     resolved_grid_layout: bool,
+    pub note_settings: NoteSettings,
     pub note_panel_default_size: (f32, f32),
     pub note_save_on_close: bool,
     pub note_always_overwrite: bool,
@@ -637,6 +638,7 @@ impl LauncherApp {
         screenshot_auto_save: Option<bool>,
         always_on_top: Option<bool>,
         page_jump: Option<usize>,
+        note_settings: Option<NoteSettings>,
         note_panel_default_size: Option<(f32, f32)>,
         note_save_on_close: Option<bool>,
         note_always_overwrite: Option<bool>,
@@ -742,6 +744,9 @@ impl LauncherApp {
         }
         if let Some(v) = page_jump {
             self.page_jump = v;
+        }
+        if let Some(v) = note_settings {
+            self.note_settings = v;
         }
         if let Some(v) = note_panel_default_size {
             self.note_panel_default_size = v;
@@ -1169,6 +1174,7 @@ impl LauncherApp {
             page_jump: settings.page_jump,
             query_results_layout: settings.query_results_layout.clone(),
             resolved_grid_layout: false,
+            note_settings: settings.note.clone(),
             note_panel_default_size: settings.note_panel_default_size,
             note_save_on_close: settings.note_save_on_close,
             note_always_overwrite: settings.note_always_overwrite,
@@ -3095,6 +3101,7 @@ mod tests {
             None, // screenshot_auto_save
             None, // always_on_top
             None, // page_jump
+            None, // note_settings
             None, // note_panel_default_size
             None, // note_save_on_close
             None, // note_always_overwrite
@@ -3109,6 +3116,60 @@ mod tests {
         assert_eq!(app.command_search_cache[0].label_lc, "plugin command");
         assert_eq!(app.command_search_cache[0].desc_lc, "plugin desc");
         assert_eq!(app.command_search_cache[0].action_lc, "plugin:command");
+    }
+
+    #[test]
+    fn update_paths_refreshes_note_settings() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        assert!(app.note_settings.split_view_enabled);
+
+        let mut note_settings = app.note_settings.clone();
+        note_settings.split_view_enabled = false;
+
+        app.update_paths(
+            None, // plugin_dirs
+            None, // index_paths
+            None, // enabled_plugins
+            None, // enabled_capabilities
+            None, // offscreen_pos
+            None, // enable_toasts
+            None, // show_inline_errors
+            None, // show_error_toasts
+            None, // toast_duration
+            None, // fuzzy_weight
+            None, // usage_weight
+            None, // match_exact
+            None, // follow_mouse
+            None, // static_enabled
+            None, // static_pos
+            None, // static_size
+            None, // hide_after_run
+            None, // clear_query_after_run
+            None, // require_confirm_destructive
+            None, // timer_refresh
+            None, // disable_timer_updates
+            None, // preserve_command
+            None, // query_autocomplete
+            None, // net_refresh
+            None, // net_unit
+            None, // screenshot_dir
+            None, // screenshot_save_file
+            None, // screenshot_use_editor
+            None, // screenshot_auto_save
+            None, // always_on_top
+            None, // page_jump
+            Some(note_settings), // note_settings
+            None, // note_panel_default_size
+            None, // note_save_on_close
+            None, // note_always_overwrite
+            None, // note_images_as_links
+            None, // note_show_details
+            None, // note_more_limit
+            None, // show_dashboard_diagnostics
+        );
+
+        assert!(!app.note_settings.split_view_enabled);
     }
 
     #[test]
