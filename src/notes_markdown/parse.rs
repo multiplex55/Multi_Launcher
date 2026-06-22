@@ -20,7 +20,7 @@ pub fn analyze_markdown_with_max_outline_depth(
     let headings = headings::parse_headings(&lines, &code_lines);
     let sections = sections::parse_sections(&headings, content);
     let task_items = task_list::parse_task_items(content);
-    let callouts = callouts::parse_callouts(&lines, &code_lines);
+    let callouts = callouts::parse_callouts(content);
     let max_outline_depth = max_outline_depth.clamp(1, 6) as u8;
     let outline = headings
         .iter()
