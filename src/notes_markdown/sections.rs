@@ -1,6 +1,14 @@
-use super::{MarkdownHeading, MarkdownSection, parse::LineSpan};
+use super::{
+    parse::{line_spans, LineSpan},
+    MarkdownHeading, MarkdownSection,
+};
 
-pub fn parse_sections(
+pub fn parse_sections(headings: &[MarkdownHeading], content: &str) -> Vec<MarkdownSection> {
+    let lines = line_spans(content);
+    parse_sections_from_lines(&lines, headings)
+}
+
+fn parse_sections_from_lines(
     lines: &[LineSpan<'_>],
     headings: &[MarkdownHeading],
 ) -> Vec<MarkdownSection> {

@@ -4,7 +4,7 @@ pub mod parse;
 pub mod sections;
 pub mod task_list;
 
-pub use parse::analyze_markdown;
+pub use parse::{analyze_markdown, analyze_markdown_with_max_outline_depth};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MarkdownAnalysis {

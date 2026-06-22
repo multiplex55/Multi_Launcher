@@ -1,4 +1,4 @@
-use super::{MarkdownAnalysis, OutlineRow, callouts, headings, sections, task_list};
+use super::{callouts, headings, sections, task_list, MarkdownAnalysis, OutlineRow};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LineSpan<'a> {
@@ -8,14 +8,23 @@ pub(crate) struct LineSpan<'a> {
 }
 
 pub fn analyze_markdown(content: &str) -> MarkdownAnalysis {
+    analyze_markdown_with_max_outline_depth(content, 6)
+}
+
+pub fn analyze_markdown_with_max_outline_depth(
+    content: &str,
+    max_outline_depth: usize,
+) -> MarkdownAnalysis {
     let lines = line_spans(content);
     let code_lines = code_line_mask(&lines);
     let headings = headings::parse_headings(&lines, &code_lines);
-    let sections = sections::parse_sections(&lines, &headings);
+    let sections = sections::parse_sections(&headings, content);
     let task_items = task_list::parse_task_items(content);
     let callouts = callouts::parse_callouts(&lines, &code_lines);
+    let max_outline_depth = max_outline_depth.clamp(1, 6) as u8;
     let outline = headings
         .iter()
+        .filter(|heading| heading.level <= max_outline_depth)
         .map(|heading| OutlineRow {
             level: heading.level,
             title: heading.title.clone(),
@@ -103,7 +112,114 @@ fn fence_info(trimmed: &str) -> Option<(u8, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use super::analyze_markdown;
+    use super::{analyze_markdown, analyze_markdown_with_max_outline_depth};
+
+    #[test]
+    fn extracts_atx_headings_and_ignores_non_headings() {
+        let content = "# One\n####### Not heading\n### Three ###\n    # Code block\n###### Six\n";
+        let analysis = analyze_markdown(content);
+        let headings: Vec<_> = analysis
+            .headings
+            .iter()
+            .map(|heading| (heading.level, heading.title.as_str(), heading.line_index))
+            .collect();
+
+        assert_eq!(
+            headings,
+            vec![(1, "One", 0), (3, "Three", 2), (6, "Six", 4)]
+        );
+        assert_eq!(analysis.headings[1].normalized_anchor, "three");
+    }
+
+    #[test]
+    fn duplicate_heading_anchors_get_stable_suffixes() {
+        let content = "# Repeat!\n## repeat\n# Repeat -- repeat?\n# Repeat\n";
+        let analysis = analyze_markdown(content);
+        let anchors: Vec<_> = analysis
+            .headings
+            .iter()
+            .map(|heading| heading.normalized_anchor.as_str())
+            .collect();
+
+        assert_eq!(
+            anchors,
+            vec!["repeat", "repeat-1", "repeat-repeat", "repeat-2"]
+        );
+        assert_eq!(
+            analysis
+                .outline
+                .iter()
+                .map(|row| row.normalized_anchor.as_str())
+                .collect::<Vec<_>>(),
+            anchors
+        );
+    }
+
+    #[test]
+    fn nested_sections_are_owned_until_same_or_higher_heading() {
+        let content = "# A\na body\n## B\nb body\n### C\nc body\n## D\nd body\n# E\ne body\n";
+        let analysis = analyze_markdown(content);
+
+        assert_eq!(analysis.sections[0].heading.title, "A");
+        assert_eq!(analysis.sections[0].body_line_range, 1..8);
+        assert_eq!(analysis.sections[0].nested_heading_count, 3);
+        assert_eq!(
+            &content[analysis.sections[0].body_byte_range.clone()],
+            "a body\n## B\nb body\n### C\nc body\n## D\nd body\n"
+        );
+
+        assert_eq!(analysis.sections[1].heading.title, "B");
+        assert_eq!(analysis.sections[1].body_line_range, 3..6);
+        assert_eq!(analysis.sections[1].nested_heading_count, 1);
+
+        assert_eq!(analysis.sections[2].heading.title, "C");
+        assert_eq!(analysis.sections[2].body_line_range, 5..6);
+        assert_eq!(analysis.sections[2].nested_heading_count, 0);
+    }
+
+    #[test]
+    fn fenced_code_headings_are_ignored() {
+        let content = "# Real\n~~~md\n## Ignored\n~~~\n```\n### Also ignored\n```\n## Visible\n";
+        let analysis = analyze_markdown(content);
+        assert_eq!(
+            analysis
+                .headings
+                .iter()
+                .map(|heading| heading.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Real", "Visible"]
+        );
+    }
+
+    #[test]
+    fn unicode_heading_anchors_keep_letters_and_numbers() {
+        let content = "# Café—日記  Привет №1!\n# 🌱\n";
+        let analysis = analyze_markdown(content);
+        assert_eq!(analysis.headings[0].normalized_anchor, "café日記-привет-1");
+        assert_eq!(analysis.headings[1].normalized_anchor, "section");
+    }
+
+    #[test]
+    fn notes_without_headings_have_no_sections_or_outline() {
+        let analysis = analyze_markdown("plain text\n- [ ] task\n");
+        assert!(analysis.headings.is_empty());
+        assert!(analysis.sections.is_empty());
+        assert!(analysis.outline.is_empty());
+    }
+
+    #[test]
+    fn outline_respects_max_depth_filter() {
+        let analysis = analyze_markdown_with_max_outline_depth("# One\n## Two\n### Three\n", 2);
+        assert_eq!(
+            analysis
+                .outline
+                .iter()
+                .map(|row| (row.level, row.title.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "One"), (2, "Two")]
+        );
+        assert_eq!(analysis.headings.len(), 3);
+    }
 
     #[test]
     fn empty_notes_have_no_markdown_items() {
