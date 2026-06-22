@@ -1,6 +1,7 @@
 use crate::actions::screenshot::{capture, Mode as ScreenshotMode};
 use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
+use crate::notes_markdown::{analyze_markdown, MarkdownAnalysis};
 use crate::plugins::note::{
     append_note, assets_dir, available_tags, image_files, load_notes, note_cache_snapshot,
     note_link_menu_targets_snapshot, note_version, resolve_note_query, save_note, Note,
@@ -17,7 +18,8 @@ use image::imageops::FilterType;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use rfd::FileDialog;
-use std::collections::HashMap;
+use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::hash::{Hash, Hasher};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::process::Command;
@@ -182,6 +184,8 @@ pub struct NotePanel {
     tag_search: String,
     view_mode: NoteViewMode,
     markdown_cache: CommonMarkCache,
+    markdown_analysis: Option<MarkdownAnalysis>,
+    markdown_analysis_source_hash: Option<u64>,
     image_cache: HashMap<std::path::PathBuf, egui::TextureHandle>,
     overwrite_prompt: bool,
     show_open_with_menu: bool,
@@ -322,6 +326,8 @@ impl NotePanel {
             tag_search: String::new(),
             view_mode,
             markdown_cache: CommonMarkCache::default(),
+            markdown_analysis: None,
+            markdown_analysis_source_hash: None,
             image_cache: HashMap::new(),
             overwrite_prompt: false,
             show_open_with_menu: false,
@@ -411,10 +417,47 @@ impl NotePanel {
         }
     }
 
+    fn content_hash(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.note.content.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn markdown_analysis(&mut self) -> &MarkdownAnalysis {
+        let source_hash = self.content_hash();
+        if self.markdown_analysis_source_hash != Some(source_hash) {
+            self.markdown_analysis = Some(analyze_markdown(&self.note.content));
+            self.markdown_analysis_source_hash = Some(source_hash);
+        }
+        self.markdown_analysis
+            .as_ref()
+            .expect("markdown analysis should be cached after recompute")
+    }
+
+    fn invalidate_markdown_analysis(&mut self) {
+        self.markdown_analysis = None;
+        self.markdown_analysis_source_hash = None;
+    }
+
     fn mark_content_changed(&mut self, now_secs: f64) {
+        self.invalidate_markdown_analysis();
+        self.markdown_cache.clear_scrollable();
         self.fast_derived_dirty = true;
         self.heavy_recompute_requested = true;
         self.last_edit_at_secs = Some(now_secs);
+    }
+
+    fn replace_rendered_checkbox_marker(
+        &mut self,
+        marker_offset: usize,
+        checked: bool,
+        now_secs: f64,
+    ) {
+        let repl = if checked { "- [x]" } else { "- [ ]" };
+        self.note
+            .content
+            .replace_range(marker_offset..marker_offset + 5, repl);
+        self.mark_content_changed(now_secs);
     }
 
     fn maybe_refresh_heavy_derived(&mut self, ctx: &egui::Context) {
@@ -597,10 +640,12 @@ impl NotePanel {
                             Some(self.render_editor(ui, app, text_id_source.clone()))
                         }
                         NoteViewMode::Preview => {
+                            let _ = self.markdown_analysis();
                             self.render_preview(ui, app, ctx);
                             None
                         }
                         NoteViewMode::Split => {
+                            let _ = self.markdown_analysis();
                             self.render_split(ui, app, ctx, text_id_source.clone())
                         }
                     });
@@ -1165,7 +1210,7 @@ impl NotePanel {
             let m = cap.get(0).unwrap();
             let range = m.range();
             let before = &content_clone[last..range.start];
-            if !before.is_empty() && self.render_segment(ui, app, before, last) {
+            if !before.is_empty() && self.render_segment(ui, app, before, last, ctx) {
                 modified = true;
                 break;
             }
@@ -1230,7 +1275,6 @@ impl NotePanel {
                         let new_w = (display.x + scroll).clamp(20.0, 4096.0);
                         let repl = format!("![{alt}]({rel}|{:.0})", new_w.round());
                         self.note.content.replace_range(range.clone(), &repl);
-                        self.markdown_cache.clear_scrollable();
                         modified = true;
                         break;
                     }
@@ -1243,13 +1287,11 @@ impl NotePanel {
                     {
                         let repl = format!("![{alt}]({rel}|{:.0})", w.round());
                         self.note.content.replace_range(range.clone(), &repl);
-                        self.markdown_cache.clear_scrollable();
                         modified = true;
                     }
                     if ui.button("Reset size").clicked() {
                         let repl = format!("![{alt}]({rel})");
                         self.note.content.replace_range(range.clone(), &repl);
-                        self.markdown_cache.clear_scrollable();
                         modified = true;
                         ui.close_menu();
                     }
@@ -1259,12 +1301,11 @@ impl NotePanel {
         }
         if !modified {
             let rest = &content_clone[last..];
-            if !rest.is_empty() && self.render_segment(ui, app, rest, last) {
+            if !rest.is_empty() && self.render_segment(ui, app, rest, last, ctx) {
                 modified = true;
             }
         }
         if modified {
-            self.markdown_cache.clear_scrollable();
             self.mark_content_changed(ctx.input(|i| i.time));
         }
     }
@@ -1337,6 +1378,7 @@ impl NotePanel {
         app: &mut LauncherApp,
         segment: &str,
         start: usize,
+        ctx: &egui::Context,
     ) -> bool {
         let mut modified = false;
         let mut offset = start;
@@ -1369,9 +1411,7 @@ impl NotePanel {
                 ui.horizontal(|ui| {
                     let resp = ui.checkbox(&mut state, "");
                     if resp.changed() {
-                        let repl = if state { "- [x]" } else { "- [ ]" };
-                        self.note.content.replace_range(offset..offset + 5, repl);
-                        self.markdown_cache.clear_scrollable();
+                        self.replace_rendered_checkbox_marker(offset, state, ctx.input(|i| i.time));
                         modified = true;
                     }
                     ui.scope(|ui| {
@@ -1445,6 +1485,7 @@ impl NotePanel {
                     .unwrap_or_else(|| self.note.content.chars().count());
                 let idx_byte = char_to_byte_index(&self.note.content, idx);
                 self.note.content.insert_str(idx_byte, "- [ ] ");
+                self.mark_content_changed(ctx.input(|i| i.time));
                 state
                     .cursor
                     .set_char_range(Some(egui::text::CCursorRange::one(
@@ -1529,6 +1570,7 @@ impl NotePanel {
                                 .unwrap_or_else(|| self.note.content.chars().count());
                             let idx_byte = char_to_byte_index(&self.note.content, idx);
                             self.note.content.insert_str(idx_byte, &insert);
+                            self.mark_content_changed(ctx.input(|i| i.time));
                             state
                                 .cursor
                                 .set_char_range(Some(egui::text::CCursorRange::one(
@@ -1567,6 +1609,7 @@ impl NotePanel {
                                     .unwrap_or_else(|| self.note.content.chars().count());
                                 let idx_byte = char_to_byte_index(&self.note.content, idx);
                                 self.note.content.insert_str(idx_byte, &insert);
+                                self.mark_content_changed(ctx.input(|i| i.time));
                                 state
                                     .cursor
                                     .set_char_range(Some(egui::text::CCursorRange::one(
@@ -1604,6 +1647,7 @@ impl NotePanel {
                                 .unwrap_or_else(|| self.note.content.chars().count());
                             let idx_byte = char_to_byte_index(&self.note.content, idx);
                             self.note.content.insert_str(idx_byte, &insert);
+                            self.mark_content_changed(ctx.input(|i| i.time));
                             state
                                 .cursor
                                 .set_char_range(Some(egui::text::CCursorRange::one(
@@ -1653,6 +1697,7 @@ impl NotePanel {
                         format!(" {token}")
                     };
                     self.note.content.insert_str(idx_byte, &insert);
+                    self.mark_content_changed(ctx.input(|i| i.time));
                     state
                         .cursor
                         .set_char_range(Some(egui::text::CCursorRange::one(
@@ -1665,7 +1710,9 @@ impl NotePanel {
         });
 
         ui.menu_button("Insert tag", |ui| {
-            insert_tag_menu(ui, ctx, id, &mut self.note.content, &mut self.tag_search);
+            if insert_tag_menu(ui, ctx, id, &mut self.note.content, &mut self.tag_search) {
+                self.mark_content_changed(ctx.input(|i| i.time));
+            }
         });
     }
 
@@ -1696,6 +1743,7 @@ impl NotePanel {
             let (start_byte, end_byte) = char_range_to_byte_range(&self.note.content, start, end);
             self.note.content.insert_str(end_byte, end_marker);
             self.note.content.insert_str(start_byte, start_marker);
+            self.mark_content_changed(ctx.input(|i| i.time));
             let new_start = start + start_marker.chars().count();
             let new_end = end + start_marker.chars().count();
             state
@@ -1911,7 +1959,8 @@ fn insert_tag_menu(
     id: egui::Id,
     content: &mut String,
     search: &mut String,
-) {
+) -> bool {
+    let mut inserted = false;
     ui.set_min_width(200.0);
     ui.label("Insert tag:");
     ui.text_edit_singleline(search);
@@ -1935,6 +1984,7 @@ fn insert_tag_menu(
                         .unwrap_or_else(|| content.chars().count());
                     let idx_byte = char_to_byte_index(content, idx);
                     content.insert_str(idx_byte, &insert);
+                    inserted = true;
                     state
                         .cursor
                         .set_char_range(Some(egui::text::CCursorRange::one(
@@ -1946,6 +1996,7 @@ fn insert_tag_menu(
                 }
             }
         });
+    inserted
 }
 
 fn detect_shell() -> PathBuf {
@@ -2979,6 +3030,56 @@ Body with [[Other]]"
         }
 
         assert_eq!(panel.heavy_recompute_count, initial);
+    }
+
+    #[test]
+    fn markdown_analysis_is_reused_until_content_changes() {
+        let mut panel = NotePanel::from_note(empty_note("# Title\n\n- [ ] item"));
+        let first_hash = {
+            let analysis = panel.markdown_analysis();
+            assert_eq!(analysis.headings.len(), 1);
+            assert_eq!(analysis.task_items.len(), 1);
+            panel.markdown_analysis_source_hash
+        };
+
+        let second_hash = {
+            let analysis = panel.markdown_analysis();
+            assert_eq!(analysis.headings.len(), 1);
+            panel.markdown_analysis_source_hash
+        };
+
+        assert_eq!(first_hash, second_hash);
+
+        panel.mark_content_changed(1.0);
+
+        assert!(panel.markdown_analysis.is_none());
+        assert!(panel.markdown_analysis_source_hash.is_none());
+        assert!(panel.fast_derived_dirty);
+        assert!(panel.heavy_recompute_requested);
+        assert_eq!(panel.last_edit_at_secs, Some(1.0));
+    }
+
+    #[test]
+    fn rendered_checkbox_toggle_marks_content_changed_and_invalidates_analysis() {
+        let mut panel = NotePanel::from_note(empty_note("- [ ] item"));
+        assert_eq!(panel.markdown_analysis().task_items.len(), 1);
+        assert!(panel.markdown_analysis.is_some());
+        assert!(panel.markdown_analysis_source_hash.is_some());
+        assert!(!panel.fast_derived_dirty);
+        assert!(!panel.heavy_recompute_requested);
+
+        panel.replace_rendered_checkbox_marker(0, true, 2.0);
+
+        assert_eq!(panel.note.content, "- [x] item");
+        assert!(panel.markdown_analysis.is_none());
+        assert!(panel.markdown_analysis_source_hash.is_none());
+        assert!(panel.fast_derived_dirty);
+        assert!(panel.heavy_recompute_requested);
+        assert_eq!(panel.last_edit_at_secs, Some(2.0));
+
+        let analysis = panel.markdown_analysis();
+        assert_eq!(analysis.task_items.len(), 1);
+        assert!(analysis.task_items[0].checked);
     }
 
     #[test]
