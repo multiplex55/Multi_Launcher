@@ -12,7 +12,7 @@ pub fn analyze_markdown(content: &str) -> MarkdownAnalysis {
     let code_lines = code_line_mask(&lines);
     let headings = headings::parse_headings(&lines, &code_lines);
     let sections = sections::parse_sections(&lines, &headings);
-    let task_items = task_list::parse_task_items(&lines, &code_lines);
+    let task_items = task_list::parse_task_items(content);
     let callouts = callouts::parse_callouts(&lines, &code_lines);
     let outline = headings
         .iter()

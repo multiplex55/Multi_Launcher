@@ -1,4 +1,5 @@
 use crate::note_todo_sync::metadata::parse_metadata;
+use crate::notes_markdown::task_list::TASK_LIST_LINE_RE;
 use chrono::NaiveDate;
 use regex::Regex;
 
@@ -14,8 +15,7 @@ pub struct ChecklistItem {
 }
 
 pub fn checklist_re() -> Regex {
-    Regex::new(r"^(\s*[-*]\s+\[( |x|X)\]\s*)(.*?)(\s*<!--\s*ml:todo:([A-Za-z0-9:_-]+)\s*-->\s*)?$")
-        .expect("valid checklist regex")
+    Regex::new(TASK_LIST_LINE_RE).expect("valid checklist regex")
 }
 
 pub fn parse_checklist_items(note_content: &str) -> Vec<ChecklistItem> {
