@@ -212,6 +212,10 @@ pub struct NotePanel {
     heavy_recompute_count: usize,
     #[cfg(test)]
     last_ui_sections: NotePanelUiSections,
+    #[cfg(test)]
+    metadata_details_render_count: usize,
+    #[cfg(test)]
+    backlinks_render_count: usize,
 }
 
 #[cfg(test)]
@@ -344,6 +348,10 @@ impl NotePanel {
             heavy_recompute_count: 0,
             #[cfg(test)]
             last_ui_sections: NotePanelUiSections::default(),
+            #[cfg(test)]
+            metadata_details_render_count: 0,
+            #[cfg(test)]
+            backlinks_render_count: 0,
         };
         panel.refresh_fast_derived();
         panel.refresh_heavy_derived(true);
@@ -568,284 +576,14 @@ impl NotePanel {
                 {
                     app.note_font_size = (app.note_font_size - 1.0).max(8.0);
                 }
-                ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
-                        save_now = true;
-                    }
-                    let open_resp = ui.button("Open Externally");
-                    let popup_id = open_resp.id.with("open_with_menu");
-                    if open_resp.clicked() {
-                        match app.note_external_open {
-                            NoteExternalOpen::Powershell => {
-                                self.save(app);
-                                self.open_external(app, NoteExternalOpen::Powershell);
-                            }
-                            NoteExternalOpen::Notepad => {
-                                self.save(app);
-                                self.open_external(app, NoteExternalOpen::Notepad);
-                            }
-                            NoteExternalOpen::Wezterm => {
-                                self.save(app);
-                                self.open_external(app, NoteExternalOpen::Wezterm);
-                            }
-                            NoteExternalOpen::Neither => {
-                                self.show_open_with_menu = true;
-                                ui.memory_mut(|m| m.open_popup(popup_id));
-                            }
-                        }
-                    }
-                    if self.show_open_with_menu {
-                        let mut close = false;
-                        if popup::popup_below_widget(ui, popup_id, &open_resp, |ui| {
-                            if ui.button("Powershell").clicked() {
-                                self.save(app);
-                                self.open_external(app, NoteExternalOpen::Powershell);
-                                close = true;
-                            }
-                            if ui.button("WezTerm").clicked() {
-                                self.save(app);
-                                self.open_external(app, NoteExternalOpen::Wezterm);
-                                close = true;
-                            }
-                            if ui.button("Notepad").clicked() {
-                                self.save(app);
-                                self.open_external(app, NoteExternalOpen::Notepad);
-                                close = true;
-                            }
-                        })
-                        .is_none()
-                        {
-                            close = true;
-                        }
-                        if close {
-                            ui.memory_mut(|m| m.close_popup());
-                            self.show_open_with_menu = false;
-                        }
-                    }
-                    if !app.note_settings.rich_markdown_enabled
-                        && matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split)
-                    {
-                        self.view_mode = NoteViewMode::Edit;
-                    }
-                    if !app.note_settings.split_view_enabled
-                        && matches!(self.view_mode, NoteViewMode::Split)
-                    {
-                        self.view_mode = NoteViewMode::Preview;
-                    }
-                    if matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split) {
-                        if ui.button("Edit").clicked() {
-                            self.view_mode = NoteViewMode::Edit;
-                            // Defer focus until after the TextEdit has been created; requesting
-                            // focus for an ID that doesn't exist in the current frame can trip
-                            // AccessKit assertions (focused node missing from node tree).
-                            self.focus_textedit_next_frame = true;
-                        }
-                    }
-                    if !matches!(self.view_mode, NoteViewMode::Preview)
-                        && ui.button("Render").clicked()
-                    {
-                        self.view_mode = NoteViewMode::Preview;
-                        if let Some(id) = self.last_textedit_id {
-                            ui.ctx().memory_mut(|m| m.surrender_focus(id));
-                        }
-                    }
-                    if app.note_settings.split_view_enabled
-                        && !matches!(self.view_mode, NoteViewMode::Split)
-                        && ui.button("Split").clicked()
-                    {
-                        self.view_mode = NoteViewMode::Split;
-                    }
-                    if ui.button(self.details_toggle_label()).clicked() {
-                        self.set_show_metadata(app, !self.show_metadata);
-                        let was_focused = self
-                            .last_textedit_id
-                            .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
-                            .unwrap_or(false);
-                        if was_focused {
-                            self.focus_textedit_next_frame = true;
-                        }
-                    }
-                    ui.separator();
-                    if ui.button("A-").clicked() {
-                        app.note_font_size = (app.note_font_size - 1.0).max(8.0);
-                    }
-                    if ui.button("A+").clicked() {
-                        app.note_font_size += 1.0;
-                    }
-                });
+                if self.render_toolbar(ui, app) {
+                    save_now = true;
+                }
                 if self.fast_derived_dirty {
                     self.refresh_fast_derived();
                 }
                 self.maybe_refresh_heavy_derived(ctx);
-                if self.show_metadata && !self.derived.tags.is_empty() {
-                    #[cfg(test)]
-                    {
-                        self.last_ui_sections.tags_visible = true;
-                    }
-                    let was_focused = self
-                        .last_textedit_id
-                        .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
-                        .unwrap_or(false);
-                    let tag_count = self.derived.tags.len();
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("Tags:");
-                        let threshold = app.note_more_limit;
-                        let show_all = self.tags_expanded || tag_count <= threshold;
-                        let limit = if show_all { tag_count } else { threshold };
-                        for t in self.derived.tags.iter().take(limit) {
-                            if ui.link(format!("#{t}")).clicked() {
-                                app.filter_notes_by_tag(t);
-                            }
-                        }
-                        if tag_count > threshold {
-                            let label = if self.tags_expanded {
-                                "collapse"
-                            } else {
-                                "... (more)"
-                            };
-                            if ui.button(label).clicked() {
-                                self.tags_expanded = !self.tags_expanded;
-                                if was_focused {
-                                    self.focus_textedit_next_frame = true;
-                                }
-                            }
-                        }
-                    });
-                }
-                enum LinkKind {
-                    Wiki(String),
-                    Url(String, String),
-                }
-                let mut all_links: Vec<LinkKind> = Vec::new();
-                all_links.extend(self.derived.wiki_links.iter().cloned().map(LinkKind::Wiki));
-                all_links.extend(
-                    self.derived
-                        .external_links
-                        .iter()
-                        .cloned()
-                        .into_iter()
-                        .map(|(label, url)| LinkKind::Url(label, url)),
-                );
-                if self.show_metadata && !all_links.is_empty() {
-                    #[cfg(test)]
-                    {
-                        self.last_ui_sections.links_visible = true;
-                    }
-                    let was_focused = self
-                        .last_textedit_id
-                        .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
-                        .unwrap_or(false);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("Links:");
-                        let threshold = app.note_more_limit;
-                        let total = all_links.len();
-                        let show_all = self.links_expanded || total <= threshold;
-                        let limit = if show_all { total } else { threshold };
-                        for l in all_links.iter().take(limit) {
-                            match l {
-                                LinkKind::Wiki(s) => {
-                                    let _ = show_wiki_link(ui, app, s);
-                                }
-                                LinkKind::Url(label, url) => {
-                                    let _ = ui.hyperlink_to(label, url);
-                                }
-                            }
-                        }
-                        if total > threshold {
-                            let label = if self.links_expanded {
-                                "collapse"
-                            } else {
-                                "... (more)"
-                            };
-                            if ui.button(label).clicked() {
-                                self.links_expanded = !self.links_expanded;
-                                if was_focused {
-                                    self.focus_textedit_next_frame = true;
-                                }
-                            }
-                        }
-                    });
-                }
-                if self.show_metadata {
-                    #[cfg(test)]
-                    {
-                        self.last_ui_sections.backlinks_visible = true;
-                    }
-                    ui.separator();
-                    ui.label("Backlinks");
-                    ui.horizontal(|ui| {
-                        for tab in [
-                            BacklinkTab::LinkedTodos,
-                            BacklinkTab::RelatedNotes,
-                            BacklinkTab::Mentions,
-                        ] {
-                            if ui
-                                .selectable_label(self.backlink_tab == tab, tab.label())
-                                .clicked()
-                            {
-                                self.backlink_tab = tab;
-                                self.backlink_page = 0;
-                            }
-                        }
-                    });
-                    let rows = self.backlink_rows_for_active_tab();
-                    let total_pages = (rows.len() + BACKLINK_PAGE_SIZE - 1) / BACKLINK_PAGE_SIZE;
-                    let page_start = self.backlink_page * BACKLINK_PAGE_SIZE;
-                    let page_end = (page_start + BACKLINK_PAGE_SIZE).min(rows.len());
-                    if rows.is_empty() {
-                        ui.small("No backlinks in this category.");
-                    } else {
-                        for (idx, row) in rows[page_start..page_end].iter().enumerate() {
-                            ui.push_id(("backlink_row", idx, page_start), |ui| {
-                                let resp = ui.selectable_label(false, &row.title);
-                                if resp.clicked() {
-                                    if let Some(slug) = &row.note_slug {
-                                        app.open_note_panel(slug, None);
-                                    } else if let Some(todo_id) = &row.todo_id {
-                                        let todos = load_todos(TODO_FILE).unwrap_or_default();
-                                        if let Some((todo_idx, _)) =
-                                            todos.iter().enumerate().find(|(_, t)| &t.id == todo_id)
-                                        {
-                                            app.todo_view_dialog.open_edit(todo_idx);
-                                        } else {
-                                            app.todo_view_dialog.open();
-                                        }
-                                    }
-                                }
-                                if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                                {
-                                    if let Some(slug) = &row.note_slug {
-                                        app.open_note_panel(slug, None);
-                                    }
-                                }
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.small(format!("[{}]", row.type_badge));
-                                    ui.small(format!("updated {}", row.updated));
-                                });
-                                ui.small(&row.snippet);
-                            });
-                            ui.separator();
-                        }
-                        if total_pages > 1 {
-                            ui.horizontal(|ui| {
-                                if ui.button("Prev").clicked() && self.backlink_page > 0 {
-                                    self.backlink_page -= 1;
-                                }
-                                ui.small(format!(
-                                    "Page {}/{}",
-                                    self.backlink_page + 1,
-                                    total_pages
-                                ));
-                                if ui.button("Next").clicked()
-                                    && self.backlink_page + 1 < total_pages
-                                {
-                                    self.backlink_page += 1;
-                                }
-                            });
-                        }
-                    }
-                    ui.separator();
-                }
+                self.render_outline(ui, app);
                 let remaining = ui.available_height();
                 #[cfg(test)]
                 {
@@ -854,156 +592,16 @@ impl NotePanel {
                 let resp = egui::ScrollArea::vertical()
                     .id_source(scroll_id_source)
                     .max_height(remaining)
-                    .show(ui, |ui| {
-                        if matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split) {
-                            let text_response = if matches!(self.view_mode, NoteViewMode::Split) {
-                                let response = ui.add(
-                                    egui::TextEdit::multiline(&mut self.note.content)
-                                        .id_source(text_id_source)
-                                        .desired_width(f32::INFINITY)
-                                        .font(FontId::monospace(app.note_font_size))
-                                        .frame(true)
-                                        .lock_focus(true)
-                                        .desired_rows(10),
-                                );
-                                ui.separator();
-                                Some(response)
-                            } else {
-                                None
-                            };
-                            let mut last = 0usize;
-                            let content_clone = self.note.content.clone();
-                            let mut modified = false;
-                            for cap in IMAGE_RE.captures_iter(&content_clone) {
-                                let m = cap.get(0).unwrap();
-                                let range = m.range();
-                                let before = &content_clone[last..range.start];
-                                if !before.is_empty() {
-                                    if self.render_segment(ui, app, before, last) {
-                                        modified = true;
-                                        break;
-                                    }
-                                }
-                                let alt = cap.get(1).unwrap().as_str();
-                                let target = cap.get(2).unwrap().as_str();
-                                let (rel, width) = if let Some((p, w)) = target.split_once('|') {
-                                    (p, w.parse::<f32>().ok())
-                                } else {
-                                    (target, None)
-                                };
-                                let full = if let Some(stripped) = rel.strip_prefix("assets/") {
-                                    assets_dir().join(stripped)
-                                } else {
-                                    std::path::PathBuf::from(rel)
-                                };
-                                if app.note_images_as_links {
-                                    let label = if alt.is_empty() { rel } else { alt };
-                                    if ui.link(label).clicked() {
-                                        app.open_image_panel(&full);
-                                    }
-                                } else {
-                                    let tex = if let Some(t) = self.image_cache.get(&full) {
-                                        t.clone()
-                                    } else if let Ok(mut img) = image::open(&full) {
-                                        if img.width() > 512 || img.height() > 512 {
-                                            img = img.resize(512, 512, FilterType::Triangle);
-                                        }
-                                        let size = [img.width() as usize, img.height() as usize];
-                                        let rgba = img.to_rgba8();
-                                        let tex = ui.ctx().load_texture(
-                                            full.to_string_lossy().to_string(),
-                                            egui::ColorImage::from_rgba_unmultiplied(
-                                                size,
-                                                rgba.as_raw(),
-                                            ),
-                                            egui::TextureOptions::LINEAR,
-                                        );
-                                        self.image_cache.insert(full.clone(), tex.clone());
-                                        tex
-                                    } else {
-                                        last = range.end;
-                                        continue;
-                                    };
-                                    let mut display = tex.size_vec2();
-                                    if let Some(w) = width {
-                                        display *= w / display.x;
-                                    }
-                                    let response = ui.add(
-                                        egui::Image::new(&tex)
-                                            .fit_to_exact_size(display)
-                                            .sense(egui::Sense::click()),
-                                    );
-                                    if response.clicked() {
-                                        app.open_image_panel(&full);
-                                    }
-                                    if response.hovered() {
-                                        let scroll = ui.ctx().input(|i| {
-                                            if i.modifiers.ctrl {
-                                                i.raw_scroll_delta.y
-                                            } else {
-                                                0.0
-                                            }
-                                        });
-                                        if scroll != 0.0 {
-                                            let new_w = (display.x + scroll).clamp(20.0, 4096.0);
-                                            let repl =
-                                                format!("![{alt}]({rel}|{:.0})", new_w.round());
-                                            self.note.content.replace_range(range.clone(), &repl);
-                                            self.markdown_cache.clear_scrollable();
-                                            modified = true;
-                                            break;
-                                        }
-                                    }
-                                    response.context_menu(|ui| {
-                                        let mut w = width.unwrap_or(display.x);
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut w)
-                                                    .clamp_range(20.0..=4096.0),
-                                            )
-                                            .changed()
-                                        {
-                                            let repl = format!("![{alt}]({rel}|{:.0})", w.round());
-                                            self.note.content.replace_range(range.clone(), &repl);
-                                            self.markdown_cache.clear_scrollable();
-                                            modified = true;
-                                        }
-                                        if ui.button("Reset size").clicked() {
-                                            let repl = format!("![{alt}]({rel})");
-                                            self.note.content.replace_range(range.clone(), &repl);
-                                            self.markdown_cache.clear_scrollable();
-                                            modified = true;
-                                            ui.close_menu();
-                                        }
-                                    });
-                                }
-                                last = range.end;
-                            }
-                            if !modified {
-                                let rest = &content_clone[last..];
-                                if !rest.is_empty() {
-                                    if self.render_segment(ui, app, rest, last) {
-                                        modified = true;
-                                    }
-                                }
-                            }
-                            if modified {
-                                self.markdown_cache.clear_scrollable();
-                                self.mark_content_changed(ctx.input(|i| i.time));
-                            }
-                            text_response
-                        } else {
-                            Some(
-                                ui.add(
-                                    egui::TextEdit::multiline(&mut self.note.content)
-                                        .id_source(text_id_source)
-                                        .desired_width(f32::INFINITY)
-                                        .font(FontId::monospace(app.note_font_size))
-                                        .frame(true)
-                                        .lock_focus(true)
-                                        .desired_rows(10),
-                                ),
-                            )
+                    .show(ui, |ui| match self.view_mode {
+                        NoteViewMode::Edit => {
+                            Some(self.render_editor(ui, app, text_id_source.clone()))
+                        }
+                        NoteViewMode::Preview => {
+                            self.render_preview(ui, app, ctx);
+                            None
+                        }
+                        NoteViewMode::Split => {
+                            self.render_split(ui, app, ctx, text_id_source.clone())
                         }
                     });
                 if matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split) {
@@ -1251,6 +849,437 @@ impl NotePanel {
                     });
                 });
         }
+    }
+
+    fn render_toolbar(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) -> bool {
+        let mut save_now = false;
+        ui.horizontal(|ui| {
+            if ui.button("Save").clicked() {
+                save_now = true;
+            }
+            let open_resp = ui.button("Open Externally");
+            let popup_id = open_resp.id.with("open_with_menu");
+            if open_resp.clicked() {
+                match app.note_external_open {
+                    NoteExternalOpen::Powershell => {
+                        self.save(app);
+                        self.open_external(app, NoteExternalOpen::Powershell);
+                    }
+                    NoteExternalOpen::Notepad => {
+                        self.save(app);
+                        self.open_external(app, NoteExternalOpen::Notepad);
+                    }
+                    NoteExternalOpen::Wezterm => {
+                        self.save(app);
+                        self.open_external(app, NoteExternalOpen::Wezterm);
+                    }
+                    NoteExternalOpen::Neither => {
+                        self.show_open_with_menu = true;
+                        ui.memory_mut(|m| m.open_popup(popup_id));
+                    }
+                }
+            }
+            if self.show_open_with_menu {
+                let mut close = false;
+                if popup::popup_below_widget(ui, popup_id, &open_resp, |ui| {
+                    if ui.button("Powershell").clicked() {
+                        self.save(app);
+                        self.open_external(app, NoteExternalOpen::Powershell);
+                        close = true;
+                    }
+                    if ui.button("WezTerm").clicked() {
+                        self.save(app);
+                        self.open_external(app, NoteExternalOpen::Wezterm);
+                        close = true;
+                    }
+                    if ui.button("Notepad").clicked() {
+                        self.save(app);
+                        self.open_external(app, NoteExternalOpen::Notepad);
+                        close = true;
+                    }
+                })
+                .is_none()
+                {
+                    close = true;
+                }
+                if close {
+                    ui.memory_mut(|m| m.close_popup());
+                    self.show_open_with_menu = false;
+                }
+            }
+            if !app.note_settings.rich_markdown_enabled
+                && matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split)
+            {
+                self.view_mode = NoteViewMode::Edit;
+            }
+            if !app.note_settings.split_view_enabled
+                && matches!(self.view_mode, NoteViewMode::Split)
+            {
+                self.view_mode = NoteViewMode::Preview;
+            }
+            if matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split)
+                && ui.button("Edit").clicked()
+            {
+                self.view_mode = NoteViewMode::Edit;
+                self.focus_textedit_next_frame = true;
+            }
+            if !matches!(self.view_mode, NoteViewMode::Preview) && ui.button("Render").clicked() {
+                self.view_mode = NoteViewMode::Preview;
+                if let Some(id) = self.last_textedit_id {
+                    ui.ctx().memory_mut(|m| m.surrender_focus(id));
+                }
+            }
+            if app.note_settings.split_view_enabled
+                && !matches!(self.view_mode, NoteViewMode::Split)
+                && ui.button("Split").clicked()
+            {
+                self.view_mode = NoteViewMode::Split;
+            }
+            if ui.button(self.details_toggle_label()).clicked() {
+                self.set_show_metadata(app, !self.show_metadata);
+                let was_focused = self
+                    .last_textedit_id
+                    .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
+                    .unwrap_or(false);
+                if was_focused {
+                    self.focus_textedit_next_frame = true;
+                }
+            }
+            ui.separator();
+            if ui.button("A-").clicked() {
+                app.note_font_size = (app.note_font_size - 1.0).max(8.0);
+            }
+            if ui.button("A+").clicked() {
+                app.note_font_size += 1.0;
+            }
+        });
+        save_now
+    }
+
+    fn render_outline(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
+        if !self.show_metadata {
+            return;
+        }
+        self.render_metadata_details(ui, app);
+        self.render_backlinks(ui, app);
+    }
+
+    fn render_metadata_details(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
+        #[cfg(test)]
+        {
+            self.metadata_details_render_count += 1;
+        }
+        if !self.derived.tags.is_empty() {
+            #[cfg(test)]
+            {
+                self.last_ui_sections.tags_visible = true;
+            }
+            let was_focused = self
+                .last_textedit_id
+                .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
+                .unwrap_or(false);
+            let tag_count = self.derived.tags.len();
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Tags:");
+                let threshold = app.note_more_limit;
+                let show_all = self.tags_expanded || tag_count <= threshold;
+                let limit = if show_all { tag_count } else { threshold };
+                for t in self.derived.tags.iter().take(limit) {
+                    if ui.link(format!("#{t}")).clicked() {
+                        app.filter_notes_by_tag(t);
+                    }
+                }
+                if tag_count > threshold {
+                    let label = if self.tags_expanded {
+                        "collapse"
+                    } else {
+                        "... (more)"
+                    };
+                    if ui.button(label).clicked() {
+                        self.tags_expanded = !self.tags_expanded;
+                        if was_focused {
+                            self.focus_textedit_next_frame = true;
+                        }
+                    }
+                }
+            });
+        }
+
+        enum LinkKind {
+            Wiki(String),
+            Url(String, String),
+        }
+        let mut all_links: Vec<LinkKind> = Vec::new();
+        all_links.extend(self.derived.wiki_links.iter().cloned().map(LinkKind::Wiki));
+        all_links.extend(
+            self.derived
+                .external_links
+                .iter()
+                .cloned()
+                .map(|(label, url)| LinkKind::Url(label, url)),
+        );
+        if all_links.is_empty() {
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.last_ui_sections.links_visible = true;
+        }
+        let was_focused = self
+            .last_textedit_id
+            .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
+            .unwrap_or(false);
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Links:");
+            let threshold = app.note_more_limit;
+            let total = all_links.len();
+            let show_all = self.links_expanded || total <= threshold;
+            let limit = if show_all { total } else { threshold };
+            for l in all_links.iter().take(limit) {
+                match l {
+                    LinkKind::Wiki(s) => {
+                        let _ = show_wiki_link(ui, app, s);
+                    }
+                    LinkKind::Url(label, url) => {
+                        let _ = ui.hyperlink_to(label, url);
+                    }
+                }
+            }
+            if total > threshold {
+                let label = if self.links_expanded {
+                    "collapse"
+                } else {
+                    "... (more)"
+                };
+                if ui.button(label).clicked() {
+                    self.links_expanded = !self.links_expanded;
+                    if was_focused {
+                        self.focus_textedit_next_frame = true;
+                    }
+                }
+            }
+        });
+    }
+
+    fn render_backlinks(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
+        #[cfg(test)]
+        {
+            self.backlinks_render_count += 1;
+        }
+        #[cfg(test)]
+        {
+            self.last_ui_sections.backlinks_visible = true;
+        }
+        ui.separator();
+        ui.label("Backlinks");
+        ui.horizontal(|ui| {
+            for tab in [
+                BacklinkTab::LinkedTodos,
+                BacklinkTab::RelatedNotes,
+                BacklinkTab::Mentions,
+            ] {
+                if ui
+                    .selectable_label(self.backlink_tab == tab, tab.label())
+                    .clicked()
+                {
+                    self.backlink_tab = tab;
+                    self.backlink_page = 0;
+                }
+            }
+        });
+        let rows = self.backlink_rows_for_active_tab();
+        let total_pages = (rows.len() + BACKLINK_PAGE_SIZE - 1) / BACKLINK_PAGE_SIZE;
+        let page_start = self.backlink_page * BACKLINK_PAGE_SIZE;
+        let page_end = (page_start + BACKLINK_PAGE_SIZE).min(rows.len());
+        if rows.is_empty() {
+            ui.small("No backlinks in this category.");
+        } else {
+            let page_rows: Vec<BacklinkRow> = rows[page_start..page_end].to_vec();
+            for (idx, row) in page_rows.iter().enumerate() {
+                ui.push_id(("backlink_row", idx, page_start), |ui| {
+                    let resp = ui.selectable_label(false, &row.title);
+                    if resp.clicked() {
+                        if let Some(slug) = &row.note_slug {
+                            app.open_note_panel(slug, None);
+                        } else if let Some(todo_id) = &row.todo_id {
+                            let todos = load_todos(TODO_FILE).unwrap_or_default();
+                            if let Some((todo_idx, _)) =
+                                todos.iter().enumerate().find(|(_, t)| &t.id == todo_id)
+                            {
+                                app.todo_view_dialog.open_edit(todo_idx);
+                            } else {
+                                app.todo_view_dialog.open();
+                            }
+                        }
+                    }
+                    if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        if let Some(slug) = &row.note_slug {
+                            app.open_note_panel(slug, None);
+                        }
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.small(format!("[{}]", row.type_badge));
+                        ui.small(format!("updated {}", row.updated));
+                    });
+                    ui.small(&row.snippet);
+                });
+                ui.separator();
+            }
+            if total_pages > 1 {
+                ui.horizontal(|ui| {
+                    if ui.button("Prev").clicked() && self.backlink_page > 0 {
+                        self.backlink_page -= 1;
+                    }
+                    ui.small(format!("Page {}/{}", self.backlink_page + 1, total_pages));
+                    if ui.button("Next").clicked() && self.backlink_page + 1 < total_pages {
+                        self.backlink_page += 1;
+                    }
+                });
+            }
+        }
+        ui.separator();
+    }
+
+    fn render_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &LauncherApp,
+        text_id_source: (&'static str, String),
+    ) -> egui::Response {
+        ui.add(
+            egui::TextEdit::multiline(&mut self.note.content)
+                .id_source(text_id_source)
+                .desired_width(f32::INFINITY)
+                .font(FontId::monospace(app.note_font_size))
+                .frame(true)
+                .lock_focus(true)
+                .desired_rows(10),
+        )
+    }
+
+    fn render_preview(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, ctx: &egui::Context) {
+        let mut last = 0usize;
+        let content_clone = self.note.content.clone();
+        let mut modified = false;
+        for cap in IMAGE_RE.captures_iter(&content_clone) {
+            let m = cap.get(0).unwrap();
+            let range = m.range();
+            let before = &content_clone[last..range.start];
+            if !before.is_empty() && self.render_segment(ui, app, before, last) {
+                modified = true;
+                break;
+            }
+            let alt = cap.get(1).unwrap().as_str();
+            let target = cap.get(2).unwrap().as_str();
+            let (rel, width) = if let Some((p, w)) = target.split_once('|') {
+                (p, w.parse::<f32>().ok())
+            } else {
+                (target, None)
+            };
+            let full = if let Some(stripped) = rel.strip_prefix("assets/") {
+                assets_dir().join(stripped)
+            } else {
+                std::path::PathBuf::from(rel)
+            };
+            if app.note_images_as_links {
+                let label = if alt.is_empty() { rel } else { alt };
+                if ui.link(label).clicked() {
+                    app.open_image_panel(&full);
+                }
+            } else {
+                let tex = if let Some(t) = self.image_cache.get(&full) {
+                    t.clone()
+                } else if let Ok(mut img) = image::open(&full) {
+                    if img.width() > 512 || img.height() > 512 {
+                        img = img.resize(512, 512, FilterType::Triangle);
+                    }
+                    let size = [img.width() as usize, img.height() as usize];
+                    let rgba = img.to_rgba8();
+                    let tex = ui.ctx().load_texture(
+                        full.to_string_lossy().to_string(),
+                        egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.image_cache.insert(full.clone(), tex.clone());
+                    tex
+                } else {
+                    last = range.end;
+                    continue;
+                };
+                let mut display = tex.size_vec2();
+                if let Some(w) = width {
+                    display *= w / display.x;
+                }
+                let response = ui.add(
+                    egui::Image::new(&tex)
+                        .fit_to_exact_size(display)
+                        .sense(egui::Sense::click()),
+                );
+                if response.clicked() {
+                    app.open_image_panel(&full);
+                }
+                if response.hovered() {
+                    let scroll = ui.ctx().input(|i| {
+                        if i.modifiers.ctrl {
+                            i.raw_scroll_delta.y
+                        } else {
+                            0.0
+                        }
+                    });
+                    if scroll != 0.0 {
+                        let new_w = (display.x + scroll).clamp(20.0, 4096.0);
+                        let repl = format!("![{alt}]({rel}|{:.0})", new_w.round());
+                        self.note.content.replace_range(range.clone(), &repl);
+                        self.markdown_cache.clear_scrollable();
+                        modified = true;
+                        break;
+                    }
+                }
+                response.context_menu(|ui| {
+                    let mut w = width.unwrap_or(display.x);
+                    if ui
+                        .add(egui::DragValue::new(&mut w).clamp_range(20.0..=4096.0))
+                        .changed()
+                    {
+                        let repl = format!("![{alt}]({rel}|{:.0})", w.round());
+                        self.note.content.replace_range(range.clone(), &repl);
+                        self.markdown_cache.clear_scrollable();
+                        modified = true;
+                    }
+                    if ui.button("Reset size").clicked() {
+                        let repl = format!("![{alt}]({rel})");
+                        self.note.content.replace_range(range.clone(), &repl);
+                        self.markdown_cache.clear_scrollable();
+                        modified = true;
+                        ui.close_menu();
+                    }
+                });
+            }
+            last = range.end;
+        }
+        if !modified {
+            let rest = &content_clone[last..];
+            if !rest.is_empty() && self.render_segment(ui, app, rest, last) {
+                modified = true;
+            }
+        }
+        if modified {
+            self.markdown_cache.clear_scrollable();
+            self.mark_content_changed(ctx.input(|i| i.time));
+        }
+    }
+
+    fn render_split(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        ctx: &egui::Context,
+        text_id_source: (&'static str, String),
+    ) -> Option<egui::Response> {
+        let response = self.render_editor(ui, app, text_id_source);
+        ui.separator();
+        self.render_preview(ui, app, ctx);
+        Some(response)
     }
 
     /// Persist the current note to disk and update UI state.
@@ -2790,6 +2819,26 @@ mod tests {
         assert!(!panel.last_ui_sections.links_visible);
         assert!(!panel.last_ui_sections.backlinks_visible);
         assert!(panel.last_ui_sections.content_visible);
+    }
+
+    #[test]
+    fn split_view_renders_details_and_backlinks_once_per_panel() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note(
+            "#tag [[linked-note]] https://example.com\n\nBody visible in split",
+        ));
+        panel.view_mode = NoteViewMode::Split;
+        app.note_settings.split_view_enabled = true;
+
+        render_panel_once(&ctx, &mut panel, &mut app);
+
+        assert!(panel.last_ui_sections.tags_visible);
+        assert!(panel.last_ui_sections.links_visible);
+        assert!(panel.last_ui_sections.backlinks_visible);
+        assert!(panel.last_ui_sections.content_visible);
+        assert_eq!(panel.metadata_details_render_count, 1);
+        assert_eq!(panel.backlinks_render_count, 1);
     }
 
     #[test]
