@@ -2408,9 +2408,10 @@ impl LauncherApp {
                 },
             );
         }
-        self.note_panels.push(NotePanel::from_note_with_details(
+        self.note_panels.push(NotePanel::from_note_with_details_and_settings(
             note,
             self.note_show_details,
+            &self.note_settings,
         ));
         // Allow keyboard shortcuts like Esc/Cmd+W to immediately close the panel
         self.update_panel_stack();
