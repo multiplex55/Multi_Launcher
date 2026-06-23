@@ -593,6 +593,7 @@ mod tests {
             links: links.iter().map(|l| l.to_string()).collect(),
             slug: slug.to_string(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: Vec::new(),
         }
     }

@@ -148,6 +148,7 @@ impl NotesDialog {
                                         links: Vec::new(),
                                         slug: String::new(),
                                         alias: None,
+                                        aliases: Vec::new(),
                                         entity_refs: Vec::new(),
                                     });
                                 } else if let Some(e) = self.entries.get_mut(idx) {

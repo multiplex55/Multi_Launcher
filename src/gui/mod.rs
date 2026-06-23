@@ -2342,7 +2342,7 @@ impl LauncherApp {
 
     /// Open a note panel for the given slug, optionally using a template for new notes.
     pub fn open_note_panel(&mut self, slug: &str, template: Option<&str>) {
-        use crate::plugins::note::{extract_alias, get_template, load_notes, Note};
+        use crate::plugins::note::{extract_aliases, get_template, load_notes, Note};
         let note = load_notes()
             .unwrap_or_default()
             .into_iter()
@@ -2369,7 +2369,8 @@ impl LauncherApp {
                 } else {
                     format!("# {}\n\n", title)
                 };
-                let alias = extract_alias(&content);
+                let aliases = extract_aliases(&content);
+                let alias = aliases.first().cloned();
                 Note {
                     title,
                     path: std::path::PathBuf::new(),
@@ -2378,6 +2379,7 @@ impl LauncherApp {
                     links: Vec::new(),
                     slug: String::new(),
                     alias,
+                    aliases,
                     entity_refs: Vec::new(),
                 }
             });
@@ -3610,6 +3612,7 @@ mod tests {
                     links: Vec::new(),
                     slug: "alpha".into(),
                     alias: None,
+                    aliases: Vec::new(),
                     entity_refs: Vec::new(),
                 }])
             },

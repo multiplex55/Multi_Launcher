@@ -228,6 +228,7 @@ mod tests {
             links: vec!["beta".into()],
             slug: "alpha".into(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: vec![EntityRef::new(EntityKind::Todo, "todo-1", None)],
         }];
         let todos = vec![TodoEntry {

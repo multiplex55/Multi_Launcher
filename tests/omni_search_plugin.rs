@@ -44,6 +44,7 @@ fn setup_fixture() -> (tempfile::TempDir, EnvGuard) {
         &[BookmarkEntry {
             url: "https://plan.example.com".into(),
             alias: Some("Plan Bookmark".into()),
+            aliases: vec!["Plan Bookmark".into()],
         }],
     )
     .unwrap();
@@ -65,6 +66,7 @@ fn setup_fixture() -> (tempfile::TempDir, EnvGuard) {
         links: Vec::new(),
         slug: "project-plan".into(),
         alias: None,
+        aliases: Vec::new(),
         entity_refs: Vec::new(),
     }])
     .unwrap();
@@ -277,6 +279,7 @@ fn o_list_dedups_duplicate_rows_across_sources() {
         links: Vec::new(),
         slug: "shared-item".into(),
         alias: None,
+        aliases: Vec::new(),
         entity_refs: Vec::new(),
     }])
     .unwrap();

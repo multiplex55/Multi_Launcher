@@ -3151,6 +3151,7 @@ mod tests {
             links: Vec::new(),
             slug: String::new(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: Vec::new(),
         }
     }
@@ -3237,6 +3238,7 @@ mod tests {
             links: Vec::new(),
             slug: slug.into(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: Vec::new(),
         }
     }
@@ -3697,6 +3699,7 @@ mod tests {
             links: Vec::new(),
             slug: String::new(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: Vec::new(),
         };
         let mut panel = NotePanel::from_note(note);
@@ -3824,6 +3827,7 @@ mod tests {
             links: Vec::new(),
             slug: "central".into(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: Vec::new(),
         };
         let notes = vec![
@@ -3835,6 +3839,7 @@ mod tests {
                 links: vec!["central".into()],
                 slug: "related".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
             Note {
@@ -3845,6 +3850,7 @@ mod tests {
                 links: Vec::new(),
                 slug: "mention".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
         ];
@@ -3924,6 +3930,7 @@ Body visible always",
             links: Vec::new(),
             slug: "central-note".into(),
             alias: Some("Hub".into()),
+            aliases: vec!["Hub".into()],
             entity_refs: Vec::new(),
         };
         let coded = Note {
@@ -3941,6 +3948,7 @@ link://note/central-note
             links: Vec::new(),
             slug: "coded".into(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: Vec::new(),
         };
         let linked = Note {
@@ -3951,6 +3959,7 @@ link://note/central-note
             links: Vec::new(),
             slug: "linked".into(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: Vec::new(),
         };
         let notes = vec![current, coded, linked];
@@ -4140,6 +4149,7 @@ Body with [[Other]]"
             links: Vec::new(),
             slug: "title".into(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: Vec::new(),
         };
         let mut panel = NotePanel::from_note(note);
@@ -4165,6 +4175,7 @@ Body with [[Other]]"
             links: Vec::new(),
             slug: "title".into(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: Vec::new(),
         };
         let mut panel = NotePanel::from_note(note);
@@ -4302,6 +4313,7 @@ Body with [[Other]]"
             links: Vec::new(),
             slug: String::new(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: Vec::new(),
         };
         let mut panel = NotePanel::from_note(note);
@@ -4444,6 +4456,7 @@ body"
             links: Vec::new(),
             slug: String::new(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: Vec::new(),
         };
         let mut panel = NotePanel::from_note(note);

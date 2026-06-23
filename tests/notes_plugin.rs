@@ -232,6 +232,7 @@ fn link_new_creates_only_when_missing_and_inserts_exact_wiki_syntax() {
             links: Vec::new(),
             slug: "current".into(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: Vec::new(),
         });
     let id = egui::Id::new("note_content");
