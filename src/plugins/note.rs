@@ -241,9 +241,27 @@ fn extract_tags(content: &str) -> Vec<String> {
     tags
 }
 
+fn content_without_fenced_code(content: &str) -> String {
+    let mut out = String::new();
+    let mut in_code = false;
+    for line in content.lines() {
+        if line.trim_start().starts_with("```") {
+            in_code = !in_code;
+            out.push('\n');
+            continue;
+        }
+        if !in_code {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
+
 fn extract_links(content: &str) -> Vec<String> {
+    let searchable = content_without_fenced_code(content);
     let mut links: Vec<String> = WIKI_RE
-        .captures_iter(content)
+        .captures_iter(&searchable)
         .map(|c| slugify(&c[1]))
         .collect();
     links.sort();
@@ -252,9 +270,21 @@ fn extract_links(content: &str) -> Vec<String> {
 }
 
 fn extract_entity_refs(content: &str) -> Vec<EntityRef> {
+    let searchable = content_without_fenced_code(content);
     let mut refs = Vec::new();
-    for token in content.split_whitespace() {
-        let token = token.trim_matches(|c: char| ",.;()[]{}".contains(c));
+    for token in searchable.split_whitespace() {
+        let token = token.trim_matches(|c: char| ",.;()[]{}<>`".contains(c));
+        if let Some(slug) = token.strip_prefix("link://note/") {
+            let id = slug
+                .split(['#', '?'])
+                .next()
+                .unwrap_or(slug)
+                .trim_matches('/');
+            if !id.is_empty() {
+                refs.push(EntityRef::new(EntityKind::Note, id.to_string(), None));
+            }
+            continue;
+        }
         let token = token.strip_prefix('@').unwrap_or(token);
         if let Some((kind, id)) = token.split_once(':') {
             let kind = match kind.to_ascii_lowercase().as_str() {
