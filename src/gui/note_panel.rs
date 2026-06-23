@@ -1,27 +1,27 @@
-use crate::actions::screenshot::{Mode as ScreenshotMode, capture};
+use crate::actions::screenshot::{capture, Mode as ScreenshotMode};
 use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::notes_markdown::{
-    MarkdownAnalysis, MarkdownCallout, MarkdownHeading, MarkdownSection, MarkdownTaskItem,
-    analyze_markdown, task_list::toggle_task_marker,
+    analyze_markdown, task_list::toggle_task_marker, MarkdownAnalysis, MarkdownCallout,
+    MarkdownHeading, MarkdownSection, MarkdownTaskItem,
 };
 use crate::plugins::note::{
-    Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget, append_note, assets_dir,
-    available_tags, image_files, load_notes, note_cache_snapshot, note_link_menu_targets_snapshot,
-    note_version, resolve_note_query, save_note,
+    append_note, assets_dir, available_tags, image_files, load_notes, note_cache_snapshot,
+    note_link_menu_targets_snapshot, note_version, resolve_note_query, save_note, Note,
+    NoteExternalOpen, NoteLinkMenuTarget, NoteTarget,
 };
-use crate::plugins::todo::{TODO_FILE, load_todos, todo_version};
+use crate::plugins::todo::{load_todos, todo_version, TODO_FILE};
 use crate::settings::{NoteSettings, NoteViewMode};
-use eframe::egui::{self, Color32, FontId, Key, popup};
+use eframe::egui::{self, popup, Color32, FontId, Key};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
-use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use image::imageops::FilterType;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use rfd::FileDialog;
-use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -145,13 +145,12 @@ fn wrap_char_range_in_callout(
     let start_char = clamp_char_index(content, start_char.min(end_char));
     let selected = &content[start_byte..end_byte];
     let mut quoted = String::new();
-    for line in selected.lines() {
+    for (idx, line) in selected.split('\n').enumerate() {
+        if idx > 0 {
+            quoted.push('\n');
+        }
         quoted.push_str("> ");
         quoted.push_str(line);
-        quoted.push('\n');
-    }
-    if selected.is_empty() || selected.ends_with('\n') {
-        quoted.push_str("> \n");
     }
     let replacement = format!("> [!{}] Title\n{quoted}", kind.to_ascii_uppercase());
     let mut updated =
@@ -163,12 +162,7 @@ fn wrap_char_range_in_callout(
         + format!("> [!{}] Title\n> ", kind.to_ascii_uppercase())
             .chars()
             .count();
-    let body_end = body_start
-        + quoted
-            .trim_end_matches('\n')
-            .chars()
-            .count()
-            .saturating_sub("> ".chars().count());
+    let body_end = body_start + quoted.chars().count().saturating_sub("> ".chars().count());
     (updated, body_start..body_end)
 }
 
@@ -1186,7 +1180,11 @@ impl NotePanel {
                             ui.add_space((row.level.saturating_sub(1) as f32) * 12.0);
                             if app.note_settings.collapsible_sections_enabled {
                                 let marker = if row.collapsible {
-                                    if row.collapsed { "▶" } else { "▼" }
+                                    if row.collapsed {
+                                        "▶"
+                                    } else {
+                                        "▼"
+                                    }
                                 } else {
                                     "•"
                                 };
@@ -2951,9 +2949,9 @@ mod tests {
     use eframe::egui;
     use std::{
         fs,
-        sync::{Arc, Mutex, MutexGuard, atomic::AtomicBool},
+        sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard},
     };
-    use tempfile::{TempDir, tempdir};
+    use tempfile::{tempdir, TempDir};
 
     static NOTES_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -3156,18 +3154,14 @@ mod tests {
 
         assert_eq!(panel.link_menu_target_refresh_count, target_refresh_count);
         assert!(panel.link_menu_result_refresh_count > result_refresh_count);
-        assert!(
-            panel
-                .link_menu_results
-                .iter()
-                .any(|result| result.display_title == "Alpha")
-        );
-        assert!(
-            !panel
-                .link_menu_results
-                .iter()
-                .any(|result| result.display_title == "Beta")
-        );
+        assert!(panel
+            .link_menu_results
+            .iter()
+            .any(|result| result.display_title == "Alpha"));
+        assert!(!panel
+            .link_menu_results
+            .iter()
+            .any(|result| result.display_title == "Beta"));
     }
 
     #[test]
