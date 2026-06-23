@@ -153,6 +153,14 @@ fn preprocess_note_links(
     out
 }
 
+fn preprocess_preview_markdown(
+    content: &str,
+    current_slug: &str,
+    todo_labels: &HashMap<String, String>,
+) -> String {
+    preprocess_note_links(content, current_slug, todo_labels)
+}
+
 fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
     if let Some(mut open_url) = ui.ctx().output_mut(|o| o.open_url.take()) {
         if let Ok(url) = Url::parse(&open_url.url) {
@@ -202,6 +210,7 @@ pub struct NotePanel {
     markdown_analysis_source_hash: Option<u64>,
     collapsed_sections: HashSet<String>,
     ui_state_error_reported: bool,
+    preview_render_error_reported: bool,
     outline_open: bool,
     outline_width: f32,
     outline_filter: String,
@@ -447,6 +456,7 @@ impl NotePanel {
             markdown_analysis_source_hash: None,
             collapsed_sections: HashSet::new(),
             ui_state_error_reported: false,
+            preview_render_error_reported: false,
             outline_open: false,
             outline_width: 180.0,
             outline_filter: String::new(),
@@ -1378,6 +1388,15 @@ impl NotePanel {
     }
 
     fn render_preview(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, ctx: &egui::Context) {
+        self.render_preview_document(ui, app, ctx);
+    }
+
+    fn render_preview_document(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        ctx: &egui::Context,
+    ) {
         if app.note_settings.collapsible_sections_enabled {
             let sections = self.collapsible_sections(true);
             if !sections.is_empty() {
@@ -1845,15 +1864,45 @@ impl NotePanel {
         }
         ui.scope(|ui| {
             ui.style_mut().override_font_id = Some(FontId::proportional(app.note_font_size));
-            let processed =
-                preprocess_note_links(fragment, &self.note.slug, &self.derived.todo_label_map);
-            CommonMarkViewer::new(format!("note_seg_{}", cache_id)).show(
-                ui,
-                &mut self.markdown_cache,
-                &processed,
+            let processed = preprocess_preview_markdown(
+                fragment,
+                &self.note.slug,
+                &self.derived.todo_label_map,
             );
-            handle_markdown_links(ui, app);
+            let render_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                CommonMarkViewer::new(format!("note_seg_{}", cache_id)).show(
+                    ui,
+                    &mut self.markdown_cache,
+                    &processed,
+                );
+            }));
+            match render_result {
+                Ok(()) => handle_markdown_links(ui, app),
+                Err(_) => self.render_preview_fallback(ui, app, fragment),
+            }
         });
+    }
+
+    fn render_preview_fallback(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        fragment: &str,
+    ) {
+        if !self.preview_render_error_reported {
+            app.report_error_message(
+                "note preview",
+                "Markdown preview rendering failed; showing read-only source text instead.",
+            );
+            self.preview_render_error_reported = true;
+        }
+        let mut fallback = fragment.to_string();
+        ui.add(
+            egui::TextEdit::multiline(&mut fallback)
+                .desired_width(f32::INFINITY)
+                .font(FontId::monospace(app.note_font_size))
+                .interactive(false),
+        );
     }
 
     fn render_task_item(
@@ -3852,6 +3901,48 @@ body"
         labels.insert("abc".to_string(), "Readable Label".to_string());
         let processed = preprocess_note_links("ref @todo:abc", "current", &labels);
         assert_eq!(processed, "ref [Readable Label](todo://abc)");
+    }
+
+    #[test]
+    fn preview_preprocess_preserves_markdown_blocks_and_raw_html() {
+        let mut labels = HashMap::new();
+        labels.insert("build".to_string(), "Build launcher".to_string());
+        let source = concat!(
+            "# Heading\n\n",
+            "- bullet\n",
+            "1. number\n",
+            "- [ ] task\n\n",
+            "> [!NOTE]\n",
+            "> callout\n\n",
+            "```rust\nfn main() {}\n```\n\n",
+            "`inline` <span>raw</span>\n\n",
+            "| a | b |\n| - | - |\n| c | d |\n\n",
+            "---\n\n",
+            "![Alt](assets/pic.png|120)\n",
+            "[external](https://example.com) [[Other Note]] @todo:build\n"
+        );
+        let processed = preprocess_preview_markdown(source, "current", &labels);
+
+        assert!(processed.contains("# Heading"));
+        assert!(processed.contains("- bullet"));
+        assert!(processed.contains("1. number"));
+        assert!(processed.contains("- [ ] task"));
+        assert!(processed.contains("> [!NOTE]\n> callout"));
+        assert!(processed.contains("```rust\nfn main() {}\n```"));
+        assert!(processed.contains("`inline` <span>raw</span>"));
+        assert!(processed.contains("| a | b |"));
+        assert!(processed.contains("---"));
+        assert!(processed.contains("![Alt](assets/pic.png|120)"));
+        assert!(processed.contains("[external](https://example.com)"));
+        assert!(processed.contains("[Other Note](note://other-note)"));
+        assert!(processed.contains("[Build launcher](todo://build)"));
+    }
+
+    #[test]
+    fn preview_preprocess_keeps_current_note_wiki_link_literal() {
+        let labels = HashMap::new();
+        let processed = preprocess_preview_markdown("[[Current Note]]", "current-note", &labels);
+        assert_eq!(processed, "[[Current Note]]");
     }
 
     #[test]
