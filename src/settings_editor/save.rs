@@ -129,12 +129,20 @@ impl SettingsEditor {
         app.note_more_limit = new_settings.note_more_limit;
         let dirs = new_settings.plugin_dirs.clone().unwrap_or_default();
         let actions_arc = Arc::clone(&app.actions);
+        let mut plugin_settings = new_settings.plugin_settings.clone();
+        plugin_settings.insert(
+            "note".into(),
+            crate::plugins::note::note_plugin_settings_with_backlinks(
+                plugin_settings.get("note"),
+                new_settings.note.backlinks_enabled,
+            ),
+        );
         app.plugins.reload_from_dirs(
             &dirs,
             app.clipboard_limit,
             app.net_unit,
             false,
-            &new_settings.plugin_settings,
+            &plugin_settings,
             actions_arc,
         );
         if let Some(val) = new_settings.plugin_settings.get("note") {

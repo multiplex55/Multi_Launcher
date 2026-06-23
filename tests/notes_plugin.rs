@@ -1,13 +1,13 @@
 use chrono::Local;
 use eframe::egui;
-use multi_launcher::gui::{extract_links, show_wiki_link, LauncherApp};
+use multi_launcher::gui::{LauncherApp, extract_links, show_wiki_link};
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugin::PluginManager;
-use multi_launcher::plugins::note::{append_note, load_notes, save_notes, NotePlugin};
+use multi_launcher::plugins::note::{NotePlugin, append_note, load_notes, save_notes};
 use multi_launcher::settings::Settings;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -56,6 +56,9 @@ fn note_root_query_returns_actions_in_order() {
             "query:note list",
             "query:note tag",
             "query:note graph",
+            "query:note backlinks ",
+            "query:note links ",
+            "query:note mentions ",
             "query:note templates",
             "query:note new ",
             "query:note add ",
@@ -268,12 +271,16 @@ fn note_today_with_trailing_args_returns_safe_action() {
 
     let results = plugin.search("note today Note");
 
-    assert!(results
-        .iter()
-        .any(|action| action.action == format!("note:new:{}", today)));
-    assert!(results
-        .iter()
-        .any(|action| action.action == "query:note today"));
+    assert!(
+        results
+            .iter()
+            .any(|action| action.action == format!("note:new:{}", today))
+    );
+    assert!(
+        results
+            .iter()
+            .any(|action| action.action == "query:note today")
+    );
 }
 
 #[test]

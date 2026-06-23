@@ -33,12 +33,36 @@ pub enum NoteExternalOpen {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotePluginSettings {
     pub external_open: NoteExternalOpen,
+    #[serde(default = "default_note_backlinks_enabled")]
+    pub backlinks_enabled: bool,
+}
+
+fn default_note_backlinks_enabled() -> bool {
+    true
+}
+
+pub fn note_plugin_settings_with_backlinks(
+    value: Option<&serde_json::Value>,
+    backlinks_enabled: bool,
+) -> serde_json::Value {
+    let mut cfg = value
+        .cloned()
+        .and_then(|v| serde_json::from_value::<NotePluginSettings>(v).ok())
+        .unwrap_or_default();
+    cfg.backlinks_enabled = backlinks_enabled;
+    serde_json::to_value(cfg).unwrap_or_else(|_| {
+        serde_json::json!({
+            "external_open": NoteExternalOpen::Wezterm,
+            "backlinks_enabled": backlinks_enabled,
+        })
+    })
 }
 
 impl Default for NotePluginSettings {
     fn default() -> Self {
         Self {
             external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: true,
         }
     }
 }
@@ -851,6 +875,7 @@ pub struct NotePlugin {
     data: Arc<Mutex<NoteCache>>,
     templates: Arc<Mutex<HashMap<String, String>>>,
     external_open: NoteExternalOpen,
+    backlinks_enabled: bool,
     #[allow(dead_code)]
     watcher: Option<RecommendedWatcher>,
 }
@@ -904,6 +929,7 @@ impl NotePlugin {
             data,
             templates,
             external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: true,
             watcher,
         }
     }
@@ -913,6 +939,217 @@ impl Default for NotePlugin {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[derive(Clone, Copy)]
+enum NoteRelationshipCommand {
+    Backlinks,
+    Links,
+    Mentions,
+}
+
+impl NoteRelationshipCommand {
+    fn query_name(self) -> &'static str {
+        match self {
+            Self::Backlinks => "backlinks",
+            Self::Links => "links",
+            Self::Mentions => "mentions",
+        }
+    }
+
+    fn label_badge(self) -> &'static str {
+        match self {
+            Self::Backlinks => "[backlink]",
+            Self::Links => "[outgoing link]",
+            Self::Mentions => "[mention]",
+        }
+    }
+
+    fn empty_label(self, note_title: &str) -> String {
+        match self {
+            Self::Backlinks => format!("No backlinks for {note_title}"),
+            Self::Links => format!("No outgoing links for {note_title}"),
+            Self::Mentions => format!("No mentions for {note_title}"),
+        }
+    }
+}
+
+fn note_display_title(note: &Note) -> &str {
+    note.alias.as_ref().unwrap_or(&note.title)
+}
+
+fn note_query_action(command: NoteRelationshipCommand, query: &str) -> Action {
+    Action {
+        label: format!("{} for {}", command.query_name(), query),
+        desc: "Note".into(),
+        action: format!("query:note {}", command.query_name()),
+        args: Some(serde_json::json!({ "query": query }).to_string()),
+    }
+}
+
+fn relationship_note_action(command: NoteRelationshipCommand, note: &Note) -> Action {
+    Action {
+        label: format!("{} {}", command.label_badge(), note_display_title(note)),
+        desc: "Note".into(),
+        action: format!("note:open:{}", note.slug),
+        args: None,
+    }
+}
+
+fn relationship_entity_action(
+    command: NoteRelationshipCommand,
+    notes: &[Note],
+    todos: &[crate::plugins::todo::TodoEntry],
+    entity: EntityKey,
+) -> Action {
+    let link = LinkRef {
+        target_type: entity.entity_type,
+        target_id: entity.entity_id,
+        anchor: None,
+        display_text: None,
+    };
+    let mut action = format_link_row(notes, todos, &link, command.query_name());
+    action.label = format!("{} {}", command.label_badge(), action.label);
+    action
+}
+
+fn relationship_actions(
+    command: NoteRelationshipCommand,
+    guard: &NoteCache,
+    args: &str,
+    backlinks_enabled: bool,
+) -> Vec<Action> {
+    if matches!(
+        command,
+        NoteRelationshipCommand::Backlinks | NoteRelationshipCommand::Mentions
+    ) && !backlinks_enabled
+    {
+        return vec![Action {
+            label: "Note backlinks are disabled in settings".into(),
+            desc: "Note".into(),
+            action: "query:note".into(),
+            args: None,
+        }];
+    }
+
+    if args.is_empty() {
+        let mut actions = vec![Action {
+            label: format!("Usage: note {} <query>", command.query_name()),
+            desc: "Usage".into(),
+            action: format!("query:note {} ", command.query_name()),
+            args: None,
+        }];
+        actions.extend(
+            guard
+                .notes
+                .iter()
+                .map(|n| note_query_action(command, &format!("slug:{}", n.slug))),
+        );
+        return actions;
+    }
+
+    let note = match resolve_target(guard, args) {
+        NoteTarget::Resolved(slug) => guard.notes.iter().find(|n| n.slug == slug),
+        NoteTarget::Ambiguous(slugs) => {
+            let mut actions = vec![Action {
+                label: format!("Ambiguous note query \"{args}\" ({} matches)", slugs.len()),
+                desc: "Note".into(),
+                action: format!("query:note {} ", command.query_name()),
+                args: None,
+            }];
+            actions.extend(
+                slugs
+                    .into_iter()
+                    .take(8)
+                    .map(|slug| note_query_action(command, &format!("slug:{slug}"))),
+            );
+            return actions;
+        }
+        NoteTarget::Broken => None,
+    };
+
+    let Some(note) = note else {
+        return vec![Action {
+            label: format!("No note found for \"{args}\""),
+            desc: "Note".into(),
+            action: format!("query:note {} ", command.query_name()),
+            args: None,
+        }];
+    };
+
+    let todos = TODO_DATA.read().map(|g| g.clone()).unwrap_or_default();
+    let index = build_index_from_notes_and_todos(&guard.notes, &todos);
+    let source = EntityKey::new(LinkTarget::Note, note.slug.clone());
+    let mut actions = Vec::new();
+
+    if matches!(command, NoteRelationshipCommand::Links) {
+        actions.extend(index.get_forward_links(&source).into_iter().map(|link| {
+            relationship_entity_action(
+                NoteRelationshipCommand::Links,
+                &guard.notes,
+                &todos,
+                EntityKey::new(link.target_type, link.target_id),
+            )
+        }));
+        if backlinks_enabled {
+            actions.extend(
+                index
+                    .get_backlinks(
+                        &source,
+                        crate::linking::BacklinkFilters {
+                            linked_todos: true,
+                            related_notes: true,
+                            mentions: true,
+                        },
+                    )
+                    .into_iter()
+                    .map(|entity| {
+                        let row_command = if entity.entity_type == LinkTarget::Note {
+                            NoteRelationshipCommand::Backlinks
+                        } else {
+                            NoteRelationshipCommand::Mentions
+                        };
+                        relationship_entity_action(row_command, &guard.notes, &todos, entity)
+                    }),
+            );
+        }
+    }
+
+    if matches!(
+        command,
+        NoteRelationshipCommand::Backlinks | NoteRelationshipCommand::Mentions
+    ) {
+        let filters = match command {
+            NoteRelationshipCommand::Backlinks => crate::linking::BacklinkFilters {
+                linked_todos: false,
+                related_notes: true,
+                mentions: false,
+            },
+            NoteRelationshipCommand::Mentions => crate::linking::BacklinkFilters {
+                linked_todos: true,
+                related_notes: true,
+                mentions: true,
+            },
+            NoteRelationshipCommand::Links => unreachable!(),
+        };
+        actions.extend(
+            index
+                .get_backlinks(&source, filters)
+                .into_iter()
+                .map(|entity| relationship_entity_action(command, &guard.notes, &todos, entity)),
+        );
+    }
+
+    if actions.is_empty() {
+        actions.push(Action {
+            label: command.empty_label(&note.title),
+            desc: "Note".into(),
+            action: format!("note:open:{}", note.slug),
+            args: None,
+        });
+    }
+
+    actions
 }
 
 impl Plugin for NotePlugin {
@@ -952,6 +1189,24 @@ impl Plugin for NotePlugin {
                         label: "note graph".into(),
                         desc: "Note".into(),
                         action: "query:note graph".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "note backlinks".into(),
+                        desc: "Note".into(),
+                        action: "query:note backlinks ".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "note links".into(),
+                        desc: "Note".into(),
+                        action: "query:note links ".into(),
+                        args: None,
+                    },
+                    Action {
+                        label: "note mentions".into(),
+                        desc: "Note".into(),
+                        action: "query:note mentions ".into(),
                         args: None,
                     },
                     Action {
@@ -1246,98 +1501,29 @@ impl Plugin for NotePlugin {
                     }
                     return actions;
                 }
+                "backlinks" => {
+                    return relationship_actions(
+                        NoteRelationshipCommand::Backlinks,
+                        &guard,
+                        args,
+                        self.backlinks_enabled,
+                    );
+                }
+                "mentions" => {
+                    return relationship_actions(
+                        NoteRelationshipCommand::Mentions,
+                        &guard,
+                        args,
+                        self.backlinks_enabled,
+                    );
+                }
                 "links" | "link" => {
-                    if args.is_empty() {
-                        let mut actions = vec![Action {
-                            label: "Usage: note links <query>".into(),
-                            desc: "Usage".into(),
-                            action: "query:note links ".into(),
-                            args: None,
-                        }];
-                        actions.extend(guard.notes.iter().map(|n| Action {
-                            label: format!("Links for {}", n.alias.as_ref().unwrap_or(&n.title)),
-                            desc: "Links".into(),
-                            action: format!(
-                                "query:note links {}",
-                                n.alias.as_ref().unwrap_or(&n.title)
-                            ),
-                            args: None,
-                        }));
-                        return actions;
-                    }
-
-                    let note = match resolve_target(&guard, args) {
-                        NoteTarget::Resolved(slug) => guard.notes.iter().find(|n| n.slug == slug),
-                        NoteTarget::Ambiguous(slugs) => {
-                            let mut actions = vec![Action {
-                                label: format!(
-                                    "Ambiguous note query \"{args}\" ({} matches)",
-                                    slugs.len()
-                                ),
-                                desc: "Links".into(),
-                                action: "query:note links ".into(),
-                                args: None,
-                            }];
-                            actions.extend(slugs.into_iter().take(8).map(|slug| Action {
-                                label: format!("Candidate: {slug}"),
-                                desc: "Links".into(),
-                                action: format!("query:note links slug:{slug}"),
-                                args: None,
-                            }));
-                            return actions;
-                        }
-                        NoteTarget::Broken => None,
-                    };
-
-                    let note = match note {
-                        Some(note) => note,
-                        None => {
-                            return vec![Action {
-                                label: format!("No note found for \"{args}\""),
-                                desc: "Links".into(),
-                                action: "query:note links ".into(),
-                                args: None,
-                            }];
-                        }
-                    };
-
-                    let todos = TODO_DATA.read().map(|g| g.clone()).unwrap_or_default();
-                    let index = build_index_from_notes_and_todos(&guard.notes, &todos);
-                    let source = EntityKey::new(LinkTarget::Note, note.slug.clone());
-
-                    let mut actions: Vec<Action> = index
-                        .get_forward_links(&source)
-                        .into_iter()
-                        .map(|link| format_link_row(&guard.notes, &todos, &link, "linked"))
-                        .collect();
-
-                    for backlink in index.get_backlinks(
-                        &source,
-                        crate::linking::BacklinkFilters {
-                            linked_todos: true,
-                            related_notes: true,
-                            mentions: true,
-                        },
-                    ) {
-                        let link = LinkRef {
-                            target_type: backlink.entity_type,
-                            target_id: backlink.entity_id,
-                            anchor: None,
-                            display_text: None,
-                        };
-                        actions.push(format_link_row(&guard.notes, &todos, &link, "mentioned_by"));
-                    }
-
-                    if actions.is_empty() {
-                        actions.push(Action {
-                            label: format!("No links for {}", note.title),
-                            desc: "Links".into(),
-                            action: format!("note:open:{}", note.slug),
-                            args: None,
-                        });
-                    }
-
-                    return actions;
+                    return relationship_actions(
+                        NoteRelationshipCommand::Links,
+                        &guard,
+                        args,
+                        self.backlinks_enabled,
+                    );
                 }
                 "rm" => {
                     let filter = args;
@@ -1472,6 +1658,18 @@ impl Plugin for NotePlugin {
                 args: None,
             },
             Action {
+                label: "note backlinks".into(),
+                desc: "Note".into(),
+                action: "query:note backlinks ".into(),
+                args: None,
+            },
+            Action {
+                label: "note mentions".into(),
+                desc: "Note".into(),
+                action: "query:note mentions ".into(),
+                args: None,
+            },
+            Action {
                 label: "note link".into(),
                 desc: "Note".into(),
                 action: "query:note link ".into(),
@@ -1511,6 +1709,7 @@ impl Plugin for NotePlugin {
     fn apply_settings(&mut self, value: &serde_json::Value) {
         if let Ok(cfg) = serde_json::from_value::<NotePluginSettings>(value.clone()) {
             self.external_open = cfg.external_open;
+            self.backlinks_enabled = cfg.backlinks_enabled;
         }
     }
 
@@ -1538,6 +1737,7 @@ impl Plugin for NotePlugin {
             Err(e) => tracing::error!("failed to serialize note settings: {e}"),
         }
         self.external_open = cfg.external_open;
+        self.backlinks_enabled = cfg.backlinks_enabled;
     }
 
     fn query_prefixes(&self) -> &[&str] {
@@ -1670,6 +1870,7 @@ Body",
             data: CACHE.clone(),
             templates: TEMPLATE_CACHE.clone(),
             external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: true,
             watcher: None,
         };
 
@@ -1733,6 +1934,7 @@ Body",
             data: CACHE.clone(),
             templates: TEMPLATE_CACHE.clone(),
             external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: true,
             watcher: None,
         };
 
@@ -1791,6 +1993,7 @@ Body",
             data: CACHE.clone(),
             templates: TEMPLATE_CACHE.clone(),
             external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: true,
             watcher: None,
         };
 
@@ -1855,6 +2058,7 @@ Body",
             data: CACHE.clone(),
             templates: TEMPLATE_CACHE.clone(),
             external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: true,
             watcher: None,
         };
 
@@ -1900,6 +2104,7 @@ Body",
             data: CACHE.clone(),
             templates: TEMPLATE_CACHE.clone(),
             external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: true,
             watcher: None,
         };
 
@@ -1962,6 +2167,7 @@ Body",
             data: CACHE.clone(),
             templates: TEMPLATE_CACHE.clone(),
             external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: true,
             watcher: None,
         };
 
@@ -1969,7 +2175,7 @@ Body",
         assert!(
             links
                 .iter()
-                .any(|a| a.label.contains("status=mentioned_by") && a.label.contains("type=note"))
+                .any(|a| a.label.contains("[backlink]") && a.label.contains("type=note"))
         );
         assert!(links.iter().any(|a| a.action.starts_with("note:open:")));
 
@@ -2005,6 +2211,7 @@ Body",
             data: CACHE.clone(),
             templates: TEMPLATE_CACHE.clone(),
             external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: true,
             watcher: None,
         };
         let links = plugin.search("note links Roadmap");
@@ -2013,18 +2220,115 @@ Body",
                 .iter()
                 .any(|a| a.label.starts_with("Ambiguous note query"))
         );
-        assert!(
-            links
-                .iter()
-                .any(|a| a.action == "query:note links slug:roadmap-a")
-        );
-        assert!(
-            links
-                .iter()
-                .any(|a| a.action == "query:note links slug:roadmap-b")
-        );
+        assert!(links.iter().any(|a| {
+            a.action == "query:note links"
+                && a.args
+                    .as_deref()
+                    .is_some_and(|args| args.contains("slug:roadmap-a"))
+        }));
+        assert!(links.iter().any(|a| {
+            a.action == "query:note links"
+                && a.args
+                    .as_deref()
+                    .is_some_and(|args| args.contains("slug:roadmap-b"))
+        }));
         restore_cache(original);
     }
+
+    #[test]
+    fn note_relationship_commands_resolve_alias_title_and_slug() {
+        let alpha_content = "See [[Beta Note]].";
+        let delta_content = "Reference [[Beta Note]].";
+        let original = set_notes(vec![
+            Note {
+                title: "Alpha".into(),
+                path: PathBuf::new(),
+                content: alpha_content.into(),
+                tags: Vec::new(),
+                links: extract_links(alpha_content),
+                slug: "alpha".into(),
+                alias: None,
+                entity_refs: Vec::new(),
+            },
+            Note {
+                title: "Beta Note".into(),
+                path: PathBuf::new(),
+                content: "Backlink target.".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "beta-note".into(),
+                alias: Some("Second".into()),
+                entity_refs: Vec::new(),
+            },
+            Note {
+                title: "Delta".into(),
+                path: PathBuf::new(),
+                content: delta_content.into(),
+                tags: Vec::new(),
+                links: extract_links(delta_content),
+                slug: "delta".into(),
+                alias: None,
+                entity_refs: Vec::new(),
+            },
+        ]);
+
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: CACHE.clone(),
+            templates: TEMPLATE_CACHE.clone(),
+            external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: true,
+            watcher: None,
+        };
+
+        let links = plugin.search("note links alpha");
+        assert_eq!(links.len(), 1);
+        assert!(links[0].label.contains("[outgoing link]"));
+        assert_eq!(links[0].action, "note:open:beta-note");
+
+        let backlinks = plugin.search("note backlinks Second");
+        let backlink_actions: Vec<&str> = backlinks.iter().map(|a| a.action.as_str()).collect();
+        assert_eq!(backlink_actions, vec!["note:open:alpha", "note:open:delta"]);
+        assert!(backlinks.iter().all(|a| a.label.contains("[backlink]")));
+
+        let mentions = plugin.search("note mentions Beta Note");
+        assert!(mentions.iter().all(|a| a.label.contains("[mention]")));
+        assert!(mentions.iter().any(|a| a.action == "note:open:alpha"));
+
+        restore_cache(original);
+    }
+
+    #[test]
+    fn note_backlinks_command_respects_disabled_setting() {
+        let original = set_notes(vec![Note {
+            title: "Target".into(),
+            path: PathBuf::new(),
+            content: String::new(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "target".into(),
+            alias: None,
+            entity_refs: Vec::new(),
+        }]);
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: CACHE.clone(),
+            templates: TEMPLATE_CACHE.clone(),
+            external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: false,
+            watcher: None,
+        };
+
+        let backlinks = plugin.search("note backlinks target");
+        assert_eq!(backlinks.len(), 1);
+        assert_eq!(
+            backlinks[0].label,
+            "Note backlinks are disabled in settings"
+        );
+
+        restore_cache(original);
+    }
+
     #[test]
     fn resolve_target_handles_duplicate_titles_with_slug_or_path() {
         let original = set_notes(vec![

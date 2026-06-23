@@ -1,6 +1,6 @@
 #![windows_subsystem = "windows"]
 
-use multi_launcher::actions::{load_actions, Action};
+use multi_launcher::actions::{Action, load_actions};
 use multi_launcher::gui::LauncherApp;
 use multi_launcher::hotkey::HotkeyTrigger;
 use multi_launcher::plugin::PluginManager;
@@ -11,9 +11,9 @@ use multi_launcher::{indexer, logging};
 use eframe::{egui, icon_data};
 use once_cell::sync::Lazy;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    mpsc::{channel, Sender},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc::{Sender, channel},
 };
 use std::thread;
 
@@ -89,12 +89,20 @@ fn spawn_gui(
     let mut plugins = PluginManager::new();
     let empty_dirs = Vec::new();
     let dirs = settings.plugin_dirs.as_ref().unwrap_or(&empty_dirs);
+    let mut plugin_settings = settings.plugin_settings.clone();
+    plugin_settings.insert(
+        "note".into(),
+        multi_launcher::plugins::note::note_plugin_settings_with_backlinks(
+            plugin_settings.get("note"),
+            settings.note.backlinks_enabled,
+        ),
+    );
     plugins.reload_from_dirs(
         dirs,
         settings.clipboard_limit,
         settings.net_unit,
         true,
-        &settings.plugin_settings,
+        &plugin_settings,
         Arc::clone(&actions),
     );
     // Ensure MG service starts even when there is no settings.json/plugin_settings entry yet.
