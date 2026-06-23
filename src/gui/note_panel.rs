@@ -1,27 +1,27 @@
-use crate::actions::screenshot::{capture, Mode as ScreenshotMode};
+use crate::actions::screenshot::{Mode as ScreenshotMode, capture};
 use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::notes_markdown::{
-    analyze_markdown, task_list::toggle_task_marker, MarkdownAnalysis, MarkdownHeading,
-    MarkdownSection, MarkdownTaskItem,
+    MarkdownAnalysis, MarkdownCallout, MarkdownHeading, MarkdownSection, MarkdownTaskItem,
+    analyze_markdown, task_list::toggle_task_marker,
 };
 use crate::plugins::note::{
-    append_note, assets_dir, available_tags, image_files, load_notes, note_cache_snapshot,
-    note_link_menu_targets_snapshot, note_version, resolve_note_query, save_note, Note,
-    NoteExternalOpen, NoteLinkMenuTarget, NoteTarget,
+    Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget, append_note, assets_dir,
+    available_tags, image_files, load_notes, note_cache_snapshot, note_link_menu_targets_snapshot,
+    note_version, resolve_note_query, save_note,
 };
-use crate::plugins::todo::{load_todos, todo_version, TODO_FILE};
+use crate::plugins::todo::{TODO_FILE, load_todos, todo_version};
 use crate::settings::{NoteSettings, NoteViewMode};
-use eframe::egui::{self, popup, Color32, FontId, Key};
+use eframe::egui::{self, Color32, FontId, Key, popup};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use image::imageops::FilterType;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use rfd::FileDialog;
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -119,6 +119,57 @@ fn char_range_to_byte_range(s: &str, start: usize, end: usize) -> (usize, usize)
         (end, start)
     };
     (char_to_byte_index(s, start), char_to_byte_index(s, end))
+}
+
+fn callout_insert_source(kind: &str) -> String {
+    format!("> [!{}] Title\n> Body\n", kind.to_ascii_uppercase())
+}
+
+fn insert_callout_at_char(content: &str, char_index: usize, kind: &str) -> (String, usize) {
+    let byte_index = char_to_byte_index(content, char_index);
+    let insert = callout_insert_source(kind);
+    let mut updated = String::with_capacity(content.len() + insert.len());
+    updated.push_str(&content[..byte_index]);
+    updated.push_str(&insert);
+    updated.push_str(&content[byte_index..]);
+    (updated, char_index + insert.chars().count())
+}
+
+fn wrap_char_range_in_callout(
+    content: &str,
+    start_char: usize,
+    end_char: usize,
+    kind: &str,
+) -> (String, std::ops::Range<usize>) {
+    let (start_byte, end_byte) = char_range_to_byte_range(content, start_char, end_char);
+    let start_char = clamp_char_index(content, start_char.min(end_char));
+    let selected = &content[start_byte..end_byte];
+    let mut quoted = String::new();
+    for line in selected.lines() {
+        quoted.push_str("> ");
+        quoted.push_str(line);
+        quoted.push('\n');
+    }
+    if selected.is_empty() || selected.ends_with('\n') {
+        quoted.push_str("> \n");
+    }
+    let replacement = format!("> [!{}] Title\n{quoted}", kind.to_ascii_uppercase());
+    let mut updated =
+        String::with_capacity(content.len() - (end_byte - start_byte) + replacement.len());
+    updated.push_str(&content[..start_byte]);
+    updated.push_str(&replacement);
+    updated.push_str(&content[end_byte..]);
+    let body_start = start_char
+        + format!("> [!{}] Title\n> ", kind.to_ascii_uppercase())
+            .chars()
+            .count();
+    let body_end = body_start
+        + quoted
+            .trim_end_matches('\n')
+            .chars()
+            .count()
+            .saturating_sub("> ".chars().count());
+    (updated, body_start..body_end)
 }
 
 fn preprocess_note_links(
@@ -1135,11 +1186,7 @@ impl NotePanel {
                             ui.add_space((row.level.saturating_sub(1) as f32) * 12.0);
                             if app.note_settings.collapsible_sections_enabled {
                                 let marker = if row.collapsible {
-                                    if row.collapsed {
-                                        "▶"
-                                    } else {
-                                        "▼"
-                                    }
+                                    if row.collapsed { "▶" } else { "▼" }
                                 } else {
                                     "•"
                                 };
@@ -1444,6 +1491,54 @@ impl NotePanel {
         ctx: &egui::Context,
         render_range: std::ops::Range<usize>,
     ) -> bool {
+        if app.note_settings.callouts_enabled {
+            let callouts: Vec<MarkdownCallout> = self
+                .markdown_analysis()
+                .callouts
+                .iter()
+                .filter(|callout| {
+                    callout.byte_range.start >= render_range.start
+                        && callout.byte_range.end <= render_range.end
+                })
+                .cloned()
+                .collect();
+            if !callouts.is_empty() {
+                let mut modified = false;
+                let mut cursor = render_range.start;
+                for callout in callouts {
+                    if cursor < callout.byte_range.start
+                        && self.render_preview_range_plain(
+                            ui,
+                            app,
+                            ctx,
+                            cursor..callout.byte_range.start,
+                        )
+                    {
+                        modified = true;
+                        break;
+                    }
+                    self.render_callout(ui, app, &callout);
+                    cursor = callout.byte_range.end;
+                }
+                if !modified
+                    && cursor < render_range.end
+                    && self.render_preview_range_plain(ui, app, ctx, cursor..render_range.end)
+                {
+                    modified = true;
+                }
+                return modified;
+            }
+        }
+        self.render_preview_range_plain(ui, app, ctx, render_range)
+    }
+
+    fn render_preview_range_plain(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        ctx: &egui::Context,
+        render_range: std::ops::Range<usize>,
+    ) -> bool {
         let mut last = 0usize;
         let content_clone = self.note.content[render_range.clone()].to_string();
         let mut modified = false;
@@ -1556,6 +1651,44 @@ impl NotePanel {
             self.mark_content_changed(ctx.input(|i| i.time));
         }
         modified
+    }
+
+    fn render_callout(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        callout: &MarkdownCallout,
+    ) {
+        let visuals = ui.visuals().clone();
+        let fill = visuals.faint_bg_color;
+        let stroke = egui::Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color);
+        egui::Frame::none()
+            .fill(fill)
+            .stroke(stroke)
+            .rounding(egui::Rounding::same(6.0))
+            .inner_margin(egui::Margin::same(8.0))
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.strong(callout.kind.to_ascii_uppercase());
+                        if !callout.title.is_empty() {
+                            ui.label(
+                                egui::RichText::new(&callout.title)
+                                    .color(visuals.strong_text_color()),
+                            );
+                        }
+                    });
+                    if !callout.body.is_empty() {
+                        ui.add_space(2.0);
+                        self.show_markdown_fragment(
+                            ui,
+                            app,
+                            &callout.body,
+                            format!("callout_{}", callout.byte_range.start),
+                        );
+                    }
+                });
+            });
     }
 
     fn render_collapsible_preview(
@@ -2050,6 +2183,23 @@ impl NotePanel {
                 self.wrap_selection(ctx, id, "*", "*");
                 ui.close_menu();
             }
+            ui.separator();
+            if ui.button("Insert NOTE callout").clicked() {
+                self.insert_callout(ctx, id, "note");
+                ui.close_menu();
+            }
+            if ui.button("Insert WARNING callout").clicked() {
+                self.insert_callout(ctx, id, "warning");
+                ui.close_menu();
+            }
+            if ui.button("Insert TODO callout").clicked() {
+                self.insert_callout(ctx, id, "todo");
+                ui.close_menu();
+            }
+            if ui.button("Wrap selection in callout").clicked() {
+                self.wrap_selection_in_callout(ctx, id, "note");
+                ui.close_menu();
+            }
         });
 
         ui.menu_button("Insert link", |ui| {
@@ -2289,6 +2439,50 @@ impl NotePanel {
                 .set_char_range(Some(egui::text::CCursorRange::two(
                     egui::text::CCursor::new(new_start),
                     egui::text::CCursor::new(new_end),
+                )));
+            state.store(ctx, id);
+        }
+    }
+
+    fn insert_callout(&mut self, ctx: &egui::Context, id: egui::Id, kind: &str) {
+        let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+        let idx = state
+            .cursor
+            .char_range()
+            .map(|r| r.primary.index)
+            .unwrap_or_else(|| self.note.content.chars().count());
+        let (updated, cursor) = insert_callout_at_char(&self.note.content, idx, kind);
+        self.note.content = updated;
+        self.mark_content_changed(ctx.input(|i| i.time));
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(cursor),
+            )));
+        state.store(ctx, id);
+    }
+
+    fn wrap_selection_in_callout(&mut self, ctx: &egui::Context, id: egui::Id, kind: &str) {
+        let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+        let mut range = state.cursor.char_range().and_then(|r| {
+            let [min, max] = r.sorted();
+            (min.index != max.index).then_some((min.index, max.index))
+        });
+        if range.is_none() {
+            range = self.pending_selection.take();
+        } else {
+            self.pending_selection = None;
+        }
+        if let Some((start, end)) = range {
+            let (updated, selected_range) =
+                wrap_char_range_in_callout(&self.note.content, start, end, kind);
+            self.note.content = updated;
+            self.mark_content_changed(ctx.input(|i| i.time));
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(selected_range.start),
+                    egui::text::CCursor::new(selected_range.end),
                 )));
             state.store(ctx, id);
         }
@@ -2757,9 +2951,9 @@ mod tests {
     use eframe::egui;
     use std::{
         fs,
-        sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard},
+        sync::{Arc, Mutex, MutexGuard, atomic::AtomicBool},
     };
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     static NOTES_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -2793,6 +2987,40 @@ mod tests {
             alias: None,
             entity_refs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn insert_callout_at_char_preserves_unicode_boundaries() {
+        let content = "αβ\nemoji 😀 end";
+        let insert_at = "αβ\nemoji 😀".chars().count();
+
+        let (updated, cursor) = insert_callout_at_char(content, insert_at, "warning");
+
+        assert_eq!(updated, "αβ\nemoji 😀> [!WARNING] Title\n> Body\n end");
+        assert_eq!(
+            cursor,
+            insert_at + "> [!WARNING] Title\n> Body\n".chars().count()
+        );
+        assert!(updated.is_char_boundary(char_to_byte_index(&updated, cursor)));
+    }
+
+    #[test]
+    fn wrap_char_range_in_callout_preserves_unicode_selection_boundaries() {
+        let content = "Intro\néclair 😀\nありがとう\nDone";
+        let start = "Intro\n".chars().count();
+        let end = "Intro\néclair 😀\nありがとう".chars().count();
+
+        let (updated, selected_range) = wrap_char_range_in_callout(content, start, end, "todo");
+
+        assert_eq!(
+            updated,
+            "Intro\n> [!TODO] Title\n> éclair 😀\n> ありがとう\nDone"
+        );
+        assert_eq!(
+            &updated[char_range_to_byte_range(&updated, selected_range.start, selected_range.end).0
+                ..char_range_to_byte_range(&updated, selected_range.start, selected_range.end).1],
+            "éclair 😀\n> ありがとう"
+        );
     }
 
     struct TempNotesDir {
@@ -2928,14 +3156,18 @@ mod tests {
 
         assert_eq!(panel.link_menu_target_refresh_count, target_refresh_count);
         assert!(panel.link_menu_result_refresh_count > result_refresh_count);
-        assert!(panel
-            .link_menu_results
-            .iter()
-            .any(|result| result.display_title == "Alpha"));
-        assert!(!panel
-            .link_menu_results
-            .iter()
-            .any(|result| result.display_title == "Beta"));
+        assert!(
+            panel
+                .link_menu_results
+                .iter()
+                .any(|result| result.display_title == "Alpha")
+        );
+        assert!(
+            !panel
+                .link_menu_results
+                .iter()
+                .any(|result| result.display_title == "Beta")
+        );
     }
 
     #[test]
