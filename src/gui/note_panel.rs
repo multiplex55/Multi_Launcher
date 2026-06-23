@@ -190,6 +190,7 @@ pub struct NotePanel {
     markdown_analysis: Option<MarkdownAnalysis>,
     markdown_analysis_source_hash: Option<u64>,
     collapsed_sections: HashSet<String>,
+    ui_state_error_reported: bool,
     outline_visible: bool,
     image_cache: HashMap<std::path::PathBuf, egui::TextureHandle>,
     overwrite_prompt: bool,
@@ -385,6 +386,7 @@ impl NotePanel {
             markdown_analysis: None,
             markdown_analysis_source_hash: None,
             collapsed_sections: HashSet::new(),
+            ui_state_error_reported: false,
             outline_visible: false,
             image_cache: HashMap::new(),
             overwrite_prompt: false,
@@ -420,6 +422,63 @@ impl NotePanel {
         panel.refresh_fast_derived();
         panel.refresh_heavy_derived(true);
         panel
+    }
+
+    pub(crate) fn load_collapsed_sections_state(&mut self, app: &mut LauncherApp) {
+        if !app.note_settings.collapsed_sections_persist {
+            return;
+        }
+        let path = crate::note_ui_state::path_for_settings(Path::new(&app.settings_path));
+        match crate::note_ui_state::load(&path) {
+            Ok(state) => {
+                self.collapsed_sections = state.collapsed_sections_for(&self.note.slug);
+            }
+            Err(err) => self.report_ui_state_error_once(
+                app,
+                format!(
+                    "Failed to load note UI state from {}: {err}",
+                    path.display()
+                ),
+            ),
+        }
+    }
+
+    fn persist_collapsed_sections_state(&mut self, app: &mut LauncherApp) {
+        if !app.note_settings.collapsed_sections_persist {
+            return;
+        }
+        let path = crate::note_ui_state::path_for_settings(Path::new(&app.settings_path));
+        let mut state = match crate::note_ui_state::load(&path) {
+            Ok(state) => state,
+            Err(err) => {
+                self.report_ui_state_error_once(
+                    app,
+                    format!(
+                        "Failed to load note UI state from {}: {err}",
+                        path.display()
+                    ),
+                );
+                return;
+            }
+        };
+        state.set_collapsed_sections(
+            self.note.slug.clone(),
+            self.collapsed_sections.iter().cloned(),
+        );
+        if let Err(err) = crate::note_ui_state::save(&path, &state) {
+            self.report_ui_state_error_once(
+                app,
+                format!("Failed to save note UI state to {}: {err}", path.display()),
+            );
+        }
+    }
+
+    fn report_ui_state_error_once(&mut self, app: &mut LauncherApp, message: String) {
+        if self.ui_state_error_reported {
+            return;
+        }
+        self.ui_state_error_reported = true;
+        app.report_error("note UI state", message);
     }
 
     fn backlink_rows_for_active_tab(&self) -> &[BacklinkRow] {
@@ -1346,6 +1405,7 @@ impl NotePanel {
                     } else {
                         self.collapsed_sections.insert(key.clone());
                     }
+                    self.persist_collapsed_sections_state(app);
                 }
                 let heading = self.note.content[heading_range.clone()].to_string();
                 self.show_markdown_fragment(ui, app, &heading, heading_range.start);

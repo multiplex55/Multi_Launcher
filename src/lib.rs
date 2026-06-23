@@ -13,6 +13,7 @@ pub mod logging;
 pub mod mouse_gestures;
 pub mod multi_manager;
 pub mod note_todo_sync;
+pub mod note_ui_state;
 pub mod notes_markdown;
 pub mod platform;
 pub mod plugin;
