@@ -2408,11 +2408,13 @@ impl LauncherApp {
                 },
             );
         }
-        self.note_panels.push(NotePanel::from_note_with_details_and_settings(
+        let mut panel = NotePanel::from_note_with_details_and_settings(
             note,
             self.note_show_details,
             &self.note_settings,
-        ));
+        );
+        panel.load_collapsed_sections_state(self);
+        self.note_panels.push(panel);
         // Allow keyboard shortcuts like Esc/Cmd+W to immediately close the panel
         self.update_panel_stack();
     }
