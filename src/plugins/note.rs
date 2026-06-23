@@ -1048,10 +1048,6 @@ impl NoteRelationshipCommand {
     }
 }
 
-fn note_display_title(note: &Note) -> &str {
-    note.alias.as_ref().unwrap_or(&note.title)
-}
-
 fn note_matches_title_or_alias(matcher: &SkimMatcherV2, note: &Note, filter: &str) -> bool {
     matcher.fuzzy_match(&note.title, filter).is_some()
         || matcher.fuzzy_match(&note.slug, filter).is_some()
@@ -1072,15 +1068,6 @@ fn note_query_action(command: NoteRelationshipCommand, query: &str) -> Action {
         desc: "Note".into(),
         action: format!("query:note {}", command.query_name()),
         args: Some(serde_json::json!({ "query": query }).to_string()),
-    }
-}
-
-fn relationship_note_action(command: NoteRelationshipCommand, note: &Note) -> Action {
-    Action {
-        label: format!("{} {}", command.label_badge(), note_display_title(note)),
-        desc: "Note".into(),
-        action: format!("note:open:{}", note.slug),
-        args: None,
     }
 }
 

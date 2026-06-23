@@ -44,7 +44,6 @@ fn setup_fixture() -> (tempfile::TempDir, EnvGuard) {
         &[BookmarkEntry {
             url: "https://plan.example.com".into(),
             alias: Some("Plan Bookmark".into()),
-            aliases: vec!["Plan Bookmark".into()],
         }],
     )
     .unwrap();
