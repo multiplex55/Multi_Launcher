@@ -1836,6 +1836,21 @@ mod tests {
         }
     }
 
+    fn test_plugin_with_notes(notes: Vec<Note>) -> (NotePlugin, Arc<Mutex<NoteCache>>) {
+        let data = Arc::new(Mutex::new(NoteCache::from_notes(notes)));
+        (
+            NotePlugin {
+                matcher: SkimMatcherV2::default(),
+                data: data.clone(),
+                templates: TEMPLATE_CACHE.clone(),
+                external_open: NoteExternalOpen::Wezterm,
+                backlinks_enabled: true,
+                watcher: None,
+            },
+            data,
+        )
+    }
+
     #[test]
     fn extract_alias_parses_single_alias() {
         let content = "# Alpha\nAlias: Display Name\n\nBody";
@@ -1857,61 +1872,51 @@ mod tests {
 
     #[test]
     fn note_alias_resolution_is_case_insensitive_and_supports_all_aliases() {
-        let original = set_notes(vec![test_note(
+        let cache = NoteCache::from_notes(vec![test_note(
             "Alpha",
             "alpha",
             "# Alpha\nAlias: Primary\nAliases: Second, Third\n\nBody",
         )]);
 
         assert_eq!(
-            resolve_note_query("primary"),
+            resolve_target(&cache, "primary"),
             NoteTarget::Resolved("alpha".into())
         );
         assert_eq!(
-            resolve_note_query("SECOND"),
+            resolve_target(&cache, "SECOND"),
             NoteTarget::Resolved("alpha".into())
         );
         assert_eq!(
-            resolve_note_query("third"),
+            resolve_target(&cache, "third"),
             NoteTarget::Resolved("alpha".into())
         );
-
-        restore_cache(original);
     }
 
     #[test]
     fn duplicate_alias_resolution_is_ambiguous() {
-        let original = set_notes(vec![
+        let (plugin, data) = test_plugin_with_notes(vec![
             test_note("Alpha", "alpha", "# Alpha\nAlias: Shared\n\nBody"),
             test_note("Beta", "beta", "# Beta\nAliases: shared, Other\n\nBody"),
         ]);
 
+        let cache = data.lock().expect("note cache lock poisoned");
         assert_eq!(
-            resolve_note_query("SHARED"),
+            resolve_target(&cache, "SHARED"),
             NoteTarget::Ambiguous(vec!["alpha".into(), "beta".into()])
         );
+        drop(cache);
 
-        let plugin = NotePlugin {
-            matcher: SkimMatcherV2::default(),
-            data: CACHE.clone(),
-            templates: TEMPLATE_CACHE.clone(),
-            external_open: NoteExternalOpen::Wezterm,
-            backlinks_enabled: true,
-            watcher: None,
-        };
         let open_actions = plugin.search("note open Shared");
         let open_slugs: Vec<&str> = open_actions
             .iter()
             .map(|action| action.action.as_str())
             .collect();
         assert_eq!(open_slugs, vec!["note:open:alpha", "note:open:beta"]);
-
-        restore_cache(original);
     }
 
     #[test]
     fn note_search_and_open_include_all_aliases() {
-        let original = set_notes(vec![
+        let (plugin, _) = test_plugin_with_notes(vec![
             test_note(
                 "Alpha",
                 "alpha",
@@ -1919,14 +1924,6 @@ mod tests {
             ),
             test_note("Beta", "beta", "# Beta\n\nBody"),
         ]);
-        let plugin = NotePlugin {
-            matcher: SkimMatcherV2::default(),
-            data: CACHE.clone(),
-            templates: TEMPLATE_CACHE.clone(),
-            external_open: NoteExternalOpen::Wezterm,
-            backlinks_enabled: true,
-            watcher: None,
-        };
 
         let search_labels: Vec<String> = plugin
             .search("note search third")
@@ -1941,8 +1938,6 @@ mod tests {
             .map(|a| a.label)
             .collect();
         assert_eq!(open_labels, vec!["Primary"]);
-
-        restore_cache(original);
     }
 
     #[test]
