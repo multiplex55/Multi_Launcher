@@ -1,27 +1,27 @@
-use crate::actions::screenshot::{capture, Mode as ScreenshotMode};
+use crate::actions::screenshot::{Mode as ScreenshotMode, capture};
 use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::notes_markdown::{
-    analyze_markdown, task_list::toggle_task_marker, MarkdownAnalysis, MarkdownCallout,
-    MarkdownHeading, MarkdownSection, MarkdownTaskItem,
+    MarkdownAnalysis, MarkdownCallout, MarkdownHeading, MarkdownSection, MarkdownTaskItem,
+    analyze_markdown, task_list::toggle_task_marker,
 };
 use crate::plugins::note::{
-    append_note, assets_dir, available_tags, image_files, load_notes, note_cache_snapshot,
-    note_link_menu_targets_snapshot, note_version, resolve_note_query, save_note, Note,
-    NoteExternalOpen, NoteLinkMenuTarget, NoteTarget,
+    Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget, append_note, assets_dir,
+    available_tags, image_files, load_notes, note_cache_snapshot, note_link_menu_targets_snapshot,
+    note_version, resolve_note_query, save_note,
 };
-use crate::plugins::todo::{load_todos, todo_version, TODO_FILE};
+use crate::plugins::todo::{TODO_FILE, load_todos, todo_version};
 use crate::settings::{NoteSettings, NoteViewMode};
-use eframe::egui::{self, popup, Color32, FontId, Key};
+use eframe::egui::{self, Color32, FontId, Key, popup};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use image::imageops::FilterType;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use rfd::FileDialog;
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -60,6 +60,7 @@ struct BacklinkRow {
     type_badge: String,
     updated: String,
     snippet: String,
+    reason: String,
     note_slug: Option<String>,
     todo_id: Option<String>,
 }
@@ -287,6 +288,8 @@ pub struct NotePanel {
     last_edit_at_secs: Option<f64>,
     last_notes_version: u64,
     last_todo_revision: u64,
+    last_backlink_content_hash: Option<u64>,
+    last_alias_map_hash: u64,
     #[cfg(test)]
     heavy_recompute_count: usize,
     #[cfg(test)]
@@ -471,7 +474,12 @@ impl NotePanel {
         } else {
             NoteViewMode::Edit
         };
-        let mut panel = Self::from_note_with_details_and_view_mode(note, show_details, view_mode);
+        let mut panel = Self::from_note_with_details_and_view_mode_and_backlink_setting(
+            note,
+            show_details,
+            view_mode,
+            settings.backlinks_enabled,
+        );
         panel.outline_open = settings.outline_sidebar_default_open;
         panel
     }
@@ -480,6 +488,20 @@ impl NotePanel {
         note: Note,
         show_details: bool,
         view_mode: NoteViewMode,
+    ) -> Self {
+        Self::from_note_with_details_and_view_mode_and_backlink_setting(
+            note,
+            show_details,
+            view_mode,
+            true,
+        )
+    }
+
+    fn from_note_with_details_and_view_mode_and_backlink_setting(
+        note: Note,
+        show_details: bool,
+        view_mode: NoteViewMode,
+        backlinks_enabled: bool,
     ) -> Self {
         let mut panel = Self {
             open: true,
@@ -529,6 +551,8 @@ impl NotePanel {
             last_edit_at_secs: None,
             last_notes_version: 0,
             last_todo_revision: 0,
+            last_backlink_content_hash: None,
+            last_alias_map_hash: 0,
             #[cfg(test)]
             heavy_recompute_count: 0,
             #[cfg(test)]
@@ -539,7 +563,7 @@ impl NotePanel {
             backlinks_render_count: 0,
         };
         panel.refresh_fast_derived();
-        panel.refresh_heavy_derived(true);
+        panel.refresh_heavy_derived(true, backlinks_enabled);
         panel
     }
 
@@ -618,12 +642,27 @@ impl NotePanel {
         self.fast_derived_dirty = false;
     }
 
-    fn refresh_heavy_derived(&mut self, force: bool) {
+    fn refresh_heavy_derived(&mut self, force: bool, backlinks_enabled: bool) {
         let current_notes_version = note_version();
         let current_todo_revision = todo_version();
+        let current_content_hash = self.content_hash();
+        let notes = note_cache_snapshot();
+        let current_alias_map_hash = alias_map_hash(&notes);
+
+        if !backlinks_enabled {
+            self.last_notes_version = current_notes_version;
+            self.last_todo_revision = current_todo_revision;
+            self.last_backlink_content_hash = Some(current_content_hash);
+            self.last_alias_map_hash = current_alias_map_hash;
+            self.heavy_recompute_requested = false;
+            return;
+        }
+
         if !force
             && self.last_notes_version == current_notes_version
             && self.last_todo_revision == current_todo_revision
+            && self.last_backlink_content_hash == Some(current_content_hash)
+            && self.last_alias_map_hash == current_alias_map_hash
         {
             self.heavy_recompute_requested = false;
             return;
@@ -636,16 +675,17 @@ impl NotePanel {
             .map(|t| (t.id.clone(), t.text.clone()))
             .collect::<HashMap<_, _>>();
 
-        let notes = note_cache_snapshot();
         self.derived.backlink_rows_linked_todos =
-            backlink_rows_for_note(&self.note.slug, BacklinkTab::LinkedTodos, &todos, &notes);
+            backlink_rows_for_note(&self.note, BacklinkTab::LinkedTodos, &todos, &notes);
         self.derived.backlink_rows_related_notes =
-            backlink_rows_for_note(&self.note.slug, BacklinkTab::RelatedNotes, &todos, &notes);
+            backlink_rows_for_note(&self.note, BacklinkTab::RelatedNotes, &todos, &notes);
         self.derived.backlink_rows_mentions =
-            backlink_rows_for_note(&self.note.slug, BacklinkTab::Mentions, &todos, &notes);
+            backlink_rows_for_note(&self.note, BacklinkTab::Mentions, &todos, &notes);
 
         self.last_notes_version = current_notes_version;
         self.last_todo_revision = current_todo_revision;
+        self.last_backlink_content_hash = Some(current_content_hash);
+        self.last_alias_map_hash = current_alias_map_hash;
         self.heavy_recompute_requested = false;
         #[cfg(test)]
         {
@@ -699,15 +739,18 @@ impl NotePanel {
         }
     }
 
-    fn maybe_refresh_heavy_derived(&mut self, ctx: &egui::Context) {
+    fn maybe_refresh_heavy_derived(&mut self, ctx: &egui::Context, backlinks_enabled: bool) {
         let notes_changed = self.last_notes_version != note_version();
         let todos_changed = self.last_todo_revision != todo_version();
+        let alias_changed = self.last_alias_map_hash != alias_map_hash(&note_cache_snapshot());
+        let content_changed = self.last_backlink_content_hash != Some(self.content_hash());
         let debounce_elapsed = self
             .last_edit_at_secs
             .map(|t| ctx.input(|i| i.time - t) >= HEAVY_RECOMPUTE_IDLE_DEBOUNCE.as_secs_f64())
             .unwrap_or(false);
-        if notes_changed || todos_changed || debounce_elapsed {
-            self.refresh_heavy_derived(false);
+        if notes_changed || todos_changed || alias_changed || (content_changed && debounce_elapsed)
+        {
+            self.refresh_heavy_derived(false, backlinks_enabled);
             return;
         }
 
@@ -870,7 +913,7 @@ impl NotePanel {
                 if self.fast_derived_dirty {
                     self.refresh_fast_derived();
                 }
-                self.maybe_refresh_heavy_derived(ctx);
+                self.maybe_refresh_heavy_derived(ctx, app.note_settings.backlinks_enabled);
                 self.render_outline(ui, app);
                 let remaining = ui.available_height();
                 #[cfg(test)]
@@ -988,7 +1031,10 @@ impl NotePanel {
                                 );
                             } else {
                                 self.refresh_fast_derived();
-                                self.refresh_heavy_derived(true);
+                                self.refresh_heavy_derived(
+                                    true,
+                                    app.note_settings.backlinks_enabled,
+                                );
                                 self.finish_save(app);
                                 self.overwrite_prompt = false;
                             }
@@ -1003,7 +1049,10 @@ impl NotePanel {
                                 );
                             } else {
                                 self.refresh_fast_derived();
-                                self.refresh_heavy_derived(true);
+                                self.refresh_heavy_derived(
+                                    true,
+                                    app.note_settings.backlinks_enabled,
+                                );
                                 self.finish_save(app);
                                 self.overwrite_prompt = false;
                             }
@@ -1180,11 +1229,7 @@ impl NotePanel {
                             ui.add_space((row.level.saturating_sub(1) as f32) * 12.0);
                             if app.note_settings.collapsible_sections_enabled {
                                 let marker = if row.collapsible {
-                                    if row.collapsed {
-                                        "▶"
-                                    } else {
-                                        "▼"
-                                    }
+                                    if row.collapsed { "▶" } else { "▼" }
                                 } else {
                                     "•"
                                 };
@@ -1221,7 +1266,9 @@ impl NotePanel {
             self.selected_outline_heading = None;
             self.pending_scroll_target = None;
         }
-        self.render_backlinks(ui, app);
+        if app.note_settings.backlinks_enabled {
+            self.render_backlinks(ui, app);
+        }
     }
 
     fn move_editor_cursor_to(&mut self, char_index: usize, ctx: &egui::Context) {
@@ -1395,8 +1442,23 @@ impl NotePanel {
                     ui.horizontal_wrapped(|ui| {
                         ui.small(format!("[{}]", row.type_badge));
                         ui.small(format!("updated {}", row.updated));
+                        ui.small(format!("reason: {}", row.reason));
                     });
                     ui.small(&row.snippet);
+                    if ui.button("Open").clicked() {
+                        if let Some(slug) = &row.note_slug {
+                            app.open_note_panel(slug, None);
+                        } else if let Some(todo_id) = &row.todo_id {
+                            let todos = load_todos(TODO_FILE).unwrap_or_default();
+                            if let Some((todo_idx, _)) =
+                                todos.iter().enumerate().find(|(_, t)| &t.id == todo_id)
+                            {
+                                app.todo_view_dialog.open_edit(todo_idx);
+                            } else {
+                                app.todo_view_dialog.open();
+                            }
+                        }
+                    }
                 });
                 ui.separator();
             }
@@ -1957,7 +2019,7 @@ impl NotePanel {
         match save_note(&mut self.note, app.note_always_overwrite) {
             Ok(true) => {
                 self.refresh_fast_derived();
-                self.refresh_heavy_derived(true);
+                self.refresh_heavy_derived(true, app.note_settings.backlinks_enabled);
                 self.finish_save(app);
                 self.link_menu_targets_version = None;
                 self.invalidate_link_menu_results();
@@ -2878,54 +2940,160 @@ fn format_note_updated(note: &Note) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+fn alias_map_hash(notes: &[Note]) -> u64 {
+    let mut aliases: Vec<(&str, &str)> = notes
+        .iter()
+        .filter_map(|note| {
+            note.alias
+                .as_deref()
+                .map(|alias| (alias, note.slug.as_str()))
+        })
+        .collect();
+    aliases.sort_unstable();
+    let mut hasher = DefaultHasher::new();
+    aliases.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn content_without_fenced_code(content: &str) -> String {
+    let mut out = String::new();
+    let mut in_code = false;
+    for line in content.lines() {
+        if line.trim_start().starts_with("```") {
+            in_code = !in_code;
+            out.push('\n');
+            continue;
+        }
+        if !in_code {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn note_reference_needles(current: &Note) -> Vec<(String, String)> {
+    let mut needles = vec![
+        (format!("[[{}]]", current.title), "wiki title".to_string()),
+        (format!("[[{}]]", current.slug), "wiki slug".to_string()),
+        (
+            format!("link://note/{}", current.slug),
+            "link id".to_string(),
+        ),
+        (
+            format!("@note:{}", current.slug),
+            "note mention".to_string(),
+        ),
+    ];
+    if let Some(alias) = current.alias.as_deref().filter(|a| !a.trim().is_empty()) {
+        needles.push((format!("[[{}]]", alias.trim()), "wiki alias".to_string()));
+    }
+    needles.sort();
+    needles.dedup();
+    needles
+}
+
 fn backlink_rows_for_note(
-    current_slug: &str,
+    current_note: &Note,
     tab: BacklinkTab,
     todos: &[crate::plugins::todo::TodoEntry],
     notes: &[Note],
 ) -> Vec<BacklinkRow> {
     let mut rows = Vec::new();
+    let current_slug = current_note.slug.as_str();
+    let needles = note_reference_needles(current_note);
+    let current_searchable = content_without_fenced_code(&current_note.content);
+
     for todo in todos {
-        let token = format!("@note:{current_slug}");
-        if todo.text.contains(&token) {
+        let matched = todo
+            .entity_refs
+            .iter()
+            .any(|r| r.kind == crate::common::entity_ref::EntityKind::Note && r.id == current_slug)
+            .then(|| {
+                (
+                    format!("@note:{current_slug}"),
+                    "todo linked to note".to_string(),
+                )
+            })
+            .or_else(|| {
+                needles
+                    .iter()
+                    .find(|(needle, _)| todo.text.contains(needle))
+                    .cloned()
+            });
+        let current_note_mentions_todo = !todo.id.is_empty()
+            && (current_searchable.contains(&format!("@todo:{}", todo.id))
+                || current_note.entity_refs.iter().any(|r| {
+                    r.kind == crate::common::entity_ref::EntityKind::Todo && r.id == todo.id
+                }));
+        let matched = matched.or_else(|| {
+            current_note_mentions_todo.then(|| {
+                (
+                    format!("@todo:{}", todo.id),
+                    "note mentions todo".to_string(),
+                )
+            })
+        });
+        if let Some((needle, reason)) = matched {
             if matches!(tab, BacklinkTab::LinkedTodos | BacklinkTab::Mentions) {
                 rows.push(BacklinkRow {
                     title: todo.text.clone(),
                     type_badge: "Todo".to_string(),
                     updated: "n/a".to_string(),
-                    snippet: extract_snippet_around(&todo.text, &token),
+                    snippet: extract_snippet_around(&todo.text, &needle),
+                    reason,
                     note_slug: None,
                     todo_id: Some(todo.id.clone()),
                 });
             }
         }
     }
+
     for note in notes {
         if note.slug == current_slug {
             continue;
         }
-        let token = format!("[[{current_slug}");
-        let mention = format!("@note:{current_slug}");
-        if note.links.iter().any(|l| l == current_slug) {
-            if tab == BacklinkTab::RelatedNotes {
+        let searchable = content_without_fenced_code(&note.content);
+        let matched = note
+            .links
+            .iter()
+            .any(|l| l == current_slug)
+            .then(|| (format!("[[{current_slug}"), "wiki link".to_string()))
+            .or_else(|| {
+                note.entity_refs
+                    .iter()
+                    .any(|r| {
+                        r.kind == crate::common::entity_ref::EntityKind::Note
+                            && r.id == current_slug
+                    })
+                    .then(|| {
+                        (
+                            format!("@note:{current_slug}"),
+                            "entity reference".to_string(),
+                        )
+                    })
+            })
+            .or_else(|| {
+                needles
+                    .iter()
+                    .find(|(needle, _)| searchable.contains(needle))
+                    .cloned()
+            });
+        if let Some((needle, reason)) = matched {
+            let is_mention = reason.contains("mention") || reason.contains("entity");
+            if (tab == BacklinkTab::RelatedNotes && !is_mention)
+                || (tab == BacklinkTab::Mentions && is_mention)
+            {
                 rows.push(BacklinkRow {
                     title: note.title.clone(),
                     type_badge: "Note".to_string(),
                     updated: format_note_updated(note),
-                    snippet: extract_snippet_around(&note.content, &token),
+                    snippet: extract_snippet_around(&searchable, &needle),
+                    reason,
                     note_slug: Some(note.slug.clone()),
                     todo_id: None,
                 });
             }
-        } else if note.content.contains(&mention) && tab == BacklinkTab::Mentions {
-            rows.push(BacklinkRow {
-                title: note.title.clone(),
-                type_badge: "Note".to_string(),
-                updated: format_note_updated(note),
-                snippet: extract_snippet_around(&note.content, &mention),
-                note_slug: Some(note.slug.clone()),
-                todo_id: None,
-            });
         }
     }
     rows
@@ -2949,9 +3117,9 @@ mod tests {
     use eframe::egui;
     use std::{
         fs,
-        sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard},
+        sync::{Arc, Mutex, MutexGuard, atomic::AtomicBool},
     };
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     static NOTES_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -3154,14 +3322,18 @@ mod tests {
 
         assert_eq!(panel.link_menu_target_refresh_count, target_refresh_count);
         assert!(panel.link_menu_result_refresh_count > result_refresh_count);
-        assert!(panel
-            .link_menu_results
-            .iter()
-            .any(|result| result.display_title == "Alpha"));
-        assert!(!panel
-            .link_menu_results
-            .iter()
-            .any(|result| result.display_title == "Beta"));
+        assert!(
+            panel
+                .link_menu_results
+                .iter()
+                .any(|result| result.display_title == "Alpha")
+        );
+        assert!(
+            !panel
+                .link_menu_results
+                .iter()
+                .any(|result| result.display_title == "Beta")
+        );
     }
 
     #[test]
@@ -3644,7 +3816,16 @@ mod tests {
         use crate::common::entity_ref::EntityRef;
         use crate::plugins::todo::TodoEntry;
 
-        let current = "central";
+        let current = Note {
+            title: "central".into(),
+            path: std::path::PathBuf::new(),
+            content: String::new(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "central".into(),
+            alias: None,
+            entity_refs: Vec::new(),
+        };
         let notes = vec![
             Note {
                 title: "related".into(),
@@ -3680,9 +3861,9 @@ mod tests {
             )],
         }];
 
-        let linked = backlink_rows_for_note(current, BacklinkTab::LinkedTodos, &todos, &notes);
-        let related = backlink_rows_for_note(current, BacklinkTab::RelatedNotes, &todos, &notes);
-        let mentions = backlink_rows_for_note(current, BacklinkTab::Mentions, &todos, &notes);
+        let linked = backlink_rows_for_note(&current, BacklinkTab::LinkedTodos, &todos, &notes);
+        let related = backlink_rows_for_note(&current, BacklinkTab::RelatedNotes, &todos, &notes);
+        let mentions = backlink_rows_for_note(&current, BacklinkTab::Mentions, &todos, &notes);
 
         assert_eq!(linked.len(), 1);
         assert_eq!(related.len(), 1);
@@ -3710,6 +3891,79 @@ mod tests {
         assert!(!panel.last_ui_sections.links_visible);
         assert!(!panel.last_ui_sections.backlinks_visible);
         assert!(panel.last_ui_sections.content_visible);
+    }
+
+    #[test]
+    fn backlinks_hidden_when_disabled() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_settings.backlinks_enabled = false;
+        let mut panel = NotePanel::from_note(empty_note(
+            "#tag [[linked-note]] https://example.com
+
+Body visible always",
+        ));
+        panel.view_mode = NoteViewMode::Edit;
+
+        render_panel_once(&ctx, &mut panel, &mut app);
+
+        assert!(panel.last_ui_sections.tags_visible);
+        assert!(panel.last_ui_sections.links_visible);
+        assert!(!panel.last_ui_sections.backlinks_visible);
+        assert!(panel.last_ui_sections.content_visible);
+        assert_eq!(panel.backlinks_render_count, 0);
+    }
+
+    #[test]
+    fn backlink_rows_ignore_fenced_code_links() {
+        let current = Note {
+            title: "Central Note".into(),
+            path: std::path::PathBuf::new(),
+            content: String::new(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "central-note".into(),
+            alias: Some("Hub".into()),
+            entity_refs: Vec::new(),
+        };
+        let coded = Note {
+            title: "coded".into(),
+            path: std::path::PathBuf::new(),
+            content: "```
+[[Central Note]]
+[[central-note]]
+[[Hub]]
+link://note/central-note
+@note:central-note
+```"
+            .into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "coded".into(),
+            alias: None,
+            entity_refs: Vec::new(),
+        };
+        let linked = Note {
+            title: "linked".into(),
+            path: std::path::PathBuf::new(),
+            content: "See [[Hub]] and link://note/central-note".into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "linked".into(),
+            alias: None,
+            entity_refs: Vec::new(),
+        };
+        let notes = vec![current, coded, linked];
+
+        let related = backlink_rows_for_note(&notes[0], BacklinkTab::RelatedNotes, &[], &notes);
+        let titles: Vec<_> = related.iter().map(|row| row.title.as_str()).collect();
+
+        assert_eq!(titles, vec!["linked"]);
+        assert!(
+            related
+                .iter()
+                .any(|row| row.reason == "link id" || row.reason == "wiki alias")
+        );
     }
 
     #[test]
