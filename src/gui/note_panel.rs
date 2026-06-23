@@ -2,7 +2,8 @@ use crate::actions::screenshot::{Mode as ScreenshotMode, capture};
 use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::notes_markdown::{
-    MarkdownAnalysis, MarkdownTaskItem, analyze_markdown, task_list::toggle_task_marker,
+    MarkdownAnalysis, MarkdownSection, MarkdownTaskItem, analyze_markdown,
+    task_list::toggle_task_marker,
 };
 use crate::plugins::note::{
     Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget, append_note, assets_dir,
@@ -20,7 +21,7 @@ use image::imageops::FilterType;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use rfd::FileDialog;
-use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -188,6 +189,8 @@ pub struct NotePanel {
     markdown_cache: CommonMarkCache,
     markdown_analysis: Option<MarkdownAnalysis>,
     markdown_analysis_source_hash: Option<u64>,
+    collapsed_sections: HashSet<String>,
+    outline_visible: bool,
     image_cache: HashMap<std::path::PathBuf, egui::TextureHandle>,
     overwrite_prompt: bool,
     show_open_with_menu: bool,
@@ -245,6 +248,57 @@ struct NoteDerivedView {
 }
 
 impl NotePanel {
+    fn section_key_for_slug(note_slug: &str, section: &MarkdownSection) -> String {
+        format!(
+            "{}::{}::{}::{}",
+            note_slug,
+            section.heading.normalized_anchor,
+            section.heading.title,
+            section.heading.line_index
+        )
+    }
+
+    fn section_key(&self, section: &MarkdownSection) -> String {
+        Self::section_key_for_slug(&self.note.slug, section)
+    }
+
+    fn is_main_title_section(&self, section: &MarkdownSection) -> bool {
+        section.heading.level == 1
+            && section.heading.line_index == 0
+            && section.heading.title == self.note.title
+    }
+
+    fn collapsible_sections(&mut self, enabled: bool) -> Vec<MarkdownSection> {
+        if !enabled {
+            return Vec::new();
+        }
+        self.markdown_analysis().sections.clone()
+    }
+
+    fn collapsed_body_ranges(
+        note_slug: &str,
+        sections: &[MarkdownSection],
+        collapsed_sections: &HashSet<String>,
+        enabled: bool,
+    ) -> Vec<std::ops::Range<usize>> {
+        if !enabled {
+            return Vec::new();
+        }
+        sections
+            .iter()
+            .filter(|section| {
+                collapsed_sections.contains(&Self::section_key_for_slug(note_slug, section))
+            })
+            .map(|section| section.body_byte_range.clone())
+            .collect()
+    }
+
+    fn range_is_hidden(range: &std::ops::Range<usize>, hidden: &[std::ops::Range<usize>]) -> bool {
+        hidden
+            .iter()
+            .any(|hidden| range.start >= hidden.start && range.end <= hidden.end)
+    }
+
     fn details_toggle_label(&self) -> &'static str {
         if self.show_metadata {
             "Hide Details"
@@ -330,6 +384,8 @@ impl NotePanel {
             markdown_cache: CommonMarkCache::default(),
             markdown_analysis: None,
             markdown_analysis_source_hash: None,
+            collapsed_sections: HashSet::new(),
+            outline_visible: false,
             image_cache: HashMap::new(),
             overwrite_prompt: false,
             show_open_with_menu: false,
@@ -834,9 +890,7 @@ impl NotePanel {
             {
                 self.view_mode = NoteViewMode::Edit;
             }
-            if !app.note_settings.can_use_split()
-                && matches!(self.view_mode, NoteViewMode::Split)
-            {
+            if !app.note_settings.can_use_split() && matches!(self.view_mode, NoteViewMode::Split) {
                 self.view_mode = if app.note_settings.rich_markdown_enabled {
                     NoteViewMode::Preview
                 } else {
@@ -878,6 +932,28 @@ impl NotePanel {
             if ui.button("A+").clicked() {
                 app.note_font_size += 1.0;
             }
+            let sections =
+                self.collapsible_sections(app.note_settings.collapsible_sections_enabled);
+            if !sections.is_empty() {
+                ui.separator();
+                if ui.button("Expand all").clicked() {
+                    self.collapsed_sections.clear();
+                }
+                if ui.button("Collapse all").clicked() {
+                    let keys = sections
+                        .iter()
+                        .filter(|section| !self.is_main_title_section(section))
+                        .map(|section| self.section_key(section))
+                        .collect();
+                    self.collapsed_sections = keys;
+                }
+                if ui.button("Toggle outline").clicked() {
+                    self.outline_visible = !self.outline_visible;
+                }
+            } else if !app.note_settings.collapsible_sections_enabled {
+                self.collapsed_sections.clear();
+                self.outline_visible = false;
+            }
         });
         save_now
     }
@@ -887,6 +963,19 @@ impl NotePanel {
             return;
         }
         self.render_metadata_details(ui, app);
+        if app.note_settings.collapsible_sections_enabled && self.outline_visible {
+            let sections = self.collapsible_sections(true);
+            if !sections.is_empty() {
+                ui.separator();
+                ui.label("Outline");
+                for section in sections {
+                    ui.horizontal(|ui| {
+                        ui.add_space((section.heading.level.saturating_sub(1) as f32) * 12.0);
+                        ui.small(&section.heading.title);
+                    });
+                }
+            }
+        }
         self.render_backlinks(ui, app);
     }
 
@@ -1084,14 +1173,38 @@ impl NotePanel {
     }
 
     fn render_preview(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, ctx: &egui::Context) {
+        if app.note_settings.collapsible_sections_enabled {
+            let sections = self.collapsible_sections(true);
+            if !sections.is_empty() {
+                self.render_collapsible_preview(ui, app, ctx, &sections);
+                return;
+            }
+        } else {
+            self.collapsed_sections.clear();
+            self.outline_visible = false;
+        }
+        self.render_preview_range(ui, app, ctx, 0..self.note.content.len());
+    }
+
+    fn render_preview_range(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        ctx: &egui::Context,
+        render_range: std::ops::Range<usize>,
+    ) -> bool {
         let mut last = 0usize;
-        let content_clone = self.note.content.clone();
+        let content_clone = self.note.content[render_range.clone()].to_string();
         let mut modified = false;
         for cap in IMAGE_RE.captures_iter(&content_clone) {
             let m = cap.get(0).unwrap();
-            let range = m.range();
-            let before = &content_clone[last..range.start];
-            if !before.is_empty() && self.render_segment(ui, app, before, last, ctx) {
+            let local_range = m.range();
+            let range =
+                (render_range.start + local_range.start)..(render_range.start + local_range.end);
+            let before = &content_clone[last..local_range.start];
+            if !before.is_empty()
+                && self.render_segment(ui, app, before, render_range.start + last, ctx)
+            {
                 modified = true;
                 break;
             }
@@ -1129,7 +1242,7 @@ impl NotePanel {
                     self.image_cache.insert(full.clone(), tex.clone());
                     tex
                 } else {
-                    last = range.end;
+                    last = local_range.end;
                     continue;
                 };
                 let mut display = tex.size_vec2();
@@ -1178,16 +1291,98 @@ impl NotePanel {
                     }
                 });
             }
-            last = range.end;
+            last = local_range.end;
         }
         if !modified {
             let rest = &content_clone[last..];
-            if !rest.is_empty() && self.render_segment(ui, app, rest, last, ctx) {
+            if !rest.is_empty()
+                && self.render_segment(ui, app, rest, render_range.start + last, ctx)
+            {
                 modified = true;
             }
         }
         if modified {
             self.mark_content_changed(ctx.input(|i| i.time));
+        }
+        modified
+    }
+
+    fn render_collapsible_preview(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        ctx: &egui::Context,
+        sections: &[MarkdownSection],
+    ) {
+        let hidden = Self::collapsed_body_ranges(
+            &self.note.slug,
+            sections,
+            &self.collapsed_sections,
+            app.note_settings.collapsible_sections_enabled,
+        );
+        let mut cursor = 0usize;
+        for section in sections {
+            let heading_range = section.heading.byte_range.clone();
+            if Self::range_is_hidden(&heading_range, &hidden) {
+                continue;
+            }
+            if cursor < heading_range.start {
+                self.render_visible_preview_range(
+                    ui,
+                    app,
+                    ctx,
+                    cursor..heading_range.start,
+                    &hidden,
+                );
+            }
+            let key = self.section_key(section);
+            let collapsed = self.collapsed_sections.contains(&key);
+            ui.horizontal_top(|ui| {
+                ui.add_space((section.heading.level.saturating_sub(1) as f32) * 10.0);
+                let label = if collapsed { "▶" } else { "▼" };
+                if ui.small_button(label).clicked() {
+                    if collapsed {
+                        self.collapsed_sections.remove(&key);
+                    } else {
+                        self.collapsed_sections.insert(key.clone());
+                    }
+                }
+                let heading = self.note.content[heading_range.clone()].to_string();
+                self.show_markdown_fragment(ui, app, &heading, heading_range.start);
+            });
+            cursor = heading_range.end;
+        }
+        if cursor < self.note.content.len() {
+            self.render_visible_preview_range(
+                ui,
+                app,
+                ctx,
+                cursor..self.note.content.len(),
+                &hidden,
+            );
+        }
+    }
+
+    fn render_visible_preview_range(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        ctx: &egui::Context,
+        range: std::ops::Range<usize>,
+        hidden: &[std::ops::Range<usize>],
+    ) {
+        let mut cursor = range.start;
+        for hidden_range in hidden
+            .iter()
+            .filter(|hidden| hidden.end > range.start && hidden.start < range.end)
+        {
+            if cursor < hidden_range.start.min(range.end) {
+                self.render_preview_range(ui, app, ctx, cursor..hidden_range.start.min(range.end));
+            }
+            cursor = cursor.max(hidden_range.end.min(range.end));
+        }
+        if cursor < range.end {
+            self.render_preview_range(ui, app, ctx, cursor..range.end);
         }
     }
 
@@ -1257,8 +1452,7 @@ impl NotePanel {
                 egui::widgets::text_edit::TextEditState::load(ctx, resp.id).unwrap_or_default();
             if let Some(range) = state.cursor.char_range() {
                 let [min, max] = range.sorted();
-                self.pending_selection =
-                    (min.index != max.index).then_some((min.index, max.index));
+                self.pending_selection = (min.index != max.index).then_some((min.index, max.index));
             } else {
                 self.pending_selection = None;
             }
@@ -1338,9 +1532,7 @@ impl NotePanel {
                 .find('\n')
                 .map(|p| byte_idx + p)
                 .unwrap_or_else(|| self.note.content.len());
-            ctx.output_mut(|o| {
-                o.copied_text = self.note.content[start_byte..end_byte].to_string()
-            });
+            ctx.output_mut(|o| o.copied_text = self.note.content[start_byte..end_byte].to_string());
         }
 
         if moved {
@@ -2277,9 +2469,9 @@ mod tests {
     use eframe::egui;
     use std::{
         fs,
-        sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard},
+        sync::{Arc, Mutex, MutexGuard, atomic::AtomicBool},
     };
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     static NOTES_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -2406,14 +2598,18 @@ mod tests {
 
         assert_eq!(panel.link_menu_target_refresh_count, target_refresh_count);
         assert!(panel.link_menu_result_refresh_count > result_refresh_count);
-        assert!(panel
-            .link_menu_results
-            .iter()
-            .any(|result| result.display_title == "Alpha"));
-        assert!(!panel
-            .link_menu_results
-            .iter()
-            .any(|result| result.display_title == "Beta"));
+        assert!(
+            panel
+                .link_menu_results
+                .iter()
+                .any(|result| result.display_title == "Alpha")
+        );
+        assert!(
+            !panel
+                .link_menu_results
+                .iter()
+                .any(|result| result.display_title == "Beta")
+        );
     }
 
     #[test]
@@ -2443,6 +2639,40 @@ mod tests {
         let results = panel.link_menu_results_snapshot();
 
         assert!(results.iter().any(|result| result.display_title == "Beta"));
+    }
+
+    #[test]
+    fn section_keys_include_slug_anchor_title_and_line_tiebreaker() {
+        let content = "# Title\n\n## Repeat\nBody\n\n## Repeat\nBody 2";
+        let analysis = analyze_markdown(content);
+        let first = &analysis.sections[1];
+        let second = &analysis.sections[2];
+
+        let first_key = NotePanel::section_key_for_slug("note-a", first);
+        let second_key = NotePanel::section_key_for_slug("note-a", second);
+        let other_note_key = NotePanel::section_key_for_slug("note-b", first);
+
+        assert_ne!(first_key, second_key);
+        assert_ne!(first_key, other_note_key);
+        assert!(first_key.contains("note-a::repeat::Repeat::2"));
+        assert!(second_key.contains("note-a::repeat-1::Repeat::5"));
+    }
+
+    #[test]
+    fn disabled_collapsible_sections_keeps_all_ranges_visible() {
+        let content = "# Title\n\n## Child\nHidden when enabled";
+        let analysis = analyze_markdown(content);
+        let child = &analysis.sections[1];
+        let key = NotePanel::section_key_for_slug("note", child);
+        let collapsed = HashSet::from([key]);
+
+        let disabled_ranges =
+            NotePanel::collapsed_body_ranges("note", &analysis.sections, &collapsed, false);
+        let enabled_ranges =
+            NotePanel::collapsed_body_ranges("note", &analysis.sections, &collapsed, true);
+
+        assert!(disabled_ranges.is_empty());
+        assert_eq!(enabled_ranges, vec![child.body_byte_range.clone()]);
     }
 
     #[test]
