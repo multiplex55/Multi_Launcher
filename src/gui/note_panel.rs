@@ -637,154 +637,26 @@ impl NotePanel {
                 {
                     self.last_ui_sections.content_visible = true;
                 }
-                let resp = egui::ScrollArea::vertical()
-                    .id_source(scroll_id_source)
-                    .max_height(remaining)
-                    .show(ui, |ui| match self.view_mode {
-                        NoteViewMode::Edit => {
-                            Some(self.render_editor(ui, app, text_id_source.clone()))
-                        }
-                        NoteViewMode::Preview => {
-                            let _ = self.markdown_analysis();
-                            self.render_preview(ui, app, ctx);
-                            None
-                        }
-                        NoteViewMode::Split => {
-                            let _ = self.markdown_analysis();
-                            self.render_split(ui, app, ctx, text_id_source.clone())
-                        }
-                    });
-                if matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split) {
-                    if let Some(resp) = resp.inner {
-                        if resp.changed() {
-                            self.mark_content_changed(ctx.input(|i| i.time));
-                        }
-                        let first_edit_frame = self.last_textedit_id.is_none();
-                        self.last_textedit_id = Some(resp.id);
-                        if self.focus_textedit_next_frame || first_edit_frame {
-                            resp.request_focus();
-                            self.focus_textedit_next_frame = false;
-                        }
-                        if !resp.secondary_clicked() {
-                            let state = egui::widgets::text_edit::TextEditState::load(ctx, resp.id)
-                                .unwrap_or_default();
-                            if let Some(range) = state.cursor.char_range() {
-                                let [min, max] = range.sorted();
-                                if min.index != max.index {
-                                    self.pending_selection = Some((min.index, max.index));
-                                } else {
-                                    self.pending_selection = None;
-                                }
-                            } else {
-                                self.pending_selection = None;
-                            }
-                        }
-                        resp.context_menu(|ui| {
-                            let ctx2 = ui.ctx().clone();
-                            self.build_textedit_menu(ui, &ctx2, resp.id, app);
-                        });
-                        if resp.has_focus()
-                            && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Period))
-                        {
-                            let pos = resp.rect.left_top();
-                            popup::show_tooltip_at(
-                                ctx,
-                                egui::Id::new("note_ctx_menu"),
-                                Some(pos),
-                                |ui| {
-                                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                                        self.build_textedit_menu(ui, ctx, resp.id, app);
-                                    });
-                                },
-                            );
-                        }
-                        if resp.has_focus() && app.vim_mode {
-                            let mut state =
-                                egui::widgets::text_edit::TextEditState::load(ctx, resp.id)
-                                    .unwrap_or_default();
-                            let total_chars = self.note.content.chars().count();
-                            let mut idx = state
-                                .cursor
-                                .char_range()
-                                .map(|r| r.primary.index)
-                                .unwrap_or(0)
-                                .min(total_chars);
-                            let mut moved = false;
-
-                            if ctx.input(|i| i.key_pressed(egui::Key::H)) {
-                                ctx.input_mut(|i| {
-                                    i.consume_key(egui::Modifiers::NONE, egui::Key::H)
-                                });
-                                idx = idx.saturating_sub(1);
-                                moved = true;
-                            }
-                            if ctx.input(|i| i.key_pressed(egui::Key::L)) {
-                                ctx.input_mut(|i| {
-                                    i.consume_key(egui::Modifiers::NONE, egui::Key::L)
-                                });
-                                idx = (idx + 1).min(total_chars);
-                                moved = true;
-                            }
-                            if ctx.input(|i| i.key_pressed(egui::Key::J)) {
-                                ctx.input_mut(|i| {
-                                    i.consume_key(egui::Modifiers::NONE, egui::Key::J)
-                                });
-                                let byte_idx = char_to_byte_index(&self.note.content, idx);
-                                if let Some(pos) = self.note.content[byte_idx..].find('\n') {
-                                    let new_byte = byte_idx + pos + 1;
-                                    idx = byte_to_char_index(&self.note.content, new_byte);
-                                } else {
-                                    idx = total_chars;
-                                }
-                                moved = true;
-                            }
-                            if ctx.input(|i| i.key_pressed(egui::Key::K)) {
-                                ctx.input_mut(|i| {
-                                    i.consume_key(egui::Modifiers::NONE, egui::Key::K)
-                                });
-                                let byte_idx = char_to_byte_index(&self.note.content, idx);
-                                if let Some(pos) = self.note.content[..byte_idx].rfind('\n') {
-                                    idx = byte_to_char_index(&self.note.content, pos);
-                                } else {
-                                    idx = 0;
-                                }
-                                moved = true;
-                            }
-                            if ctx.input(|i| i.key_pressed(egui::Key::Y)) {
-                                ctx.input_mut(|i| {
-                                    i.consume_key(egui::Modifiers::NONE, egui::Key::Y)
-                                });
-                                let byte_idx = char_to_byte_index(&self.note.content, idx);
-                                let start_byte = self.note.content[..byte_idx]
-                                    .rfind('\n')
-                                    .map(|p| p + 1)
-                                    .unwrap_or(0);
-                                let end_byte = self.note.content[byte_idx..]
-                                    .find('\n')
-                                    .map(|p| byte_idx + p)
-                                    .unwrap_or_else(|| self.note.content.len());
-                                ctx.output_mut(|o| {
-                                    o.copied_text =
-                                        self.note.content[start_byte..end_byte].to_string();
-                                });
-                            }
-
-                            if moved {
-                                state
-                                    .cursor
-                                    .set_char_range(Some(egui::text::CCursorRange::one(
-                                        egui::text::CCursor::new(idx),
-                                    )));
-                                state.store(ctx, resp.id);
-                            }
-                        }
-                        if resp.clicked() {
-                            resp.request_focus();
-                        }
-                        if resp.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            let modifiers = ctx.input(|i| i.modifiers);
-                            ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
-                        }
+                match self.view_mode {
+                    NoteViewMode::Edit => {
+                        let resp = egui::ScrollArea::vertical()
+                            .id_source(scroll_id_source)
+                            .max_height(remaining)
+                            .show(ui, |ui| self.render_editor(ui, app, text_id_source.clone()))
+                            .inner;
+                        self.handle_editor_response(resp, ctx, app, true);
+                    }
+                    NoteViewMode::Preview => {
+                        egui::ScrollArea::vertical()
+                            .id_source(scroll_id_source)
+                            .max_height(remaining)
+                            .show(ui, |ui| {
+                                let _ = self.markdown_analysis();
+                                self.render_preview(ui, app, ctx);
+                            });
+                    }
+                    NoteViewMode::Split => {
+                        self.render_split(ui, app, ctx);
                     }
                 }
             });
@@ -962,10 +834,14 @@ impl NotePanel {
             {
                 self.view_mode = NoteViewMode::Edit;
             }
-            if !app.note_settings.split_view_enabled
+            if !app.note_settings.can_use_split()
                 && matches!(self.view_mode, NoteViewMode::Split)
             {
-                self.view_mode = NoteViewMode::Preview;
+                self.view_mode = if app.note_settings.rich_markdown_enabled {
+                    NoteViewMode::Preview
+                } else {
+                    NoteViewMode::Edit
+                };
             }
             if matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split)
                 && ui.button("Edit").clicked()
@@ -979,7 +855,7 @@ impl NotePanel {
                     ui.ctx().memory_mut(|m| m.surrender_focus(id));
                 }
             }
-            if app.note_settings.split_view_enabled
+            if app.note_settings.can_use_split()
                 && !matches!(self.view_mode, NoteViewMode::Split)
                 && ui.button("Split").clicked()
             {
@@ -1315,17 +1191,166 @@ impl NotePanel {
         }
     }
 
-    fn render_split(
+    fn render_split(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, ctx: &egui::Context) {
+        let slug = self.note.slug.clone();
+        let editor_id_source = ("note_split_text", slug.clone());
+        let editor_scroll_id = ("note_split_editor_scroll", slug.clone());
+        let preview_scroll_id = ("note_split_preview_scroll", slug);
+        let height = ui.available_height();
+
+        ui.horizontal(|ui| {
+            let pane_width =
+                ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(120.0);
+            let editor_resp = ui
+                .allocate_ui_with_layout(
+                    egui::vec2(pane_width, height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(pane_width);
+                        egui::ScrollArea::vertical()
+                            .id_source(editor_scroll_id)
+                            .max_height(height)
+                            .show(ui, |ui| self.render_editor(ui, app, editor_id_source))
+                            .inner
+                    },
+                )
+                .inner;
+            self.handle_editor_response(editor_resp, ctx, app, false);
+
+            ui.separator();
+
+            ui.allocate_ui_with_layout(
+                egui::vec2(pane_width, height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(pane_width);
+                    egui::ScrollArea::vertical()
+                        .id_source(preview_scroll_id)
+                        .max_height(height)
+                        .show(ui, |ui| {
+                            let _ = self.markdown_analysis();
+                            self.render_preview(ui, app, ctx);
+                        });
+                },
+            );
+        });
+    }
+
+    fn handle_editor_response(
         &mut self,
-        ui: &mut egui::Ui,
-        app: &mut LauncherApp,
+        resp: egui::Response,
         ctx: &egui::Context,
-        text_id_source: (&'static str, String),
-    ) -> Option<egui::Response> {
-        let response = self.render_editor(ui, app, text_id_source);
-        ui.separator();
-        self.render_preview(ui, app, ctx);
-        Some(response)
+        app: &mut LauncherApp,
+        request_initial_focus: bool,
+    ) {
+        if resp.changed() {
+            self.mark_content_changed(ctx.input(|i| i.time));
+        }
+        let first_edit_frame = self.last_textedit_id.is_none();
+        self.last_textedit_id = Some(resp.id);
+        if self.focus_textedit_next_frame || (request_initial_focus && first_edit_frame) {
+            resp.request_focus();
+            self.focus_textedit_next_frame = false;
+        }
+        if !resp.secondary_clicked() {
+            let state =
+                egui::widgets::text_edit::TextEditState::load(ctx, resp.id).unwrap_or_default();
+            if let Some(range) = state.cursor.char_range() {
+                let [min, max] = range.sorted();
+                self.pending_selection =
+                    (min.index != max.index).then_some((min.index, max.index));
+            } else {
+                self.pending_selection = None;
+            }
+        }
+        resp.context_menu(|ui| {
+            let ctx2 = ui.ctx().clone();
+            self.build_textedit_menu(ui, &ctx2, resp.id, app);
+        });
+        if resp.has_focus() && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Period)) {
+            let pos = resp.rect.left_top();
+            popup::show_tooltip_at(ctx, egui::Id::new("note_ctx_menu"), Some(pos), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    self.build_textedit_menu(ui, ctx, resp.id, app);
+                });
+            });
+        }
+        if resp.has_focus() && app.vim_mode {
+            self.handle_vim_keys(ctx, resp.id);
+        }
+        if resp.clicked() {
+            resp.request_focus();
+        }
+        if resp.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            let modifiers = ctx.input(|i| i.modifiers);
+            ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+        }
+    }
+
+    fn handle_vim_keys(&mut self, ctx: &egui::Context, id: egui::Id) {
+        let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+        let total_chars = self.note.content.chars().count();
+        let mut idx = state
+            .cursor
+            .char_range()
+            .map(|r| r.primary.index)
+            .unwrap_or(0)
+            .min(total_chars);
+        let mut moved = false;
+
+        if ctx.input(|i| i.key_pressed(egui::Key::H)) {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::H));
+            idx = idx.saturating_sub(1);
+            moved = true;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::L)) {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::L));
+            idx = (idx + 1).min(total_chars);
+            moved = true;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::J)) {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::J));
+            let byte_idx = char_to_byte_index(&self.note.content, idx);
+            if let Some(pos) = self.note.content[byte_idx..].find('\n') {
+                idx = byte_to_char_index(&self.note.content, byte_idx + pos + 1);
+            } else {
+                idx = total_chars;
+            }
+            moved = true;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::K)) {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::K));
+            let byte_idx = char_to_byte_index(&self.note.content, idx);
+            idx = self.note.content[..byte_idx]
+                .rfind('\n')
+                .map(|pos| byte_to_char_index(&self.note.content, pos))
+                .unwrap_or(0);
+            moved = true;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Y)) {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Y));
+            let byte_idx = char_to_byte_index(&self.note.content, idx);
+            let start_byte = self.note.content[..byte_idx]
+                .rfind('\n')
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            let end_byte = self.note.content[byte_idx..]
+                .find('\n')
+                .map(|p| byte_idx + p)
+                .unwrap_or_else(|| self.note.content.len());
+            ctx.output_mut(|o| {
+                o.copied_text = self.note.content[start_byte..end_byte].to_string()
+            });
+        }
+
+        if moved {
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(idx),
+                )));
+            state.store(ctx, id);
+        }
     }
 
     /// Persist the current note to disk and update UI state.
@@ -2252,9 +2277,9 @@ mod tests {
     use eframe::egui;
     use std::{
         fs,
-        sync::{Arc, Mutex, MutexGuard, atomic::AtomicBool},
+        sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard},
     };
-    use tempfile::{TempDir, tempdir};
+    use tempfile::{tempdir, TempDir};
 
     static NOTES_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -2381,18 +2406,14 @@ mod tests {
 
         assert_eq!(panel.link_menu_target_refresh_count, target_refresh_count);
         assert!(panel.link_menu_result_refresh_count > result_refresh_count);
-        assert!(
-            panel
-                .link_menu_results
-                .iter()
-                .any(|result| result.display_title == "Alpha")
-        );
-        assert!(
-            !panel
-                .link_menu_results
-                .iter()
-                .any(|result| result.display_title == "Beta")
-        );
+        assert!(panel
+            .link_menu_results
+            .iter()
+            .any(|result| result.display_title == "Alpha"));
+        assert!(!panel
+            .link_menu_results
+            .iter()
+            .any(|result| result.display_title == "Beta"));
     }
 
     #[test]
@@ -2950,6 +2971,60 @@ mod tests {
             NotePanel::from_note_with_details_and_settings(empty_note("body"), true, &settings);
 
         assert_eq!(panel.view_mode, NoteViewMode::Preview);
+    }
+
+    #[test]
+    fn split_default_falls_back_to_edit_when_rich_markdown_disabled() {
+        let mut settings = NoteSettings::default();
+        settings.default_view_mode = NoteViewMode::Split;
+        settings.rich_markdown_enabled = false;
+
+        let panel =
+            NotePanel::from_note_with_details_and_settings(empty_note("body"), true, &settings);
+
+        assert_eq!(panel.view_mode, NoteViewMode::Edit);
+    }
+
+    #[test]
+    fn split_mode_falls_back_when_disabled_at_render_time() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_settings.split_view_enabled = false;
+        let mut panel = NotePanel::from_note(empty_note("body"));
+        panel.view_mode = NoteViewMode::Split;
+
+        render_panel_once(&ctx, &mut panel, &mut app);
+
+        assert_eq!(panel.view_mode, NoteViewMode::Preview);
+    }
+
+    #[test]
+    fn split_mode_falls_back_to_edit_when_rich_markdown_disabled_at_render_time() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_settings.rich_markdown_enabled = false;
+        let mut panel = NotePanel::from_note(empty_note("body"));
+        panel.view_mode = NoteViewMode::Split;
+
+        render_panel_once(&ctx, &mut panel, &mut app);
+
+        assert_eq!(panel.view_mode, NoteViewMode::Edit);
+    }
+
+    #[test]
+    fn split_mode_does_not_request_initial_editor_focus() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("body"));
+        panel.view_mode = NoteViewMode::Split;
+
+        render_panel_once(&ctx, &mut panel, &mut app);
+
+        let editor_has_focus = panel
+            .last_textedit_id
+            .map(|id| ctx.memory(|m| m.has_focus(id)))
+            .unwrap_or(false);
+        assert!(!editor_has_focus);
     }
 
     #[test]
