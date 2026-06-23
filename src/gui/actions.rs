@@ -80,7 +80,20 @@ impl LauncherApp {
             return;
         } else if let Some(new_q) = a.action.strip_prefix("query:") {
             tracing::debug!("query action via activation: {new_q}");
-            self.query = new_q.to_string();
+            self.query = if let Some(query_arg) = a
+                .args
+                .as_deref()
+                .and_then(|args| serde_json::from_str::<serde_json::Value>(args).ok())
+                .and_then(|value| {
+                    value
+                        .get("query")
+                        .and_then(|query| query.as_str())
+                        .map(str::to_string)
+                }) {
+                format!("{} {}", new_q.trim_end(), query_arg)
+            } else {
+                new_q.to_string()
+            };
             self.last_timer_query =
                 new_q.starts_with("timer list") || new_q.starts_with("alarm list");
             self.search();
@@ -838,7 +851,7 @@ mod tests {
         settings::Settings,
     };
     use eframe::egui;
-    use std::sync::{atomic::AtomicBool, Arc};
+    use std::sync::{Arc, atomic::AtomicBool};
     use tempfile::tempdir;
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
@@ -925,10 +938,11 @@ mod tests {
             ActivationSource::Enter,
         );
 
-        assert!(app
-            .error
-            .as_deref()
-            .is_some_and(|msg| msg.contains("injected failure")));
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|msg| msg.contains("injected failure"))
+        );
         let log = std::fs::read_to_string(crate::toast_log::TOAST_LOG_FILE).unwrap();
         assert!(log.contains("[error:launcher] Failed: injected failure"));
         assert!(log.contains("Failed: injected failure"));
