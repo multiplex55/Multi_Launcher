@@ -1,27 +1,27 @@
-use crate::actions::screenshot::{Mode as ScreenshotMode, capture};
+use crate::actions::screenshot::{capture, Mode as ScreenshotMode};
 use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::notes_markdown::{
-    MarkdownAnalysis, MarkdownSection, MarkdownTaskItem, analyze_markdown,
-    task_list::toggle_task_marker,
+    analyze_markdown, task_list::toggle_task_marker, MarkdownAnalysis, MarkdownHeading,
+    MarkdownSection, MarkdownTaskItem,
 };
 use crate::plugins::note::{
-    Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget, append_note, assets_dir,
-    available_tags, image_files, load_notes, note_cache_snapshot, note_link_menu_targets_snapshot,
-    note_version, resolve_note_query, save_note,
+    append_note, assets_dir, available_tags, image_files, load_notes, note_cache_snapshot,
+    note_link_menu_targets_snapshot, note_version, resolve_note_query, save_note, Note,
+    NoteExternalOpen, NoteLinkMenuTarget, NoteTarget,
 };
-use crate::plugins::todo::{TODO_FILE, load_todos, todo_version};
+use crate::plugins::todo::{load_todos, todo_version, TODO_FILE};
 use crate::settings::{NoteSettings, NoteViewMode};
-use eframe::egui::{self, Color32, FontId, Key, popup};
+use eframe::egui::{self, popup, Color32, FontId, Key};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
-use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use image::imageops::FilterType;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use rfd::FileDialog;
-use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -62,6 +62,17 @@ struct BacklinkRow {
     snippet: String,
     note_slug: Option<String>,
     todo_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NoteOutlineRow {
+    level: u8,
+    title: String,
+    normalized_anchor: String,
+    line_index: usize,
+    char_index: usize,
+    collapsible: bool,
+    collapsed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -191,7 +202,11 @@ pub struct NotePanel {
     markdown_analysis_source_hash: Option<u64>,
     collapsed_sections: HashSet<String>,
     ui_state_error_reported: bool,
-    outline_visible: bool,
+    outline_open: bool,
+    outline_width: f32,
+    outline_filter: String,
+    selected_outline_heading: Option<String>,
+    pending_scroll_target: Option<String>,
     image_cache: HashMap<std::path::PathBuf, egui::TextureHandle>,
     overwrite_prompt: bool,
     show_open_with_menu: bool,
@@ -300,6 +315,49 @@ impl NotePanel {
             .any(|hidden| range.start >= hidden.start && range.end <= hidden.end)
     }
 
+    fn outline_rows_from_headings(
+        note_slug: &str,
+        content: &str,
+        headings: &[MarkdownHeading],
+        sections: &[MarkdownSection],
+        collapsed_sections: &HashSet<String>,
+        max_outline_depth: usize,
+        collapsible_sections_enabled: bool,
+        filter: &str,
+    ) -> Vec<NoteOutlineRow> {
+        let max_depth = max_outline_depth.clamp(1, 6) as u8;
+        let filter = filter.trim().to_lowercase();
+        headings
+            .iter()
+            .filter(|heading| heading.level <= max_depth)
+            .filter(|heading| filter.is_empty() || heading.title.to_lowercase().contains(&filter))
+            .map(|heading| {
+                let section = sections.iter().find(|section| {
+                    section.heading.line_index == heading.line_index
+                        && section.heading.normalized_anchor == heading.normalized_anchor
+                });
+                let (collapsible, collapsed) = section
+                    .map(|section| {
+                        let key = Self::section_key_for_slug(note_slug, section);
+                        (
+                            collapsible_sections_enabled,
+                            collapsed_sections.contains(&key),
+                        )
+                    })
+                    .unwrap_or((false, false));
+                NoteOutlineRow {
+                    level: heading.level,
+                    title: heading.title.clone(),
+                    normalized_anchor: heading.normalized_anchor.clone(),
+                    line_index: heading.line_index,
+                    char_index: byte_to_char_index(content, heading.byte_range.start),
+                    collapsible,
+                    collapsed,
+                }
+            })
+            .collect()
+    }
+
     fn details_toggle_label(&self) -> &'static str {
         if self.show_metadata {
             "Hide Details"
@@ -359,7 +417,9 @@ impl NotePanel {
         } else {
             NoteViewMode::Edit
         };
-        Self::from_note_with_details_and_view_mode(note, show_details, view_mode)
+        let mut panel = Self::from_note_with_details_and_view_mode(note, show_details, view_mode);
+        panel.outline_open = settings.outline_sidebar_default_open;
+        panel
     }
 
     fn from_note_with_details_and_view_mode(
@@ -387,7 +447,11 @@ impl NotePanel {
             markdown_analysis_source_hash: None,
             collapsed_sections: HashSet::new(),
             ui_state_error_reported: false,
-            outline_visible: false,
+            outline_open: false,
+            outline_width: 180.0,
+            outline_filter: String::new(),
+            selected_outline_heading: None,
+            pending_scroll_target: None,
             image_cache: HashMap::new(),
             overwrite_prompt: false,
             show_open_with_menu: false,
@@ -742,6 +806,12 @@ impl NotePanel {
                 if self.render_toolbar(ui, app) {
                     save_now = true;
                 }
+                if !app.note_settings.outline_sidebar_enabled {
+                    self.outline_open = false;
+                    self.outline_filter.clear();
+                    self.selected_outline_heading = None;
+                    self.pending_scroll_target = None;
+                }
                 if self.fast_derived_dirty {
                     self.refresh_fast_derived();
                 }
@@ -1006,12 +1076,14 @@ impl NotePanel {
                         .collect();
                     self.collapsed_sections = keys;
                 }
-                if ui.button("Toggle outline").clicked() {
-                    self.outline_visible = !self.outline_visible;
-                }
             } else if !app.note_settings.collapsible_sections_enabled {
                 self.collapsed_sections.clear();
-                self.outline_visible = false;
+            }
+            if app.note_settings.outline_sidebar_enabled {
+                ui.separator();
+                if ui.button("Toggle outline").clicked() {
+                    self.outline_open = !self.outline_open;
+                }
             }
         });
         save_now
@@ -1022,20 +1094,94 @@ impl NotePanel {
             return;
         }
         self.render_metadata_details(ui, app);
-        if app.note_settings.collapsible_sections_enabled && self.outline_visible {
-            let sections = self.collapsible_sections(true);
-            if !sections.is_empty() {
-                ui.separator();
-                ui.label("Outline");
-                for section in sections {
+        if app.note_settings.outline_sidebar_enabled {
+            if self.outline_open {
+                let analysis = self.markdown_analysis().clone();
+                let rows = Self::outline_rows_from_headings(
+                    &self.note.slug,
+                    &self.note.content,
+                    &analysis.headings,
+                    &analysis.sections,
+                    &self.collapsed_sections,
+                    app.note_settings.max_outline_depth,
+                    app.note_settings.collapsible_sections_enabled,
+                    &self.outline_filter,
+                );
+                if !rows.is_empty() || !self.outline_filter.is_empty() {
+                    ui.separator();
                     ui.horizontal(|ui| {
-                        ui.add_space((section.heading.level.saturating_sub(1) as f32) * 12.0);
-                        ui.small(&section.heading.title);
+                        ui.label("Outline");
+                        ui.add(
+                            egui::DragValue::new(&mut self.outline_width)
+                                .clamp_range(120.0..=360.0)
+                                .speed(4.0)
+                                .prefix("width "),
+                        );
                     });
+                    ui.set_max_width(self.outline_width);
+                    ui.text_edit_singleline(&mut self.outline_filter);
+                    for row in rows {
+                        ui.horizontal(|ui| {
+                            ui.add_space((row.level.saturating_sub(1) as f32) * 12.0);
+                            if app.note_settings.collapsible_sections_enabled {
+                                let marker = if row.collapsible {
+                                    if row.collapsed {
+                                        "▶"
+                                    } else {
+                                        "▼"
+                                    }
+                                } else {
+                                    "•"
+                                };
+                                ui.small(marker);
+                            }
+                            let selected = self.selected_outline_heading.as_deref()
+                                == Some(row.normalized_anchor.as_str());
+                            if ui.selectable_label(selected, &row.title).clicked() {
+                                self.selected_outline_heading = Some(row.normalized_anchor.clone());
+                                self.pending_scroll_target = Some(row.normalized_anchor.clone());
+                                match self.view_mode {
+                                    NoteViewMode::Edit => {
+                                        self.move_editor_cursor_to(row.char_index, ui.ctx());
+                                    }
+                                    NoteViewMode::Split => {
+                                        let editor_focused = self
+                                            .last_textedit_id
+                                            .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
+                                            .unwrap_or(false);
+                                        if editor_focused {
+                                            self.move_editor_cursor_to(row.char_index, ui.ctx());
+                                        }
+                                    }
+                                    NoteViewMode::Preview => {}
+                                }
+                            }
+                        });
+                    }
                 }
             }
+        } else {
+            self.outline_open = false;
+            self.outline_filter.clear();
+            self.selected_outline_heading = None;
+            self.pending_scroll_target = None;
         }
         self.render_backlinks(ui, app);
+    }
+
+    fn move_editor_cursor_to(&mut self, char_index: usize, ctx: &egui::Context) {
+        let id = self
+            .last_textedit_id
+            .unwrap_or_else(|| egui::Id::new(("note_text", self.note.slug.clone())));
+        let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(char_index),
+            )));
+        state.store(ctx, id);
+        self.pending_selection = None;
+        self.focus_textedit_next_frame = true;
     }
 
     fn render_metadata_details(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
@@ -1240,7 +1386,34 @@ impl NotePanel {
             }
         } else {
             self.collapsed_sections.clear();
-            self.outline_visible = false;
+        }
+        if let Some(target) = self.pending_scroll_target.clone() {
+            if let Some(heading) = self
+                .markdown_analysis()
+                .headings
+                .iter()
+                .find(|heading| heading.normalized_anchor == target)
+                .cloned()
+            {
+                if heading.byte_range.start > 0 {
+                    self.render_preview_range(ui, app, ctx, 0..heading.byte_range.start);
+                }
+                let resp = ui.scope(|ui| {
+                    let heading_text = self.note.content[heading.byte_range.clone()].to_string();
+                    self.show_markdown_fragment(ui, app, &heading_text, heading.byte_range.start);
+                });
+                ui.scroll_to_rect(resp.response.rect, Some(egui::Align::Center));
+                self.pending_scroll_target = None;
+                if heading.byte_range.end < self.note.content.len() {
+                    self.render_preview_range(
+                        ui,
+                        app,
+                        ctx,
+                        heading.byte_range.end..self.note.content.len(),
+                    );
+                }
+                return;
+            }
         }
         self.render_preview_range(ui, app, ctx, 0..self.note.content.len());
     }
@@ -1396,7 +1569,7 @@ impl NotePanel {
             }
             let key = self.section_key(section);
             let collapsed = self.collapsed_sections.contains(&key);
-            ui.horizontal_top(|ui| {
+            let resp = ui.horizontal_top(|ui| {
                 ui.add_space((section.heading.level.saturating_sub(1) as f32) * 10.0);
                 let label = if collapsed { "▶" } else { "▼" };
                 if ui.small_button(label).clicked() {
@@ -1410,6 +1583,12 @@ impl NotePanel {
                 let heading = self.note.content[heading_range.clone()].to_string();
                 self.show_markdown_fragment(ui, app, &heading, heading_range.start);
             });
+            if self.pending_scroll_target.as_deref()
+                == Some(section.heading.normalized_anchor.as_str())
+            {
+                ui.scroll_to_rect(resp.response.rect, Some(egui::Align::Center));
+                self.pending_scroll_target = None;
+            }
             cursor = heading_range.end;
         }
         if cursor < self.note.content.len() {
@@ -2529,9 +2708,9 @@ mod tests {
     use eframe::egui;
     use std::{
         fs,
-        sync::{Arc, Mutex, MutexGuard, atomic::AtomicBool},
+        sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard},
     };
-    use tempfile::{TempDir, tempdir};
+    use tempfile::{tempdir, TempDir};
 
     static NOTES_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -2626,6 +2805,48 @@ mod tests {
     }
 
     #[test]
+    fn outline_state_is_hidden_and_pending_navigation_ignored_when_disabled() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_settings.outline_sidebar_enabled = false;
+        let mut panel = NotePanel::from_note(empty_note("# One\n\n## Two"));
+        panel.outline_open = true;
+        panel.outline_filter = "two".into();
+        panel.selected_outline_heading = Some("two".into());
+        panel.pending_scroll_target = Some("two".into());
+
+        render_panel_once(&ctx, &mut panel, &mut app);
+
+        assert!(!panel.outline_open);
+        assert!(panel.outline_filter.is_empty());
+        assert!(panel.selected_outline_heading.is_none());
+        assert!(panel.pending_scroll_target.is_none());
+    }
+
+    #[test]
+    fn outline_rows_respect_max_depth_filter() {
+        let content = "# One\n\n## Two\n\n### Three\n\n#### Four\n";
+        let analysis = analyze_markdown(content);
+        let rows = NotePanel::outline_rows_from_headings(
+            "note",
+            content,
+            &analysis.headings,
+            &analysis.sections,
+            &HashSet::new(),
+            2,
+            false,
+            "",
+        );
+
+        let titles = rows
+            .iter()
+            .map(|row| row.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["One", "Two"]);
+        assert!(rows.iter().all(|row| row.level <= 2));
+    }
+
+    #[test]
     fn link_menu_targets_are_cached_by_note_version() {
         let notes_dir = TempNotesDir::new();
         notes_dir.write_note("alpha.md", "# Alpha\n\nAlpha body");
@@ -2658,18 +2879,14 @@ mod tests {
 
         assert_eq!(panel.link_menu_target_refresh_count, target_refresh_count);
         assert!(panel.link_menu_result_refresh_count > result_refresh_count);
-        assert!(
-            panel
-                .link_menu_results
-                .iter()
-                .any(|result| result.display_title == "Alpha")
-        );
-        assert!(
-            !panel
-                .link_menu_results
-                .iter()
-                .any(|result| result.display_title == "Beta")
-        );
+        assert!(panel
+            .link_menu_results
+            .iter()
+            .any(|result| result.display_title == "Alpha"));
+        assert!(!panel
+            .link_menu_results
+            .iter()
+            .any(|result| result.display_title == "Beta"));
     }
 
     #[test]
