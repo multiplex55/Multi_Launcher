@@ -140,6 +140,10 @@ fn alias_metadata_line(alias: &str) -> String {
     format!("Alias: {}", alias.trim())
 }
 
+fn alias_metadata_key(alias: &str) -> String {
+    alias.trim().to_lowercase()
+}
+
 fn aliases_metadata_line(aliases: &[String]) -> String {
     if aliases.len() == 1 {
         alias_metadata_line(&aliases[0])
@@ -156,10 +160,11 @@ fn alias_metadata_indexes_and_values(lines: &[&str]) -> (Vec<usize>, Vec<String>
         if let Some(alias) = trimmed.strip_prefix("Alias:") {
             indexes.push(idx);
             let alias = alias.trim();
+            let key = alias_metadata_key(alias);
             if !alias.is_empty()
                 && !aliases
                     .iter()
-                    .any(|a: &String| a.eq_ignore_ascii_case(alias))
+                    .any(|a: &String| alias_metadata_key(a) == key)
             {
                 aliases.push(alias.to_string());
             }
@@ -170,9 +175,10 @@ fn alias_metadata_indexes_and_values(lines: &[&str]) -> (Vec<usize>, Vec<String>
                 .map(str::trim)
                 .filter(|a| !a.is_empty())
             {
+                let key = alias_metadata_key(alias);
                 if !aliases
                     .iter()
-                    .any(|a: &String| a.eq_ignore_ascii_case(alias))
+                    .any(|a: &String| alias_metadata_key(a) == key)
                 {
                     aliases.push(alias.to_string());
                 }
@@ -190,7 +196,8 @@ pub(crate) fn add_alias_metadata(content: &str, alias: &str) -> String {
     let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
     let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
     let (indexes, mut aliases) = alias_metadata_indexes_and_values(&line_refs);
-    if aliases.iter().any(|a| a.eq_ignore_ascii_case(alias)) {
+    let key = alias_metadata_key(alias);
+    if aliases.iter().any(|a| alias_metadata_key(a) == key) {
         return content.to_string();
     }
     aliases.push(alias.to_string());
@@ -221,9 +228,10 @@ pub(crate) fn remove_alias_metadata(content: &str, alias: &str) -> String {
     let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
     let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
     let (indexes, aliases) = alias_metadata_indexes_and_values(&line_refs);
+    let remove_key = alias_metadata_key(alias);
     let aliases: Vec<String> = aliases
         .into_iter()
-        .filter(|a| !a.eq_ignore_ascii_case(alias))
+        .filter(|a| alias_metadata_key(a) != remove_key)
         .collect();
     if indexes.is_empty() {
         return content.to_string();
