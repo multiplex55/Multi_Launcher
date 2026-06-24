@@ -1923,14 +1923,15 @@ mod tests {
             .lock()
             .expect("template env lock poisoned");
         let dir = tempfile::tempdir().expect("tempdir");
+        let template_dir = dir.path().join("templates");
         let prev = std::env::var("ML_NOTE_TEMPLATES_DIR").ok();
-        unsafe { std::env::set_var("ML_NOTE_TEMPLATES_DIR", dir.path()) };
+        unsafe { std::env::set_var("ML_NOTE_TEMPLATES_DIR", &template_dir) };
         let original_templates = TEMPLATE_CACHE
             .lock()
             .expect("template cache lock poisoned")
             .clone();
 
-        let result = test(dir.path());
+        let result = test(&template_dir);
 
         if let Some(prev) = prev {
             unsafe { std::env::set_var("ML_NOTE_TEMPLATES_DIR", prev) };
