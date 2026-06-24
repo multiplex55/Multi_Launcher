@@ -672,6 +672,26 @@ pub fn get_template(name: &str) -> Option<String> {
         .and_then(|m| m.get(name).cloned())
 }
 
+pub fn expand_template_variables<Tz: chrono::TimeZone>(
+    template: &str,
+    title: &str,
+    slug: &str,
+    now: chrono::DateTime<Tz>,
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    template
+        .replace("{{title}}", title)
+        .replace("{{slug}}", slug)
+        .replace("{{date}}", slug)
+        .replace("{{datetime}}", &now.format("%Y-%m-%d %H:%M:%S").to_string())
+        .replace("{{year}}", &now.format("%Y").to_string())
+        .replace("{{month}}", &now.format("%m").to_string())
+        .replace("{{day}}", &now.format("%d").to_string())
+        .replace("{{time}}", &now.format("%H:%M:%S").to_string())
+}
+
 pub fn save_template(name: &str, content: &str) -> anyhow::Result<()> {
     let path = template_path(name)?;
     if let Some(parent) = path.parent() {
@@ -1872,6 +1892,7 @@ impl Plugin for NotePlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use std::path::PathBuf;
 
     fn set_notes(notes: Vec<Note>) -> NoteCache {
@@ -2017,6 +2038,38 @@ mod tests {
                 "query:note new --template daily ",
                 "query:note new --template meeting "
             ]
+        );
+    }
+
+    #[test]
+    fn expand_template_variables_replaces_all_supported_variables() {
+        let now = chrono::FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 6, 24, 7, 8, 9)
+            .unwrap();
+        let expanded = expand_template_variables(
+            "{{title}}|{{slug}}|{{date}}|{{datetime}}|{{year}}|{{month}}|{{day}}|{{time}}",
+            "Daily Notes",
+            "daily-notes",
+            now,
+        );
+
+        assert_eq!(
+            expanded,
+            "Daily Notes|daily-notes|daily-notes|2026-06-24 07:08:09|2026|06|24|07:08:09"
+        );
+    }
+
+    #[test]
+    fn expand_template_variables_preserves_title_and_date_compatibility() {
+        let now = chrono::FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(1999, 1, 2, 3, 4, 5)
+            .unwrap();
+
+        assert_eq!(
+            expand_template_variables("# {{title}}\nDate: {{date}}", "My Note", "my-note", now),
+            "# My Note\nDate: my-note"
         );
     }
 
