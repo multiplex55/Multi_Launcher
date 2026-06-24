@@ -1,6 +1,6 @@
 #![windows_subsystem = "windows"]
 
-use multi_launcher::actions::{Action, load_actions};
+use multi_launcher::actions::{load_actions, Action};
 use multi_launcher::gui::LauncherApp;
 use multi_launcher::hotkey::HotkeyTrigger;
 use multi_launcher::plugin::PluginManager;
@@ -11,9 +11,9 @@ use multi_launcher::{indexer, logging};
 use eframe::{egui, icon_data};
 use once_cell::sync::Lazy;
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
-    mpsc::{Sender, channel},
+    mpsc::{channel, Sender},
+    Arc, Mutex,
 };
 use std::thread;
 
@@ -95,6 +95,7 @@ fn spawn_gui(
         multi_launcher::plugins::note::note_plugin_settings_with_backlinks(
             plugin_settings.get("note"),
             settings.note.backlinks_enabled,
+            settings.note.templates_enabled,
         ),
     );
     plugins.reload_from_dirs(
