@@ -2342,7 +2342,9 @@ impl LauncherApp {
 
     /// Open a note panel for the given slug, optionally using a template for new notes.
     pub fn open_note_panel(&mut self, slug: &str, template: Option<&str>) {
-        use crate::plugins::note::{extract_aliases, get_template, load_notes, Note};
+        use crate::plugins::note::{
+            expand_template_variables, extract_aliases, get_template, load_notes, Note,
+        };
         let note = load_notes()
             .unwrap_or_default()
             .into_iter()
@@ -2357,7 +2359,8 @@ impl LauncherApp {
                 let title = slug.replace('-', " ");
                 let content = if let Some(tpl_name) = template {
                     if let Some(tpl) = get_template(tpl_name) {
-                        let filled = tpl.replace("{{title}}", &title).replace("{{date}}", slug);
+                        let filled =
+                            expand_template_variables(&tpl, &title, slug, chrono::Local::now());
                         if filled.starts_with("# ") {
                             filled
                         } else {
