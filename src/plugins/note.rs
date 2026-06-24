@@ -3,15 +3,15 @@ use crate::common::entity_ref::{EntityKind, EntityRef};
 use crate::common::query::parse_query_filters;
 use crate::common::slug::{register_slug, reset_slug_lookup, slugify, unique_slug};
 use crate::linking::{
-    build_index_from_notes_and_todos, format_link_id, EntityKey, LinkRef, LinkTarget,
+    EntityKey, LinkRef, LinkTarget, build_index_from_notes_and_todos, format_link_id,
 };
 use crate::plugin::Plugin;
 use crate::plugins::todo::TODO_DATA;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Local;
 use eframe::egui;
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,11 +36,17 @@ pub struct NotePluginSettings {
     pub external_open: NoteExternalOpen,
     #[serde(default = "default_note_backlinks_enabled")]
     pub backlinks_enabled: bool,
+    #[serde(default = "default_note_aliases_enabled")]
+    pub aliases_enabled: bool,
     #[serde(default = "default_note_templates_enabled")]
     pub templates_enabled: bool,
 }
 
 fn default_note_backlinks_enabled() -> bool {
+    true
+}
+
+fn default_note_aliases_enabled() -> bool {
     true
 }
 
@@ -51,6 +57,7 @@ fn default_note_templates_enabled() -> bool {
 pub fn note_plugin_settings_with_backlinks(
     value: Option<&serde_json::Value>,
     backlinks_enabled: bool,
+    aliases_enabled: bool,
     templates_enabled: bool,
 ) -> serde_json::Value {
     let mut cfg = value
@@ -58,11 +65,13 @@ pub fn note_plugin_settings_with_backlinks(
         .and_then(|v| serde_json::from_value::<NotePluginSettings>(v).ok())
         .unwrap_or_default();
     cfg.backlinks_enabled = backlinks_enabled;
+    cfg.aliases_enabled = aliases_enabled;
     cfg.templates_enabled = templates_enabled;
     serde_json::to_value(cfg).unwrap_or_else(|_| {
         serde_json::json!({
             "external_open": NoteExternalOpen::Wezterm,
             "backlinks_enabled": backlinks_enabled,
+            "aliases_enabled": aliases_enabled,
             "templates_enabled": templates_enabled,
         })
     })
@@ -73,6 +82,7 @@ impl Default for NotePluginSettings {
         Self {
             external_open: NoteExternalOpen::Wezterm,
             backlinks_enabled: true,
+            aliases_enabled: true,
             templates_enabled: true,
         }
     }
@@ -1040,6 +1050,7 @@ pub struct NotePlugin {
     templates: Arc<Mutex<HashMap<String, String>>>,
     external_open: NoteExternalOpen,
     backlinks_enabled: bool,
+    aliases_enabled: bool,
     templates_enabled: bool,
     #[allow(dead_code)]
     watcher: Option<RecommendedWatcher>,
@@ -1095,6 +1106,7 @@ impl NotePlugin {
             templates,
             external_open: NoteExternalOpen::Wezterm,
             backlinks_enabled: true,
+            aliases_enabled: true,
             templates_enabled: true,
             watcher,
         }
@@ -1368,6 +1380,76 @@ fn relationship_actions(
     actions
 }
 
+fn note_command_action(label: &str, action: &str) -> Action {
+    Action {
+        label: label.into(),
+        desc: "Note".into(),
+        action: action.into(),
+        args: None,
+    }
+}
+
+fn note_command_suggestions(
+    backlinks_enabled: bool,
+    aliases_enabled: bool,
+    templates_enabled: bool,
+) -> Vec<Action> {
+    let mut commands = vec![
+        note_command_action("note", "query:note"),
+        note_command_action("note new", "query:note new "),
+        note_command_action("note add", "query:note add "),
+        note_command_action("note create", "query:note create "),
+        note_command_action("note open", "query:note open "),
+        note_command_action("note list", "query:note list"),
+        note_command_action("note search", "query:note search "),
+        note_command_action("note tag", "query:note tag"),
+        note_command_action("note tags", "query:note tags"),
+        note_command_action("note graph", "query:note graph"),
+        note_command_action("note today", "query:note today"),
+        note_command_action("note link", "query:note link "),
+        note_command_action("note links", "query:note links "),
+        note_command_action("note rm", "query:note rm "),
+        note_command_action("note reload", "note:reload"),
+        note_command_action("notes unused", "note:unused_assets"),
+    ];
+    if backlinks_enabled {
+        commands.extend([
+            note_command_action("note backlinks", "query:note backlinks "),
+            note_command_action("note mentions", "query:note mentions "),
+        ]);
+    }
+    if aliases_enabled {
+        commands.extend([
+            note_command_action("note alias", "query:note alias "),
+            note_command_action("note aliases", "query:note aliases"),
+        ]);
+    }
+    if templates_enabled {
+        commands.extend([
+            note_command_action("note templates", "query:note templates"),
+            note_command_action("note template list", "query:note template list"),
+            note_command_action("note template new", "query:note template new "),
+            note_command_action("note template edit", "query:note template edit "),
+            note_command_action("note template open", "query:note template open "),
+            note_command_action("note template rm", "query:note template rm "),
+        ]);
+    }
+    commands
+}
+
+fn note_suggestions_for_query_prefix(
+    rest: &str,
+    backlinks_enabled: bool,
+    aliases_enabled: bool,
+    templates_enabled: bool,
+) -> Vec<Action> {
+    let prefix = format!("note {}", rest.trim()).to_lowercase();
+    note_command_suggestions(backlinks_enabled, aliases_enabled, templates_enabled)
+        .into_iter()
+        .filter(|a| a.label.to_lowercase().starts_with(&prefix))
+        .collect()
+}
+
 impl Plugin for NotePlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
@@ -1382,107 +1464,15 @@ impl Plugin for NotePlugin {
                     action: "note:dialog".into(),
                     args: None,
                 }];
-                actions.extend([
-                    Action {
-                        label: "note search".into(),
-                        desc: "Note".into(),
-                        action: "query:note search ".into(),
-                        args: None,
-                    },
-                    Action {
-                        label: "note list".into(),
-                        desc: "Note".into(),
-                        action: "query:note list".into(),
-                        args: None,
-                    },
-                    Action {
-                        label: "note tag".into(),
-                        desc: "Note".into(),
-                        action: "query:note tag".into(),
-                        args: None,
-                    },
-                    Action {
-                        label: "note graph".into(),
-                        desc: "Note".into(),
-                        action: "query:note graph".into(),
-                        args: None,
-                    },
-                    Action {
-                        label: "note backlinks".into(),
-                        desc: "Note".into(),
-                        action: "query:note backlinks ".into(),
-                        args: None,
-                    },
-                    Action {
-                        label: "note links".into(),
-                        desc: "Note".into(),
-                        action: "query:note links ".into(),
-                        args: None,
-                    },
-                    Action {
-                        label: "note mentions".into(),
-                        desc: "Note".into(),
-                        action: "query:note mentions ".into(),
-                        args: None,
-                    },
-                    Action {
-                        label: "note templates".into(),
-                        desc: "Note".into(),
-                        action: "query:note templates".into(),
-                        args: None,
-                    },
-                    Action {
-                        label: "note new".into(),
-                        desc: "Note".into(),
-                        action: "query:note new ".into(),
-                        args: None,
-                    },
-                    Action {
-                        label: "note add".into(),
-                        desc: "Note".into(),
-                        action: "query:note add ".into(),
-                        args: None,
-                    },
-                    Action {
-                        label: "note open".into(),
-                        desc: "Note".into(),
-                        action: "query:note open ".into(),
-                        args: None,
-                    },
-                    Action {
-                        label: "note today".into(),
-                        desc: "Note".into(),
-                        action: "query:note today".into(),
-                        args: None,
-                    },
-                    Action {
-                        label: "note link".into(),
-                        desc: "Note".into(),
-                        action: "query:note link ".into(),
-                        args: None,
-                    },
-                    Action {
-                        label: "note rm".into(),
-                        desc: "Note".into(),
-                        action: "query:note rm ".into(),
-                        args: None,
-                    },
-                    Action {
-                        label: "note reload".into(),
-                        desc: "Note".into(),
-                        action: "note:reload".into(),
-                        args: None,
-                    },
-                    Action {
-                        label: "notes unused".into(),
-                        desc: "Note".into(),
-                        action: "note:unused_assets".into(),
-                        args: None,
-                    },
-                ]);
-                if !self.templates_enabled {
-                    actions.retain(|a| !a.label.contains("template"));
-                }
+                actions.extend(
+                    note_command_suggestions(
+                        self.backlinks_enabled,
+                        self.aliases_enabled,
+                        self.templates_enabled,
+                    )
+                    .into_iter()
+                    .filter(|a| a.label != "note"),
+                );
                 return actions;
             }
 
@@ -1778,6 +1768,36 @@ impl Plugin for NotePlugin {
                             .collect();
                     }
                 }
+                "alias" | "aliases" => {
+                    if !self.aliases_enabled {
+                        return Vec::new();
+                    }
+                    if args.is_empty() {
+                        return note_suggestions_for_query_prefix(
+                            rest,
+                            self.backlinks_enabled,
+                            self.aliases_enabled,
+                            self.templates_enabled,
+                        );
+                    }
+                    let filter = args;
+                    let mut actions = Vec::new();
+                    for note in &guard.notes {
+                        for alias in &note.aliases {
+                            if filter.is_empty()
+                                || note_fuzzy_match_ci(&self.matcher, alias, filter)
+                            {
+                                actions.push(Action {
+                                    label: format!("{alias} → {}", note.title),
+                                    desc: "Note".into(),
+                                    action: format!("note:open:{}", note.slug),
+                                    args: None,
+                                });
+                            }
+                        }
+                    }
+                    return actions;
+                }
                 "template" => {
                     if !self.templates_enabled {
                         return Vec::new();
@@ -1785,6 +1805,19 @@ impl Plugin for NotePlugin {
                     let mut template_parts = args.splitn(2, ' ');
                     let subcmd = template_parts.next().unwrap_or("");
                     let name_filter = template_parts.next().unwrap_or("").trim();
+                    if !subcmd.is_empty()
+                        && !["list", "new", "edit", "open", "rm"].contains(&subcmd)
+                    {
+                        let suggestions = note_suggestions_for_query_prefix(
+                            rest,
+                            self.backlinks_enabled,
+                            self.aliases_enabled,
+                            self.templates_enabled,
+                        );
+                        if !suggestions.is_empty() {
+                            return suggestions;
+                        }
+                    }
                     if matches!(subcmd, "" | "list") {
                         return self.search(&format!("note templates {name_filter}"));
                     }
@@ -1805,6 +1838,16 @@ impl Plugin for NotePlugin {
                 }
                 _ => {}
             }
+
+            let suggestions = note_suggestions_for_query_prefix(
+                rest,
+                self.backlinks_enabled,
+                self.aliases_enabled,
+                self.templates_enabled,
+            );
+            if !suggestions.is_empty() {
+                return suggestions;
+            }
         }
 
         Vec::new()
@@ -1823,145 +1866,11 @@ impl Plugin for NotePlugin {
     }
 
     fn commands(&self) -> Vec<Action> {
-        let mut commands = vec![
-            Action {
-                label: "note".into(),
-                desc: "Note".into(),
-                action: "query:note".into(),
-                args: None,
-            },
-            Action {
-                label: "note new".into(),
-                desc: "Note".into(),
-                action: "query:note new ".into(),
-                args: None,
-            },
-            Action {
-                label: "note add".into(),
-                desc: "Note".into(),
-                action: "query:note add ".into(),
-                args: None,
-            },
-            Action {
-                label: "note create".into(),
-                desc: "Note".into(),
-                action: "query:note create ".into(),
-                args: None,
-            },
-            Action {
-                label: "note open".into(),
-                desc: "Note".into(),
-                action: "query:note open ".into(),
-                args: None,
-            },
-            Action {
-                label: "note list".into(),
-                desc: "Note".into(),
-                action: "query:note list".into(),
-                args: None,
-            },
-            Action {
-                label: "note search".into(),
-                desc: "Note".into(),
-                action: "query:note search ".into(),
-                args: None,
-            },
-            Action {
-                label: "note tag".into(),
-                desc: "Note".into(),
-                action: "query:note tag".into(),
-                args: None,
-            },
-            Action {
-                label: "note today".into(),
-                desc: "Note".into(),
-                action: "query:note today".into(),
-                args: None,
-            },
-            Action {
-                label: "note backlinks".into(),
-                desc: "Note".into(),
-                action: "query:note backlinks ".into(),
-                args: None,
-            },
-            Action {
-                label: "note mentions".into(),
-                desc: "Note".into(),
-                action: "query:note mentions ".into(),
-                args: None,
-            },
-            Action {
-                label: "note link".into(),
-                desc: "Note".into(),
-                action: "query:note link ".into(),
-                args: None,
-            },
-            Action {
-                label: "note links".into(),
-                desc: "Note".into(),
-                action: "query:note links ".into(),
-                args: None,
-            },
-            Action {
-                label: "note rm".into(),
-                desc: "Note".into(),
-                action: "query:note rm ".into(),
-                args: None,
-            },
-            Action {
-                label: "note reload".into(),
-                desc: "Note".into(),
-                action: "note:reload".into(),
-                args: None,
-            },
-            Action {
-                label: "notes unused".into(),
-                desc: "Note".into(),
-                action: "note:unused_assets".into(),
-                args: None,
-            },
-        ];
-        if self.templates_enabled {
-            commands.extend([
-                Action {
-                    label: "note templates".into(),
-                    desc: "Note".into(),
-                    action: "query:note templates".into(),
-                    args: None,
-                },
-                Action {
-                    label: "note template list".into(),
-                    desc: "Note".into(),
-                    action: "query:note template list".into(),
-                    args: None,
-                },
-                Action {
-                    label: "note template new".into(),
-                    desc: "Note".into(),
-                    action: "query:note template new ".into(),
-                    args: None,
-                },
-                Action {
-                    label: "note template edit".into(),
-                    desc: "Note".into(),
-                    action: "query:note template edit ".into(),
-                    args: None,
-                },
-                Action {
-                    label: "note template open".into(),
-                    desc: "Note".into(),
-                    action: "query:note template open ".into(),
-                    args: None,
-                },
-                Action {
-                    label: "note template rm".into(),
-                    desc: "Note".into(),
-                    action: "query:note template rm ".into(),
-                    args: None,
-                },
-            ]);
-        }
-        commands
+        note_command_suggestions(
+            self.backlinks_enabled,
+            self.aliases_enabled,
+            self.templates_enabled,
+        )
     }
 
     fn default_settings(&self) -> Option<serde_json::Value> {
@@ -1972,6 +1881,7 @@ impl Plugin for NotePlugin {
         if let Ok(cfg) = serde_json::from_value::<NotePluginSettings>(value.clone()) {
             self.external_open = cfg.external_open;
             self.backlinks_enabled = cfg.backlinks_enabled;
+            self.aliases_enabled = cfg.aliases_enabled;
             self.templates_enabled = cfg.templates_enabled;
         }
     }
@@ -1995,12 +1905,16 @@ impl Plugin for NotePlugin {
                 ui.selectable_value(&mut cfg.external_open, NoteExternalOpen::Notepad, "Notepad");
                 ui.selectable_value(&mut cfg.external_open, NoteExternalOpen::Wezterm, "WezTerm");
             });
+        ui.checkbox(&mut cfg.backlinks_enabled, "Enable backlinks");
+        ui.checkbox(&mut cfg.aliases_enabled, "Enable aliases");
+        ui.checkbox(&mut cfg.templates_enabled, "Enable templates");
         match serde_json::to_value(&cfg) {
             Ok(v) => *value = v,
             Err(e) => tracing::error!("failed to serialize note settings: {e}"),
         }
         self.external_open = cfg.external_open;
         self.backlinks_enabled = cfg.backlinks_enabled;
+        self.aliases_enabled = cfg.aliases_enabled;
         self.templates_enabled = cfg.templates_enabled;
     }
 
@@ -2051,6 +1965,7 @@ mod tests {
                 templates: TEMPLATE_CACHE.clone(),
                 external_open: NoteExternalOpen::Wezterm,
                 backlinks_enabled: true,
+                aliases_enabled: true,
                 templates_enabled: true,
                 watcher: None,
             },
@@ -2168,6 +2083,7 @@ mod tests {
             templates,
             external_open: NoteExternalOpen::Wezterm,
             backlinks_enabled: true,
+            aliases_enabled: true,
             templates_enabled: true,
             watcher: None,
         };
@@ -2190,6 +2106,83 @@ mod tests {
     }
 
     #[test]
+    fn note_common_query_prefixes_return_command_suggestions() {
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: Arc::new(Mutex::new(NoteCache::default())),
+            templates: Arc::new(Mutex::new(HashMap::new())),
+            external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: true,
+            aliases_enabled: true,
+            templates_enabled: true,
+            watcher: None,
+        };
+
+        for (query, expected_label) in [
+            ("note op", "note open"),
+            ("note li", "note list"),
+            ("note se", "note search"),
+            ("note ta", "note tags"),
+            ("note gr", "note graph"),
+            ("note lin", "note links"),
+            ("note back", "note backlinks"),
+            ("note templ", "note templates"),
+            ("note template l", "note template list"),
+            ("note template n", "note template new"),
+            ("note tod", "note today"),
+            ("note alia", "note alias"),
+            ("note aliases", "note aliases"),
+        ] {
+            let labels: Vec<String> = plugin.search(query).into_iter().map(|a| a.label).collect();
+            assert!(
+                labels.iter().any(|label| label == expected_label),
+                "{query:?} should suggest {expected_label:?}; got {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn note_command_suggestions_respect_feature_gates() {
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: Arc::new(Mutex::new(NoteCache::default())),
+            templates: Arc::new(Mutex::new(HashMap::from([(
+                "daily".to_string(),
+                "# Daily".to_string(),
+            )]))),
+            external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: false,
+            aliases_enabled: false,
+            templates_enabled: false,
+            watcher: None,
+        };
+
+        let command_labels: Vec<String> = plugin.commands().into_iter().map(|a| a.label).collect();
+        assert!(
+            !command_labels
+                .iter()
+                .any(|label| label.contains("backlink"))
+        );
+        assert!(!command_labels.iter().any(|label| label.contains("alias")));
+        assert!(
+            !command_labels
+                .iter()
+                .any(|label| label.contains("template"))
+        );
+
+        assert!(plugin.search("note back").is_empty());
+        assert!(plugin.search("note alia").is_empty());
+        assert!(plugin.search("note templ").is_empty());
+        assert!(
+            plugin.search("note backlinks target")[0]
+                .label
+                .contains("backlinks are disabled")
+        );
+        assert!(plugin.search("note aliases").is_empty());
+        assert!(plugin.search("note templates").is_empty());
+    }
+
+    #[test]
     fn note_template_suggestions_hide_when_templates_disabled() {
         let plugin = NotePlugin {
             matcher: SkimMatcherV2::default(),
@@ -2200,18 +2193,23 @@ mod tests {
             )]))),
             external_open: NoteExternalOpen::Wezterm,
             backlinks_enabled: true,
+            aliases_enabled: true,
             templates_enabled: false,
             watcher: None,
         };
 
-        assert!(!plugin
-            .search("note")
-            .iter()
-            .any(|a| a.label.contains("template")));
-        assert!(!plugin
-            .commands()
-            .iter()
-            .any(|a| a.label.contains("template")));
+        assert!(
+            !plugin
+                .search("note")
+                .iter()
+                .any(|a| a.label.contains("template"))
+        );
+        assert!(
+            !plugin
+                .commands()
+                .iter()
+                .any(|a| a.label.contains("template"))
+        );
         assert!(plugin.search("note templates").is_empty());
     }
 
@@ -2223,6 +2221,7 @@ mod tests {
             templates: Arc::new(Mutex::new(HashMap::new())),
             external_open: NoteExternalOpen::Wezterm,
             backlinks_enabled: true,
+            aliases_enabled: true,
             templates_enabled: false,
             watcher: None,
         };
@@ -2242,6 +2241,7 @@ mod tests {
             templates: Arc::new(Mutex::new(HashMap::new())),
             external_open: NoteExternalOpen::Wezterm,
             backlinks_enabled: true,
+            aliases_enabled: true,
             templates_enabled: true,
             watcher: None,
         };
@@ -2516,6 +2516,7 @@ Body",
             templates: TEMPLATE_CACHE.clone(),
             external_open: NoteExternalOpen::Wezterm,
             backlinks_enabled: true,
+            aliases_enabled: true,
             templates_enabled: true,
             watcher: None,
         };
@@ -2584,6 +2585,7 @@ Body",
             templates: TEMPLATE_CACHE.clone(),
             external_open: NoteExternalOpen::Wezterm,
             backlinks_enabled: true,
+            aliases_enabled: true,
             templates_enabled: true,
             watcher: None,
         };
@@ -2647,6 +2649,7 @@ Body",
             templates: TEMPLATE_CACHE.clone(),
             external_open: NoteExternalOpen::Wezterm,
             backlinks_enabled: true,
+            aliases_enabled: true,
             templates_enabled: true,
             watcher: None,
         };
@@ -2715,6 +2718,7 @@ Body",
             templates: TEMPLATE_CACHE.clone(),
             external_open: NoteExternalOpen::Wezterm,
             backlinks_enabled: true,
+            aliases_enabled: true,
             templates_enabled: true,
             watcher: None,
         };
@@ -2726,7 +2730,7 @@ Body",
         assert_eq!(labels_alias, labels);
 
         let commands = plugin.commands();
-        assert!(!commands.iter().any(|a| a.label == "note tags"));
+        assert!(commands.iter().any(|a| a.label == "note tags"));
 
         restore_cache(original);
     }
@@ -2764,6 +2768,7 @@ Body",
             templates: TEMPLATE_CACHE.clone(),
             external_open: NoteExternalOpen::Wezterm,
             backlinks_enabled: true,
+            aliases_enabled: true,
             templates_enabled: true,
             watcher: None,
         };
@@ -2832,14 +2837,17 @@ Body",
             templates: TEMPLATE_CACHE.clone(),
             external_open: NoteExternalOpen::Wezterm,
             backlinks_enabled: true,
+            aliases_enabled: true,
             templates_enabled: true,
             watcher: None,
         };
 
         let links = plugin.search("note links Second");
-        assert!(links
-            .iter()
-            .any(|a| a.label.contains("[backlink]") && a.label.contains("type=note")));
+        assert!(
+            links
+                .iter()
+                .any(|a| a.label.contains("[backlink]") && a.label.contains("type=note"))
+        );
         assert!(links.iter().any(|a| a.action.starts_with("note:open:")));
 
         restore_cache(original);
@@ -2877,13 +2885,16 @@ Body",
             templates: TEMPLATE_CACHE.clone(),
             external_open: NoteExternalOpen::Wezterm,
             backlinks_enabled: true,
+            aliases_enabled: true,
             templates_enabled: true,
             watcher: None,
         };
         let links = plugin.search("note links Roadmap");
-        assert!(links
-            .iter()
-            .any(|a| a.label.starts_with("Ambiguous note query")));
+        assert!(
+            links
+                .iter()
+                .any(|a| a.label.starts_with("Ambiguous note query"))
+        );
         assert!(links.iter().any(|a| {
             a.action == "query:note links"
                 && a.args
@@ -2945,6 +2956,7 @@ Body",
             templates: TEMPLATE_CACHE.clone(),
             external_open: NoteExternalOpen::Wezterm,
             backlinks_enabled: true,
+            aliases_enabled: true,
             templates_enabled: true,
             watcher: None,
         };
@@ -2985,6 +2997,7 @@ Body",
             templates: TEMPLATE_CACHE.clone(),
             external_open: NoteExternalOpen::Wezterm,
             backlinks_enabled: false,
+            aliases_enabled: true,
             templates_enabled: true,
             watcher: None,
         };
