@@ -1,7 +1,8 @@
-use crate::gui::LauncherApp;
+use crate::actions::Action;
+use crate::gui::{ActivationSource, LauncherApp};
 use crate::plugins::note::{
-    delete_template, get_template, list_templates, load_notes, reload_templates, save_notes,
-    save_template, template_path, validate_template_name, Note,
+    delete_template, get_template, list_templates, load_notes, note_backlinks, note_cache_snapshot,
+    reload_templates, save_notes, save_template, template_path, validate_template_name, Note,
 };
 use crate::plugins::todo::{load_todos, TODO_FILE};
 use chrono::{DateTime, Local};
@@ -29,6 +30,59 @@ fn insert_at_char_boundary(text: &str, idx: usize, insert: &str) -> String {
     out.push_str(insert);
     out.push_str(&text[byte_idx..]);
     out
+}
+
+fn cached_notes_or_load() -> Vec<Note> {
+    let snapshot = note_cache_snapshot();
+    if snapshot.is_empty() {
+        load_notes().unwrap_or_default()
+    } else {
+        snapshot
+    }
+}
+
+fn display_title(note: &Note) -> &str {
+    note.alias.as_deref().unwrap_or(&note.title)
+}
+
+fn short_preview(content: &str) -> String {
+    let preview = content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with("# ") && !trimmed.starts_with("Alias:")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if preview.chars().count() > 120 {
+        format!("{}…", preview.chars().take(120).collect::<String>())
+    } else {
+        preview
+    }
+}
+
+fn checkbox_count(content: &str) -> usize {
+    content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("- [ ] ")
+                || trimmed.starts_with("- [x] ")
+                || trimmed.starts_with("- [X] ")
+        })
+        .count()
+}
+
+fn note_action(label: impl Into<String>, action: impl Into<String>) -> Action {
+    Action {
+        label: label.into(),
+        desc: "Note".into(),
+        action: action.into(),
+        args: None,
+    }
 }
 
 #[derive(Default)]
@@ -214,7 +268,7 @@ impl TemplateManagerState {
 
 impl NotesDialog {
     pub fn open(&mut self) {
-        self.entries = load_notes().unwrap_or_default();
+        self.entries = cached_notes_or_load();
         self.rebuild_index();
         self.open = true;
         self.edit_idx = None;
@@ -226,7 +280,7 @@ impl NotesDialog {
     }
 
     pub fn open_edit(&mut self, idx: usize) {
-        self.entries = load_notes().unwrap_or_default();
+        self.entries = cached_notes_or_load();
         self.rebuild_index();
         if idx < self.entries.len() {
             self.text = self.entries[idx].content.clone();
@@ -246,6 +300,16 @@ impl NotesDialog {
                 if let Some(a) = &n.alias {
                     txt.push('\n');
                     txt.push_str(&a.to_lowercase());
+                }
+                for alias in &n.aliases {
+                    txt.push('\n');
+                    txt.push_str(&alias.to_lowercase());
+                }
+                txt.push('\n');
+                txt.push_str(&n.slug.to_lowercase());
+                for tag in &n.tags {
+                    txt.push('\n');
+                    txt.push_str(&tag.to_lowercase());
                 }
                 txt
             })
@@ -268,6 +332,7 @@ impl NotesDialog {
         let mut close = false;
         let mut save_now = false;
         let mut rebuild_idx = false;
+        let mut refresh_entries = false;
         egui::Window::new("Quick Notes")
             .open(&mut self.open)
             .resizable(true)
@@ -374,17 +439,120 @@ impl NotesDialog {
                                     continue;
                                 }
                                 let entry = self.entries[idx].clone();
-                                ui.horizontal(|ui| {
-                                    let resp = ui.label(entry.content.replace('\n', " "));
+                                ui.vertical(|ui| {
+                                    let title = display_title(&entry);
+                                    let slug = if entry.slug.is_empty() {
+                                        "unsaved"
+                                    } else {
+                                        &entry.slug
+                                    };
+                                    let mut meta = vec![format!("slug: {slug}")];
+                                    if !entry.tags.is_empty() {
+                                        meta.push(format!("tags: {}", entry.tags.join(", ")));
+                                    }
+                                    if app.note_settings.backlinks_enabled && !entry.slug.is_empty()
+                                    {
+                                        meta.push(format!(
+                                            "{} backlinks",
+                                            note_backlinks(&entry.slug).len()
+                                        ));
+                                    }
+                                    if app.note_settings.task_lists_enabled {
+                                        let count = checkbox_count(&entry.content);
+                                        if count > 0 {
+                                            meta.push(format!("{count} checkboxes"));
+                                        }
+                                    }
+                                    let preview = short_preview(&entry.content);
+                                    let resp = ui
+                                        .horizontal(|ui| {
+                                            ui.strong(title);
+                                            ui.small(meta.join(" · "));
+                                        })
+                                        .response
+                                        .on_hover_text(if preview.is_empty() {
+                                            entry.content.clone()
+                                        } else {
+                                            preview.clone()
+                                        });
+                                    if !preview.is_empty() {
+                                        ui.small(preview);
+                                    }
                                     let idx_copy = idx;
                                     resp.clone().context_menu(|ui| {
-                                        if ui.button("Edit Note").clicked() {
+                                        if ui.button("Open").clicked() {
+                                            app.open_note_panel(&entry.slug, None);
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Edit").clicked() {
                                             self.edit_idx = Some(idx_copy);
                                             self.text = entry.content.clone();
                                             ui.close_menu();
                                         }
+                                        if ui.button("Open externally").clicked() {
+                                            if let Err(e) = open::that(&entry.path) {
+                                                app.report_error_message(
+                                                    "ui operation",
+                                                    format!("Failed to open note externally: {e}"),
+                                                );
+                                            }
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Copy link").clicked() {
+                                            let link = format!("[[{}]]", entry.slug);
+                                            if let Err(e) =
+                                                crate::actions::clipboard::set_text(&link)
+                                            {
+                                                app.report_error_message(
+                                                    "ui operation",
+                                                    format!("Failed to copy note link: {e}"),
+                                                );
+                                            }
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Copy slug").clicked() {
+                                            if let Err(e) =
+                                                crate::actions::clipboard::set_text(&entry.slug)
+                                            {
+                                                app.report_error_message(
+                                                    "ui operation",
+                                                    format!("Failed to copy note slug: {e}"),
+                                                );
+                                            }
+                                            ui.close_menu();
+                                        }
+                                        if app.note_settings.aliases_enabled
+                                            && ui.button("Manage aliases").clicked()
+                                        {
+                                            app.open_note_panel(&entry.slug, None);
+                                            ui.close_menu();
+                                        }
+                                        if app.note_settings.templates_enabled
+                                            && ui.button("Create note from template").clicked()
+                                        {
+                                            app.activate_action(
+                                                note_action("New note", "query:note templates"),
+                                                None,
+                                                ActivationSource::Click,
+                                            );
+                                            ui.close_menu();
+                                        }
                                         if ui.button("Remove Note").clicked() {
-                                            remove = Some(idx_copy);
+                                            if entry.slug.is_empty() {
+                                                remove = Some(idx_copy);
+                                            } else {
+                                                app.activate_action(
+                                                    note_action(
+                                                        "Remove note",
+                                                        format!("note:remove:{}", entry.slug),
+                                                    ),
+                                                    None,
+                                                    ActivationSource::Click,
+                                                );
+                                                if !app.require_confirm_destructive {
+                                                    refresh_entries = true;
+                                                }
+                                            }
                                             ui.close_menu();
                                         }
                                         ui.separator();
@@ -415,14 +583,8 @@ impl NotesDialog {
                                             }
                                         }
                                     });
-                                    if ui.button("Edit").clicked() {
-                                        self.edit_idx = Some(idx);
-                                        self.text = entry.content.clone();
-                                    }
-                                    if ui.button("Remove").clicked() {
-                                        remove = Some(idx);
-                                    }
                                 });
+                                ui.separator();
                             }
                         });
                     if let Some(idx) = remove {
@@ -432,6 +594,10 @@ impl NotesDialog {
                     }
                 }
             });
+        if refresh_entries {
+            self.entries = cached_notes_or_load();
+            rebuild_idx = true;
+        }
         if rebuild_idx {
             self.rebuild_index();
         }
@@ -451,7 +617,9 @@ impl NotesDialog {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_note_timestamp, insert_at_char_boundary};
+    use super::{
+        checkbox_count, format_note_timestamp, insert_at_char_boundary, note_action, short_preview,
+    };
     use chrono::{Local, TimeZone};
 
     #[test]
@@ -486,5 +654,35 @@ mod tests {
             .single()
             .expect("valid local datetime");
         assert_eq!(format_note_timestamp(dt), "2024-01-02 03:04:05");
+    }
+
+    #[test]
+    fn preview_omits_title_and_alias_metadata() {
+        let preview = short_preview("# Title\nAlias: Primary\n\nBody text\nwith spacing");
+
+        assert_eq!(preview, "Body text with spacing");
+    }
+
+    #[test]
+    fn checkbox_count_counts_task_list_rows() {
+        let content = "- [ ] open\n- [x] done\n- [X] upper\nnot a task";
+
+        assert_eq!(checkbox_count(content), 3);
+    }
+
+    #[test]
+    fn remove_note_context_action_uses_existing_remove_route() {
+        let action = note_action("Remove note", "note:remove:alpha");
+
+        assert_eq!(action.action, "note:remove:alpha");
+        assert_eq!(action.desc, "Note");
+    }
+
+    #[test]
+    fn open_note_context_action_uses_existing_open_route() {
+        let action = note_action("Open note", "note:open:alpha");
+
+        assert_eq!(action.action, "note:open:alpha");
+        assert_eq!(action.desc, "Note");
     }
 }
