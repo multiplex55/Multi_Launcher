@@ -1048,18 +1048,24 @@ impl NoteRelationshipCommand {
     }
 }
 
+fn note_fuzzy_match_ci(matcher: &SkimMatcherV2, haystack: &str, needle: &str) -> bool {
+    matcher.fuzzy_match(haystack, needle).is_some()
+        || matcher
+            .fuzzy_match(&haystack.to_lowercase(), &needle.to_lowercase())
+            .is_some()
+}
+
 fn note_matches_title_or_alias(matcher: &SkimMatcherV2, note: &Note, filter: &str) -> bool {
-    matcher.fuzzy_match(&note.title, filter).is_some()
-        || matcher.fuzzy_match(&note.slug, filter).is_some()
+    note_fuzzy_match_ci(matcher, &note.title, filter)
+        || note_fuzzy_match_ci(matcher, &note.slug, filter)
         || note
             .alias
             .as_ref()
-            .and_then(|a| matcher.fuzzy_match(a, filter))
-            .is_some()
+            .is_some_and(|a| note_fuzzy_match_ci(matcher, a, filter))
         || note
             .aliases
             .iter()
-            .any(|a| matcher.fuzzy_match(a, filter).is_some())
+            .any(|a| note_fuzzy_match_ci(matcher, a, filter))
 }
 
 fn note_query_action(command: NoteRelationshipCommand, query: &str) -> Action {
@@ -1900,17 +1906,23 @@ mod tests {
         ]);
 
         let cache = data.lock().expect("note cache lock poisoned");
+        let mut resolved_slugs = match resolve_target(&cache, "SHARED") {
+            NoteTarget::Ambiguous(slugs) => slugs,
+            other => panic!("expected ambiguous alias resolution, got {other:?}"),
+        };
+        resolved_slugs.sort();
         assert_eq!(
-            resolve_target(&cache, "SHARED"),
-            NoteTarget::Ambiguous(vec!["alpha".into(), "beta".into()])
+            resolved_slugs,
+            vec!["alpha".to_string(), "beta".to_string()]
         );
         drop(cache);
 
         let open_actions = plugin.search("note open Shared");
-        let open_slugs: Vec<&str> = open_actions
+        let mut open_slugs: Vec<&str> = open_actions
             .iter()
             .map(|action| action.action.as_str())
             .collect();
+        open_slugs.sort_unstable();
         assert_eq!(open_slugs, vec!["note:open:alpha", "note:open:beta"]);
     }
 
