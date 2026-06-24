@@ -1195,17 +1195,11 @@ pub fn decode_note_new_payload(encoded: &str) -> anyhow::Result<NoteNewPayload> 
 }
 
 fn encoded_note_new_action(slug: &str, template: Option<&str>) -> Action {
-    let payload = NoteNewPayload {
-        slug: slug.to_string(),
-        template: template.map(str::to_string),
-    };
-    let action = encode_note_new_payload(&payload)
-        .unwrap_or_else(|_| format!("note:new:{}", urlencoding::encode(slug)));
     Action {
         label: String::new(),
         desc: "Note".into(),
-        action,
-        args: None,
+        action: format!("note:new:{}", urlencoding::encode(slug)),
+        args: template.map(|name| serde_json::json!({ "template": name }).to_string()),
     }
 }
 
@@ -2255,15 +2249,9 @@ mod tests {
         let actions = plugin.search("note new Quarterly Plan --template fancy:name with spaces");
 
         assert_eq!(actions.len(), 1);
-        assert!(actions[0].action.starts_with(NOTE_NEW_JSON_PREFIX));
-        let encoded = actions[0]
-            .action
-            .strip_prefix(NOTE_NEW_JSON_PREFIX)
-            .expect("encoded note payload");
-        let payload = decode_note_new_payload(encoded).expect("decode note payload");
-        assert_eq!(payload.slug, "quarterly-plan");
-        assert_eq!(payload.template.as_deref(), Some("fancy:name with spaces"));
-        assert_eq!(actions[0].args, None);
+        assert_eq!(actions[0].action, "note:new:quarterly-plan");
+        let expected_args = serde_json::json!({ "template": "fancy:name with spaces" }).to_string();
+        assert_eq!(actions[0].args.as_deref(), Some(expected_args.as_str()));
     }
 
     #[test]
