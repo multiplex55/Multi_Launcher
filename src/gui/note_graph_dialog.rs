@@ -867,6 +867,7 @@ mod tests {
             links: Vec::new(),
             slug: slug.to_string(),
             alias: alias.map(str::to_string),
+            aliases: alias.map(|a| vec![a.to_string()]).unwrap_or_default(),
             entity_refs: Vec::new(),
         }
     }

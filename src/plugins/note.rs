@@ -3,14 +3,14 @@ use crate::common::entity_ref::{EntityKind, EntityRef};
 use crate::common::query::parse_query_filters;
 use crate::common::slug::{register_slug, reset_slug_lookup, slugify, unique_slug};
 use crate::linking::{
-    EntityKey, LinkRef, LinkTarget, build_index_from_notes_and_todos, format_link_id,
+    build_index_from_notes_and_todos, format_link_id, EntityKey, LinkRef, LinkTarget,
 };
 use crate::plugin::Plugin;
 use crate::plugins::todo::TODO_DATA;
 use chrono::Local;
 use eframe::egui;
-use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +76,7 @@ pub struct Note {
     pub links: Vec<String>,
     pub slug: String,
     pub alias: Option<String>,
+    pub aliases: Vec<String>,
     pub entity_refs: Vec<EntityRef>,
 }
 
@@ -84,6 +85,7 @@ pub struct NoteLinkMenuTarget {
     pub slug: String,
     pub title: String,
     pub alias: Option<String>,
+    pub aliases: Vec<String>,
 }
 
 impl NoteLinkMenuTarget {
@@ -94,6 +96,10 @@ impl NoteLinkMenuTarget {
     pub fn search_text(&self) -> String {
         let mut text = self.title.clone();
         if let Some(alias) = &self.alias {
+            text.push('\n');
+            text.push_str(alias);
+        }
+        for alias in &self.aliases {
             text.push('\n');
             text.push_str(alias);
         }
@@ -127,8 +133,8 @@ pub struct NoteCache {
     pub links: HashMap<String, Vec<String>>,
     /// Lowercased contents for simple full-text search.
     pub index: Vec<String>,
-    /// Map of note alias -> note slug for quick lookup.
-    pub aliases: HashMap<String, String>,
+    /// Map of lowercased note alias -> candidate note slugs for quick lookup.
+    pub aliases: HashMap<String, Vec<String>>,
     /// Set of canonical note slugs for exact-existence checks.
     pub slug_set: HashSet<String>,
     /// Map of lowercased slug -> canonical slug.
@@ -142,7 +148,7 @@ impl NoteCache {
         let mut notes = notes;
         let mut tag_set: HashSet<String> = HashSet::new();
         let mut link_map: HashMap<String, Vec<String>> = HashMap::new();
-        let mut alias_map: HashMap<String, String> = HashMap::new();
+        let mut alias_map: HashMap<String, Vec<String>> = HashMap::new();
         let mut slug_set: HashSet<String> = HashSet::new();
         let mut slug_map: HashMap<String, String> = HashMap::new();
         let mut title_map: HashMap<String, Vec<String>> = HashMap::new();
@@ -153,8 +159,12 @@ impl NoteCache {
             } else {
                 n.tags = n.tags.iter().map(|t| t.to_lowercase()).collect();
             }
-            if let Some(a) = &n.alias {
-                alias_map.insert(a.to_lowercase(), n.slug.clone());
+            normalize_note_aliases(n);
+            for a in &n.aliases {
+                let entry = alias_map.entry(a.to_lowercase()).or_default();
+                if !entry.contains(&n.slug) {
+                    entry.push(n.slug.clone());
+                }
             }
             slug_set.insert(n.slug.clone());
             slug_map.insert(n.slug.to_lowercase(), n.slug.clone());
@@ -206,11 +216,17 @@ impl NoteCache {
             .map(|n| {
                 let mut txt = n.title.to_lowercase();
                 txt.push('\n');
-                txt.push_str(&n.content.to_lowercase());
+                txt.push_str(&n.slug.to_lowercase());
                 if let Some(a) = &n.alias {
                     txt.push('\n');
                     txt.push_str(&a.to_lowercase());
                 }
+                for a in &n.aliases {
+                    txt.push('\n');
+                    txt.push_str(&a.to_lowercase());
+                }
+                txt.push('\n');
+                txt.push_str(&n.content.to_lowercase());
                 txt
             })
             .collect();
@@ -360,8 +376,12 @@ fn resolve_target(cache: &NoteCache, query: &str) -> NoteTarget {
         return NoteTarget::Broken;
     }
     let query_lower = query.to_lowercase();
-    if let Some(slug) = cache.aliases.get(&query_lower) {
-        return NoteTarget::Resolved(slug.clone());
+    if let Some(slugs) = cache.aliases.get(&query_lower) {
+        return match slugs.as_slice() {
+            [slug] => NoteTarget::Resolved(slug.clone()),
+            [] => NoteTarget::Broken,
+            _ => NoteTarget::Ambiguous(slugs.clone()),
+        };
     }
     if let Some(slug) = query_lower.strip_prefix("slug:") {
         let slug = slug.trim();
@@ -523,11 +543,54 @@ pub fn note_relationship_edges() -> Vec<(String, String)> {
 }
 
 pub fn extract_alias(content: &str) -> Option<String> {
-    content
-        .lines()
-        .skip(1)
-        .take_while(|l| !l.trim().is_empty())
-        .find_map(|l| l.strip_prefix("Alias:").map(|a| a.trim().to_string()))
+    extract_aliases(content).into_iter().next()
+}
+
+pub fn extract_aliases(content: &str) -> Vec<String> {
+    let mut aliases = Vec::new();
+    for line in content.lines().skip(1).take_while(|l| !l.trim().is_empty()) {
+        let trimmed = line.trim_start();
+        if let Some(alias) = trimmed.strip_prefix("Alias:") {
+            aliases.push(alias.trim().to_string());
+        } else if let Some(alias_list) = trimmed.strip_prefix("Aliases:") {
+            aliases.extend(
+                alias_list
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|alias| !alias.is_empty())
+                    .map(str::to_string),
+            );
+        }
+    }
+    dedup_aliases(aliases)
+}
+
+fn dedup_aliases(aliases: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for alias in aliases {
+        let alias = alias.trim();
+        if alias.is_empty() {
+            continue;
+        }
+        if seen.insert(alias.to_lowercase()) {
+            deduped.push(alias.to_string());
+        }
+    }
+    deduped
+}
+
+fn normalize_note_aliases(note: &mut Note) {
+    let mut aliases = Vec::new();
+    if let Some(alias) = &note.alias {
+        aliases.push(alias.clone());
+    }
+    aliases.extend(note.aliases.clone());
+    if !note.content.is_empty() {
+        aliases.extend(extract_aliases(&note.content));
+    }
+    note.aliases = dedup_aliases(aliases);
+    note.alias = note.aliases.first().cloned();
 }
 
 fn templates_dir() -> PathBuf {
@@ -669,7 +732,8 @@ pub fn load_notes() -> anyhow::Result<Vec<Note>> {
             .to_string();
         register_slug(&slug);
         let content = std::fs::read_to_string(&path)?;
-        let alias = extract_alias(&content);
+        let aliases = extract_aliases(&content);
+        let alias = aliases.first().cloned();
         let title = content
             .lines()
             .next()
@@ -687,6 +751,7 @@ pub fn load_notes() -> anyhow::Result<Vec<Note>> {
             links,
             slug,
             alias,
+            aliases,
             entity_refs,
         });
     }
@@ -727,6 +792,7 @@ pub fn note_link_menu_targets_snapshot() -> Vec<NoteLinkMenuTarget> {
                     slug: note.slug.clone(),
                     title: note.title.clone(),
                     alias: note.alias.clone(),
+                    aliases: note.aliases.clone(),
                 })
                 .collect()
         })
@@ -791,7 +857,14 @@ pub fn save_note(note: &mut Note, overwrite: bool) -> anyhow::Result<bool> {
             content = format!("{first}\nAlias: {a}\n{rest}");
         }
     }
-    note.alias = extract_alias(&content);
+    note.aliases = extract_aliases(&content);
+    if let Some(alias) = &note.alias {
+        if !note.aliases.iter().any(|a| a.eq_ignore_ascii_case(alias)) {
+            note.aliases.insert(0, alias.clone());
+        }
+    }
+    note.aliases = dedup_aliases(note.aliases.clone());
+    note.alias = note.aliases.first().cloned();
     note.tags = extract_tags(&content);
     note.entity_refs = extract_entity_refs(&content);
     std::fs::write(&path, content)?;
@@ -856,6 +929,7 @@ pub fn append_note(title: &str, content: &str) -> anyhow::Result<()> {
         links: extract_links(content),
         slug: String::new(),
         alias: None,
+        aliases: Vec::new(),
         entity_refs: extract_entity_refs(content),
     };
     save_note(&mut note, true).map(|_| ())
@@ -974,8 +1048,24 @@ impl NoteRelationshipCommand {
     }
 }
 
-fn note_display_title(note: &Note) -> &str {
-    note.alias.as_ref().unwrap_or(&note.title)
+fn note_fuzzy_match_ci(matcher: &SkimMatcherV2, haystack: &str, needle: &str) -> bool {
+    matcher.fuzzy_match(haystack, needle).is_some()
+        || matcher
+            .fuzzy_match(&haystack.to_lowercase(), &needle.to_lowercase())
+            .is_some()
+}
+
+fn note_matches_title_or_alias(matcher: &SkimMatcherV2, note: &Note, filter: &str) -> bool {
+    note_fuzzy_match_ci(matcher, &note.title, filter)
+        || note_fuzzy_match_ci(matcher, &note.slug, filter)
+        || note
+            .alias
+            .as_ref()
+            .is_some_and(|a| note_fuzzy_match_ci(matcher, a, filter))
+        || note
+            .aliases
+            .iter()
+            .any(|a| note_fuzzy_match_ci(matcher, a, filter))
 }
 
 fn note_query_action(command: NoteRelationshipCommand, query: &str) -> Action {
@@ -984,15 +1074,6 @@ fn note_query_action(command: NoteRelationshipCommand, query: &str) -> Action {
         desc: "Note".into(),
         action: format!("query:note {}", command.query_name()),
         args: Some(serde_json::json!({ "query": query }).to_string()),
-    }
-}
-
-fn relationship_note_action(command: NoteRelationshipCommand, note: &Note) -> Action {
-    Action {
-        label: format!("{} {}", command.label_badge(), note_display_title(note)),
-        desc: "Note".into(),
-        action: format!("note:open:{}", note.slug),
-        args: None,
     }
 }
 
@@ -1320,13 +1401,7 @@ impl Plugin for NotePlugin {
                     return guard
                         .notes
                         .iter()
-                        .filter(|n| {
-                            self.matcher.fuzzy_match(&n.title, filter).is_some()
-                                || n.alias
-                                    .as_ref()
-                                    .and_then(|a| self.matcher.fuzzy_match(a, filter))
-                                    .is_some()
-                        })
+                        .filter(|n| note_matches_title_or_alias(&self.matcher, n, filter))
                         .map(|n| Action {
                             label: n.alias.as_ref().unwrap_or(&n.title).clone(),
                             desc: "Note".into(),
@@ -1368,11 +1443,7 @@ impl Plugin for NotePlugin {
                                 true
                             } else {
                                 let matches =
-                                    self.matcher.fuzzy_match(&n.title, &text_filter).is_some()
-                                        || n.alias
-                                            .as_ref()
-                                            .and_then(|a| self.matcher.fuzzy_match(a, &text_filter))
-                                            .is_some();
+                                    note_matches_title_or_alias(&self.matcher, n, &text_filter);
                                 if filters.negate_text {
                                     !matches
                                 } else {
@@ -1530,13 +1601,7 @@ impl Plugin for NotePlugin {
                     return guard
                         .notes
                         .iter()
-                        .filter(|n| {
-                            self.matcher.fuzzy_match(&n.title, filter).is_some()
-                                || n.alias
-                                    .as_ref()
-                                    .and_then(|a| self.matcher.fuzzy_match(a, filter))
-                                    .is_some()
-                        })
+                        .filter(|n| note_matches_title_or_alias(&self.matcher, n, filter))
                         .map(|n| Action {
                             label: format!("Remove {}", n.alias.as_ref().unwrap_or(&n.title)),
                             desc: "Note".into(),
@@ -1762,6 +1827,131 @@ mod tests {
         *guard = original;
     }
 
+    fn test_note(title: &str, slug: &str, content: &str) -> Note {
+        let aliases = extract_aliases(content);
+        Note {
+            title: title.into(),
+            path: PathBuf::new(),
+            content: content.into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: slug.into(),
+            alias: aliases.first().cloned(),
+            aliases,
+            entity_refs: Vec::new(),
+        }
+    }
+
+    fn test_plugin_with_notes(notes: Vec<Note>) -> (NotePlugin, Arc<Mutex<NoteCache>>) {
+        let data = Arc::new(Mutex::new(NoteCache::from_notes(notes)));
+        (
+            NotePlugin {
+                matcher: SkimMatcherV2::default(),
+                data: data.clone(),
+                templates: TEMPLATE_CACHE.clone(),
+                external_open: NoteExternalOpen::Wezterm,
+                backlinks_enabled: true,
+                watcher: None,
+            },
+            data,
+        )
+    }
+
+    #[test]
+    fn extract_alias_parses_single_alias() {
+        let content = "# Alpha\nAlias: Display Name\n\nBody";
+        assert_eq!(extract_alias(content), Some("Display Name".into()));
+        assert_eq!(extract_aliases(content), vec!["Display Name"]);
+    }
+
+    #[test]
+    fn extract_aliases_parses_comma_separated_aliases() {
+        let content = "# Alpha\nAliases: foo, bar, baz\n\nBody";
+        assert_eq!(extract_aliases(content), vec!["foo", "bar", "baz"]);
+    }
+
+    #[test]
+    fn extract_aliases_includes_old_single_alias_and_dedups_case_insensitively() {
+        let content = "# Alpha\nAlias: Foo\nAliases: foo, Bar, FOO\n\nBody";
+        assert_eq!(extract_aliases(content), vec!["Foo", "Bar"]);
+    }
+
+    #[test]
+    fn note_alias_resolution_is_case_insensitive_and_supports_all_aliases() {
+        let cache = NoteCache::from_notes(vec![test_note(
+            "Alpha",
+            "alpha",
+            "# Alpha\nAlias: Primary\nAliases: Second, Third\n\nBody",
+        )]);
+
+        assert_eq!(
+            resolve_target(&cache, "primary"),
+            NoteTarget::Resolved("alpha".into())
+        );
+        assert_eq!(
+            resolve_target(&cache, "SECOND"),
+            NoteTarget::Resolved("alpha".into())
+        );
+        assert_eq!(
+            resolve_target(&cache, "third"),
+            NoteTarget::Resolved("alpha".into())
+        );
+    }
+
+    #[test]
+    fn duplicate_alias_resolution_is_ambiguous() {
+        let (plugin, data) = test_plugin_with_notes(vec![
+            test_note("Alpha", "alpha", "# Alpha\nAlias: Shared\n\nBody"),
+            test_note("Beta", "beta", "# Beta\nAliases: shared, Other\n\nBody"),
+        ]);
+
+        let cache = data.lock().expect("note cache lock poisoned");
+        let mut resolved_slugs = match resolve_target(&cache, "SHARED") {
+            NoteTarget::Ambiguous(slugs) => slugs,
+            other => panic!("expected ambiguous alias resolution, got {other:?}"),
+        };
+        resolved_slugs.sort();
+        assert_eq!(
+            resolved_slugs,
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
+        drop(cache);
+
+        let open_actions = plugin.search("note open Shared");
+        let mut open_slugs: Vec<&str> = open_actions
+            .iter()
+            .map(|action| action.action.as_str())
+            .collect();
+        open_slugs.sort_unstable();
+        assert_eq!(open_slugs, vec!["note:open:alpha", "note:open:beta"]);
+    }
+
+    #[test]
+    fn note_search_and_open_include_all_aliases() {
+        let (plugin, _) = test_plugin_with_notes(vec![
+            test_note(
+                "Alpha",
+                "alpha",
+                "# Alpha\nAlias: Primary\nAliases: Second, Third\n\nBody",
+            ),
+            test_note("Beta", "beta", "# Beta\n\nBody"),
+        ]);
+
+        let search_labels: Vec<String> = plugin
+            .search("note search third")
+            .into_iter()
+            .map(|a| a.label)
+            .collect();
+        assert_eq!(search_labels, vec!["Primary"]);
+
+        let open_labels: Vec<String> = plugin
+            .search("note open Second")
+            .into_iter()
+            .map(|a| a.label)
+            .collect();
+        assert_eq!(open_labels, vec!["Primary"]);
+    }
+
     #[test]
     fn note_cache_snapshot_is_read_only_copy() {
         let original = set_notes(vec![Note {
@@ -1772,6 +1962,7 @@ mod tests {
             links: Vec::new(),
             slug: "alpha".into(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: Vec::new(),
         }]);
 
@@ -1841,6 +2032,7 @@ Body",
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
             Note {
@@ -1851,6 +2043,7 @@ Body",
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
             Note {
@@ -1861,6 +2054,7 @@ Body",
                 links: Vec::new(),
                 slug: "gamma".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
         ]);
@@ -1905,6 +2099,7 @@ Body",
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
             Note {
@@ -1915,6 +2110,7 @@ Body",
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
             Note {
@@ -1925,6 +2121,7 @@ Body",
                 links: Vec::new(),
                 slug: "gamma".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
         ]);
@@ -1964,6 +2161,7 @@ Body",
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
             Note {
@@ -1974,6 +2172,7 @@ Body",
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
             Note {
@@ -1984,6 +2183,7 @@ Body",
                 links: Vec::new(),
                 slug: "gamma".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
         ]);
@@ -2039,6 +2239,7 @@ Body",
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
             Note {
@@ -2049,6 +2250,7 @@ Body",
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
         ]);
@@ -2085,6 +2287,7 @@ Body",
                 links: Vec::new(),
                 slug: "alpha".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
             Note {
@@ -2095,6 +2298,7 @@ Body",
                 links: Vec::new(),
                 slug: "beta".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
         ]);
@@ -2128,6 +2332,7 @@ Body",
                 links: extract_links(alpha_content),
                 slug: "alpha".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
             Note {
@@ -2138,6 +2343,7 @@ Body",
                 links: Vec::new(),
                 slug: "beta-note".into(),
                 alias: Some("Second".into()),
+                aliases: vec!["Second".into()],
                 entity_refs: Vec::new(),
             },
             Note {
@@ -2148,6 +2354,7 @@ Body",
                 links: extract_links(delta_content),
                 slug: "delta".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
             Note {
@@ -2158,6 +2365,7 @@ Body",
                 links: Vec::new(),
                 slug: "gamma-note".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
         ]);
@@ -2172,11 +2380,9 @@ Body",
         };
 
         let links = plugin.search("note links Second");
-        assert!(
-            links
-                .iter()
-                .any(|a| a.label.contains("[backlink]") && a.label.contains("type=note"))
-        );
+        assert!(links
+            .iter()
+            .any(|a| a.label.contains("[backlink]") && a.label.contains("type=note")));
         assert!(links.iter().any(|a| a.action.starts_with("note:open:")));
 
         restore_cache(original);
@@ -2193,6 +2399,7 @@ Body",
                 links: Vec::new(),
                 slug: "roadmap-a".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
             Note {
@@ -2203,6 +2410,7 @@ Body",
                 links: Vec::new(),
                 slug: "roadmap-b".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
         ]);
@@ -2215,11 +2423,9 @@ Body",
             watcher: None,
         };
         let links = plugin.search("note links Roadmap");
-        assert!(
-            links
-                .iter()
-                .any(|a| a.label.starts_with("Ambiguous note query"))
-        );
+        assert!(links
+            .iter()
+            .any(|a| a.label.starts_with("Ambiguous note query")));
         assert!(links.iter().any(|a| {
             a.action == "query:note links"
                 && a.args
@@ -2248,6 +2454,7 @@ Body",
                 links: extract_links(alpha_content),
                 slug: "alpha".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
             Note {
@@ -2258,6 +2465,7 @@ Body",
                 links: Vec::new(),
                 slug: "beta-note".into(),
                 alias: Some("Second".into()),
+                aliases: vec!["Second".into()],
                 entity_refs: Vec::new(),
             },
             Note {
@@ -2268,6 +2476,7 @@ Body",
                 links: extract_links(delta_content),
                 slug: "delta".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
         ]);
@@ -2308,6 +2517,7 @@ Body",
             links: Vec::new(),
             slug: "target".into(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: Vec::new(),
         }]);
         let plugin = NotePlugin {
@@ -2340,6 +2550,7 @@ Body",
                 links: Vec::new(),
                 slug: "roadmap-alpha".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
             Note {
@@ -2350,6 +2561,7 @@ Body",
                 links: Vec::new(),
                 slug: "roadmap-beta".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
             Note {
@@ -2360,6 +2572,7 @@ Body",
                 links: Vec::new(),
                 slug: "beta-roadmap-copy".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
         ]);
@@ -2400,6 +2613,7 @@ Body",
                 links: Vec::new(),
                 slug: "main".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
             Note {
@@ -2410,6 +2624,7 @@ Body",
                 links: Vec::new(),
                 slug: "target".into(),
                 alias: None,
+                aliases: Vec::new(),
                 entity_refs: Vec::new(),
             },
         ]);
@@ -2442,6 +2657,7 @@ Body",
             links: Vec::new(),
             slug: "alpha".into(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: Vec::new(),
         };
 
@@ -2475,6 +2691,7 @@ Body",
             links: Vec::new(),
             slug: String::new(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: Vec::new(),
         };
 
@@ -2510,6 +2727,7 @@ Body",
             links: Vec::new(),
             slug: "alpha-renamed".into(),
             alias: None,
+            aliases: Vec::new(),
             entity_refs: Vec::new(),
         };
 

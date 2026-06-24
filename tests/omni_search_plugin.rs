@@ -65,6 +65,7 @@ fn setup_fixture() -> (tempfile::TempDir, EnvGuard) {
         links: Vec::new(),
         slug: "project-plan".into(),
         alias: None,
+        aliases: Vec::new(),
         entity_refs: Vec::new(),
     }])
     .unwrap();
@@ -277,6 +278,7 @@ fn o_list_dedups_duplicate_rows_across_sources() {
         links: Vec::new(),
         slug: "shared-item".into(),
         alias: None,
+        aliases: Vec::new(),
         entity_refs: Vec::new(),
     }])
     .unwrap();
