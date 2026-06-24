@@ -405,22 +405,42 @@ impl LauncherApp {
             let slug = slug.to_string();
             self.open_note_panel(&slug, None);
         } else if let Some(rest) = a.action.strip_prefix("note:new:") {
-            let mut parts = rest.split(':');
-            let slug = parts.next().unwrap_or("").trim();
-            let template = parts.next().map(str::trim);
-            let has_extra_delimiter = parts.next().is_some();
+            let slug = match urlencoding::decode(rest.trim()) {
+                Ok(decoded) => decoded.into_owned(),
+                Err(_) => {
+                    self.report_error_message(
+                        "launcher",
+                        format!("Malformed note action: {}", a.action),
+                    );
+                    return;
+                }
+            };
+            let template = a.args.as_deref().and_then(|args| {
+                serde_json::from_str::<serde_json::Value>(args)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("template")
+                            .and_then(|template| template.as_str())
+                            .map(str::to_string)
+                    })
+            });
             let slug_has_whitespace = slug.chars().any(char::is_whitespace);
+            let slug_has_delimiter = slug.contains(':');
             let template_invalid = template
-                .map(|tpl| tpl.is_empty() || tpl.chars().any(char::is_whitespace))
+                .as_deref()
+                .map(|tpl| tpl.trim().is_empty())
                 .unwrap_or(false);
-            if has_extra_delimiter || slug.is_empty() || slug_has_whitespace || template_invalid {
+            if slug.is_empty() || slug_has_whitespace || slug_has_delimiter || template_invalid {
                 self.report_error_message(
                     "launcher",
                     format!("Malformed note action: {}", a.action),
                 );
                 return;
             }
-            self.open_note_panel(slug, template);
+            self.open_note_panel(&slug, template.as_deref());
+        } else if a.action == "note:templates_disabled" {
+            self.report_error_message("launcher", "Note templates are disabled in settings");
         } else if a.action == "note:tags" {
             self.open_note_tags();
             set_focus = true;
@@ -851,7 +871,7 @@ mod tests {
         settings::Settings,
     };
     use eframe::egui;
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::{atomic::AtomicBool, Arc};
     use tempfile::tempdir;
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
@@ -938,11 +958,10 @@ mod tests {
             ActivationSource::Enter,
         );
 
-        assert!(
-            app.error
-                .as_deref()
-                .is_some_and(|msg| msg.contains("injected failure"))
-        );
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|msg| msg.contains("injected failure")));
         let log = std::fs::read_to_string(crate::toast_log::TOAST_LOG_FILE).unwrap();
         assert!(log.contains("[error:launcher] Failed: injected failure"));
         assert!(log.contains("Failed: injected failure"));
