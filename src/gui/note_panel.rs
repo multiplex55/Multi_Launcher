@@ -1,27 +1,27 @@
-use crate::actions::screenshot::{Mode as ScreenshotMode, capture};
+use crate::actions::screenshot::{capture, Mode as ScreenshotMode};
 use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::notes_markdown::{
-    MarkdownAnalysis, MarkdownCallout, MarkdownHeading, MarkdownSection, MarkdownTaskItem,
-    analyze_markdown, task_list::toggle_task_marker,
+    analyze_markdown, task_list::toggle_task_marker, MarkdownAnalysis, MarkdownCallout,
+    MarkdownHeading, MarkdownSection, MarkdownTaskItem,
 };
 use crate::plugins::note::{
-    Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget, append_note, assets_dir,
-    available_tags, image_files, load_notes, note_cache_snapshot, note_link_menu_targets_snapshot,
-    note_version, resolve_note_query, save_note,
+    append_note, assets_dir, available_tags, extract_aliases, image_files, load_notes,
+    note_alias_map_snapshot, note_cache_snapshot, note_link_menu_targets_snapshot, note_version,
+    resolve_note_query, save_note, Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget,
 };
-use crate::plugins::todo::{TODO_FILE, load_todos, todo_version};
+use crate::plugins::todo::{load_todos, todo_version, TODO_FILE};
 use crate::settings::{NoteSettings, NoteViewMode};
-use eframe::egui::{self, Color32, FontId, Key, popup};
+use eframe::egui::{self, popup, Color32, FontId, Key};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
-use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use image::imageops::FilterType;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use rfd::FileDialog;
-use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -134,6 +134,131 @@ fn insert_callout_at_char(content: &str, char_index: usize, kind: &str) -> (Stri
     updated.push_str(&insert);
     updated.push_str(&content[byte_index..]);
     (updated, char_index + insert.chars().count())
+}
+
+fn alias_metadata_line(alias: &str) -> String {
+    format!("Alias: {}", alias.trim())
+}
+
+fn aliases_metadata_line(aliases: &[String]) -> String {
+    if aliases.len() == 1 {
+        alias_metadata_line(&aliases[0])
+    } else {
+        format!("Aliases: {}", aliases.join(", "))
+    }
+}
+
+fn alias_metadata_indexes_and_values(lines: &[&str]) -> (Vec<usize>, Vec<String>) {
+    let mut indexes = Vec::new();
+    let mut aliases = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if let Some(alias) = trimmed.strip_prefix("Alias:") {
+            indexes.push(idx);
+            let alias = alias.trim();
+            if !alias.is_empty()
+                && !aliases
+                    .iter()
+                    .any(|a: &String| a.eq_ignore_ascii_case(alias))
+            {
+                aliases.push(alias.to_string());
+            }
+        } else if let Some(alias_list) = trimmed.strip_prefix("Aliases:") {
+            indexes.push(idx);
+            for alias in alias_list
+                .split(',')
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+            {
+                if !aliases
+                    .iter()
+                    .any(|a: &String| a.eq_ignore_ascii_case(alias))
+                {
+                    aliases.push(alias.to_string());
+                }
+            }
+        }
+    }
+    (indexes, aliases)
+}
+
+pub(crate) fn add_alias_metadata(content: &str, alias: &str) -> String {
+    let alias = alias.trim();
+    if alias.is_empty() {
+        return content.to_string();
+    }
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let (indexes, mut aliases) = alias_metadata_indexes_and_values(&line_refs);
+    if aliases.iter().any(|a| a.eq_ignore_ascii_case(alias)) {
+        return content.to_string();
+    }
+    aliases.push(alias.to_string());
+    if let Some(first_idx) = indexes.first().copied() {
+        lines[first_idx] = aliases_metadata_line(&aliases);
+        let index_set: HashSet<usize> = indexes.into_iter().skip(1).collect();
+        lines = lines
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, line)| (!index_set.contains(&idx)).then_some(line))
+            .collect();
+    } else {
+        let insert_at = usize::from(lines.first().is_some_and(|line| line.starts_with("# ")));
+        lines.insert(insert_at, alias_metadata_line(alias));
+    }
+    let mut out = lines.join("\n");
+    if content.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+pub(crate) fn remove_alias_metadata(content: &str, alias: &str) -> String {
+    let alias = alias.trim();
+    if alias.is_empty() {
+        return content.to_string();
+    }
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let (indexes, aliases) = alias_metadata_indexes_and_values(&line_refs);
+    let aliases: Vec<String> = aliases
+        .into_iter()
+        .filter(|a| !a.eq_ignore_ascii_case(alias))
+        .collect();
+    if indexes.is_empty() {
+        return content.to_string();
+    }
+    let index_set: HashSet<usize> = indexes.iter().copied().skip(1).collect();
+    if let Some(first_idx) = indexes.first().copied() {
+        if aliases.is_empty() {
+            lines = lines
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, line)| (!indexes.contains(&idx)).then_some(line))
+                .collect();
+        } else {
+            lines[first_idx] = aliases_metadata_line(&aliases);
+            lines = lines
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, line)| (!index_set.contains(&idx)).then_some(line))
+                .collect();
+        }
+    }
+    let mut out = lines.join("\n");
+    if content.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+pub(crate) fn rename_alias_metadata(content: &str, old_alias: &str, new_alias: &str) -> String {
+    let new_alias = new_alias.trim();
+    if new_alias.is_empty() {
+        remove_alias_metadata(content, old_alias)
+    } else {
+        add_alias_metadata(&remove_alias_metadata(content, old_alias), new_alias)
+    }
 }
 
 fn wrap_char_range_in_callout(
@@ -276,6 +401,8 @@ pub struct NotePanel {
     link_url: String,
     link_new_dialog_open: bool,
     link_new_name: String,
+    new_alias: String,
+    alias_rename_inputs: HashMap<String, String>,
 
     // Focus management: avoid requesting focus on an ID that does not correspond to
     // an existing widget in the current frame. This prevents AccessKit from seeing
@@ -543,6 +670,8 @@ impl NotePanel {
             link_url: String::new(),
             link_new_dialog_open: false,
             link_new_name: String::new(),
+            new_alias: String::new(),
+            alias_rename_inputs: HashMap::new(),
             focus_textedit_next_frame: false,
             last_textedit_id: None,
             derived: NoteDerivedView::default(),
@@ -640,6 +769,62 @@ impl NotePanel {
             .collect();
         self.derived.external_links = extract_links(&self.note.content);
         self.fast_derived_dirty = false;
+    }
+
+    fn sync_aliases_from_content(&mut self) {
+        self.note.aliases = extract_aliases(&self.note.content);
+        self.note.alias = self.note.aliases.first().cloned();
+        self.fast_derived_dirty = true;
+        self.heavy_recompute_requested = true;
+    }
+
+    fn save_alias_metadata_change(&mut self, app: &mut LauncherApp) {
+        self.sync_aliases_from_content();
+        let mut note = self.note.clone();
+        match save_note(&mut note, true) {
+            Ok(true) => {
+                self.note = note;
+                self.sync_aliases_from_content();
+            }
+            Ok(false) => self.overwrite_prompt = true,
+            Err(err) => app.report_error("note save", format!("Failed to save aliases: {err}")),
+        }
+    }
+
+    fn alias_collision_warning(&self, alias: &str) -> Option<String> {
+        let alias = alias.trim();
+        if alias.is_empty() {
+            return None;
+        }
+        let alias_map = note_alias_map_snapshot();
+        let Some(slugs) = alias_map.get(&alias.to_lowercase()) else {
+            return None;
+        };
+        let conflicting_slugs: HashSet<&str> = slugs
+            .iter()
+            .map(String::as_str)
+            .filter(|slug| *slug != self.note.slug)
+            .collect();
+        if conflicting_slugs.is_empty() {
+            return None;
+        }
+        let labels = note_cache_snapshot()
+            .into_iter()
+            .filter(|note| conflicting_slugs.contains(note.slug.as_str()))
+            .map(|note| note_display_with_secondary(&note))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!("Alias \"{alias}\" is already used by {labels}"))
+    }
+
+    fn warn_alias_collision(&self, app: &mut LauncherApp, alias: &str) {
+        if let Some(message) = self.alias_collision_warning(alias) {
+            app.add_toast(Toast {
+                text: message.into(),
+                kind: ToastKind::Warning,
+                options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
+            });
+        }
     }
 
     fn refresh_heavy_derived(&mut self, force: bool, backlinks_enabled: bool) {
@@ -1229,7 +1414,11 @@ impl NotePanel {
                             ui.add_space((row.level.saturating_sub(1) as f32) * 12.0);
                             if app.note_settings.collapsible_sections_enabled {
                                 let marker = if row.collapsible {
-                                    if row.collapsed { "▶" } else { "▼" }
+                                    if row.collapsed {
+                                        "▶"
+                                    } else {
+                                        "▼"
+                                    }
                                 } else {
                                     "•"
                                 };
@@ -1322,6 +1511,63 @@ impl NotePanel {
                         if was_focused {
                             self.focus_textedit_next_frame = true;
                         }
+                    }
+                }
+            });
+        }
+
+        if app.note_settings.aliases_enabled {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Aliases:");
+                if self.note.aliases.is_empty() {
+                    ui.small("None");
+                }
+                for alias in self.note.aliases.clone() {
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(&alias);
+                            ui.small(format!("{} · {}", self.note.title, self.note.slug));
+                            if ui.small_button("Remove").clicked() {
+                                self.note.content =
+                                    remove_alias_metadata(&self.note.content, &alias);
+                                self.alias_rename_inputs.remove(&alias);
+                                self.save_alias_metadata_change(app);
+                            }
+                        });
+                        let mut input = self
+                            .alias_rename_inputs
+                            .entry(alias.clone())
+                            .or_insert_with(|| alias.clone())
+                            .clone();
+                        let mut rename_to = None;
+                        ui.horizontal(|ui| {
+                            ui.text_edit_singleline(&mut input);
+                            if ui.small_button("Rename").clicked() {
+                                rename_to = Some(input.trim().to_string());
+                            }
+                        });
+                        if let Some(renamed) = rename_to {
+                            self.warn_alias_collision(app, &renamed);
+                            self.note.content =
+                                rename_alias_metadata(&self.note.content, &alias, &renamed);
+                            self.alias_rename_inputs.remove(&alias);
+                            self.save_alias_metadata_change(app);
+                        } else {
+                            self.alias_rename_inputs.insert(alias.clone(), input);
+                        }
+                    });
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Add alias:");
+                ui.text_edit_singleline(&mut self.new_alias);
+                if ui.button("Add").clicked() {
+                    let alias = self.new_alias.trim().to_string();
+                    if !alias.is_empty() {
+                        self.warn_alias_collision(app, &alias);
+                        self.note.content = add_alias_metadata(&self.note.content, &alias);
+                        self.new_alias.clear();
+                        self.save_alias_metadata_change(app);
                     }
                 }
             });
@@ -2955,6 +3201,14 @@ fn alias_map_hash(notes: &[Note]) -> u64 {
     hasher.finish()
 }
 
+fn note_display_with_secondary(note: &Note) -> String {
+    if let Some(alias) = note.alias.as_deref().filter(|a| !a.trim().is_empty()) {
+        format!("{alias} ({} · {})", note.title, note.slug)
+    } else {
+        format!("{} ({})", note.title, note.slug)
+    }
+}
+
 fn content_without_fenced_code(content: &str) -> String {
     let mut out = String::new();
     let mut in_code = false;
@@ -3117,9 +3371,9 @@ mod tests {
     use eframe::egui;
     use std::{
         fs,
-        sync::{Arc, Mutex, MutexGuard, atomic::AtomicBool},
+        sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard},
     };
-    use tempfile::{TempDir, tempdir};
+    use tempfile::{tempdir, TempDir};
 
     static NOTES_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -3324,18 +3578,14 @@ mod tests {
 
         assert_eq!(panel.link_menu_target_refresh_count, target_refresh_count);
         assert!(panel.link_menu_result_refresh_count > result_refresh_count);
-        assert!(
-            panel
-                .link_menu_results
-                .iter()
-                .any(|result| result.display_title == "Alpha")
-        );
-        assert!(
-            !panel
-                .link_menu_results
-                .iter()
-                .any(|result| result.display_title == "Beta")
-        );
+        assert!(panel
+            .link_menu_results
+            .iter()
+            .any(|result| result.display_title == "Alpha"));
+        assert!(!panel
+            .link_menu_results
+            .iter()
+            .any(|result| result.display_title == "Beta"));
     }
 
     #[test]
@@ -3968,11 +4218,9 @@ link://note/central-note
         let titles: Vec<_> = related.iter().map(|row| row.title.as_str()).collect();
 
         assert_eq!(titles, vec!["linked"]);
-        assert!(
-            related
-                .iter()
-                .any(|row| row.reason == "link id" || row.reason == "wiki alias")
-        );
+        assert!(related
+            .iter()
+            .any(|row| row.reason == "link id" || row.reason == "wiki alias"));
     }
 
     #[test]
@@ -4435,6 +4683,34 @@ body"
         let labels = HashMap::new();
         let processed = preprocess_preview_markdown("[[Current Note]]", "current-note", &labels);
         assert_eq!(processed, "[[Current Note]]");
+    }
+
+    #[test]
+    fn add_alias_metadata_inserts_unicode_alias_after_title() {
+        let content = "# Café\n\nBody\n";
+        let updated = add_alias_metadata(content, "東京 🦀");
+        assert_eq!(updated, "# Café\nAlias: 東京 🦀\n\nBody\n");
+    }
+
+    #[test]
+    fn add_alias_metadata_extends_existing_unicode_aliases() {
+        let content = "# Café\nAliases: 東京, naïve\n\nBody";
+        let updated = add_alias_metadata(content, "🦀 Crab");
+        assert_eq!(updated, "# Café\nAliases: 東京, naïve, 🦀 Crab\n\nBody");
+    }
+
+    #[test]
+    fn remove_alias_metadata_removes_unicode_alias_without_touching_others() {
+        let content = "# Café\nAliases: 東京, naïve, 🦀 Crab\n\nBody\n";
+        let updated = remove_alias_metadata(content, "NAÏVE");
+        assert_eq!(updated, "# Café\nAliases: 東京, 🦀 Crab\n\nBody\n");
+    }
+
+    #[test]
+    fn rename_alias_metadata_renames_unicode_alias() {
+        let content = "# Café\nAlias: 東京\n\nBody";
+        let updated = rename_alias_metadata(content, "東京", "京都 🦀");
+        assert_eq!(updated, "# Café\nAlias: 京都 🦀\n\nBody");
     }
 
     #[test]

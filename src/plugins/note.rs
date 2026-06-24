@@ -781,6 +781,11 @@ pub fn note_cache_snapshot() -> Vec<Note> {
     CACHE.lock().map(|c| c.notes.clone()).unwrap_or_default()
 }
 
+/// Return the cached lowercased alias -> note slug map without hitting disk.
+pub fn note_alias_map_snapshot() -> HashMap<String, Vec<String>> {
+    CACHE.lock().map(|c| c.aliases.clone()).unwrap_or_default()
+}
+
 /// Return lightweight note link menu targets from the in-memory cache without hitting disk.
 pub fn note_link_menu_targets_snapshot() -> Vec<NoteLinkMenuTarget> {
     CACHE
