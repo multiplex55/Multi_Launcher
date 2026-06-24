@@ -1400,6 +1400,12 @@ impl Plugin for NotePlugin {
                         args: None,
                     },
                     Action {
+                        label: "note templates".into(),
+                        desc: "Note".into(),
+                        action: "query:note templates".into(),
+                        args: None,
+                    },
+                    Action {
                         label: "note new".into(),
                         desc: "Note".into(),
                         action: "query:note new ".into(),
@@ -1448,45 +1454,8 @@ impl Plugin for NotePlugin {
                         args: None,
                     },
                 ]);
-                if self.templates_enabled {
-                    actions.extend([
-                        Action {
-                            label: "note templates".into(),
-                            desc: "Note".into(),
-                            action: "query:note templates".into(),
-                            args: None,
-                        },
-                        Action {
-                            label: "note template list".into(),
-                            desc: "Note".into(),
-                            action: "query:note template list".into(),
-                            args: None,
-                        },
-                        Action {
-                            label: "note template new".into(),
-                            desc: "Note".into(),
-                            action: "query:note template new ".into(),
-                            args: None,
-                        },
-                        Action {
-                            label: "note template edit".into(),
-                            desc: "Note".into(),
-                            action: "query:note template edit ".into(),
-                            args: None,
-                        },
-                        Action {
-                            label: "note template open".into(),
-                            desc: "Note".into(),
-                            action: "query:note template open ".into(),
-                            args: None,
-                        },
-                        Action {
-                            label: "note template rm".into(),
-                            desc: "Note".into(),
-                            action: "query:note template rm ".into(),
-                            args: None,
-                        },
-                    ]);
+                if !self.templates_enabled {
+                    actions.retain(|a| !a.label.contains("template"));
                 }
                 return actions;
             }
