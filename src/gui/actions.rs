@@ -1,5 +1,15 @@
 use super::*;
 
+fn validate_note_new_payload(slug: &str, template: Option<&str>) -> Result<(), String> {
+    let slug_has_whitespace = slug.chars().any(char::is_whitespace);
+    let slug_has_delimiter = slug.contains(':');
+    let template_invalid = template.map(|tpl| tpl.trim().is_empty()).unwrap_or(false);
+    if slug.is_empty() || slug_has_whitespace || slug_has_delimiter || template_invalid {
+        return Err("Malformed note action".to_string());
+    }
+    Ok(())
+}
+
 impl LauncherApp {
     pub fn activate_action(
         &mut self,
@@ -404,6 +414,26 @@ impl LauncherApp {
         } else if let Some(slug) = a.action.strip_prefix("note:open:") {
             let slug = slug.to_string();
             self.open_note_panel(&slug, None);
+        } else if let Some(encoded) = a
+            .action
+            .strip_prefix(crate::plugins::note::NOTE_NEW_JSON_PREFIX)
+        {
+            let payload = match crate::plugins::note::decode_note_new_payload(encoded) {
+                Ok(payload) => payload,
+                Err(err) => {
+                    self.report_error_message(
+                        "launcher",
+                        format!("Malformed note action payload: {err}"),
+                    );
+                    return;
+                }
+            };
+            if let Err(err) = validate_note_new_payload(&payload.slug, payload.template.as_deref())
+            {
+                self.report_error_message("launcher", err);
+                return;
+            }
+            self.open_note_panel(&payload.slug, payload.template.as_deref());
         } else if let Some(rest) = a.action.strip_prefix("note:new:") {
             let slug = match urlencoding::decode(rest.trim()) {
                 Ok(decoded) => decoded.into_owned(),
@@ -425,17 +455,8 @@ impl LauncherApp {
                             .map(str::to_string)
                     })
             });
-            let slug_has_whitespace = slug.chars().any(char::is_whitespace);
-            let slug_has_delimiter = slug.contains(':');
-            let template_invalid = template
-                .as_deref()
-                .map(|tpl| tpl.trim().is_empty())
-                .unwrap_or(false);
-            if slug.is_empty() || slug_has_whitespace || slug_has_delimiter || template_invalid {
-                self.report_error_message(
-                    "launcher",
-                    format!("Malformed note action: {}", a.action),
-                );
+            if let Err(err) = validate_note_new_payload(&slug, template.as_deref()) {
+                self.report_error_message("launcher", err);
                 return;
             }
             self.open_note_panel(&slug, template.as_deref());

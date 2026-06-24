@@ -7,6 +7,7 @@ use crate::linking::{
 };
 use crate::plugin::Plugin;
 use crate::plugins::todo::TODO_DATA;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Local;
 use eframe::egui;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -1168,6 +1169,31 @@ fn note_query_action(command: NoteRelationshipCommand, query: &str) -> Action {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteNewPayload {
+    pub slug: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+}
+
+pub const NOTE_NEW_JSON_PREFIX: &str = "note:new-json:";
+
+pub fn encode_note_new_payload(payload: &NoteNewPayload) -> anyhow::Result<String> {
+    let json = serde_json::to_vec(payload)?;
+    Ok(format!(
+        "{NOTE_NEW_JSON_PREFIX}{}",
+        URL_SAFE_NO_PAD.encode(json)
+    ))
+}
+
+pub fn decode_note_new_payload(encoded: &str) -> anyhow::Result<NoteNewPayload> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|err| anyhow::anyhow!("invalid note new payload base64: {err}"))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|err| anyhow::anyhow!("invalid note new payload json: {err}"))
+}
+
 fn encoded_note_new_action(slug: &str, template: Option<&str>) -> Action {
     Action {
         label: String::new(),
@@ -2226,6 +2252,28 @@ mod tests {
         assert_eq!(actions[0].action, "note:new:quarterly-plan");
         let expected_args = serde_json::json!({ "template": "fancy:name with spaces" }).to_string();
         assert_eq!(actions[0].args.as_deref(), Some(expected_args.as_str()));
+    }
+
+    #[test]
+    fn note_new_payload_round_trips_arbitrary_template_text() {
+        let template = "colon: slash/ backslash\\ unicode☃\nnewline \"quotes\"";
+        let payload = NoteNewPayload {
+            slug: "unicode-note".into(),
+            template: Some(template.into()),
+        };
+
+        let action = encode_note_new_payload(&payload).expect("encode note payload");
+
+        assert!(action.starts_with(NOTE_NEW_JSON_PREFIX));
+        let encoded = action.strip_prefix(NOTE_NEW_JSON_PREFIX).unwrap();
+        let decoded = decode_note_new_payload(encoded).expect("decode note payload");
+        assert_eq!(decoded, payload);
+        assert!(!encoded.contains(':'));
+        assert!(!encoded.contains('/'));
+        assert!(!encoded.contains('\\'));
+        assert!(!encoded.contains(char::is_whitespace));
+        assert!(!encoded.contains('\n'));
+        assert!(!encoded.contains('"'));
     }
 
     #[test]
