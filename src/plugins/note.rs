@@ -593,34 +593,66 @@ fn normalize_note_aliases(note: &mut Note) {
     note.alias = note.aliases.first().cloned();
 }
 
-fn templates_dir() -> PathBuf {
+pub fn template_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("ML_NOTE_TEMPLATES_DIR") {
+        return PathBuf::from(dir);
+    }
     dirs_next::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".multi_launcher")
         .join("templates")
 }
 
+fn validate_template_name(name: &str) -> anyhow::Result<&str> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || std::path::Path::new(name).is_absolute()
+    {
+        anyhow::bail!("invalid note template name: {name}");
+    }
+    Ok(name)
+}
+
+pub fn template_path(name: &str) -> anyhow::Result<PathBuf> {
+    let name = validate_template_name(name)?;
+    Ok(template_dir().join(format!("{name}.md")))
+}
+
 fn load_templates() -> anyhow::Result<HashMap<String, String>> {
-    let dir = templates_dir();
+    let dir = template_dir();
     let mut map = HashMap::new();
-    if dir.exists() {
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)?;
+        return Ok(map);
+    }
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+            if validate_template_name(name).is_err() {
                 continue;
             }
-            if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    map.insert(name.to_string(), content);
-                }
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                map.insert(name.to_string(), content);
             }
         }
     }
     Ok(map)
 }
 
-fn refresh_template_cache() -> anyhow::Result<()> {
+pub fn list_templates() -> anyhow::Result<Vec<String>> {
+    let mut names: Vec<String> = load_templates()?.into_keys().collect();
+    names.sort();
+    Ok(names)
+}
+
+pub fn reload_templates() -> anyhow::Result<()> {
     let templates = load_templates()?;
     if let Ok(mut guard) = TEMPLATE_CACHE.lock() {
         *guard = templates;
@@ -628,11 +660,33 @@ fn refresh_template_cache() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn refresh_template_cache() -> anyhow::Result<()> {
+    reload_templates()
+}
+
 pub fn get_template(name: &str) -> Option<String> {
+    let name = validate_template_name(name).ok()?;
     TEMPLATE_CACHE
         .lock()
         .ok()
         .and_then(|m| m.get(name).cloned())
+}
+
+pub fn save_template(name: &str, content: &str) -> anyhow::Result<()> {
+    let path = template_path(name)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, content)?;
+    reload_templates()
+}
+
+pub fn delete_template(name: &str) -> anyhow::Result<()> {
+    let path = template_path(name)?;
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    reload_templates()
 }
 
 pub fn notes_dir() -> PathBuf {
@@ -1860,6 +1914,109 @@ mod tests {
             },
             data,
         )
+    }
+
+    static TEMPLATE_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn with_template_dir<T>(test: impl FnOnce(&std::path::Path) -> T) -> T {
+        let _lock = TEMPLATE_ENV_LOCK
+            .lock()
+            .expect("template env lock poisoned");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var("ML_NOTE_TEMPLATES_DIR").ok();
+        unsafe { std::env::set_var("ML_NOTE_TEMPLATES_DIR", dir.path()) };
+        let original_templates = TEMPLATE_CACHE
+            .lock()
+            .expect("template cache lock poisoned")
+            .clone();
+
+        let result = test(dir.path());
+
+        if let Some(prev) = prev {
+            unsafe { std::env::set_var("ML_NOTE_TEMPLATES_DIR", prev) };
+        } else {
+            unsafe { std::env::remove_var("ML_NOTE_TEMPLATES_DIR") };
+        }
+        *TEMPLATE_CACHE.lock().expect("template cache lock poisoned") = original_templates;
+        result
+    }
+
+    #[test]
+    fn note_templates_ignore_non_markdown_files() {
+        with_template_dir(|dir| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("daily.md"), "# Daily").unwrap();
+            std::fs::write(dir.join("scratch.txt"), "ignore me").unwrap();
+
+            reload_templates().unwrap();
+
+            assert_eq!(list_templates().unwrap(), vec!["daily"]);
+            assert_eq!(get_template("daily"), Some("# Daily".into()));
+            assert_eq!(get_template("scratch"), None);
+        });
+    }
+
+    #[test]
+    fn note_templates_missing_directory_returns_empty_and_creates_directory() {
+        with_template_dir(|dir| {
+            assert!(!dir.exists());
+
+            assert_eq!(list_templates().unwrap(), Vec::<String>::new());
+
+            assert!(dir.exists());
+            assert!(dir.is_dir());
+        });
+    }
+
+    #[test]
+    fn note_template_helpers_reject_path_traversal_names() {
+        with_template_dir(|_| {
+            for name in [
+                "../secret",
+                "folder/name",
+                r"folder\name",
+                "..",
+                "/tmp/secret",
+            ] {
+                assert!(template_path(name).is_err(), "{name} should be rejected");
+                assert!(
+                    save_template(name, "content").is_err(),
+                    "{name} should be rejected"
+                );
+                assert!(delete_template(name).is_err(), "{name} should be rejected");
+                assert_eq!(get_template(name), None, "{name} should not resolve");
+            }
+        });
+    }
+
+    #[test]
+    fn note_templates_command_still_lists_cached_templates() {
+        let templates = Arc::new(Mutex::new(HashMap::from([
+            ("daily".to_string(), "# Daily".to_string()),
+            ("meeting".to_string(), "# Meeting".to_string()),
+        ])));
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: Arc::new(Mutex::new(NoteCache::default())),
+            templates,
+            external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: true,
+            watcher: None,
+        };
+
+        let mut actions = plugin.search("note templates");
+        actions.sort_by(|a, b| a.label.cmp(&b.label));
+
+        let labels: Vec<&str> = actions.iter().map(|a| a.label.as_str()).collect();
+        let action_values: Vec<&str> = actions.iter().map(|a| a.action.as_str()).collect();
+        assert_eq!(labels, vec!["daily", "meeting"]);
+        assert_eq!(
+            action_values,
+            vec![
+                "query:note new --template daily ",
+                "query:note new --template meeting "
+            ]
+        );
     }
 
     #[test]
