@@ -1,5 +1,8 @@
 use crate::gui::LauncherApp;
-use crate::plugins::note::{load_notes, save_notes, Note};
+use crate::plugins::note::{
+    delete_template, get_template, list_templates, load_notes, reload_templates, save_notes,
+    save_template, template_path, validate_template_name, Note,
+};
 use crate::plugins::todo::{load_todos, TODO_FILE};
 use chrono::{DateTime, Local};
 use eframe::egui;
@@ -36,6 +39,177 @@ pub struct NotesDialog {
     edit_idx: Option<usize>,
     text: String,
     search: String,
+    template_manager: TemplateManagerState,
+}
+
+#[derive(Default)]
+struct TemplateManagerState {
+    open: bool,
+    templates: Vec<String>,
+    selected: Option<String>,
+    name: String,
+    content: String,
+    pending_delete: Option<String>,
+}
+
+impl TemplateManagerState {
+    fn open(&mut self) {
+        self.open = true;
+        self.refresh();
+    }
+
+    fn refresh(&mut self) {
+        let _ = reload_templates();
+        self.templates = list_templates().unwrap_or_default();
+        if let Some(selected) = self.selected.clone() {
+            if self.templates.iter().any(|name| name == &selected) {
+                self.load_for_edit(&selected);
+            } else {
+                self.clear_editor();
+            }
+        }
+    }
+
+    fn clear_editor(&mut self) {
+        self.selected = None;
+        self.name.clear();
+        self.content.clear();
+    }
+
+    fn load_for_edit(&mut self, name: &str) {
+        self.selected = Some(name.to_string());
+        self.name = name.to_string();
+        self.content = get_template(name).unwrap_or_default();
+    }
+
+    fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+        if !self.open {
+            return;
+        }
+
+        let mut refresh = false;
+        let mut open = self.open;
+        egui::Window::new("Note Templates")
+            .open(&mut open)
+            .resizable(true)
+            .default_size((520.0, 360.0))
+            .min_width(320.0)
+            .min_height(220.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("New Template").clicked() {
+                        self.clear_editor();
+                    }
+                    if ui.button("Refresh").clicked() {
+                        refresh = true;
+                    }
+                });
+                ui.separator();
+                ui.columns(2, |columns| {
+                    columns[0].heading("Templates");
+                    egui::ScrollArea::vertical().show(&mut columns[0], |ui| {
+                        for name in self.templates.clone() {
+                            ui.horizontal(|ui| {
+                                let selected = self.selected.as_deref() == Some(name.as_str());
+                                if ui.selectable_label(selected, &name).clicked() {
+                                    self.load_for_edit(&name);
+                                }
+                                if ui.small_button("Open").clicked() {
+                                    match template_path(&name)
+                                        .and_then(|path| open::that(path).map_err(Into::into))
+                                    {
+                                        Ok(()) => {}
+                                        Err(e) => app.report_error_message(
+                                            "ui operation",
+                                            format!("Failed to open template: {e}"),
+                                        ),
+                                    }
+                                }
+                                if ui.small_button("Delete").clicked() {
+                                    self.pending_delete = Some(name.clone());
+                                }
+                            });
+                        }
+                    });
+
+                    columns[1].heading(if self.selected.is_some() {
+                        "Edit Template"
+                    } else {
+                        "Create Template"
+                    });
+                    columns[1].label("Name");
+                    columns[1].add(
+                        egui::TextEdit::singleline(&mut self.name).desired_width(f32::INFINITY),
+                    );
+                    columns[1].label("Content");
+                    columns[1].add(
+                        egui::TextEdit::multiline(&mut self.content)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(10),
+                    );
+                    columns[1].horizontal(|ui| {
+                        if ui.button("Save Template").clicked() {
+                            match validate_template_name(&self.name).and_then(|name| {
+                                save_template(name, &self.content).map(|_| name.to_string())
+                            }) {
+                                Ok(saved_name) => {
+                                    self.selected = Some(saved_name);
+                                    refresh = true;
+                                    app.search();
+                                }
+                                Err(e) => app.report_error_message(
+                                    "ui operation",
+                                    format!("Failed to save template: {e}"),
+                                ),
+                            }
+                        }
+                        if ui.button("Clear").clicked() {
+                            self.clear_editor();
+                        }
+                    });
+                });
+            });
+        self.open = open;
+
+        if let Some(name) = self.pending_delete.clone() {
+            let mut confirm_open = true;
+            egui::Window::new("Delete Template?")
+                .open(&mut confirm_open)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(format!("Delete template '{name}'?"));
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete").clicked() {
+                            match delete_template(&name) {
+                                Ok(()) => {
+                                    if self.selected.as_deref() == Some(name.as_str()) {
+                                        self.clear_editor();
+                                    }
+                                    self.pending_delete = None;
+                                    refresh = true;
+                                    app.search();
+                                }
+                                Err(e) => app.report_error_message(
+                                    "ui operation",
+                                    format!("Failed to delete template: {e}"),
+                                ),
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.pending_delete = None;
+                        }
+                    });
+                });
+            if !confirm_open {
+                self.pending_delete = None;
+            }
+        }
+
+        if refresh {
+            self.refresh();
+        }
+    }
 }
 
 impl NotesDialog {
@@ -46,6 +220,9 @@ impl NotesDialog {
         self.edit_idx = None;
         self.text.clear();
         self.search.clear();
+        if self.template_manager.open {
+            self.template_manager.refresh();
+        }
     }
 
     pub fn open_edit(&mut self, idx: usize) {
@@ -175,6 +352,9 @@ impl NotesDialog {
                         if ui.button("Unused Assets").clicked() {
                             app.unused_assets_dialog.open();
                         }
+                        if app.note_settings.templates_enabled && ui.button("Templates").clicked() {
+                            self.template_manager.open();
+                        }
                         if ui.button("Close").clicked() {
                             close = true;
                         }
@@ -260,6 +440,11 @@ impl NotesDialog {
         }
         if close {
             self.open = false;
+        }
+        if app.note_settings.templates_enabled {
+            self.template_manager.ui(ctx, app);
+        } else {
+            self.template_manager.open = false;
         }
     }
 }

@@ -613,7 +613,7 @@ pub fn template_dir() -> PathBuf {
         .join("templates")
 }
 
-fn validate_template_name(name: &str) -> anyhow::Result<&str> {
+pub fn validate_template_name(name: &str) -> anyhow::Result<&str> {
     let name = name.trim();
     if name.is_empty()
         || name.contains('/')
@@ -2104,6 +2104,30 @@ mod tests {
                 assert_eq!(get_template(name), None, "{name} should not resolve");
             }
         });
+    }
+
+    #[test]
+    fn note_template_helpers_trim_names_for_crud_operations() {
+        with_template_dir(|dir| {
+            save_template("  meeting  ", "# Meeting").unwrap();
+
+            assert_eq!(list_templates().unwrap(), vec!["meeting"]);
+            assert_eq!(get_template(" meeting "), Some("# Meeting".into()));
+            assert!(dir.join("meeting.md").exists());
+
+            delete_template(" meeting ").unwrap();
+            assert_eq!(list_templates().unwrap(), Vec::<String>::new());
+            assert!(!dir.join("meeting.md").exists());
+        });
+    }
+
+    #[test]
+    fn note_template_name_validation_matches_command_helper() {
+        assert_eq!(validate_template_name(" daily ").unwrap(), "daily");
+        assert!(validate_template_name("").is_err());
+        assert!(validate_template_name("nested/template").is_err());
+        assert!(validate_template_name(r"nested\template").is_err());
+        assert!(validate_template_name("../template").is_err());
     }
 
     #[test]
