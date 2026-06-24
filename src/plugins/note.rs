@@ -677,7 +677,10 @@ pub fn expand_template_variables<Tz: chrono::TimeZone>(
     title: &str,
     slug: &str,
     now: chrono::DateTime<Tz>,
-) -> String {
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
     template
         .replace("{{title}}", title)
         .replace("{{slug}}", slug)
