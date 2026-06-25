@@ -32,7 +32,7 @@ pub struct CaptureSession {
     pub rx: mpsc::Receiver<CaptureEvent>,
     cancel: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
-    #[cfg(windows)]
+    #[cfg(all(windows, not(test)))]
     hook_thread_id: Option<Arc<std::sync::atomic::AtomicU32>>,
     #[cfg(test)]
     test_id: usize,
@@ -49,7 +49,7 @@ impl CaptureSession {
             rx,
             cancel: Arc::new(AtomicBool::new(false)),
             join: None,
-            #[cfg(windows)]
+            #[cfg(all(windows, not(test)))]
             hook_thread_id: None,
             test_id: NEXT_TEST_CAPTURE_SESSION_ID.fetch_add(1, Ordering::Relaxed),
         }
@@ -65,7 +65,7 @@ impl Drop for CaptureSession {
     fn drop(&mut self) {
         info!("capture session stop requested");
         self.cancel.store(true, Ordering::Relaxed);
-        #[cfg(windows)]
+        #[cfg(all(windows, not(test)))]
         if let Some(thread_id) = &self.hook_thread_id {
             let thread_id = thread_id.load(Ordering::Relaxed);
             if thread_id != 0 {
@@ -212,7 +212,7 @@ fn start_polling_capture_session(ctx: eframe::egui::Context) -> CaptureSession {
         rx,
         cancel,
         join: Some(join),
-        #[cfg(windows)]
+        #[cfg(all(windows, not(test)))]
         hook_thread_id: None,
         #[cfg(test)]
         test_id: NEXT_TEST_CAPTURE_SESSION_ID.fetch_add(1, Ordering::Relaxed),
@@ -262,7 +262,7 @@ fn log_capture_metadata(captured: &Option<CapturedWindow>) {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 mod windows_backend {
     use super::*;
     use std::sync::Mutex;

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use super::{MarkdownHeading, parse::LineSpan};
 
-pub fn parse_headings(lines: &[LineSpan<'_>], code_lines: &[bool]) -> Vec<MarkdownHeading> {
+pub(crate) fn parse_headings(lines: &[LineSpan<'_>], code_lines: &[bool]) -> Vec<MarkdownHeading> {
     let mut seen_anchors = HashMap::new();
 
     lines
