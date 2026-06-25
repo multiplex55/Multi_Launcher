@@ -147,15 +147,33 @@ Multi Launcher is centered around a **single query box**:
 ### 4) Notes (markdown files)
 - Create a new note:
   - `note add Meeting notes`
+  - `note new Sprint plan --template meeting`
 - List notes:
   - `note list`
 - Search notes (title/content):
   - `note rustdoc`
+- Show aliases/templates:
+  - `note alias project`
+  - `note aliases`
+  - `note template list` (or legacy `note templates`)
 - Inspect links around a note (linked todos/notes/mentions):
   - `note links roadmap`
   - `note links slug:roadmap-2026`
 
 > Notes are markdown files stored in `notes/` by default. Set `ML_NOTES_DIR` to override.
+
+Notes support an in-app markdown workspace with **Edit**, **Preview**, and
+**Split** modes. Markdown task lists (`- [ ]` / `- [x]`) render as interactive
+checkboxes, headings can appear in the outline sidebar, and sections can be
+collapsed while reading or editing longer notes. Callouts use blockquote-style
+markers such as `> [!NOTE]` or `> [!WARNING]`.
+
+Use wiki links (`[[Roadmap]]`) and canonical links (`link://note/roadmap`) for
+backlinks. Add aliases near the top of a note with either `Alias: Display Name`
+or `Aliases: Alpha, Beta`; note search, open, backlinks, and relationship
+commands resolve aliases case-insensitively. Templates live in the note
+templates directory as `.md` files and expand variables like `{{title}}`,
+`{{slug}}`, `{{date}}`, and `{{datetime}}` when creating notes.
 
 ### 5) Todos (tags + priority)
 - Add tasks:
@@ -444,8 +462,27 @@ Notable settings (high impact):
 * `enable_toasts` + `toast_duration`
 * `follow_mouse`, `always_on_top`, `hide_after_run`
 * screenshot settings (`screenshot_dir`, `screenshot_auto_save`, `screenshot_use_editor`)
+* note settings (`note.*`)
 * dashboard settings (`dashboard.*`)
 * MultiManager settings (`multi_manager.*`)
+
+Note behavior can be customized under the nested `note` settings object:
+
+```json
+{
+  "note": {
+    "external_open": "Wezterm",
+    "backlinks_enabled": true,
+    "aliases_enabled": true,
+    "templates_enabled": true
+  }
+}
+```
+
+Legacy top-level note settings are still accepted for compatibility. Turning off
+note features only hides or disables their UI/actions; it does not delete note
+markdown content, aliases, backlinks, templates, or other metadata already on
+disk.
 
 MultiManager paths can be customized under the `multi_manager` settings object:
 
