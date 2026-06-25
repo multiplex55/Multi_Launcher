@@ -1437,6 +1437,41 @@ fn note_command_suggestions(
     commands
 }
 
+fn note_root_suggestions(backlinks_enabled: bool, templates_enabled: bool) -> Vec<Action> {
+    let mut commands = vec![
+        note_command_action("note search", "query:note search "),
+        note_command_action("note list", "query:note list"),
+        note_command_action("note tag", "query:note tag"),
+        note_command_action("note graph", "query:note graph"),
+    ];
+    if backlinks_enabled {
+        commands.extend([
+            note_command_action("note backlinks", "query:note backlinks "),
+            note_command_action("note links", "query:note links "),
+            note_command_action("note mentions", "query:note mentions "),
+        ]);
+    } else {
+        commands.push(note_command_action("note links", "query:note links "));
+    }
+    if templates_enabled {
+        commands.push(note_command_action(
+            "note templates",
+            "query:note templates",
+        ));
+    }
+    commands.extend([
+        note_command_action("note new", "query:note new "),
+        note_command_action("note add", "query:note add "),
+        note_command_action("note open", "query:note open "),
+        note_command_action("note today", "query:note today"),
+        note_command_action("note link", "query:note link "),
+        note_command_action("note rm", "query:note rm "),
+        note_command_action("note reload", "note:reload"),
+        note_command_action("notes unused", "note:unused_assets"),
+    ]);
+    commands
+}
+
 fn note_suggestions_for_query_prefix(
     rest: &str,
     backlinks_enabled: bool,
@@ -1464,15 +1499,10 @@ impl Plugin for NotePlugin {
                     action: "note:dialog".into(),
                     args: None,
                 }];
-                actions.extend(
-                    note_command_suggestions(
-                        self.backlinks_enabled,
-                        self.aliases_enabled,
-                        self.templates_enabled,
-                    )
-                    .into_iter()
-                    .filter(|a| a.label != "note"),
-                );
+                actions.extend(note_root_suggestions(
+                    self.backlinks_enabled,
+                    self.templates_enabled,
+                ));
                 return actions;
             }
 
