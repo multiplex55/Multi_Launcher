@@ -1111,6 +1111,28 @@ impl NotePlugin {
             watcher,
         }
     }
+
+    fn template_list_actions(&self, filter: &str) -> Vec<Action> {
+        if let Ok(tpl) = self.templates.lock() {
+            return tpl
+                .keys()
+                .filter(|name| {
+                    if filter.is_empty() {
+                        true
+                    } else {
+                        self.matcher.fuzzy_match(name, filter).is_some()
+                    }
+                })
+                .map(|name| {
+                    let mut action = encoded_note_new_action("", Some(name));
+                    action.label = name.clone();
+                    action.action = "query:note new ".into();
+                    action
+                })
+                .collect();
+        }
+        Vec::new()
+    }
 }
 
 impl Default for NotePlugin {
@@ -1778,25 +1800,7 @@ impl Plugin for NotePlugin {
                     if !self.templates_enabled {
                         return Vec::new();
                     }
-                    let filter = args;
-                    if let Ok(tpl) = self.templates.lock() {
-                        return tpl
-                            .keys()
-                            .filter(|name| {
-                                if filter.is_empty() {
-                                    true
-                                } else {
-                                    self.matcher.fuzzy_match(name, filter).is_some()
-                                }
-                            })
-                            .map(|name| {
-                                let mut action = encoded_note_new_action("", Some(name));
-                                action.label = name.clone();
-                                action.action = "query:note new ".into();
-                                action
-                            })
-                            .collect();
-                    }
+                    return self.template_list_actions(args);
                 }
                 "alias" | "aliases" => {
                     if !self.aliases_enabled {
@@ -1849,7 +1853,7 @@ impl Plugin for NotePlugin {
                         }
                     }
                     if matches!(subcmd, "" | "list") {
-                        return self.search(&format!("note templates {name_filter}"));
+                        return self.template_list_actions(name_filter);
                     }
                     if matches!(subcmd, "new" | "edit" | "open" | "rm") {
                         let label = if name_filter.is_empty() {
