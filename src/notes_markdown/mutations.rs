@@ -143,6 +143,20 @@ pub fn remove_alias_metadata(content: &str, alias: &str) -> Result<String, Mutat
     Ok(updated)
 }
 
+pub fn rename_alias_metadata(
+    content: &str,
+    old_alias: &str,
+    new_alias: &str,
+) -> Result<String, MutationError> {
+    let new_alias = new_alias.trim();
+    let without_old = remove_alias_metadata(content, old_alias)?;
+    if new_alias.is_empty() {
+        Ok(without_old)
+    } else {
+        add_alias_metadata(&without_old, new_alias)
+    }
+}
+
 pub fn insert_callout(
     content: &str,
     byte_index: usize,
@@ -411,14 +425,19 @@ mod tests {
     }
 
     #[test]
-    fn unicode_aliases_add_and_remove_preserve_body() {
+    fn unicode_aliases_add_remove_and_rename_preserve_body() {
         let content = "# タイトル\nBody 🌱\n";
         let added = add_alias_metadata(content, "Café 日記").unwrap();
         assert_eq!(
             added,
             "---\naliases:\n  - Café 日記\n---\n# タイトル\nBody 🌱\n"
         );
-        let removed = remove_alias_metadata(&added, "Café 日記").unwrap();
+        let renamed = rename_alias_metadata(&added, "Café 日記", "京都 🦀").unwrap();
+        assert_eq!(
+            renamed,
+            "---\naliases:\n  - \"京都 🦀\"\n---\n# タイトル\nBody 🌱\n"
+        );
+        let removed = remove_alias_metadata(&renamed, "京都 🦀").unwrap();
         assert_eq!(removed, content);
     }
 
