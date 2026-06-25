@@ -4208,6 +4208,28 @@ Body visible always",
     }
 
     #[test]
+    fn backlinks_disabled_constructor_skips_initial_backlink_rows() {
+        let notes_dir = TempNotesDir::new();
+        notes_dir.write_note("current.md", "# Current\n\nBody");
+        notes_dir.write_note("other.md", "# Other\n\n[[Current]]");
+        notes_dir.refresh_cache();
+
+        let note = crate::plugins::note::note_cache_snapshot()
+            .into_iter()
+            .find(|note| note.slug == "current")
+            .expect("current note should exist in cache");
+
+        let mut settings = NoteSettings::default();
+        settings.backlinks_enabled = false;
+        let panel = NotePanel::from_note_with_details_and_settings(note, true, &settings);
+
+        assert!(panel.derived.backlink_rows_linked_todos.is_empty());
+        assert!(panel.derived.backlink_rows_related_notes.is_empty());
+        assert!(panel.derived.backlink_rows_mentions.is_empty());
+        assert_eq!(panel.heavy_recompute_count, 0);
+    }
+
+    #[test]
     fn backlink_rows_ignore_fenced_code_links() {
         let current = Note {
             title: "Central Note".into(),
@@ -4289,6 +4311,30 @@ link://note/central-note
             NotePanel::from_note_with_details_and_settings(empty_note("body"), true, &settings);
 
         assert_eq!(panel.view_mode, NoteViewMode::Edit);
+    }
+
+    #[test]
+    fn initializes_default_view_mode_to_preview_from_default_settings() {
+        let settings = NoteSettings::default();
+
+        let panel =
+            NotePanel::from_note_with_details_and_settings(empty_note("body"), true, &settings);
+
+        assert_eq!(settings.default_view_mode, NoteViewMode::Preview);
+        assert_eq!(panel.view_mode, NoteViewMode::Preview);
+    }
+
+    #[test]
+    fn initializes_default_view_mode_to_split_when_enabled() {
+        let mut settings = NoteSettings::default();
+        settings.default_view_mode = NoteViewMode::Split;
+        settings.split_view_enabled = true;
+        settings.rich_markdown_enabled = true;
+
+        let panel =
+            NotePanel::from_note_with_details_and_settings(empty_note("body"), true, &settings);
+
+        assert_eq!(panel.view_mode, NoteViewMode::Split);
     }
 
     #[test]
