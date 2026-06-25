@@ -2174,6 +2174,59 @@ mod tests {
     }
 
     #[test]
+    fn note_template_list_command_matches_legacy_templates_command() {
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: Arc::new(Mutex::new(NoteCache::default())),
+            templates: Arc::new(Mutex::new(HashMap::from([
+                ("daily".to_string(), "# Daily".to_string()),
+                ("meeting".to_string(), "# Meeting".to_string()),
+            ]))),
+            external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: true,
+            aliases_enabled: true,
+            templates_enabled: true,
+            watcher: None,
+        };
+
+        let mut legacy = plugin.search("note templates");
+        let mut list = plugin.search("note template list");
+        legacy.sort_by(|a, b| a.label.cmp(&b.label));
+        list.sort_by(|a, b| a.label.cmp(&b.label));
+
+        assert_eq!(
+            legacy.iter().map(|a| &a.label).collect::<Vec<_>>(),
+            list.iter().map(|a| &a.label).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            list.iter().map(|a| a.action.as_str()).collect::<Vec<_>>(),
+            vec!["query:note new ", "query:note new "]
+        );
+    }
+
+    #[test]
+    fn missing_note_template_name_is_encoded_as_requested_template() {
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: Arc::new(Mutex::new(NoteCache::default())),
+            templates: Arc::new(Mutex::new(HashMap::new())),
+            external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: true,
+            aliases_enabled: true,
+            templates_enabled: true,
+            watcher: None,
+        };
+
+        let actions = plugin.search("note new Missing Template Note --template absent");
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].label, "New note Missing Template Note");
+        assert_eq!(actions[0].action, "note:new:missing-template-note");
+        let expected_args = serde_json::json!({ "template": "absent" }).to_string();
+        assert_eq!(actions[0].args.as_deref(), Some(expected_args.as_str()));
+    }
+
+    #[test]
     fn note_common_query_prefixes_return_command_suggestions() {
         let plugin = NotePlugin {
             matcher: SkimMatcherV2::default(),
@@ -2207,6 +2260,33 @@ mod tests {
                 "{query:?} should suggest {expected_label:?}; got {labels:?}"
             );
         }
+    }
+
+    #[test]
+    fn note_commands_include_aliases_template_list_and_template_new() {
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: Arc::new(Mutex::new(NoteCache::default())),
+            templates: Arc::new(Mutex::new(HashMap::new())),
+            external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: true,
+            aliases_enabled: true,
+            templates_enabled: true,
+            watcher: None,
+        };
+
+        let commands = plugin.commands();
+        let labels: HashSet<&str> = commands.iter().map(|a| a.label.as_str()).collect();
+        let actions: HashSet<&str> = commands.iter().map(|a| a.action.as_str()).collect();
+
+        assert!(labels.contains("note alias"));
+        assert!(labels.contains("note aliases"));
+        assert!(labels.contains("note template list"));
+        assert!(labels.contains("note new"));
+        assert!(actions.contains("query:note alias "));
+        assert!(actions.contains("query:note aliases"));
+        assert!(actions.contains("query:note template list"));
+        assert!(actions.contains("query:note new "));
     }
 
     #[test]
