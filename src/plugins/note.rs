@@ -2030,6 +2030,44 @@ mod tests {
     }
 
     #[test]
+    fn extract_entity_refs_parses_link_note_urls_like_action_links() {
+        let refs = extract_entity_refs(
+            "See link://note/alpha and link://note/beta#section and link://note/gamma?x=1.",
+        );
+
+        assert_eq!(
+            refs,
+            vec![
+                EntityRef::new(EntityKind::Note, "alpha", None),
+                EntityRef::new(EntityKind::Note, "beta", None),
+                EntityRef::new(EntityKind::Note, "gamma", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn note_cache_links_include_wiki_links_and_link_note_mentions() {
+        let content = "# Beta\n\n[[Alpha]] link://note/alpha";
+        let mut beta_note = test_note("Beta", "beta", content);
+        beta_note.entity_refs = extract_entity_refs(content);
+        let cache = NoteCache::from_notes(vec![
+            test_note("Alpha", "alpha", "# Alpha"),
+            beta_note,
+        ]);
+
+        let beta = cache
+            .notes
+            .iter()
+            .find(|note| note.slug == "beta")
+            .expect("beta note");
+
+        assert_eq!(beta.links, vec!["alpha"]);
+        assert!(beta.entity_refs.iter().any(|entity| {
+            entity.kind == EntityKind::Note && entity.id == "alpha"
+        }));
+    }
+
+    #[test]
     fn note_templates_ignore_non_markdown_files() {
         with_template_dir(|dir| {
             std::fs::create_dir_all(dir).unwrap();

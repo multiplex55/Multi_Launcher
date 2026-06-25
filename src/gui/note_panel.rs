@@ -340,6 +340,31 @@ fn preprocess_preview_markdown(
     preprocess_note_links(content, current_slug, todo_labels)
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ParsedImageTarget {
+    rel: String,
+    full: PathBuf,
+    width: Option<f32>,
+}
+
+fn parse_note_image_target(target: &str) -> ParsedImageTarget {
+    let (rel, width) = if let Some((path, width)) = target.split_once('|') {
+        (path.trim(), width.trim().parse::<f32>().ok())
+    } else {
+        (target.trim(), None)
+    };
+    let full = if let Some(stripped) = rel.strip_prefix("assets/") {
+        assets_dir().join(stripped)
+    } else {
+        PathBuf::from(rel)
+    };
+    ParsedImageTarget {
+        rel: rel.to_string(),
+        full,
+        width,
+    }
+}
+
 fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
     if let Some(mut open_url) = ui.ctx().output_mut(|o| o.open_url.take()) {
         if let Ok(url) = Url::parse(&open_url.url) {
@@ -1870,16 +1895,10 @@ impl NotePanel {
             }
             let alt = cap.get(1).unwrap().as_str();
             let target = cap.get(2).unwrap().as_str();
-            let (rel, width) = if let Some((p, w)) = target.split_once('|') {
-                (p, w.parse::<f32>().ok())
-            } else {
-                (target, None)
-            };
-            let full = if let Some(stripped) = rel.strip_prefix("assets/") {
-                assets_dir().join(stripped)
-            } else {
-                std::path::PathBuf::from(rel)
-            };
+            let parsed = parse_note_image_target(target);
+            let rel = parsed.rel.as_str();
+            let full = parsed.full;
+            let width = parsed.width;
             if app.note_images_as_links {
                 let label = if alt.is_empty() { rel } else { alt };
                 if ui.link(label).clicked() {
@@ -4057,6 +4076,16 @@ mod tests {
     }
 
     #[test]
+    fn preprocess_wiki_links_preserves_alias_text_and_uses_target_slug() {
+        let content = "See [[Target Note|friendly label]] and [[  Spaced Note  ]]";
+        let processed = preprocess_note_links(content, "current-note", &HashMap::new());
+        assert_eq!(
+            processed,
+            "See [Target Note|friendly label](note://target-note) and [  Spaced Note  ](note://spaced-note)"
+        );
+    }
+
+    #[test]
     fn preprocess_wiki_links_skips_self() {
         let content = "See [[Target Note]]";
         let processed = preprocess_note_links(content, "target-note", &HashMap::new());
@@ -4649,6 +4678,61 @@ body"
         labels.insert("abc".to_string(), "Readable Label".to_string());
         let processed = preprocess_note_links("ref @todo:abc", "current", &labels);
         assert_eq!(processed, "ref [Readable Label](todo://abc)");
+    }
+
+    #[test]
+    fn preprocess_todo_labels_fall_back_to_id_and_ignore_invalid_tokens() {
+        let mut labels = HashMap::new();
+        labels.insert("abc-123".to_string(), "Readable Todo".to_string());
+        let processed = preprocess_note_links(
+            "mapped @todo:abc-123 fallback @todo:missing ignored @todo:not.valid",
+            "current",
+            &labels,
+        );
+        assert_eq!(
+            processed,
+            "mapped [Readable Todo](todo://abc-123) fallback [missing](todo://missing) ignored [not](todo://not).valid"
+        );
+    }
+
+    #[test]
+    fn preprocess_preview_markdown_uses_same_link_and_todo_mapping() {
+        let mut labels = HashMap::new();
+        labels.insert("build".to_string(), "Build launcher".to_string());
+
+        assert_eq!(
+            preprocess_preview_markdown("[[Other Note]] @todo:build", "current", &labels),
+            preprocess_note_links("[[Other Note]] @todo:build", "current", &labels)
+        );
+    }
+
+    #[test]
+    fn parse_note_image_target_handles_assets_and_width_suffixes() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let prev = std::env::var("ML_NOTES_DIR").ok();
+        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
+
+        let parsed = parse_note_image_target("assets/image.png|320");
+        assert_eq!(parsed.rel, "assets/image.png");
+        assert_eq!(parsed.full, dir.path().join("assets").join("image.png"));
+        assert_eq!(parsed.width, Some(320.0));
+
+        let parsed_no_width = parse_note_image_target("relative/image.png");
+        assert_eq!(parsed_no_width.rel, "relative/image.png");
+        assert_eq!(parsed_no_width.full, PathBuf::from("relative/image.png"));
+        assert_eq!(parsed_no_width.width, None);
+
+        let parsed_bad_width = parse_note_image_target("assets/image.png|wide");
+        assert_eq!(parsed_bad_width.rel, "assets/image.png");
+        assert_eq!(parsed_bad_width.width, None);
+
+        if let Some(p) = prev {
+            unsafe { std::env::set_var("ML_NOTES_DIR", p) };
+        } else {
+            unsafe { std::env::remove_var("ML_NOTES_DIR") };
+        }
     }
 
     #[test]
