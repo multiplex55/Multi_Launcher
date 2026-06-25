@@ -95,6 +95,7 @@ fn spawn_gui(
         multi_launcher::plugins::note::note_plugin_settings_with_backlinks(
             plugin_settings.get("note"),
             settings.note.backlinks_enabled,
+            settings.note.aliases_enabled,
             settings.note.templates_enabled,
         ),
     );

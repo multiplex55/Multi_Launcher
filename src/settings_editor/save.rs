@@ -135,6 +135,7 @@ impl SettingsEditor {
             crate::plugins::note::note_plugin_settings_with_backlinks(
                 plugin_settings.get("note"),
                 new_settings.note.backlinks_enabled,
+                new_settings.note.aliases_enabled,
                 new_settings.note.templates_enabled,
             ),
         );
