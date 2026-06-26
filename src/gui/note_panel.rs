@@ -13,7 +13,7 @@ use crate::plugins::note::{
 };
 use crate::plugins::todo::{TODO_FILE, load_todos, todo_version};
 use crate::settings::{NoteSettings, NoteViewMode};
-use eframe::egui::{self, Color32, FontId, Key, popup};
+use eframe::egui::{self, Color32, FontId, Key, RichText, popup};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
 use fuzzy_matcher::FuzzyMatcher;
@@ -93,6 +93,10 @@ struct LinkMenuResult {
 
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
 static TODO_TOKEN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"@todo:([A-Za-z0-9_-]+)").unwrap());
+
+fn task_display_text(task_item: &MarkdownTaskItem) -> &str {
+    task_item.text.as_str()
+}
 
 fn clamp_char_index(s: &str, char_index: usize) -> usize {
     char_index.min(s.chars().count())
@@ -2451,15 +2455,11 @@ impl NotePanel {
             if interactive && resp.changed() {
                 modified = self.toggle_rendered_checkbox_marker(task_item, ctx.input(|i| i.time));
             }
-            ui.vertical(|ui| {
-                ui.set_width(ui.available_width());
-                self.show_markdown_fragment(
-                    ui,
-                    app,
-                    &task_item.text,
-                    format!("task_{}", task_item.marker_byte_range.start),
-                );
-            });
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(task_display_text(task_item))
+                    .font(FontId::proportional(app.note_font_size)),
+            );
         });
         modified
     }
@@ -3499,6 +3499,19 @@ mod tests {
             aliases: Vec::new(),
             entity_refs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn task_display_text_uses_normalized_task_text_without_marker_or_bullet() {
+        let content = "  - [ ]   item text";
+        let task_item = analyze_markdown(content).task_items.remove(0);
+
+        assert_eq!(task_item.bullet_marker, "-");
+        assert_eq!(&content[task_item.marker_byte_range.clone()], "[ ]");
+        assert_eq!(task_item.text, "item text");
+        assert_eq!(task_display_text(&task_item), "item text");
+        assert!(!task_display_text(&task_item).contains("[ ]"));
+        assert!(!task_display_text(&task_item).starts_with('-'));
     }
 
     #[test]
