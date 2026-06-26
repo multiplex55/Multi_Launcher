@@ -379,13 +379,7 @@ fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
                 }
             } else if url.scheme() == "todo" {
                 if let Some(todo_id) = url.host_str() {
-                    let todos = load_todos(TODO_FILE).unwrap_or_default();
-                    if let Some((idx, _)) = todos.iter().enumerate().find(|(_, t)| t.id == todo_id)
-                    {
-                        app.todo_view_dialog.open_edit(idx);
-                    } else {
-                        app.todo_view_dialog.open();
-                    }
+                    open_todo_reference(app, todo_id);
                 }
             } else {
                 ui.ctx().open_url(open_url);
@@ -396,6 +390,15 @@ fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
             }
             ui.ctx().open_url(open_url);
         }
+    }
+}
+
+fn open_todo_reference(app: &mut LauncherApp, todo_id: &str) {
+    let todos = load_todos(TODO_FILE).unwrap_or_default();
+    if let Some((idx, _)) = todos.iter().enumerate().find(|(_, t)| t.id == todo_id) {
+        app.todo_view_dialog.open_edit(idx);
+    } else {
+        app.todo_view_dialog.open();
     }
 }
 
@@ -2439,6 +2442,106 @@ impl NotePanel {
         );
     }
 
+    fn render_inline_note_text(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, text: &str) {
+        let font = FontId::proportional(app.note_font_size);
+        let mut cursor = 0;
+
+        while cursor < text.len() {
+            let remaining = &text[cursor..];
+            let next_wiki = remaining.find("[[");
+            let next_markdown = remaining.find('[').filter(|idx| {
+                let byte_idx = cursor + idx;
+                byte_idx == 0 || text.as_bytes().get(byte_idx - 1) != Some(&b'!')
+            });
+            let next_todo = remaining.find("@todo:");
+
+            let Some(next) = [next_wiki, next_markdown, next_todo]
+                .into_iter()
+                .flatten()
+                .min()
+            else {
+                ui.label(RichText::new(remaining).font(font.clone()));
+                break;
+            };
+
+            if next > 0 {
+                ui.label(RichText::new(&remaining[..next]).font(font.clone()));
+                cursor += next;
+                continue;
+            }
+
+            if let Some(rest) = text[cursor..].strip_prefix("[[") {
+                if let Some(end) = rest.find("]]") {
+                    let link_text = &rest[..end];
+                    let (target, label) = link_text
+                        .split_once('|')
+                        .map(|(target, alias)| (target.trim(), alias.trim()))
+                        .unwrap_or_else(|| (link_text.trim(), link_text.trim()));
+                    let resp = ui.link(RichText::new(label).font(font.clone()));
+                    if resp.clicked() {
+                        match resolve_note_query(target) {
+                            NoteTarget::Resolved(slug) => app.open_note_panel(&slug, None),
+                            NoteTarget::Ambiguous(slugs) => app.report_error("ui operation", format!(
+                                "Ambiguous link [[{target}]]; use [[slug:<slug>]] or [[path:<file.md>]]. Candidates: {}",
+                                slugs.join(", ")
+                            )),
+                            NoteTarget::Broken => {
+                                app.report_error(
+                                    "ui operation",
+                                    format!("Broken note link: [[{target}]]"),
+                                );
+                                app.open_note_panel(&slugify(target), None);
+                            }
+                        }
+                    }
+                    cursor += 2 + end + 2;
+                    continue;
+                }
+            }
+
+            if text[cursor..].starts_with('[')
+                && let Some(label_end) = text[cursor + 1..].find("](")
+            {
+                let label_end = cursor + 1 + label_end;
+                let url_start = label_end + 2;
+                if let Some(url_end_offset) = text[url_start..].find(')') {
+                    let url_end = url_start + url_end_offset;
+                    let label = &text[cursor + 1..label_end];
+                    let url = &text[url_start..url_end];
+                    if url.starts_with("http://") || url.starts_with("https://") {
+                        ui.scope(|ui| {
+                            ui.style_mut().override_font_id = Some(font.clone());
+                            ui.hyperlink_to(label, url);
+                        });
+                        cursor = url_end + 1;
+                        continue;
+                    }
+                }
+            }
+
+            if let Some(rest) = text[cursor..].strip_prefix("@todo:") {
+                let id_len = rest
+                    .bytes()
+                    .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+                    .count();
+                if id_len > 0 {
+                    let todo_id = &rest[..id_len];
+                    let resp =
+                        ui.link(RichText::new(format!("@todo:{todo_id}")).font(font.clone()));
+                    if resp.clicked() {
+                        open_todo_reference(app, todo_id);
+                    }
+                    cursor += "@todo:".len() + id_len;
+                    continue;
+                }
+            }
+
+            let ch = text[cursor..].chars().next().unwrap();
+            ui.label(RichText::new(ch.to_string()).font(font.clone()));
+            cursor += ch.len_utf8();
+        }
+    }
+
     fn render_task_item(
         &mut self,
         ui: &mut egui::Ui,
@@ -2456,10 +2559,7 @@ impl NotePanel {
                 modified = self.toggle_rendered_checkbox_marker(task_item, ctx.input(|i| i.time));
             }
             ui.add_space(4.0);
-            ui.label(
-                RichText::new(task_display_text(task_item))
-                    .font(FontId::proportional(app.note_font_size)),
-            );
+            self.render_inline_note_text(ui, app, task_display_text(task_item));
         });
         modified
     }
