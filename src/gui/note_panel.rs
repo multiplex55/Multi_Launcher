@@ -1450,7 +1450,12 @@ impl NotePanel {
         }
     }
 
-    fn render_outline_sidebar(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
+    fn render_outline_sidebar(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        outline_size: egui::Vec2,
+    ) {
         let analysis = self.markdown_analysis().clone();
         let rows = Self::outline_rows_from_headings(
             &self.note.slug,
@@ -1468,15 +1473,15 @@ impl NotePanel {
         }
 
         self.outline_width = self.outline_width.clamp(120.0, 360.0);
-        let outline_width = self.outline_width;
+        let outline_width = self.outline_width.min(outline_size.x.max(0.0));
         let outline_scroll_id = ("note_outline_scroll", self.note.slug.clone());
-        let remaining = ui.available_height();
 
         ui.vertical(|ui| {
             ui.set_width(outline_width);
             egui::ScrollArea::vertical()
                 .id_source(outline_scroll_id)
-                .max_height(remaining)
+                .max_height(outline_size.y)
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.set_width(outline_width);
                     ui.horizontal(|ui| {
@@ -1539,7 +1544,11 @@ impl NotePanel {
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.set_width(outline_width);
-                        self.render_outline_sidebar(ui, app);
+                        self.render_outline_sidebar(
+                            ui,
+                            app,
+                            egui::vec2(outline_width, body_height),
+                        );
                     },
                 );
                 #[cfg(test)]
@@ -3983,6 +3992,27 @@ mod tests {
         assert!(!panel.last_ui_sections.tags_visible);
         assert!(!panel.last_ui_sections.links_visible);
         assert!(panel.last_ui_sections.content_visible);
+
+        let outline_rect = panel
+            .last_outline_rect
+            .expect("outline pane should be allocated while open");
+        let content_rect = panel
+            .last_content_rect
+            .expect("content pane should be allocated while outline is open");
+        assert!(
+            outline_rect.width() > 1.0 && outline_rect.height() > 1.0,
+            "outline pane should have meaningful size, got {outline_rect:?}"
+        );
+        assert!(
+            content_rect.width() > 1.0 && content_rect.height() > 1.0,
+            "content pane should have meaningful size, got {content_rect:?}"
+        );
+        assert!(
+            content_rect.is_positive()
+                && content_rect.width() > 1.0
+                && content_rect.height() > 1.0,
+            "content pane should remain visible while outline is open and details are hidden, got {content_rect:?}"
+        );
     }
 
     #[test]
