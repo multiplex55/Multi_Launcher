@@ -1589,7 +1589,8 @@ impl NotePanel {
         }
         match self.view_mode {
             NoteViewMode::Edit => {
-                let resp = self.render_editor(ui, app, text_id_source.clone(), available_size);
+                let resp =
+                    self.render_editor(ui, app, text_id_source.clone(), Some(available_size));
                 self.handle_editor_response(resp, ctx, app, true);
             }
             NoteViewMode::Preview => {
@@ -1903,18 +1904,19 @@ impl NotePanel {
         ui: &mut egui::Ui,
         app: &LauncherApp,
         text_id_source: (&'static str, String),
-        available_size: egui::Vec2,
+        desired_size: Option<egui::Vec2>,
     ) -> egui::Response {
-        let response = ui.add_sized(
-            available_size,
-            egui::TextEdit::multiline(&mut self.note.content)
-                .id_source(text_id_source)
-                .desired_width(f32::INFINITY)
-                .font(FontId::monospace(app.note_font_size))
-                .frame(true)
-                .lock_focus(true)
-                .desired_rows(10),
-        );
+        let text_edit = egui::TextEdit::multiline(&mut self.note.content)
+            .id_source(text_id_source)
+            .desired_width(f32::INFINITY)
+            .font(FontId::monospace(app.note_font_size))
+            .frame(true)
+            .lock_focus(true);
+        let response = if let Some(size) = desired_size {
+            ui.add_sized(size, text_edit)
+        } else {
+            ui.add(text_edit.desired_rows(10))
+        };
         #[cfg(test)]
         {
             self.last_editor_rect = Some(response.rect);
@@ -2308,7 +2310,7 @@ impl NotePanel {
                             .max_height(editor_size.y)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                self.render_editor(ui, app, editor_id_source, editor_size)
+                                self.render_editor(ui, app, editor_id_source, Some(editor_size))
                             })
                             .inner
                     },
@@ -3835,7 +3837,7 @@ mod tests {
     }
 
     #[test]
-    fn content_pane_receives_meaningful_height_in_edit_mode() {
+    fn edit_mode_editor_height_tracks_tall_content_pane() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         app.note_panel_default_size = (720.0, 520.0);
@@ -3868,7 +3870,11 @@ mod tests {
         );
         assert!(
             editor_rect.height() > 300.0,
-            "editor should fill the content pane instead of staying near its natural row height, got {editor_rect:?}"
+            "editor should grow with the tall content pane instead of staying near the old desired_rows(10) height, got {editor_rect:?}"
+        );
+        assert!(
+            (content_rect.height() - editor_rect.height()).abs() < 8.0,
+            "editor should closely match the content pane height, content={content_rect:?}, editor={editor_rect:?}"
         );
     }
 
