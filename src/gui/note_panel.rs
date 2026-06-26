@@ -1535,6 +1535,10 @@ impl NotePanel {
                 {
                     self.last_outline_rect = Some(outline.response.rect);
                 }
+                #[cfg(not(test))]
+                {
+                    let _ = &outline;
+                }
 
                 ui.separator();
             }
@@ -1562,6 +1566,10 @@ impl NotePanel {
             #[cfg(test)]
             {
                 self.last_content_rect = Some(content.response.rect);
+            }
+            #[cfg(not(test))]
+            {
+                let _ = &content;
             }
         });
     }
@@ -3830,7 +3838,7 @@ mod tests {
     fn content_pane_receives_meaningful_height_in_edit_mode() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
-        app.note_panel_default_size = egui::vec2(720.0, 520.0);
+        app.note_panel_default_size = (720.0, 520.0);
 
         let mut panel = NotePanel::from_note(empty_note("Short note body"));
         panel.show_metadata = false;
