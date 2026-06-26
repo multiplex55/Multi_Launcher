@@ -1,27 +1,28 @@
-use crate::actions::screenshot::{capture, Mode as ScreenshotMode};
+use crate::actions::screenshot::{Mode as ScreenshotMode, capture};
 use crate::common::slug::slugify;
 use crate::gui::LauncherApp;
 use crate::notes_markdown::{
-    analyze_markdown, task_list::toggle_task_marker, MarkdownAnalysis, MarkdownCallout,
-    MarkdownHeading, MarkdownSection, MarkdownTaskItem,
+    MarkdownAnalysis, MarkdownCallout, MarkdownHeading, MarkdownSection, MarkdownTaskItem,
+    analyze_markdown, task_list::toggle_task_marker,
 };
 use crate::plugins::note::{
-    append_note, assets_dir, available_tags, extract_aliases, image_files, load_notes,
-    note_alias_map_snapshot, note_cache_snapshot, note_link_menu_targets_snapshot, note_version,
-    resolve_note_query, save_note, Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget,
+    Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget, append_note, assets_dir,
+    available_tags, extract_aliases, image_files, load_notes, note_alias_map_snapshot,
+    note_cache_snapshot, note_link_menu_targets_snapshot, note_version, resolve_note_query,
+    save_note,
 };
-use crate::plugins::todo::{load_todos, todo_version, TODO_FILE};
+use crate::plugins::todo::{TODO_FILE, load_todos, todo_version};
 use crate::settings::{NoteSettings, NoteViewMode};
-use eframe::egui::{self, popup, Color32, FontId, Key};
+use eframe::egui::{self, Color32, FontId, Key, popup};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use image::imageops::FilterType;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use rfd::FileDialog;
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -1132,34 +1133,19 @@ impl NotePanel {
                     self.refresh_fast_derived();
                 }
                 self.maybe_refresh_heavy_derived(ctx, app.note_settings.backlinks_enabled);
-                self.render_outline(ui, app);
-                let remaining = ui.available_height();
-                #[cfg(test)]
-                {
-                    self.last_ui_sections.content_visible = true;
+                if self.show_metadata {
+                    self.render_metadata_details_section(ui, app);
                 }
-                match self.view_mode {
-                    NoteViewMode::Edit => {
-                        let resp = egui::ScrollArea::vertical()
-                            .id_source(scroll_id_source)
-                            .max_height(remaining)
-                            .show(ui, |ui| self.render_editor(ui, app, text_id_source.clone()))
-                            .inner;
-                        self.handle_editor_response(resp, ctx, app, true);
-                    }
-                    NoteViewMode::Preview => {
-                        egui::ScrollArea::vertical()
-                            .id_source(scroll_id_source)
-                            .max_height(remaining)
-                            .show(ui, |ui| {
-                                let _ = self.markdown_analysis();
-                                self.render_preview(ui, app, ctx);
-                            });
-                    }
-                    NoteViewMode::Split => {
-                        self.render_split(ui, app, ctx);
-                    }
-                }
+                ui.horizontal(|ui| {
+                    self.render_outline_sidebar(ui, app);
+                    self.render_note_content_area(
+                        ui,
+                        app,
+                        ctx,
+                        scroll_id_source.clone(),
+                        text_id_source.clone(),
+                    );
+                });
             });
 
         // If the panel is closing, ensure we don't leave egui focus on a widget
@@ -1411,85 +1397,117 @@ impl NotePanel {
         save_now
     }
 
-    fn render_outline(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
-        if !self.show_metadata {
-            return;
-        }
+    fn render_metadata_details_section(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
         self.render_metadata_details(ui, app);
-        if app.note_settings.outline_sidebar_enabled {
-            if self.outline_open {
-                let analysis = self.markdown_analysis().clone();
-                let rows = Self::outline_rows_from_headings(
-                    &self.note.slug,
-                    &self.note.content,
-                    &analysis.headings,
-                    &analysis.sections,
-                    &self.collapsed_sections,
-                    app.note_settings.max_outline_depth,
-                    app.note_settings.collapsible_sections_enabled,
-                    &self.outline_filter,
-                );
-                if !rows.is_empty() || !self.outline_filter.is_empty() {
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label("Outline");
-                        ui.add(
-                            egui::DragValue::new(&mut self.outline_width)
-                                .clamp_range(120.0..=360.0)
-                                .speed(4.0)
-                                .prefix("width "),
-                        );
-                    });
-                    ui.set_max_width(self.outline_width);
-                    ui.text_edit_singleline(&mut self.outline_filter);
-                    for row in rows {
-                        ui.horizontal(|ui| {
-                            ui.add_space((row.level.saturating_sub(1) as f32) * 12.0);
-                            if app.note_settings.collapsible_sections_enabled {
-                                let marker = if row.collapsible {
-                                    if row.collapsed {
-                                        "▶"
-                                    } else {
-                                        "▼"
-                                    }
-                                } else {
-                                    "•"
-                                };
-                                ui.small(marker);
-                            }
-                            let selected = self.selected_outline_heading.as_deref()
-                                == Some(row.normalized_anchor.as_str());
-                            if ui.selectable_label(selected, &row.title).clicked() {
-                                self.selected_outline_heading = Some(row.normalized_anchor.clone());
-                                self.pending_scroll_target = Some(row.normalized_anchor.clone());
-                                match self.view_mode {
-                                    NoteViewMode::Edit => {
-                                        self.move_editor_cursor_to(row.char_index, ui.ctx());
-                                    }
-                                    NoteViewMode::Split => {
-                                        let editor_focused = self
-                                            .last_textedit_id
-                                            .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
-                                            .unwrap_or(false);
-                                        if editor_focused {
-                                            self.move_editor_cursor_to(row.char_index, ui.ctx());
-                                        }
-                                    }
-                                    NoteViewMode::Preview => {}
-                                }
-                            }
-                        });
-                    }
-                }
-            }
-        } else {
-            self.outline_open = false;
-            self.outline_filter.clear();
-            self.selected_outline_heading = None;
-            self.pending_scroll_target = None;
-        }
         if app.note_settings.backlinks_enabled {
             self.render_backlinks(ui, app);
+        }
+    }
+
+    fn render_outline_sidebar(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
+        if !app.note_settings.outline_sidebar_enabled || !self.outline_open {
+            return;
+        }
+
+        let analysis = self.markdown_analysis().clone();
+        let rows = Self::outline_rows_from_headings(
+            &self.note.slug,
+            &self.note.content,
+            &analysis.headings,
+            &analysis.sections,
+            &self.collapsed_sections,
+            app.note_settings.max_outline_depth,
+            app.note_settings.collapsible_sections_enabled,
+            &self.outline_filter,
+        );
+        if rows.is_empty() && self.outline_filter.is_empty() {
+            return;
+        }
+
+        ui.vertical(|ui| {
+            ui.set_width(self.outline_width);
+            ui.horizontal(|ui| {
+                ui.label("Outline");
+                ui.add(
+                    egui::DragValue::new(&mut self.outline_width)
+                        .clamp_range(120.0..=360.0)
+                        .speed(4.0)
+                        .prefix("width "),
+                );
+            });
+            ui.text_edit_singleline(&mut self.outline_filter);
+            for row in rows {
+                ui.horizontal(|ui| {
+                    ui.add_space((row.level.saturating_sub(1) as f32) * 12.0);
+                    if app.note_settings.collapsible_sections_enabled {
+                        let marker = if row.collapsible {
+                            if row.collapsed { "▶" } else { "▼" }
+                        } else {
+                            "•"
+                        };
+                        ui.small(marker);
+                    }
+                    let selected = self.selected_outline_heading.as_deref()
+                        == Some(row.normalized_anchor.as_str());
+                    if ui.selectable_label(selected, &row.title).clicked() {
+                        self.selected_outline_heading = Some(row.normalized_anchor.clone());
+                        self.pending_scroll_target = Some(row.normalized_anchor.clone());
+                        match self.view_mode {
+                            NoteViewMode::Edit => {
+                                self.move_editor_cursor_to(row.char_index, ui.ctx());
+                            }
+                            NoteViewMode::Split => {
+                                let editor_focused = self
+                                    .last_textedit_id
+                                    .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
+                                    .unwrap_or(false);
+                                if editor_focused {
+                                    self.move_editor_cursor_to(row.char_index, ui.ctx());
+                                }
+                            }
+                            NoteViewMode::Preview => {}
+                        }
+                    }
+                });
+            }
+        });
+        ui.separator();
+    }
+
+    fn render_note_content_area(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        ctx: &egui::Context,
+        scroll_id_source: (&'static str, String),
+        text_id_source: (&'static str, String),
+    ) {
+        let remaining = ui.available_height();
+        #[cfg(test)]
+        {
+            self.last_ui_sections.content_visible = true;
+        }
+        match self.view_mode {
+            NoteViewMode::Edit => {
+                let resp = egui::ScrollArea::vertical()
+                    .id_source(scroll_id_source)
+                    .max_height(remaining)
+                    .show(ui, |ui| self.render_editor(ui, app, text_id_source.clone()))
+                    .inner;
+                self.handle_editor_response(resp, ctx, app, true);
+            }
+            NoteViewMode::Preview => {
+                egui::ScrollArea::vertical()
+                    .id_source(scroll_id_source)
+                    .max_height(remaining)
+                    .show(ui, |ui| {
+                        let _ = self.markdown_analysis();
+                        self.render_preview(ui, app, ctx);
+                    });
+            }
+            NoteViewMode::Split => {
+                self.render_split(ui, app, ctx);
+            }
         }
     }
 
@@ -3398,9 +3416,9 @@ mod tests {
     use eframe::egui;
     use std::{
         fs,
-        sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard},
+        sync::{Arc, Mutex, MutexGuard, atomic::AtomicBool},
     };
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     static NOTES_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -3605,14 +3623,18 @@ mod tests {
 
         assert_eq!(panel.link_menu_target_refresh_count, target_refresh_count);
         assert!(panel.link_menu_result_refresh_count > result_refresh_count);
-        assert!(panel
-            .link_menu_results
-            .iter()
-            .any(|result| result.display_title == "Alpha"));
-        assert!(!panel
-            .link_menu_results
-            .iter()
-            .any(|result| result.display_title == "Beta"));
+        assert!(
+            panel
+                .link_menu_results
+                .iter()
+                .any(|result| result.display_title == "Alpha")
+        );
+        assert!(
+            !panel
+                .link_menu_results
+                .iter()
+                .any(|result| result.display_title == "Beta")
+        );
     }
 
     #[test]
@@ -4277,9 +4299,11 @@ link://note/central-note
         let titles: Vec<_> = related.iter().map(|row| row.title.as_str()).collect();
 
         assert_eq!(titles, vec!["linked"]);
-        assert!(related
-            .iter()
-            .any(|row| row.reason == "link id" || row.reason == "wiki alias"));
+        assert!(
+            related
+                .iter()
+                .any(|row| row.reason == "link id" || row.reason == "wiki alias")
+        );
     }
 
     #[test]
