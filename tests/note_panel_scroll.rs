@@ -1,7 +1,7 @@
 use eframe::egui;
 use multi_launcher::gui::{LauncherApp, NotePanel};
 use multi_launcher::plugin::PluginManager;
-use multi_launcher::plugins::note::{save_notes, Note};
+use multi_launcher::plugins::note::{Note, save_notes};
 use multi_launcher::settings::Settings;
 use once_cell::sync::Lazy;
 use std::sync::atomic::AtomicBool;
@@ -41,11 +41,12 @@ fn new_app(ctx: &egui::Context) -> LauncherApp {
 }
 
 #[test]
-fn long_note_panel_respects_max_height() {
+fn note_panel_max_height_tracks_available_screen_height() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let _tmp = setup();
     let ctx = egui::Context::default();
     let mut app = new_app(&ctx);
+    app.note_panel_default_size = (700.0, 900.0);
 
     let long_content = (0..5000).map(|i| format!("line {i}\n")).collect::<String>();
     let note = Note {
@@ -74,5 +75,12 @@ fn long_note_panel_respects_max_height() {
     let rect = ctx
         .memory(|m| m.area_rect(egui::Id::new("Long note")))
         .expect("window rect");
-    assert!(rect.height() <= 600.0);
+    assert!(
+        rect.height() > 600.0,
+        "note panel should be able to exceed the old 600 px cap on tall screens, got {rect:?}"
+    );
+    assert!(
+        rect.height() <= 976.0,
+        "note panel should still fit within the available screen height minus margin, got {rect:?}"
+    );
 }
