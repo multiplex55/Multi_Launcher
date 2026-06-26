@@ -2095,26 +2095,12 @@ impl NotePanel {
                     &hidden,
                 );
             }
-            let key = self.section_key(section);
-            let collapsed = self.collapsed_sections.contains(&key);
-            let resp = ui.horizontal_top(|ui| {
-                ui.add_space((section.heading.level.saturating_sub(1) as f32) * 10.0);
-                let label = if collapsed { "▶" } else { "▼" };
-                if ui.small_button(label).clicked() {
-                    if collapsed {
-                        self.collapsed_sections.remove(&key);
-                    } else {
-                        self.collapsed_sections.insert(key.clone());
-                    }
-                    self.persist_collapsed_sections_state(app);
-                }
-                let heading = self.note.content[heading_range.clone()].to_string();
-                self.show_markdown_fragment(ui, app, &heading, heading_range.start);
-            });
+            let collapsed = self.collapsed_sections.contains(&self.section_key(section));
+            let resp = self.render_collapsible_heading_row(ui, app, section, collapsed);
             if self.pending_scroll_target.as_deref()
                 == Some(section.heading.normalized_anchor.as_str())
             {
-                ui.scroll_to_rect(resp.response.rect, Some(egui::Align::Center));
+                ui.scroll_to_rect(resp.rect, Some(egui::Align::Center));
                 self.pending_scroll_target = None;
             }
             cursor = heading_range.end;
@@ -2128,6 +2114,41 @@ impl NotePanel {
                 &hidden,
             );
         }
+    }
+
+    fn render_collapsible_heading_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        section: &MarkdownSection,
+        collapsed: bool,
+    ) -> egui::Response {
+        let key = self.section_key(section);
+        ui.horizontal_top(|ui| {
+            ui.add_space((section.heading.level.saturating_sub(1) as f32) * 10.0);
+            let label = if collapsed { "▶" } else { "▼" };
+            if ui.small_button(label).clicked() {
+                if collapsed {
+                    self.collapsed_sections.remove(&key);
+                } else {
+                    self.collapsed_sections.insert(key.clone());
+                }
+                self.persist_collapsed_sections_state(app);
+            }
+
+            let size = match section.heading.level {
+                1 => app.note_font_size * 1.45,
+                2 => app.note_font_size * 1.30,
+                3 => app.note_font_size * 1.15,
+                _ => app.note_font_size,
+            };
+            ui.label(
+                egui::RichText::new(&section.heading.title)
+                    .size(size)
+                    .strong(),
+            );
+        })
+        .response
     }
 
     fn render_visible_preview_range(
