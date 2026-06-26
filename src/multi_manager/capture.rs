@@ -13,9 +13,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use tracing::{debug, info};
+#[cfg(all(windows, not(test)))]
+use tracing::error;
 #[cfg(windows)]
-use tracing::{error, warn};
+use tracing::warn;
+use tracing::{debug, info};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(12);
 const VK_ENTER: u32 = 0x0D;
