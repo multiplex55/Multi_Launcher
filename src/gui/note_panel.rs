@@ -3989,9 +3989,9 @@ mod tests {
         render_panel_once(&ctx, &mut panel, &mut app);
 
         assert!(panel.last_ui_sections.outline_visible);
+        assert!(panel.last_ui_sections.content_visible);
         assert!(!panel.last_ui_sections.tags_visible);
         assert!(!panel.last_ui_sections.links_visible);
-        assert!(panel.last_ui_sections.content_visible);
 
         let outline_rect = panel
             .last_outline_rect
@@ -4000,18 +4000,44 @@ mod tests {
             .last_content_rect
             .expect("content pane should be allocated while outline is open");
         assert!(
-            outline_rect.width() > 1.0 && outline_rect.height() > 1.0,
+            outline_rect.is_positive() && outline_rect.width() > 1.0 && outline_rect.height() > 1.0,
             "outline pane should have meaningful size, got {outline_rect:?}"
         );
         assert!(
-            content_rect.width() > 1.0 && content_rect.height() > 1.0,
+            content_rect.is_positive() && content_rect.width() > 1.0 && content_rect.height() > 1.0,
             "content pane should have meaningful size, got {content_rect:?}"
         );
+    }
+
+    #[test]
+    fn details_and_outline_can_render_together() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_settings.outline_sidebar_enabled = true;
+        let mut panel = NotePanel::from_note(empty_note(
+            "# One\n\n#tag [[linked-note]] https://example.com\n\n## Two",
+        ));
+        panel.show_metadata = true;
+        panel.outline_open = true;
+
+        render_panel_once(&ctx, &mut panel, &mut app);
+
+        assert!(panel.last_ui_sections.tags_visible);
+        assert!(panel.last_ui_sections.links_visible);
+        assert!(panel.last_ui_sections.backlinks_visible);
+        assert!(panel.last_ui_sections.outline_visible);
+        assert!(panel.last_ui_sections.content_visible);
         assert!(
-            content_rect.is_positive()
-                && content_rect.width() > 1.0
-                && content_rect.height() > 1.0,
-            "content pane should remain visible while outline is open and details are hidden, got {content_rect:?}"
+            panel
+                .last_outline_rect
+                .expect("outline pane should be allocated while open")
+                .is_positive()
+        );
+        assert!(
+            panel
+                .last_content_rect
+                .expect("content pane should be allocated while outline is open")
+                .is_positive()
         );
     }
 
