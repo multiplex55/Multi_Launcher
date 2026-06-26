@@ -1120,8 +1120,9 @@ impl NotePanel {
         let mut open = self.open;
         let mut save_now = false;
         let screen_rect = ctx.available_rect();
-        let max_width = screen_rect.width().min(800.0);
-        let max_height = screen_rect.height().min(600.0);
+        let margin = 24.0;
+        let max_width = (screen_rect.width() - margin).max(200.0);
+        let max_height = (screen_rect.height() - margin).max(150.0);
         // NOTE: `egui::TextEditState` cursor indices are char-based and we also mutate `self` inside the
         // window closure (save, open externally, etc.). Don't capture borrows of `self.note.slug` in
         // the closure environment - keep IDs based on an owned clone instead.
