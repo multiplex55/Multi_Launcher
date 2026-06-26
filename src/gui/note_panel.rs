@@ -467,6 +467,12 @@ pub struct NotePanel {
     #[cfg(test)]
     last_ui_sections: NotePanelUiSections,
     #[cfg(test)]
+    last_content_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    last_outline_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    last_preview_heading_rects: Vec<egui::Rect>,
+    #[cfg(test)]
     metadata_details_render_count: usize,
     #[cfg(test)]
     backlinks_render_count: usize,
@@ -732,6 +738,12 @@ impl NotePanel {
             heavy_recompute_count: 0,
             #[cfg(test)]
             last_ui_sections: NotePanelUiSections::default(),
+            #[cfg(test)]
+            last_content_rect: None,
+            #[cfg(test)]
+            last_outline_rect: None,
+            #[cfg(test)]
+            last_preview_heading_rects: Vec::new(),
             #[cfg(test)]
             metadata_details_render_count: 0,
             #[cfg(test)]
@@ -1119,6 +1131,9 @@ impl NotePanel {
                 #[cfg(test)]
                 {
                     self.last_ui_sections = NotePanelUiSections::default();
+                    self.last_content_rect = None;
+                    self.last_outline_rect = None;
+                    self.last_preview_heading_rects.clear();
                 }
                 if ui
                     .ctx()
@@ -1148,18 +1163,13 @@ impl NotePanel {
                 if self.show_metadata {
                     self.render_metadata_details_section(ui, app);
                 }
-                ui.horizontal(|ui| {
-                    if app.note_settings.outline_sidebar_enabled && self.outline_open {
-                        self.render_outline_sidebar(ui, app);
-                    }
-                    self.render_note_content_area(
-                        ui,
-                        app,
-                        ctx,
-                        scroll_id_source.clone(),
-                        text_id_source.clone(),
-                    );
-                });
+                self.render_note_body_row(
+                    ui,
+                    app,
+                    ctx,
+                    scroll_id_source.clone(),
+                    text_id_source.clone(),
+                );
             });
 
         // If the panel is closing, ensure we don't leave egui focus on a widget
@@ -1491,7 +1501,64 @@ impl NotePanel {
                     }
                 });
         });
-        ui.separator();
+    }
+
+    fn render_note_body_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        ctx: &egui::Context,
+        scroll_id_source: (&'static str, String),
+        text_id_source: (&'static str, String),
+    ) {
+        let body_width = ui.available_width();
+        let body_height = ui.available_height();
+        ui.horizontal(|ui| {
+            let has_outline = app.note_settings.outline_sidebar_enabled && self.outline_open;
+            if has_outline {
+                self.outline_width = self.outline_width.clamp(120.0, 360.0);
+                let outline_width = self.outline_width.min(body_width);
+                let outline = ui.allocate_ui_with_layout(
+                    egui::vec2(outline_width, body_height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(outline_width);
+                        self.render_outline_sidebar(ui, app);
+                    },
+                );
+                #[cfg(test)]
+                {
+                    self.last_outline_rect = Some(outline.response.rect);
+                }
+
+                ui.separator();
+            }
+
+            let content_width = ui.available_width().max(0.0);
+            let content = ui.allocate_ui_with_layout(
+                egui::vec2(
+                    if has_outline {
+                        content_width
+                    } else {
+                        body_width
+                    },
+                    body_height,
+                ),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(if has_outline {
+                        content_width
+                    } else {
+                        body_width
+                    });
+                    self.render_note_content_area(ui, app, ctx, scroll_id_source, text_id_source);
+                },
+            );
+            #[cfg(test)]
+            {
+                self.last_content_rect = Some(content.response.rect);
+            }
+        });
     }
 
     fn render_note_content_area(
@@ -2140,31 +2207,37 @@ impl NotePanel {
         collapsed: bool,
     ) -> egui::Response {
         let key = self.section_key(section);
-        ui.horizontal_top(|ui| {
-            ui.add_space((section.heading.level.saturating_sub(1) as f32) * 10.0);
-            let label = if collapsed { "▶" } else { "▼" };
-            if ui.small_button(label).clicked() {
-                if collapsed {
-                    self.collapsed_sections.remove(&key);
-                } else {
-                    self.collapsed_sections.insert(key.clone());
+        let resp = ui
+            .horizontal_top(|ui| {
+                ui.add_space((section.heading.level.saturating_sub(1) as f32) * 10.0);
+                let label = if collapsed { "▶" } else { "▼" };
+                if ui.small_button(label).clicked() {
+                    if collapsed {
+                        self.collapsed_sections.remove(&key);
+                    } else {
+                        self.collapsed_sections.insert(key.clone());
+                    }
+                    self.persist_collapsed_sections_state(app);
                 }
-                self.persist_collapsed_sections_state(app);
-            }
 
-            let size = match section.heading.level {
-                1 => app.note_font_size * 1.45,
-                2 => app.note_font_size * 1.30,
-                3 => app.note_font_size * 1.15,
-                _ => app.note_font_size,
-            };
-            ui.label(
-                egui::RichText::new(heading_display_text(&section.heading))
-                    .size(size)
-                    .strong(),
-            );
-        })
-        .response
+                let size = match section.heading.level {
+                    1 => app.note_font_size * 1.45,
+                    2 => app.note_font_size * 1.30,
+                    3 => app.note_font_size * 1.15,
+                    _ => app.note_font_size,
+                };
+                ui.label(
+                    egui::RichText::new(heading_display_text(&section.heading))
+                        .size(size)
+                        .strong(),
+                );
+            })
+            .response;
+        #[cfg(test)]
+        {
+            self.last_preview_heading_rects.push(resp.rect);
+        }
+        resp
     }
 
     fn render_visible_preview_range(
@@ -3788,6 +3861,64 @@ mod tests {
 
         assert!(panel.last_ui_sections.outline_visible);
         assert!(panel.last_ui_sections.content_visible);
+    }
+
+    #[test]
+    fn preview_headings_stack_vertically_with_outline_body_row() {
+        const FPV_MARKDOWN_SAMPLE: &str = r#"# FPV Drone Build Notes
+
+## Frame
+Choose a 5-inch freestyle frame with enough stack clearance.
+
+## Flight Controller
+Use soft mounting and verify the gyro orientation before the first hover.
+
+## ESC and Motors
+Match motor KV to battery cell count and prop size.
+
+## Video System
+Keep the VTX antenna clear of carbon and battery leads.
+
+## Receiver Setup
+Mount antennas at 90 degrees for better link reliability.
+"#;
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_settings.rich_markdown_enabled = true;
+        app.note_settings.collapsible_sections_enabled = true;
+        app.note_settings.outline_sidebar_enabled = true;
+
+        let mut note = empty_note(FPV_MARKDOWN_SAMPLE);
+        note.title = "FPV Drone Build Notes".into();
+        note.slug = "fpv-drone-build-notes".into();
+        let mut panel = NotePanel::from_note(note);
+        panel.show_metadata = false;
+        panel.view_mode = NoteViewMode::Preview;
+        panel.outline_open = true;
+
+        render_panel_once(&ctx, &mut panel, &mut app);
+
+        assert!(
+            panel.last_outline_rect.is_some(),
+            "outline pane should be allocated"
+        );
+        assert!(
+            panel.last_content_rect.is_some(),
+            "content pane should be allocated"
+        );
+        assert!(
+            panel.last_preview_heading_rects.len() >= 5,
+            "expected recorded preview heading rects, got {:?}",
+            panel.last_preview_heading_rects
+        );
+        for pair in panel.last_preview_heading_rects.windows(2) {
+            assert!(
+                pair[0].min.y < pair[1].min.y,
+                "heading rect y positions should strictly increase: {:?}",
+                panel.last_preview_heading_rects
+            );
+        }
     }
 
     #[test]
