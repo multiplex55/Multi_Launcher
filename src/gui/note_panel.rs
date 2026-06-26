@@ -468,6 +468,7 @@ struct NotePanelUiSections {
     links_visible: bool,
     backlinks_visible: bool,
     content_visible: bool,
+    outline_visible: bool,
 }
 
 #[derive(Default, Clone)]
@@ -1418,8 +1419,9 @@ impl NotePanel {
             app.note_settings.collapsible_sections_enabled,
             &self.outline_filter,
         );
-        if rows.is_empty() && self.outline_filter.is_empty() {
-            return;
+        #[cfg(test)]
+        {
+            self.last_ui_sections.outline_visible = true;
         }
 
         self.outline_width = self.outline_width.clamp(120.0, 360.0);
@@ -1445,6 +1447,13 @@ impl NotePanel {
                     });
                     self.outline_width = self.outline_width.clamp(120.0, 360.0);
                     ui.text_edit_singleline(&mut self.outline_filter);
+                    if rows.is_empty() {
+                        if self.outline_filter.is_empty() {
+                            ui.label("No headings in this note.");
+                        } else {
+                            ui.label("No headings match the filter.");
+                        }
+                    }
                     for row in rows {
                         ui.horizontal(|ui| {
                             ui.add_space((row.level.saturating_sub(1) as f32) * 12.0);
@@ -3575,6 +3584,34 @@ mod tests {
         assert!(panel.outline_filter.is_empty());
         assert!(panel.selected_outline_heading.is_none());
         assert!(panel.pending_scroll_target.is_none());
+        assert!(!panel.last_ui_sections.outline_visible);
+    }
+
+    #[test]
+    fn outline_sidebar_renders_empty_state_when_note_has_no_headings() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("Body without headings"));
+        panel.outline_open = true;
+
+        render_panel_once(&ctx, &mut panel, &mut app);
+
+        assert!(panel.last_ui_sections.outline_visible);
+        assert!(panel.last_ui_sections.content_visible);
+    }
+
+    #[test]
+    fn outline_sidebar_renders_filtered_empty_state_when_no_headings_match() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("# One\n\n## Two"));
+        panel.outline_open = true;
+        panel.outline_filter = "missing".into();
+
+        render_panel_once(&ctx, &mut panel, &mut app);
+
+        assert!(panel.last_ui_sections.outline_visible);
+        assert!(panel.last_ui_sections.content_visible);
     }
 
     #[test]
