@@ -469,6 +469,8 @@ pub struct NotePanel {
     #[cfg(test)]
     last_content_rect: Option<egui::Rect>,
     #[cfg(test)]
+    last_editor_rect: Option<egui::Rect>,
+    #[cfg(test)]
     last_outline_rect: Option<egui::Rect>,
     #[cfg(test)]
     last_preview_heading_rects: Vec<egui::Rect>,
@@ -740,6 +742,8 @@ impl NotePanel {
             last_ui_sections: NotePanelUiSections::default(),
             #[cfg(test)]
             last_content_rect: None,
+            #[cfg(test)]
+            last_editor_rect: None,
             #[cfg(test)]
             last_outline_rect: None,
             #[cfg(test)]
@@ -1132,6 +1136,7 @@ impl NotePanel {
                 {
                     self.last_ui_sections = NotePanelUiSections::default();
                     self.last_content_rect = None;
+                    self.last_editor_rect = None;
                     self.last_outline_rect = None;
                     self.last_preview_heading_rects.clear();
                 }
@@ -1569,27 +1574,30 @@ impl NotePanel {
         scroll_id_source: (&'static str, String),
         text_id_source: (&'static str, String),
     ) {
-        let remaining = ui.available_height();
+        let available_size = ui.available_size();
         #[cfg(test)]
         {
             self.last_ui_sections.content_visible = true;
         }
         match self.view_mode {
             NoteViewMode::Edit => {
-                let resp = egui::ScrollArea::vertical()
-                    .id_source(scroll_id_source)
-                    .max_height(remaining)
-                    .show(ui, |ui| self.render_editor(ui, app, text_id_source.clone()))
-                    .inner;
+                let resp = self.render_editor(ui, app, text_id_source.clone(), available_size);
                 self.handle_editor_response(resp, ctx, app, true);
             }
             NoteViewMode::Preview => {
                 egui::ScrollArea::vertical()
                     .id_source(scroll_id_source)
-                    .max_height(remaining)
+                    .max_height(available_size.y)
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        let _ = self.markdown_analysis();
-                        self.render_preview(ui, app, ctx);
+                        ui.allocate_ui_with_layout(
+                            available_size,
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                let _ = self.markdown_analysis();
+                                self.render_preview(ui, app, ctx);
+                            },
+                        );
                     });
             }
             NoteViewMode::Split => {
@@ -1887,8 +1895,10 @@ impl NotePanel {
         ui: &mut egui::Ui,
         app: &LauncherApp,
         text_id_source: (&'static str, String),
+        available_size: egui::Vec2,
     ) -> egui::Response {
-        ui.add(
+        let response = ui.add_sized(
+            available_size,
             egui::TextEdit::multiline(&mut self.note.content)
                 .id_source(text_id_source)
                 .desired_width(f32::INFINITY)
@@ -1896,7 +1906,12 @@ impl NotePanel {
                 .frame(true)
                 .lock_focus(true)
                 .desired_rows(10),
-        )
+        );
+        #[cfg(test)]
+        {
+            self.last_editor_rect = Some(response.rect);
+        }
+        response
     }
 
     fn render_preview(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, ctx: &egui::Context) {
@@ -2279,10 +2294,14 @@ impl NotePanel {
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.set_width(pane_width);
+                        let editor_size = ui.available_size();
                         egui::ScrollArea::vertical()
                             .id_source(editor_scroll_id)
-                            .max_height(height)
-                            .show(ui, |ui| self.render_editor(ui, app, editor_id_source))
+                            .max_height(editor_size.y)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                self.render_editor(ui, app, editor_id_source, editor_size)
+                            })
                             .inner
                     },
                 )
@@ -2296,12 +2315,20 @@ impl NotePanel {
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     ui.set_width(pane_width);
+                    let preview_size = ui.available_size();
                     egui::ScrollArea::vertical()
                         .id_source(preview_scroll_id)
-                        .max_height(height)
+                        .max_height(preview_size.y)
+                        .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            let _ = self.markdown_analysis();
-                            self.render_preview(ui, app, ctx);
+                            ui.allocate_ui_with_layout(
+                                preview_size,
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    let _ = self.markdown_analysis();
+                                    self.render_preview(ui, app, ctx);
+                                },
+                            );
                         });
                 },
             );
@@ -3797,6 +3824,44 @@ mod tests {
         let _ = ctx.run(Default::default(), |ctx| {
             panel.ui(ctx, app);
         });
+    }
+
+    #[test]
+    fn content_pane_receives_meaningful_height_in_edit_mode() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_panel_default_size = egui::vec2(720.0, 520.0);
+
+        let mut panel = NotePanel::from_note(empty_note("Short note body"));
+        panel.show_metadata = false;
+        panel.view_mode = NoteViewMode::Edit;
+
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw_input, |ctx| {
+            panel.ui(ctx, &mut app);
+        });
+
+        let content_rect = panel
+            .last_content_rect
+            .expect("content pane should be allocated in edit mode");
+        let editor_rect = panel
+            .last_editor_rect
+            .expect("editor should be allocated in edit mode");
+
+        assert!(
+            content_rect.height() > 300.0,
+            "content pane should receive the window body height, got {content_rect:?}"
+        );
+        assert!(
+            editor_rect.height() > 300.0,
+            "editor should fill the content pane instead of staying near its natural row height, got {editor_rect:?}"
+        );
     }
 
     #[test]
