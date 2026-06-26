@@ -1137,7 +1137,9 @@ impl NotePanel {
                     self.render_metadata_details_section(ui, app);
                 }
                 ui.horizontal(|ui| {
-                    self.render_outline_sidebar(ui, app);
+                    if app.note_settings.outline_sidebar_enabled && self.outline_open {
+                        self.render_outline_sidebar(ui, app);
+                    }
                     self.render_note_content_area(
                         ui,
                         app,
@@ -1405,10 +1407,6 @@ impl NotePanel {
     }
 
     fn render_outline_sidebar(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
-        if !app.note_settings.outline_sidebar_enabled || !self.outline_open {
-            return;
-        }
-
         let analysis = self.markdown_analysis().clone();
         let rows = Self::outline_rows_from_headings(
             &self.note.slug,
@@ -1424,52 +1422,64 @@ impl NotePanel {
             return;
         }
 
+        self.outline_width = self.outline_width.clamp(120.0, 360.0);
+        let outline_width = self.outline_width;
+        let outline_scroll_id = ("note_outline_scroll", self.note.slug.clone());
+        let remaining = ui.available_height();
+
         ui.vertical(|ui| {
-            ui.set_width(self.outline_width);
-            ui.horizontal(|ui| {
-                ui.label("Outline");
-                ui.add(
-                    egui::DragValue::new(&mut self.outline_width)
-                        .clamp_range(120.0..=360.0)
-                        .speed(4.0)
-                        .prefix("width "),
-                );
-            });
-            ui.text_edit_singleline(&mut self.outline_filter);
-            for row in rows {
-                ui.horizontal(|ui| {
-                    ui.add_space((row.level.saturating_sub(1) as f32) * 12.0);
-                    if app.note_settings.collapsible_sections_enabled {
-                        let marker = if row.collapsible {
-                            if row.collapsed { "▶" } else { "▼" }
-                        } else {
-                            "•"
-                        };
-                        ui.small(marker);
-                    }
-                    let selected = self.selected_outline_heading.as_deref()
-                        == Some(row.normalized_anchor.as_str());
-                    if ui.selectable_label(selected, &row.title).clicked() {
-                        self.selected_outline_heading = Some(row.normalized_anchor.clone());
-                        self.pending_scroll_target = Some(row.normalized_anchor.clone());
-                        match self.view_mode {
-                            NoteViewMode::Edit => {
-                                self.move_editor_cursor_to(row.char_index, ui.ctx());
+            ui.set_width(outline_width);
+            egui::ScrollArea::vertical()
+                .id_source(outline_scroll_id)
+                .max_height(remaining)
+                .show(ui, |ui| {
+                    ui.set_width(outline_width);
+                    ui.horizontal(|ui| {
+                        ui.label("Outline");
+                        ui.add(
+                            egui::DragValue::new(&mut self.outline_width)
+                                .clamp_range(120.0..=360.0)
+                                .speed(4.0)
+                                .prefix("width "),
+                        );
+                    });
+                    self.outline_width = self.outline_width.clamp(120.0, 360.0);
+                    ui.text_edit_singleline(&mut self.outline_filter);
+                    for row in rows {
+                        ui.horizontal(|ui| {
+                            ui.add_space((row.level.saturating_sub(1) as f32) * 12.0);
+                            if app.note_settings.collapsible_sections_enabled {
+                                let marker = if row.collapsible {
+                                    if row.collapsed { "▶" } else { "▼" }
+                                } else {
+                                    "•"
+                                };
+                                ui.small(marker);
                             }
-                            NoteViewMode::Split => {
-                                let editor_focused = self
-                                    .last_textedit_id
-                                    .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
-                                    .unwrap_or(false);
-                                if editor_focused {
-                                    self.move_editor_cursor_to(row.char_index, ui.ctx());
+                            let selected = self.selected_outline_heading.as_deref()
+                                == Some(row.normalized_anchor.as_str());
+                            if ui.selectable_label(selected, &row.title).clicked() {
+                                self.selected_outline_heading = Some(row.normalized_anchor.clone());
+                                self.pending_scroll_target = Some(row.normalized_anchor.clone());
+                                match self.view_mode {
+                                    NoteViewMode::Edit => {
+                                        self.move_editor_cursor_to(row.char_index, ui.ctx());
+                                    }
+                                    NoteViewMode::Split => {
+                                        let editor_focused = self
+                                            .last_textedit_id
+                                            .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
+                                            .unwrap_or(false);
+                                        if editor_focused {
+                                            self.move_editor_cursor_to(row.char_index, ui.ctx());
+                                        }
+                                    }
+                                    NoteViewMode::Preview => {}
                                 }
                             }
-                            NoteViewMode::Preview => {}
-                        }
+                        });
                     }
                 });
-            }
         });
         ui.separator();
     }
