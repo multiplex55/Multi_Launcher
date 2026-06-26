@@ -1392,7 +1392,13 @@ impl NotePanel {
             }
             if app.note_settings.outline_sidebar_enabled {
                 ui.separator();
-                if ui.button("Toggle outline").clicked() {
+                let outline_label = if self.outline_open {
+                    "Hide Outline"
+                } else {
+                    "Show Outline"
+                };
+
+                if ui.button(outline_label).clicked() {
                     self.outline_open = !self.outline_open;
                 }
             }
