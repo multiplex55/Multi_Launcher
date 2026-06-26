@@ -815,6 +815,25 @@ impl NotePanel {
         }
     }
 
+    fn expand_all_collapsible_sections(&mut self, app: &mut LauncherApp) {
+        self.collapsed_sections.clear();
+        self.persist_collapsed_sections_state(app);
+    }
+
+    fn collapse_all_collapsible_sections(
+        &mut self,
+        app: &mut LauncherApp,
+        sections: &[MarkdownSection],
+    ) {
+        let keys = sections
+            .iter()
+            .filter(|section| !self.is_main_title_section(section))
+            .map(|section| self.section_key(section))
+            .collect();
+        self.collapsed_sections = keys;
+        self.persist_collapsed_sections_state(app);
+    }
+
     fn report_ui_state_error_once(&mut self, app: &mut LauncherApp, message: String) {
         if self.ui_state_error_reported {
             return;
@@ -1414,15 +1433,10 @@ impl NotePanel {
             if !sections.is_empty() {
                 ui.separator();
                 if ui.button("Expand all").clicked() {
-                    self.collapsed_sections.clear();
+                    self.expand_all_collapsible_sections(app);
                 }
                 if ui.button("Collapse all").clicked() {
-                    let keys = sections
-                        .iter()
-                        .filter(|section| !self.is_main_title_section(section))
-                        .map(|section| self.section_key(section))
-                        .collect();
-                    self.collapsed_sections = keys;
+                    self.collapse_all_collapsible_sections(app, &sections);
                 }
             } else if !app.note_settings.collapsible_sections_enabled {
                 self.collapsed_sections.clear();
@@ -4261,6 +4275,91 @@ mod tests {
 
         assert!(disabled_ranges.is_empty());
         assert_eq!(enabled_ranges, vec![child.body_byte_range.clone()]);
+    }
+
+    fn app_with_note_ui_state_path(ctx: &egui::Context, dir: &TempDir) -> LauncherApp {
+        let mut app = new_app(ctx);
+        let settings_path = dir.path().join("settings.json");
+        app.settings_path = settings_path.to_string_lossy().to_string();
+        app.note_settings.collapsible_sections_enabled = true;
+        app.note_settings.collapsed_sections_persist = true;
+        app
+    }
+
+    fn note_with_collapsible_sections() -> Note {
+        Note {
+            title: "Project".into(),
+            path: std::path::PathBuf::new(),
+            content: "# Project\n\nIntro\n\n## Alpha\n\nA\n\n## Beta\n\nB\n\n# Appendix\n\nC"
+                .into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "project".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn expand_all_clears_runtime_and_persisted_collapsed_sections() {
+        let ctx = egui::Context::default();
+        let dir = tempdir().expect("tempdir");
+        let mut app = app_with_note_ui_state_path(&ctx, &dir);
+        let mut panel = NotePanel::from_note(note_with_collapsible_sections());
+        let sections = panel.collapsible_sections(true);
+        panel.collapse_all_collapsible_sections(&mut app, &sections);
+        assert!(!panel.collapsed_sections.is_empty());
+
+        panel.expand_all_collapsible_sections(&mut app);
+
+        assert!(panel.collapsed_sections.is_empty());
+        let state_path = crate::note_ui_state::path_for_settings(Path::new(&app.settings_path));
+        let state = crate::note_ui_state::load(&state_path).expect("load note ui state");
+        assert!(state.collapsed_sections_for("project").is_empty());
+    }
+
+    #[test]
+    fn collapse_all_persists_non_main_title_sections_only() {
+        let ctx = egui::Context::default();
+        let dir = tempdir().expect("tempdir");
+        let mut app = app_with_note_ui_state_path(&ctx, &dir);
+        let mut panel = NotePanel::from_note(note_with_collapsible_sections());
+        let sections = panel.collapsible_sections(true);
+
+        panel.collapse_all_collapsible_sections(&mut app, &sections);
+
+        let expected = sections
+            .iter()
+            .filter(|section| !panel.is_main_title_section(section))
+            .map(|section| panel.section_key(section))
+            .collect::<HashSet<_>>();
+        let main_title_key = panel.section_key(&sections[0]);
+        assert_eq!(panel.collapsed_sections, expected);
+        assert!(!panel.collapsed_sections.contains(&main_title_key));
+
+        let state_path = crate::note_ui_state::path_for_settings(Path::new(&app.settings_path));
+        let state = crate::note_ui_state::load(&state_path).expect("load note ui state");
+        assert_eq!(state.collapsed_sections_for("project"), expected);
+    }
+
+    #[test]
+    fn collapse_all_updates_runtime_state_without_persistence_when_disabled() {
+        let ctx = egui::Context::default();
+        let dir = tempdir().expect("tempdir");
+        let mut app = app_with_note_ui_state_path(&ctx, &dir);
+        app.note_settings.collapsed_sections_persist = false;
+        let mut panel = NotePanel::from_note(note_with_collapsible_sections());
+        let sections = panel.collapsible_sections(true);
+
+        panel.collapse_all_collapsible_sections(&mut app, &sections);
+
+        assert!(!panel.collapsed_sections.is_empty());
+        let state_path = crate::note_ui_state::path_for_settings(Path::new(&app.settings_path));
+        assert!(
+            !state_path.exists(),
+            "disabled persistence should not create note UI state"
+        );
     }
 
     #[test]
