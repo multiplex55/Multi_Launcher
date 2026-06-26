@@ -1481,23 +1481,7 @@ impl NotePanel {
                             let selected = self.selected_outline_heading.as_deref()
                                 == Some(row.normalized_anchor.as_str());
                             if ui.selectable_label(selected, &row.title).clicked() {
-                                self.selected_outline_heading = Some(row.normalized_anchor.clone());
-                                self.pending_scroll_target = Some(row.normalized_anchor.clone());
-                                match self.view_mode {
-                                    NoteViewMode::Edit => {
-                                        self.move_editor_cursor_to(row.char_index, ui.ctx());
-                                    }
-                                    NoteViewMode::Split => {
-                                        let editor_focused = self
-                                            .last_textedit_id
-                                            .map(|id| ui.ctx().memory(|m| m.has_focus(id)))
-                                            .unwrap_or(false);
-                                        if editor_focused {
-                                            self.move_editor_cursor_to(row.char_index, ui.ctx());
-                                        }
-                                    }
-                                    NoteViewMode::Preview => {}
-                                }
+                                self.handle_outline_row_click(&row, ui.ctx());
                             }
                         });
                     }
@@ -1539,6 +1523,27 @@ impl NotePanel {
             }
             NoteViewMode::Split => {
                 self.render_split(ui, app, ctx);
+            }
+        }
+    }
+
+    fn handle_outline_row_click(&mut self, row: &NoteOutlineRow, ctx: &egui::Context) {
+        self.selected_outline_heading = Some(row.normalized_anchor.clone());
+        self.pending_scroll_target = Some(row.normalized_anchor.clone());
+
+        match self.view_mode {
+            NoteViewMode::Edit => {
+                self.move_editor_cursor_to(row.char_index, ctx);
+            }
+            NoteViewMode::Preview => {}
+            NoteViewMode::Split => {
+                let editor_focused = self
+                    .last_textedit_id
+                    .map(|id| ctx.memory(|m| m.has_focus(id)))
+                    .unwrap_or(false);
+                if editor_focused {
+                    self.move_editor_cursor_to(row.char_index, ctx);
+                }
             }
         }
     }
