@@ -471,6 +471,10 @@ pub struct NotePanel {
     #[cfg(test)]
     last_editor_rect: Option<egui::Rect>,
     #[cfg(test)]
+    last_split_editor_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    last_split_preview_rect: Option<egui::Rect>,
+    #[cfg(test)]
     last_outline_rect: Option<egui::Rect>,
     #[cfg(test)]
     last_preview_heading_rects: Vec<egui::Rect>,
@@ -744,6 +748,10 @@ impl NotePanel {
             last_content_rect: None,
             #[cfg(test)]
             last_editor_rect: None,
+            #[cfg(test)]
+            last_split_editor_rect: None,
+            #[cfg(test)]
+            last_split_preview_rect: None,
             #[cfg(test)]
             last_outline_rect: None,
             #[cfg(test)]
@@ -1137,6 +1145,8 @@ impl NotePanel {
                     self.last_ui_sections = NotePanelUiSections::default();
                     self.last_content_rect = None;
                     self.last_editor_rect = None;
+                    self.last_split_editor_rect = None;
+                    self.last_split_preview_rect = None;
                     self.last_outline_rect = None;
                     self.last_preview_heading_rects.clear();
                 }
@@ -2293,46 +2303,48 @@ impl NotePanel {
         let editor_id_source = ("note_split_text", slug.clone());
         let editor_scroll_id = ("note_split_editor_scroll", slug.clone());
         let preview_scroll_id = ("note_split_preview_scroll", slug);
-        let height = ui.available_height();
+        let available_size = ui.available_size();
+        let height = available_size.y;
+        let pane_width = ((available_size.x - ui.spacing().item_spacing.x) / 2.0).max(120.0);
 
         ui.horizontal(|ui| {
-            let pane_width =
-                ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(120.0);
-            let editor_resp = ui
-                .allocate_ui_with_layout(
-                    egui::vec2(pane_width, height),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_width(pane_width);
-                        let editor_size = ui.available_size();
-                        egui::ScrollArea::vertical()
-                            .id_source(editor_scroll_id)
-                            .max_height(editor_size.y)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                self.render_editor(ui, app, editor_id_source, Some(editor_size))
-                            })
-                            .inner
-                    },
-                )
-                .inner;
-            self.handle_editor_response(editor_resp, ctx, app, false);
-
-            ui.separator();
-
-            ui.allocate_ui_with_layout(
+            let editor_pane = ui.allocate_ui_with_layout(
                 egui::vec2(pane_width, height),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     ui.set_width(pane_width);
-                    let preview_size = ui.available_size();
+                    let editor_size = egui::vec2(pane_width, height);
+                    egui::ScrollArea::vertical()
+                        .id_source(editor_scroll_id)
+                        .max_height(height)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            self.render_editor(ui, app, editor_id_source, Some(editor_size))
+                        })
+                        .inner
+                },
+            );
+            #[cfg(test)]
+            {
+                self.last_split_editor_rect = Some(editor_pane.response.rect);
+            }
+            let editor_resp = editor_pane.inner;
+            self.handle_editor_response(editor_resp, ctx, app, false);
+
+            ui.separator();
+
+            let preview_pane = ui.allocate_ui_with_layout(
+                egui::vec2(pane_width, height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(pane_width);
                     egui::ScrollArea::vertical()
                         .id_source(preview_scroll_id)
-                        .max_height(preview_size.y)
+                        .max_height(height)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             ui.allocate_ui_with_layout(
-                                preview_size,
+                                egui::vec2(pane_width, height),
                                 egui::Layout::top_down(egui::Align::Min),
                                 |ui| {
                                     let _ = self.markdown_analysis();
@@ -2342,6 +2354,10 @@ impl NotePanel {
                         });
                 },
             );
+            #[cfg(test)]
+            {
+                self.last_split_preview_rect = Some(preview_pane.response.rect);
+            }
         });
     }
 
@@ -3875,6 +3891,57 @@ mod tests {
         assert!(
             (content_rect.height() - editor_rect.height()).abs() < 8.0,
             "editor should closely match the content pane height, content={content_rect:?}, editor={editor_rect:?}"
+        );
+    }
+
+    #[test]
+    fn split_panes_fill_allocated_body_height() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_panel_default_size = (760.0, 540.0);
+        app.note_settings.rich_markdown_enabled = true;
+        app.note_settings.split_view_enabled = true;
+        app.note_settings.outline_sidebar_enabled = true;
+
+        let mut panel = NotePanel::from_note(empty_note(
+            "# Split body\n\n## Preview heading\n\nShort split-mode body.",
+        ));
+        panel.show_metadata = false;
+        panel.view_mode = NoteViewMode::Split;
+        panel.outline_open = true;
+
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw_input, |ctx| {
+            panel.ui(ctx, &mut app);
+        });
+
+        let content_rect = panel
+            .last_content_rect
+            .expect("content body pane should be allocated");
+        let editor_rect = panel
+            .last_split_editor_rect
+            .expect("split editor pane should be allocated");
+        let preview_rect = panel
+            .last_split_preview_rect
+            .expect("split preview pane should be allocated");
+
+        assert!(
+            (editor_rect.height() - preview_rect.height()).abs() < 4.0,
+            "split editor and preview panes should have similar heights, editor={editor_rect:?}, preview={preview_rect:?}"
+        );
+        assert!(
+            (content_rect.height() - editor_rect.height()).abs() < 8.0,
+            "split editor pane should closely match content body height, content={content_rect:?}, editor={editor_rect:?}"
+        );
+        assert!(
+            (content_rect.height() - preview_rect.height()).abs() < 8.0,
+            "split preview pane should closely match content body height, content={content_rect:?}, preview={preview_rect:?}"
         );
     }
 
