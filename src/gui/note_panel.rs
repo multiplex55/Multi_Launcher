@@ -2542,11 +2542,13 @@ impl NotePanel {
                 &self.derived.todo_label_map,
             );
             let render_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                CommonMarkViewer::new(format!("note_seg_{}", cache_id)).show(
-                    ui,
-                    &mut self.markdown_cache,
-                    &processed,
-                );
+                ui.vertical(|ui| {
+                    CommonMarkViewer::new(format!("note_seg_{}", cache_id)).show(
+                        ui,
+                        &mut self.markdown_cache,
+                        &processed,
+                    );
+                });
             }));
             match render_result {
                 Ok(()) => handle_markdown_links(ui, app),
@@ -4011,22 +4013,16 @@ mod tests {
 
     #[test]
     fn preview_headings_stack_vertically_with_outline_body_row() {
-        const FPV_MARKDOWN_SAMPLE: &str = r#"# FPV Drone Build Notes
-
-## Frame
-Choose a 5-inch freestyle frame with enough stack clearance.
-
-## Flight Controller
-Use soft mounting and verify the gyro orientation before the first hover.
-
-## ESC and Motors
-Match motor KV to battery cell count and prop size.
-
-## Video System
-Keep the VTX antenna clear of carbon and battery leads.
-
-## Receiver Setup
-Mount antennas at 90 degrees for better link reliability.
+        const FPV_MARKDOWN_SAMPLE: &str = r#"# fpv
+#fpv #drone
+# Training
+[[fpv-training]]
+# Youtube channel
+[Alec Searle YT](https://www.youtube.com/@alec_searle/videos)
+[[fpv-drone-buying]]
+[[fpv-random-contracts-to-fly-in-areas]]
+# Locations
+[[fpv-drone-flying-locations]]
 "#;
 
         let ctx = egui::Context::default();
@@ -4036,8 +4032,8 @@ Mount antennas at 90 degrees for better link reliability.
         app.note_settings.outline_sidebar_enabled = true;
 
         let mut note = empty_note(FPV_MARKDOWN_SAMPLE);
-        note.title = "FPV Drone Build Notes".into();
-        note.slug = "fpv-drone-build-notes".into();
+        note.title = "fpv".into();
+        note.slug = "fpv".into();
         let mut panel = NotePanel::from_note(note);
         panel.show_metadata = false;
         panel.view_mode = NoteViewMode::Preview;
@@ -4054,8 +4050,8 @@ Mount antennas at 90 degrees for better link reliability.
             "content pane should be allocated"
         );
         assert!(
-            panel.last_preview_heading_rects.len() >= 5,
-            "expected recorded preview heading rects, got {:?}",
+            panel.last_preview_heading_rects.len() >= 4,
+            "expected at least four recorded preview heading rects, got {:?}",
             panel.last_preview_heading_rects
         );
         for pair in panel.last_preview_heading_rects.windows(2) {
@@ -4065,6 +4061,16 @@ Mount antennas at 90 degrees for better link reliability.
                 panel.last_preview_heading_rects
             );
         }
+
+        let first_y = panel.last_preview_heading_rects[0].min.y;
+        assert!(
+            panel
+                .last_preview_heading_rects
+                .iter()
+                .any(|rect| (rect.min.y - first_y).abs() > 1.0),
+            "heading rect y positions should not all share approximately the same min.y: {:?}",
+            panel.last_preview_heading_rects
+        );
     }
 
     #[test]
