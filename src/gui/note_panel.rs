@@ -3733,6 +3733,23 @@ mod tests {
     }
 
     #[test]
+    fn outline_can_render_while_details_are_hidden() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_settings.outline_sidebar_enabled = true;
+        let mut panel = NotePanel::from_note(empty_note("# One\n\n## Two"));
+        panel.show_metadata = false;
+        panel.outline_open = true;
+
+        render_panel_once(&ctx, &mut panel, &mut app);
+
+        assert!(panel.last_ui_sections.outline_visible);
+        assert!(!panel.last_ui_sections.tags_visible);
+        assert!(!panel.last_ui_sections.links_visible);
+        assert!(panel.last_ui_sections.content_visible);
+    }
+
+    #[test]
     fn outline_sidebar_renders_empty_state_when_note_has_no_headings() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
@@ -4575,6 +4592,28 @@ link://note/central-note
             NotePanel::from_note_with_details_and_settings(empty_note("body"), true, &settings);
 
         assert_eq!(panel.view_mode, NoteViewMode::Edit);
+    }
+
+    #[test]
+    fn outline_opens_by_default_when_enabled_in_settings() {
+        let mut settings = NoteSettings::default();
+        settings.outline_sidebar_default_open = true;
+
+        let panel =
+            NotePanel::from_note_with_details_and_settings(empty_note("body"), true, &settings);
+
+        assert!(panel.outline_open);
+    }
+
+    #[test]
+    fn outline_stays_closed_by_default_when_disabled_in_settings() {
+        let mut settings = NoteSettings::default();
+        settings.outline_sidebar_default_open = false;
+
+        let panel =
+            NotePanel::from_note_with_details_and_settings(empty_note("body"), true, &settings);
+
+        assert!(!panel.outline_open);
     }
 
     #[test]
