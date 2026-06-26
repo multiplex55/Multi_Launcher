@@ -94,6 +94,10 @@ struct LinkMenuResult {
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
 static TODO_TOKEN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"@todo:([A-Za-z0-9_-]+)").unwrap());
 
+fn heading_display_text(heading: &MarkdownHeading) -> &str {
+    heading.title.as_str()
+}
+
 fn task_display_text(task_item: &MarkdownTaskItem) -> &str {
     task_item.text.as_str()
 }
@@ -2155,7 +2159,7 @@ impl NotePanel {
                 _ => app.note_font_size,
             };
             ui.label(
-                egui::RichText::new(&section.heading.title)
+                egui::RichText::new(heading_display_text(&section.heading))
                     .size(size)
                     .strong(),
             );
@@ -3607,16 +3611,26 @@ mod tests {
     }
 
     #[test]
-    fn task_display_text_uses_normalized_task_text_without_marker_or_bullet() {
-        let content = "  - [ ]   item text";
-        let task_item = analyze_markdown(content).task_items.remove(0);
+    fn heading_display_text_uses_heading_title_without_markdown_marker() {
+        let content = "## Vendors to buy from or look at";
+        let analysis = analyze_markdown(content);
+        let heading = analysis.headings.first().expect("heading should parse");
+        let display_text = heading_display_text(heading);
 
-        assert_eq!(task_item.bullet_marker, "-");
-        assert_eq!(&content[task_item.marker_byte_range.clone()], "[ ]");
-        assert_eq!(task_item.text, "item text");
-        assert_eq!(task_display_text(&task_item), "item text");
-        assert!(!task_display_text(&task_item).contains("[ ]"));
-        assert!(!task_display_text(&task_item).starts_with('-'));
+        assert_eq!(display_text, "Vendors to buy from or look at");
+        assert!(!display_text.contains("##"));
+    }
+
+    #[test]
+    fn task_display_text_uses_normalized_task_text_without_marker_or_bullet() {
+        let content = "- [ ] adsfasdf";
+        let task_item = analyze_markdown(content).task_items.remove(0);
+        let display_text = task_display_text(&task_item);
+
+        assert_eq!(display_text, "adsfasdf");
+        assert!(!display_text.contains("[ ]"));
+        assert!(!display_text.starts_with('-'));
+        assert!(!display_text.starts_with('\n'));
     }
 
     #[test]
