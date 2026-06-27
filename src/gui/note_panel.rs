@@ -4651,6 +4651,56 @@ Some text.
     }
 
     #[test]
+    fn horizontal_markdown_fragments_shrink_vertically_with_long_links() {
+        const LONG_LINK_MARKDOWN: &str = r#"# First
+
+https://www.google.com/maps/place/very-long-unbroken-url-or-query-string-that-keeps-going-and-going-and-going-and-going-and-going-and-going-and-going-and-going-and-going-and-going-and-going-and-going-and-going-and-going-and-going-and-going-and-going-and-going-and-going-and-going...
+
+# Second
+
+More text.
+"#;
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_settings.rich_markdown_enabled = true;
+        app.note_settings.collapsible_sections_enabled = true;
+
+        let mut note = empty_note(LONG_LINK_MARKDOWN);
+        note.title = "Long link preview".into();
+        note.slug = "long-link-preview".into();
+        let mut panel = NotePanel::from_note(note);
+        panel.view_mode = NoteViewMode::Preview;
+        panel.show_metadata = false;
+        panel.outline_open = false;
+        panel.last_preview_heading_rects.clear();
+
+        let note_body_size = egui::vec2(500.0, 700.0);
+        render_note_body_once(&ctx, &mut panel, &mut app, note_body_size);
+
+        let content_rect = panel
+            .last_content_rect
+            .expect("preview content body pane should be allocated");
+        assert!(
+            content_rect.width() <= note_body_size.x + 1.0,
+            "long unbroken URL should not expand the bounded note body width, body_size={note_body_size:?}, content={content_rect:?}"
+        );
+        assert!(
+            panel.last_preview_heading_rects.len() >= 2,
+            "expected at least two recorded preview heading rects, got {:?}",
+            panel.last_preview_heading_rects
+        );
+
+        let first = panel.last_preview_heading_rects[0];
+        let second = panel.last_preview_heading_rects[1];
+        let gap = second.min.y - first.max.y;
+        assert!(
+            gap < 160.0,
+            "long-link markdown fragment should not consume the vertical viewport; gap was {gap}"
+        );
+    }
+
+    #[test]
     fn preview_headings_stack_vertically_with_outline_body_row() {
         const FPV_MARKDOWN_SAMPLE: &str = r#"# fpv
 #fpv #drone
