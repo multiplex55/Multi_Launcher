@@ -3936,6 +3936,41 @@ mod tests {
         });
     }
 
+    fn render_note_body_once(
+        ctx: &egui::Context,
+        panel: &mut NotePanel,
+        app: &mut LauncherApp,
+        size: egui::Vec2,
+    ) {
+        let slug = panel.note.slug.clone();
+        let scroll_id_source = ("note_scroll", slug.clone());
+        let text_id_source = ("note_text", slug);
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
+
+        let _ = ctx.run(raw_input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.allocate_ui_with_layout(
+                    size,
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(size.x);
+                        ui.set_height(size.y);
+                        panel.render_note_body_row(
+                            ui,
+                            app,
+                            ctx,
+                            scroll_id_source.clone(),
+                            text_id_source.clone(),
+                        );
+                    },
+                );
+            });
+        });
+    }
+
     #[test]
     fn markdown_title_change_keeps_note_window_rect() {
         let ctx = egui::Context::default();
@@ -4084,16 +4119,7 @@ mod tests {
         panel.view_mode = NoteViewMode::Split;
         panel.outline_open = false;
 
-        let raw_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1400.0, 900.0),
-            )),
-            ..Default::default()
-        };
-        let _ = ctx.run(raw_input, |ctx| {
-            panel.ui(ctx, &mut app);
-        });
+        render_note_body_once(&ctx, &mut panel, &mut app, egui::vec2(500.0, 420.0));
 
         let content_rect = panel
             .last_content_rect
@@ -4112,7 +4138,7 @@ mod tests {
         );
         assert!(
             content_rect.width() < 700.0,
-            "split view content should not approach the 1400px screen width, content={content_rect:?}"
+            "split view content should not approach a large screen width, content={content_rect:?}"
         );
         assert!(
             editor_rect.width() + split_gap + preview_rect.width() <= content_rect.width() + 1.0,
@@ -4133,16 +4159,7 @@ mod tests {
         panel.view_mode = NoteViewMode::Split;
         panel.outline_open = false;
 
-        let raw_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(900.0, 700.0),
-            )),
-            ..Default::default()
-        };
-        let _ = ctx.run(raw_input, |ctx| {
-            panel.ui(ctx, &mut app);
-        });
+        render_note_body_once(&ctx, &mut panel, &mut app, egui::vec2(220.0, 420.0));
 
         let content_rect = panel
             .last_content_rect
@@ -4190,16 +4207,7 @@ mod tests {
         panel.outline_open = true;
         panel.outline_width = 220.0;
 
-        let raw_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1200.0, 800.0),
-            )),
-            ..Default::default()
-        };
-        let _ = ctx.run(raw_input, |ctx| {
-            panel.ui(ctx, &mut app);
-        });
+        render_note_body_once(&ctx, &mut panel, &mut app, egui::vec2(640.0, 480.0));
 
         let outline_rect = panel
             .last_outline_rect
@@ -4247,16 +4255,7 @@ mod tests {
         panel.view_mode = NoteViewMode::Split;
         panel.outline_open = false;
 
-        let raw_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1400.0, 900.0),
-            )),
-            ..Default::default()
-        };
-        let _ = ctx.run(raw_input, |ctx| {
-            panel.ui(ctx, &mut app);
-        });
+        render_note_body_once(&ctx, &mut panel, &mut app, egui::vec2(500.0, 420.0));
 
         let content_rect = panel
             .last_content_rect
@@ -4275,17 +4274,17 @@ mod tests {
         );
         assert!(
             preview_rect.width() < 700.0,
-            "long unbroken preview content should not expand toward the 1400px screen width, preview={preview_rect:?}"
+            "long unbroken preview content should not expand toward a large screen width, preview={preview_rect:?}"
         );
     }
 
     #[test]
     fn note_panel_default_size_is_only_runtime_window_default() {
         let source = include_str!("note_panel.rs");
-        let production_source = source
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .expect("note_panel.rs should contain production source before tests");
+        let tests_start = source
+            .find("mod tests")
+            .expect("note_panel.rs should contain test module");
+        let production_source = &source[..tests_start];
 
         assert_eq!(
             production_source
