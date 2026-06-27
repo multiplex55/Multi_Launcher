@@ -429,6 +429,7 @@ pub struct NotePanel {
     preview_render_error_reported: bool,
     outline_open: bool,
     outline_width: f32,
+    split_ratio: f32,
     outline_filter: String,
     selected_outline_heading: Option<String>,
     pending_scroll_target: Option<String>,
@@ -713,6 +714,7 @@ impl NotePanel {
             preview_render_error_reported: false,
             outline_open: false,
             outline_width: 180.0,
+            split_ratio: 0.5,
             outline_filter: String::new(),
             selected_outline_heading: None,
             pending_scroll_target: None,
@@ -2355,7 +2357,8 @@ impl NotePanel {
         let total_height = available_size.y.max(0.0);
         let separator_width = 6.0 + ui.spacing().item_spacing.x * 2.0;
         let usable_width = (total_width - separator_width).max(0.0);
-        let editor_width = usable_width * 0.5;
+        self.split_ratio = self.split_ratio.clamp(0.2, 0.8);
+        let editor_width = usable_width * self.split_ratio;
         let preview_width = usable_width - editor_width;
 
         ui.horizontal(|ui| {
@@ -4061,6 +4064,33 @@ mod tests {
             (content_rect.height() - preview_rect.height()).abs() < 8.0,
             "split preview pane should closely match content body height, content={content_rect:?}, preview={preview_rect:?}"
         );
+    }
+
+    #[test]
+    fn split_ratio_is_clamped_during_split_render() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_panel_default_size = (760.0, 540.0);
+        app.note_settings.rich_markdown_enabled = true;
+        app.note_settings.split_view_enabled = true;
+
+        let mut panel = NotePanel::from_note(empty_note("# Split ratio\n\nBody"));
+        panel.show_metadata = false;
+        panel.view_mode = NoteViewMode::Split;
+        panel.split_ratio = 1.5;
+
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw_input, |ctx| {
+            panel.ui(ctx, &mut app);
+        });
+
+        assert_eq!(panel.split_ratio, 0.8);
     }
 
     #[test]
