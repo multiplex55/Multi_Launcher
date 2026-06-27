@@ -4,10 +4,13 @@ use multi_launcher::hotkey::{Hotkey, HotkeyTrigger};
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
 use multi_launcher::visibility::handle_visibility_trigger;
+use multi_launcher::window_manager::{
+    MOCK_MOUSE_LOCK, clear_mock_mouse_position, set_mock_mouse_position,
+};
 use multi_launcher::{gui::ActivationSource, gui::LauncherApp};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 
 #[path = "mock_ctx.rs"]
@@ -35,6 +38,8 @@ fn new_app(ctx: &egui::Context) -> LauncherApp {
 
 #[test]
 fn visibility_toggle_immediate_when_context_present() {
+    let _mouse_lock = MOCK_MOUSE_LOCK.lock().unwrap();
+    set_mock_mouse_position(Some((200.0, 110.0)));
     let trigger = HotkeyTrigger::new(Hotkey::default());
     let visibility = Arc::new(AtomicBool::new(false));
     let restore = Arc::new(AtomicBool::new(false));
@@ -62,6 +67,7 @@ fn visibility_toggle_immediate_when_context_present() {
 
     assert_eq!(visibility.load(Ordering::SeqCst), true);
     assert!(queued_visibility.is_none());
+    clear_mock_mouse_position();
 
     let cmds = ctx.commands.lock().unwrap();
     assert_eq!(cmds.len(), 4);

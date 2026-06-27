@@ -73,7 +73,7 @@ fn note_panel_max_height_tracks_available_screen_height() {
     let _ = ctx.end_frame();
 
     let rect = ctx
-        .memory(|m| m.area_rect(egui::Id::new("Long note")))
+        .memory(|m| m.area_rect(egui::Id::new(("note_panel_window", String::new()))))
         .expect("window rect");
     assert!(
         rect.height() > 600.0,
