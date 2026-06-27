@@ -1683,14 +1683,12 @@ impl NotePanel {
                     .max_height(available_size.y)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.allocate_ui_with_layout(
-                            available_size,
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                let _ = self.markdown_analysis();
-                                self.render_preview(ui, app, ctx);
-                            },
-                        );
+                        ui.set_width(available_size.x);
+                        ui.set_min_width(available_size.x);
+                        ui.set_max_width(available_size.x);
+
+                        let _ = self.markdown_analysis();
+                        self.render_preview(ui, app, ctx);
                     });
             }
             NoteViewMode::Split => {
