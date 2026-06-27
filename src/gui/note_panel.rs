@@ -1942,9 +1942,10 @@ impl NotePanel {
         text_id_source: (&'static str, String),
         desired_size: Option<egui::Vec2>,
     ) -> egui::Response {
+        let desired_width = desired_size.map_or(f32::INFINITY, |size| size.x);
         let text_edit = egui::TextEdit::multiline(&mut self.note.content)
             .id_source(text_id_source)
-            .desired_width(f32::INFINITY)
+            .desired_width(desired_width)
             .font(FontId::monospace(app.note_font_size))
             .frame(true)
             .lock_focus(true);
