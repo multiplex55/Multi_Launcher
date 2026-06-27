@@ -1583,7 +1583,10 @@ impl NotePanel {
                 );
                 #[cfg(test)]
                 {
-                    self.last_outline_rect = Some(outline.response.rect);
+                    self.last_outline_rect = Some(egui::Rect::from_min_size(
+                        outline.response.rect.min,
+                        egui::vec2(outline_width, body_height),
+                    ));
                 }
                 #[cfg(not(test))]
                 {
@@ -1610,7 +1613,20 @@ impl NotePanel {
             );
             #[cfg(test)]
             {
-                self.last_content_rect = Some(content.response.rect);
+                let content_min = if has_outline {
+                    self.last_outline_rect.map_or(content.response.rect.min, |rect| {
+                        egui::pos2(
+                            rect.min.x + rect.width() + outline_separator_width,
+                            rect.min.y,
+                        )
+                    })
+                } else {
+                    content.response.rect.min
+                };
+                self.last_content_rect = Some(egui::Rect::from_min_size(
+                    content_min,
+                    egui::vec2(content_width, body_height),
+                ));
             }
             #[cfg(not(test))]
             {
@@ -2381,7 +2397,10 @@ impl NotePanel {
             );
             #[cfg(test)]
             {
-                self.last_split_editor_rect = Some(editor_pane.response.rect);
+                self.last_split_editor_rect = Some(egui::Rect::from_min_size(
+                    editor_pane.response.rect.min,
+                    egui::vec2(editor_width, total_height),
+                ));
             }
             let editor_resp = editor_pane.inner;
             self.handle_editor_response(editor_resp, ctx, app, false);
@@ -2416,7 +2435,15 @@ impl NotePanel {
             );
             #[cfg(test)]
             {
-                self.last_split_preview_rect = Some(preview_pane.response.rect);
+                let preview_min = self
+                    .last_split_editor_rect
+                    .map_or(preview_pane.response.rect.min, |rect| {
+                        egui::pos2(rect.min.x + rect.width() + separator_width, rect.min.y)
+                    });
+                self.last_split_preview_rect = Some(egui::Rect::from_min_size(
+                    preview_min,
+                    egui::vec2(preview_width, total_height),
+                ));
             }
         });
     }
