@@ -1966,6 +1966,9 @@ impl NotePanel {
     }
 
     fn render_preview(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, ctx: &egui::Context) {
+        let preview_width = ui.available_width().max(0.0);
+        ui.set_min_width(preview_width);
+        ui.set_max_width(preview_width);
         self.render_preview_document(ui, app, ctx);
     }
 
@@ -2119,6 +2122,10 @@ impl NotePanel {
                 let mut display = tex.size_vec2();
                 if let Some(w) = width {
                     display *= w / display.x;
+                }
+                let max_preview_width = ui.available_width().max(1.0);
+                if display.x > max_preview_width {
+                    display *= max_preview_width / display.x;
                 }
                 let response = ui.add(
                     egui::Image::new(&tex)
@@ -2380,10 +2387,14 @@ impl NotePanel {
                         .max_height(total_height)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
+                            ui.set_min_width(preview_width);
+                            ui.set_max_width(preview_width);
                             ui.allocate_ui_with_layout(
                                 egui::vec2(preview_width, total_height),
                                 egui::Layout::top_down(egui::Align::Min),
                                 |ui| {
+                                    ui.set_min_width(preview_width);
+                                    ui.set_max_width(preview_width);
                                     let _ = self.markdown_analysis();
                                     self.render_preview(ui, app, ctx);
                                 },
@@ -2571,7 +2582,10 @@ impl NotePanel {
         if fragment.is_empty() {
             return;
         }
+        let fragment_width = ui.available_width().max(0.0);
         ui.scope(|ui| {
+            ui.set_min_width(fragment_width);
+            ui.set_max_width(fragment_width);
             ui.style_mut().override_font_id = Some(FontId::proportional(app.note_font_size));
             let processed = preprocess_preview_markdown(
                 fragment,
@@ -2579,13 +2593,18 @@ impl NotePanel {
                 &self.derived.todo_label_map,
             );
             let render_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                ui.vertical(|ui| {
-                    CommonMarkViewer::new(format!("note_seg_{}", cache_id)).show(
-                        ui,
-                        &mut self.markdown_cache,
-                        &processed,
-                    );
-                });
+                egui::ScrollArea::horizontal()
+                    .max_width(fragment_width)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_min_width(fragment_width);
+                        ui.set_max_width(fragment_width);
+                        CommonMarkViewer::new(format!("note_seg_{}", cache_id)).show(
+                            ui,
+                            &mut self.markdown_cache,
+                            &processed,
+                        );
+                    });
             }));
             match render_result {
                 Ok(()) => handle_markdown_links(ui, app),
@@ -2609,13 +2628,21 @@ impl NotePanel {
         }
         let mut fallback = fragment.to_string();
         let fallback_width = ui.available_width().max(0.0);
-        let response = ui.add_sized(
-            egui::vec2(fallback_width, 0.0),
-            egui::TextEdit::multiline(&mut fallback)
-                .desired_width(fallback_width)
-                .font(FontId::monospace(app.note_font_size))
-                .interactive(false),
-        );
+        ui.set_min_width(fallback_width);
+        ui.set_max_width(fallback_width);
+        let response = egui::ScrollArea::horizontal()
+            .max_width(fallback_width)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_sized(
+                    egui::vec2(fallback_width, 0.0),
+                    egui::TextEdit::multiline(&mut fallback)
+                        .desired_width(fallback_width)
+                        .font(FontId::monospace(app.note_font_size))
+                        .interactive(false),
+                )
+            })
+            .inner;
         #[cfg(test)]
         {
             self.last_preview_fallback_rect = Some(response.rect);
