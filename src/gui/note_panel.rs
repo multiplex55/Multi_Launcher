@@ -1552,13 +1552,21 @@ impl NotePanel {
         scroll_id_source: (&'static str, String),
         text_id_source: (&'static str, String),
     ) {
-        let body_width = ui.available_width();
+        let body_width = ui.available_width().max(0.0);
         let body_height = ui.available_height();
         ui.horizontal(|ui| {
             let has_outline = app.note_settings.outline_sidebar_enabled && self.outline_open;
+            let outline_separator_width = if has_outline {
+                6.0 + ui.spacing().item_spacing.x * 2.0
+            } else {
+                0.0
+            };
+            let mut content_width = body_width;
             if has_outline {
                 self.outline_width = self.outline_width.clamp(120.0, 360.0);
-                let outline_width = self.outline_width.min(body_width);
+                let outline_budget = (body_width - outline_separator_width).max(0.0);
+                let outline_width = self.outline_width.min(outline_budget).min(body_width);
+                content_width = (body_width - outline_width - outline_separator_width).max(0.0);
                 let outline = ui.allocate_ui_with_layout(
                     egui::vec2(outline_width, body_height),
                     egui::Layout::top_down(egui::Align::Min),
@@ -1583,24 +1591,19 @@ impl NotePanel {
                 ui.separator();
             }
 
-            let content_width = ui.available_width().max(0.0);
             let content = ui.allocate_ui_with_layout(
-                egui::vec2(
-                    if has_outline {
-                        content_width
-                    } else {
-                        body_width
-                    },
-                    body_height,
-                ),
+                egui::vec2(content_width, body_height),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    ui.set_width(if has_outline {
-                        content_width
-                    } else {
-                        body_width
-                    });
-                    self.render_note_content_area(ui, app, ctx, scroll_id_source, text_id_source);
+                    ui.set_width(content_width);
+                    self.render_note_content_area(
+                        ui,
+                        app,
+                        ctx,
+                        scroll_id_source,
+                        text_id_source,
+                        egui::vec2(content_width, body_height),
+                    );
                 },
             );
             #[cfg(test)]
@@ -1621,8 +1624,9 @@ impl NotePanel {
         ctx: &egui::Context,
         scroll_id_source: (&'static str, String),
         text_id_source: (&'static str, String),
+        available_size: egui::Vec2,
     ) {
-        let available_size = ui.available_size();
+        let available_size = egui::vec2(available_size.x.max(0.0), available_size.y.max(0.0));
         #[cfg(test)]
         {
             self.last_ui_sections.content_visible = true;
@@ -1650,7 +1654,7 @@ impl NotePanel {
                     });
             }
             NoteViewMode::Split => {
-                self.render_split(ui, app, ctx);
+                self.render_split(ui, app, ctx, available_size);
             }
         }
     }
@@ -2336,8 +2340,13 @@ impl NotePanel {
         }
     }
 
-    fn render_split(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, ctx: &egui::Context) {
-        let available_size = ui.available_size();
+    fn render_split(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        ctx: &egui::Context,
+        available_size: egui::Vec2,
+    ) {
         let slug = self.note.slug.clone();
         let editor_id_source = ("note_split_text", slug.clone());
         let editor_scroll_id = ("note_split_editor_scroll", slug.clone());
