@@ -1583,7 +1583,10 @@ impl NotePanel {
                 );
                 #[cfg(test)]
                 {
-                    self.last_outline_rect = Some(outline.response.rect);
+                    self.last_outline_rect = Some(egui::Rect::from_min_size(
+                        outline.response.rect.min,
+                        egui::vec2(outline_width, body_height),
+                    ));
                 }
                 #[cfg(not(test))]
                 {
@@ -1610,7 +1613,20 @@ impl NotePanel {
             );
             #[cfg(test)]
             {
-                self.last_content_rect = Some(content.response.rect);
+                let content_min = if has_outline {
+                    self.last_outline_rect.map_or(content.response.rect.min, |rect| {
+                        egui::pos2(
+                            rect.min.x + rect.width() + outline_separator_width,
+                            rect.min.y,
+                        )
+                    })
+                } else {
+                    content.response.rect.min
+                };
+                self.last_content_rect = Some(egui::Rect::from_min_size(
+                    content_min,
+                    egui::vec2(content_width, body_height),
+                ));
             }
             #[cfg(not(test))]
             {
@@ -2381,7 +2397,10 @@ impl NotePanel {
             );
             #[cfg(test)]
             {
-                self.last_split_editor_rect = Some(editor_pane.response.rect);
+                self.last_split_editor_rect = Some(egui::Rect::from_min_size(
+                    editor_pane.response.rect.min,
+                    egui::vec2(editor_width, total_height),
+                ));
             }
             let editor_resp = editor_pane.inner;
             self.handle_editor_response(editor_resp, ctx, app, false);
@@ -2416,7 +2435,15 @@ impl NotePanel {
             );
             #[cfg(test)]
             {
-                self.last_split_preview_rect = Some(preview_pane.response.rect);
+                let preview_min = self
+                    .last_split_editor_rect
+                    .map_or(preview_pane.response.rect.min, |rect| {
+                        egui::pos2(rect.min.x + rect.width() + separator_width, rect.min.y)
+                    });
+                self.last_split_preview_rect = Some(egui::Rect::from_min_size(
+                    preview_min,
+                    egui::vec2(preview_width, total_height),
+                ));
             }
         });
     }
@@ -3936,6 +3963,41 @@ mod tests {
         });
     }
 
+    fn render_note_body_once(
+        ctx: &egui::Context,
+        panel: &mut NotePanel,
+        app: &mut LauncherApp,
+        size: egui::Vec2,
+    ) {
+        let slug = panel.note.slug.clone();
+        let scroll_id_source = ("note_scroll", slug.clone());
+        let text_id_source = ("note_text", slug);
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
+
+        let _ = ctx.run(raw_input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.allocate_ui_with_layout(
+                    size,
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(size.x);
+                        ui.set_height(size.y);
+                        panel.render_note_body_row(
+                            ui,
+                            app,
+                            ctx,
+                            scroll_id_source.clone(),
+                            text_id_source.clone(),
+                        );
+                    },
+                );
+            });
+        });
+    }
+
     #[test]
     fn markdown_title_change_keeps_note_window_rect() {
         let ctx = egui::Context::default();
@@ -4072,12 +4134,184 @@ mod tests {
     }
 
     #[test]
+    fn split_view_does_not_auto_expand_note_window_width() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_panel_default_size = (500.0, 420.0);
+        app.note_settings.rich_markdown_enabled = true;
+        app.note_settings.split_view_enabled = true;
+
+        let mut panel = NotePanel::from_note(empty_note("# Split width\n\nBody"));
+        panel.show_metadata = false;
+        panel.view_mode = NoteViewMode::Split;
+        panel.outline_open = false;
+
+        render_note_body_once(&ctx, &mut panel, &mut app, egui::vec2(500.0, 420.0));
+
+        let content_rect = panel
+            .last_content_rect
+            .expect("split content body pane should be allocated");
+        let editor_rect = panel
+            .last_split_editor_rect
+            .expect("split editor pane should be allocated");
+        let preview_rect = panel
+            .last_split_preview_rect
+            .expect("split preview pane should be allocated");
+        let split_gap = (preview_rect.min.x - editor_rect.max.x).max(0.0);
+
+        assert!(
+            content_rect.width() <= app.note_panel_default_size.0 + 1.0,
+            "split view should keep the content near the configured note width instead of expanding toward the screen width, content={content_rect:?}"
+        );
+        assert!(
+            content_rect.width() < 700.0,
+            "split view content should not approach a large screen width, content={content_rect:?}"
+        );
+        assert!(
+            editor_rect.width() + split_gap + preview_rect.width() <= content_rect.width() + 1.0,
+            "split panes plus their separator/spacing should fit within the content width, content={content_rect:?}, editor={editor_rect:?}, preview={preview_rect:?}, gap={split_gap}"
+        );
+    }
+
+    #[test]
+    fn split_view_allows_narrow_dialog_without_forcing_pane_minimums() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_panel_default_size = (220.0, 420.0);
+        app.note_settings.rich_markdown_enabled = true;
+        app.note_settings.split_view_enabled = true;
+
+        let mut panel = NotePanel::from_note(empty_note("# Narrow split\n\nBody"));
+        panel.show_metadata = false;
+        panel.view_mode = NoteViewMode::Split;
+        panel.outline_open = false;
+
+        render_note_body_once(&ctx, &mut panel, &mut app, egui::vec2(220.0, 420.0));
+
+        let content_rect = panel
+            .last_content_rect
+            .expect("narrow split content body pane should be allocated");
+        let editor_rect = panel
+            .last_split_editor_rect
+            .expect("narrow split editor pane should be allocated");
+        let preview_rect = panel
+            .last_split_preview_rect
+            .expect("narrow split preview pane should be allocated");
+        let split_gap = (preview_rect.min.x - editor_rect.max.x).max(0.0);
+
+        assert!(
+            content_rect.width() <= app.note_panel_default_size.0 + 1.0,
+            "split view should allow a narrow configured dialog width, content={content_rect:?}"
+        );
+        assert!(
+            editor_rect.width() > 0.0 && preview_rect.width() > 0.0,
+            "narrow split panes should remain positive, editor={editor_rect:?}, preview={preview_rect:?}"
+        );
+        assert!(
+            editor_rect.width() + split_gap + preview_rect.width() <= content_rect.width() + 1.0,
+            "narrow split panes plus separator/spacing should not exceed content width, content={content_rect:?}, editor={editor_rect:?}, preview={preview_rect:?}, gap={split_gap}"
+        );
+        assert!(
+            content_rect.width() < 240.0,
+            "narrow split content should remain too narrow to fit two old 120px minimum panes, content={content_rect:?}"
+        );
+    }
+
+    #[test]
+    fn outline_and_split_view_share_existing_dialog_width() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_panel_default_size = (640.0, 480.0);
+        app.note_settings.rich_markdown_enabled = true;
+        app.note_settings.split_view_enabled = true;
+        app.note_settings.outline_sidebar_enabled = true;
+
+        let mut panel = NotePanel::from_note(empty_note(
+            "# Outline split\n\n## First\n\nBody\n\n## Second\n\nMore body",
+        ));
+        panel.show_metadata = false;
+        panel.view_mode = NoteViewMode::Split;
+        panel.outline_open = true;
+        panel.outline_width = 220.0;
+
+        render_note_body_once(&ctx, &mut panel, &mut app, egui::vec2(640.0, 480.0));
+
+        let outline_rect = panel
+            .last_outline_rect
+            .expect("outline pane should be allocated with split view");
+        let content_rect = panel
+            .last_content_rect
+            .expect("content pane should be allocated beside outline");
+        let editor_rect = panel
+            .last_split_editor_rect
+            .expect("split editor pane should be allocated beside outline");
+        let preview_rect = panel
+            .last_split_preview_rect
+            .expect("split preview pane should be allocated beside outline");
+        let outline_gap = (content_rect.min.x - outline_rect.max.x).max(0.0);
+        let split_gap = (preview_rect.min.x - editor_rect.max.x).max(0.0);
+
+        assert!(
+            outline_rect.width() <= 220.0 + 1.0,
+            "outline should not exceed configured width, outline={outline_rect:?}"
+        );
+        assert!(
+            outline_rect.width() + outline_gap + content_rect.width()
+                <= app.note_panel_default_size.0 + 1.0,
+            "outline plus separator/spacing plus content should share the existing note body width, outline={outline_rect:?}, content={content_rect:?}, gap={outline_gap}"
+        );
+        assert!(
+            editor_rect.width() + split_gap + preview_rect.width() <= content_rect.width() + 1.0,
+            "split panes should derive from the content rect remaining after the outline, content={content_rect:?}, editor={editor_rect:?}, preview={preview_rect:?}, gap={split_gap}"
+        );
+    }
+
+    #[test]
+    fn split_preview_long_unbroken_content_does_not_expand_dialog() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_panel_default_size = (500.0, 420.0);
+        app.note_settings.rich_markdown_enabled = true;
+        app.note_settings.split_view_enabled = true;
+
+        let long_unbroken = "x".repeat(10_000);
+        let mut panel = NotePanel::from_note(empty_note(&format!(
+            "# Long preview\n\n{long_unbroken}"
+        )));
+        panel.show_metadata = false;
+        panel.view_mode = NoteViewMode::Split;
+        panel.outline_open = false;
+
+        render_note_body_once(&ctx, &mut panel, &mut app, egui::vec2(500.0, 420.0));
+
+        let content_rect = panel
+            .last_content_rect
+            .expect("long preview content body pane should be allocated");
+        let preview_rect = panel
+            .last_split_preview_rect
+            .expect("long preview split pane should be allocated");
+
+        assert!(
+            content_rect.width() <= app.note_panel_default_size.0 + 1.0,
+            "long unbroken preview content should not widen the dialog content rect, content={content_rect:?}"
+        );
+        assert!(
+            preview_rect.width() <= content_rect.width() + 1.0,
+            "long unbroken preview content should remain bounded by the content rect, content={content_rect:?}, preview={preview_rect:?}"
+        );
+        assert!(
+            preview_rect.width() < 700.0,
+            "long unbroken preview content should not expand toward a large screen width, preview={preview_rect:?}"
+        );
+    }
+
+    #[test]
     fn note_panel_default_size_is_only_runtime_window_default() {
         let source = include_str!("note_panel.rs");
-        let production_source = source
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .expect("note_panel.rs should contain production source before tests");
+        let tests_start = source
+            .find("mod tests")
+            .expect("note_panel.rs should contain test module");
+        let production_source = &source[..tests_start];
 
         assert_eq!(
             production_source
