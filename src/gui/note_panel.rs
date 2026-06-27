@@ -38,6 +38,28 @@ const BACKLINK_PAGE_SIZE: usize = 12;
 const HEAVY_RECOMPUTE_IDLE_DEBOUNCE: Duration = Duration::from_millis(250);
 const NOTE_LINK_CONTEXT_MENU_RESULT_LIMIT: usize = 50;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SplitPaneWidths {
+    editor: f32,
+    preview: f32,
+    separator: f32,
+}
+
+fn split_pane_widths(
+    total_width: f32,
+    split_ratio: f32,
+    separator_width: f32,
+) -> SplitPaneWidths {
+    let separator = separator_width.max(0.0);
+    let usable_width = (total_width.max(0.0) - separator).max(0.0);
+    let editor = usable_width * split_ratio.clamp(0.2, 0.8);
+    SplitPaneWidths {
+        editor,
+        preview: usable_width - editor,
+        separator,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BacklinkTab {
     LinkedTodos,
@@ -2371,11 +2393,14 @@ impl NotePanel {
         let preview_scroll_id = ("note_split_preview_scroll", slug);
         let total_width = available_size.x.max(0.0);
         let total_height = available_size.y.max(0.0);
-        let separator_width = 6.0 + ui.spacing().item_spacing.x * 2.0;
-        let usable_width = (total_width - separator_width).max(0.0);
+        let widths = split_pane_widths(
+            total_width,
+            self.split_ratio,
+            6.0 + ui.spacing().item_spacing.x * 2.0,
+        );
         self.split_ratio = self.split_ratio.clamp(0.2, 0.8);
-        let editor_width = usable_width * self.split_ratio;
-        let preview_width = usable_width - editor_width;
+        let editor_width = widths.editor;
+        let preview_width = widths.preview;
 
         ui.horizontal(|ui| {
             let editor_pane = ui.allocate_ui_with_layout(
@@ -2438,7 +2463,7 @@ impl NotePanel {
                 let preview_min = self
                     .last_split_editor_rect
                     .map_or(preview_pane.response.rect.min, |rect| {
-                        egui::pos2(rect.min.x + rect.width() + separator_width, rect.min.y)
+                        egui::pos2(rect.min.x + rect.width() + widths.separator, rect.min.y)
                     });
                 self.last_split_preview_rect = Some(egui::Rect::from_min_size(
                     preview_min,
