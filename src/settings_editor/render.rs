@@ -444,9 +444,13 @@ impl SettingsEditor {
                 });
                 ui.horizontal(|ui| {
                     ui.label("Note panel W");
-                    ui.add(egui::DragValue::new(&mut self.note_panel_w));
+                    ui.add(
+                        egui::DragValue::new(&mut self.note_panel_w).clamp_range(200.0..=2000.0),
+                    );
                     ui.label("H");
-                    ui.add(egui::DragValue::new(&mut self.note_panel_h));
+                    ui.add(
+                        egui::DragValue::new(&mut self.note_panel_h).clamp_range(150.0..=1600.0),
+                    );
                 });
                 let mut cfg = self
                     .plugin_settings

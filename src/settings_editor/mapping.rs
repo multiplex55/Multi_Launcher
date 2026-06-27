@@ -234,7 +234,10 @@ impl SettingsEditor {
             toast_duration: self.toast_duration,
             offscreen_pos: Some((self.offscreen_x, self.offscreen_y)),
             window_size: Some((self.window_w, self.window_h)),
-            note_panel_default_size: (self.note_panel_w, self.note_panel_h),
+            note_panel_default_size: (
+                self.note_panel_w.clamp(200.0, 2000.0),
+                self.note_panel_h.clamp(150.0, 1600.0),
+            ),
             note_save_on_close: self.note_save_on_close,
             note_always_overwrite: self.note_always_overwrite,
             note_images_as_links: self.note_images_as_links,
@@ -421,6 +424,22 @@ mod tests {
         let saved = editor.to_settings(&initial);
         assert_eq!(saved.query_results_layout.rows, 1);
         assert_eq!(saved.query_results_layout.cols, 1);
+    }
+
+    #[test]
+    fn note_panel_default_size_clamps_to_allowed_bounds() {
+        let initial = Settings::default();
+        let mut editor = SettingsEditor::new(&initial);
+
+        editor.note_panel_w = 199.0;
+        editor.note_panel_h = 149.0;
+        let saved_min = editor.to_settings(&initial);
+        assert_eq!(saved_min.note_panel_default_size, (200.0, 150.0));
+
+        editor.note_panel_w = 2001.0;
+        editor.note_panel_h = 1601.0;
+        let saved_max = editor.to_settings(&initial);
+        assert_eq!(saved_max.note_panel_default_size, (2000.0, 1600.0));
     }
 
     #[test]
