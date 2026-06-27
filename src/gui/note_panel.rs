@@ -4581,6 +4581,76 @@ mod tests {
     }
 
     #[test]
+    fn preview_sections_do_not_use_viewport_height_as_spacing_without_outline() {
+        const FPV_LOCATIONS_MARKDOWN: &str = r#"# FPV Drone Flying Locations
+
+[[FPV Random Contracts to fly in areas]]
+
+# Georgia
+
+## West of Warner Robins
+
+Some text.
+
+## Perry
+
+Some text.
+"#;
+
+        fn render_heading_gap_at_height(height: f32) -> f32 {
+            let ctx = egui::Context::default();
+            let mut app = new_app(&ctx);
+            app.note_settings.rich_markdown_enabled = true;
+            app.note_settings.collapsible_sections_enabled = true;
+            app.note_settings.outline_sidebar_enabled = true;
+
+            let mut note = empty_note(FPV_LOCATIONS_MARKDOWN);
+            note.title = "FPV Drone Flying Locations".into();
+            note.slug = "fpv-drone-flying-locations".into();
+
+            let mut panel = NotePanel::from_note(note);
+            panel.outline_open = false;
+            panel.show_metadata = false;
+            panel.view_mode = NoteViewMode::Preview;
+            panel.last_preview_heading_rects.clear();
+
+            render_note_body_once(&ctx, &mut panel, &mut app, egui::vec2(640.0, height));
+
+            assert!(
+                panel.last_outline_rect.is_none(),
+                "outline should stay closed while outline support is enabled"
+            );
+            assert!(
+                panel.last_preview_heading_rects.len() >= 2,
+                "expected at least two recorded preview heading rects at height {height}, got {:?}",
+                panel.last_preview_heading_rects
+            );
+
+            let first = panel.last_preview_heading_rects[0];
+            let second = panel.last_preview_heading_rects[1];
+            assert!(
+                second.min.y > first.max.y,
+                "second heading should appear below the first at height {height}: first={first:?}, second={second:?}"
+            );
+
+            let gap = second.min.y - first.max.y;
+            assert!(
+                gap < 120.0,
+                "heading gap should stay bounded and not consume the preview viewport height at height {height}: gap={gap}, first={first:?}, second={second:?}"
+            );
+            gap
+        }
+
+        let gap_at_320_height = render_heading_gap_at_height(320.0);
+        let gap_at_800_height = render_heading_gap_at_height(800.0);
+
+        assert!(
+            gap_at_800_height <= gap_at_320_height + 20.0,
+            "heading gap should not grow with viewport height: gap_at_320_height={gap_at_320_height}, gap_at_800_height={gap_at_800_height}"
+        );
+    }
+
+    #[test]
     fn preview_headings_stack_vertically_with_outline_body_row() {
         const FPV_MARKDOWN_SAMPLE: &str = r#"# fpv
 #fpv #drone
