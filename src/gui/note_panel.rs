@@ -4020,6 +4020,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         app.note_panel_default_size = (760.0, 540.0);
+        let original_default_size = app.note_panel_default_size;
         app.note_settings.rich_markdown_enabled = true;
         app.note_settings.split_view_enabled = true;
         app.note_settings.outline_sidebar_enabled = true;
@@ -4063,6 +4064,35 @@ mod tests {
         assert!(
             (content_rect.height() - preview_rect.height()).abs() < 8.0,
             "split preview pane should closely match content body height, content={content_rect:?}, preview={preview_rect:?}"
+        );
+        assert_eq!(
+            app.note_panel_default_size, original_default_size,
+            "split rendering must use bounded layout and must not write the measured window size back to the global note panel default"
+        );
+    }
+
+    #[test]
+    fn note_panel_default_size_is_only_runtime_window_default() {
+        let source = include_str!("note_panel.rs");
+        let production_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("note_panel.rs should contain production source before tests");
+
+        assert_eq!(
+            production_source
+                .matches("app.note_panel_default_size")
+                .count(),
+            1,
+            "production note panel code should only read app.note_panel_default_size for Window::default_size"
+        );
+        assert!(
+            production_source.contains(".default_size(app.note_panel_default_size)"),
+            "production note panel code should pass app.note_panel_default_size to egui::Window::default_size"
+        );
+        assert!(
+            !production_source.contains("app.note_panel_default_size ="),
+            "ordinary note panel rendering must not write measured sizes back to app.note_panel_default_size"
         );
     }
 
