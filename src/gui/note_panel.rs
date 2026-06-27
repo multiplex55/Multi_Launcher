@@ -2329,17 +2329,21 @@ impl NotePanel {
         let editor_id_source = ("note_split_text", slug.clone());
         let editor_scroll_id = ("note_split_editor_scroll", slug.clone());
         let preview_scroll_id = ("note_split_preview_scroll", slug);
-        let available_size = ui.available_size();
-        let height = available_size.y;
-        let pane_width = ((available_size.x - ui.spacing().item_spacing.x) / 2.0).max(120.0);
+        let total_width = ui.available_width().max(0.0);
+        let total_height = ui.available_height().max(0.0);
+        let separator_width = 6.0 + ui.spacing().item_spacing.x * 2.0;
+        let usable_width = (total_width - separator_width).max(0.0);
+        let editor_width = usable_width * 0.5;
+        let preview_width = usable_width - editor_width;
+        let height = total_height;
 
         ui.horizontal(|ui| {
             let editor_pane = ui.allocate_ui_with_layout(
-                egui::vec2(pane_width, height),
+                egui::vec2(editor_width, height),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    ui.set_width(pane_width);
-                    let editor_size = egui::vec2(pane_width, height);
+                    ui.set_width(editor_width);
+                    let editor_size = egui::vec2(editor_width, height);
                     egui::ScrollArea::vertical()
                         .id_source(editor_scroll_id)
                         .max_height(height)
@@ -2360,17 +2364,17 @@ impl NotePanel {
             ui.separator();
 
             let preview_pane = ui.allocate_ui_with_layout(
-                egui::vec2(pane_width, height),
+                egui::vec2(preview_width, height),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    ui.set_width(pane_width);
+                    ui.set_width(preview_width);
                     egui::ScrollArea::vertical()
                         .id_source(preview_scroll_id)
                         .max_height(height)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             ui.allocate_ui_with_layout(
-                                egui::vec2(pane_width, height),
+                                egui::vec2(preview_width, height),
                                 egui::Layout::top_down(egui::Align::Min),
                                 |ui| {
                                     let _ = self.markdown_analysis();
