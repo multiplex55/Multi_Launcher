@@ -1704,8 +1704,12 @@ impl NotePanel {
         }
         match self.view_mode {
             NoteViewMode::Edit => {
-                let resp =
-                    self.render_editor(ui, app, text_id_source.clone(), Some(available_size));
+                let resp = self.render_bounded_editor(
+                    ui,
+                    app,
+                    text_id_source.clone(),
+                    available_size,
+                );
                 self.handle_editor_response(resp, ctx, app, true);
             }
             NoteViewMode::Preview => {
@@ -2012,11 +2016,36 @@ impl NotePanel {
         ui.separator();
     }
 
+    fn render_bounded_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        id_source: impl std::hash::Hash + Clone,
+        available_size: egui::Vec2,
+    ) -> egui::Response {
+        let available_size = egui::vec2(
+            available_size.x.max(0.0),
+            available_size.y.max(0.0),
+        );
+
+        egui::ScrollArea::vertical()
+            .max_width(available_size.x)
+            .max_height(available_size.y)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_width(available_size.x);
+                ui.set_min_width(available_size.x);
+                ui.set_max_width(available_size.x);
+                self.render_editor(ui, app, id_source.clone(), Some(available_size))
+            })
+            .inner
+    }
+
     fn render_editor(
         &mut self,
         ui: &mut egui::Ui,
         app: &LauncherApp,
-        text_id_source: (&'static str, String),
+        text_id_source: impl std::hash::Hash,
         desired_size: Option<egui::Vec2>,
     ) -> egui::Response {
         let desired_width = desired_size.map_or(f32::INFINITY, |size| size.x);
@@ -2418,7 +2447,6 @@ impl NotePanel {
     ) {
         let slug = self.note.slug.clone();
         let editor_id_source = ("note_split_text", slug.clone());
-        let editor_scroll_id = ("note_split_editor_scroll", slug.clone());
         let preview_scroll_id = ("note_split_preview_scroll", slug);
         let total_width = available_size.x.max(0.0);
         let total_height = available_size.y.max(0.0);
@@ -2438,15 +2466,7 @@ impl NotePanel {
                 |ui| {
                     ui.set_width(editor_width);
                     let editor_size = egui::vec2(editor_width, total_height);
-                    egui::ScrollArea::vertical()
-                        .id_source(editor_scroll_id)
-                        .max_width(editor_width)
-                        .max_height(total_height)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            self.render_editor(ui, app, editor_id_source, Some(editor_size))
-                        })
-                        .inner
+                    self.render_bounded_editor(ui, app, editor_id_source, editor_size)
                 },
             );
             #[cfg(test)]
