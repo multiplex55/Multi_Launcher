@@ -2458,6 +2458,10 @@ impl NotePanel {
                         });
                 },
             );
+            #[cfg(not(test))]
+            {
+                let _ = &preview_pane;
+            }
             #[cfg(test)]
             {
                 let preview_min = self
@@ -2707,6 +2711,10 @@ impl NotePanel {
                 )
             })
             .inner;
+        #[cfg(not(test))]
+        {
+            let _ = &response;
+        }
         #[cfg(test)]
         {
             self.last_preview_fallback_rect = Some(response.rect);
