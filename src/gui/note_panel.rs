@@ -2441,18 +2441,12 @@ impl NotePanel {
                         .max_height(total_height)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
+                            ui.set_width(preview_width);
                             ui.set_min_width(preview_width);
                             ui.set_max_width(preview_width);
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(preview_width, total_height),
-                                egui::Layout::top_down(egui::Align::Min),
-                                |ui| {
-                                    ui.set_min_width(preview_width);
-                                    ui.set_max_width(preview_width);
-                                    let _ = self.markdown_analysis();
-                                    self.render_preview(ui, app, ctx);
-                                },
-                            );
+
+                            let _ = self.markdown_analysis();
+                            self.render_preview(ui, app, ctx);
                         });
                 },
             );
