@@ -2663,7 +2663,7 @@ impl NotePanel {
             let render_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 egui::ScrollArea::horizontal()
                     .max_width(fragment_width)
-                    .auto_shrink([false, false])
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.set_min_width(fragment_width);
                         ui.set_max_width(fragment_width);
@@ -2700,7 +2700,7 @@ impl NotePanel {
         ui.set_max_width(fallback_width);
         let response = egui::ScrollArea::horizontal()
             .max_width(fallback_width)
-            .auto_shrink([false, false])
+            .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.add_sized(
                     egui::vec2(fallback_width, 0.0),
