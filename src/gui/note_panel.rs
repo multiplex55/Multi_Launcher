@@ -1146,11 +1146,13 @@ impl NotePanel {
         // window closure (save, open externally, etc.). Don't capture borrows of `self.note.slug` in
         // the closure environment - keep IDs based on an owned clone instead.
         let slug = self.note.slug.clone();
+        let window_id = egui::Id::new(("note_panel_window", self.note.slug.clone()));
         let content_id = egui::Id::new(("note_content", slug.clone()));
         let scroll_id_source = ("note_scroll", slug.clone());
         let text_id_source = ("note_text", slug);
 
         egui::Window::new(self.note.title.clone())
+            .id(window_id)
             .open(&mut open)
             .resizable(true)
             .default_size(app.note_panel_default_size)
@@ -3876,6 +3878,43 @@ mod tests {
         let _ = ctx.run(Default::default(), |ctx| {
             panel.ui(ctx, app);
         });
+    }
+
+    #[test]
+    fn markdown_title_change_keeps_note_window_rect() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_panel_default_size = (420.0, 320.0);
+
+        let mut panel = NotePanel::from_note(note_with_slug("Original Title", "stable-note"));
+        let window_id = egui::Id::new(("note_panel_window", panel.note.slug.clone()));
+        let raw_input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1200.0, 900.0),
+            )),
+            ..Default::default()
+        };
+
+        let _ = ctx.run(raw_input(), |ctx| {
+            panel.ui(ctx, &mut app);
+        });
+        let original_rect = ctx
+            .memory(|memory| memory.area_rect(window_id))
+            .expect("note window rect should be remembered after rendering");
+
+        panel.note.title = "Renamed From Markdown".into();
+        panel.note.content = "# Renamed From Markdown\n\nBody".into();
+        app.note_panel_default_size = (760.0, 560.0);
+
+        let _ = ctx.run(raw_input(), |ctx| {
+            panel.ui(ctx, &mut app);
+        });
+        let renamed_rect = ctx
+            .memory(|memory| memory.area_rect(window_id))
+            .expect("note window rect should still be remembered after title changes");
+
+        assert_eq!(renamed_rect, original_rect);
     }
 
     #[test]
