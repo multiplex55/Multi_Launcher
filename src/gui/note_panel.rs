@@ -1578,15 +1578,46 @@ impl NotePanel {
     ) {
         let body_width = ui.available_width().max(0.0);
         let body_height = ui.available_height();
-        ui.horizontal(|ui| {
-            let has_outline = app.note_settings.outline_sidebar_enabled && self.outline_open;
-            let outline_separator_width = if has_outline {
-                6.0 + ui.spacing().item_spacing.x * 2.0
-            } else {
-                0.0
-            };
+        let has_outline = app.note_settings.outline_sidebar_enabled && self.outline_open;
+
+        if !has_outline {
+            let body_size = egui::vec2(body_width, body_height);
+            let content = ui.allocate_ui_with_layout(
+                body_size,
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(body_width);
+                    self.render_note_content_area(
+                        ui,
+                        app,
+                        ctx,
+                        scroll_id_source,
+                        text_id_source,
+                        body_size,
+                    );
+                },
+            );
+
+            #[cfg(test)]
+            {
+                self.last_content_rect = Some(egui::Rect::from_min_size(
+                    content.response.rect.min,
+                    body_size,
+                ));
+            }
+
+            #[cfg(not(test))]
+            {
+                let _ = &content;
+            }
+
+            return;
+        }
+
+        ui.horizontal_top(|ui| {
+            let outline_separator_width = 6.0 + ui.spacing().item_spacing.x * 2.0;
             let mut content_width = body_width;
-            if has_outline {
+            {
                 self.outline_width = self.outline_width.clamp(120.0, 360.0);
                 let outline_budget = (body_width - outline_separator_width).max(0.0);
                 let outline_width = self.outline_width.min(outline_budget).min(body_width);
