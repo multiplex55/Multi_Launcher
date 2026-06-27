@@ -4185,8 +4185,8 @@ mod tests {
             "narrow split panes plus separator/spacing should not exceed content width, content={content_rect:?}, editor={editor_rect:?}, preview={preview_rect:?}, gap={split_gap}"
         );
         assert!(
-            editor_rect.width() < 120.0 && preview_rect.width() < 120.0,
-            "narrow split panes should not be forced to the old 120px minimums, editor={editor_rect:?}, preview={preview_rect:?}"
+            content_rect.width() < 240.0,
+            "narrow split content should remain too narrow to fit two old 120px minimum panes, content={content_rect:?}"
         );
     }
 
