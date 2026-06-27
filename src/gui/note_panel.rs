@@ -479,6 +479,8 @@ pub struct NotePanel {
     #[cfg(test)]
     last_preview_heading_rects: Vec<egui::Rect>,
     #[cfg(test)]
+    last_preview_fallback_rect: Option<egui::Rect>,
+    #[cfg(test)]
     metadata_details_render_count: usize,
     #[cfg(test)]
     backlinks_render_count: usize,
@@ -756,6 +758,8 @@ impl NotePanel {
             last_outline_rect: None,
             #[cfg(test)]
             last_preview_heading_rects: Vec::new(),
+            #[cfg(test)]
+            last_preview_fallback_rect: None,
             #[cfg(test)]
             metadata_details_render_count: 0,
             #[cfg(test)]
@@ -2604,12 +2608,18 @@ impl NotePanel {
             self.preview_render_error_reported = true;
         }
         let mut fallback = fragment.to_string();
-        ui.add(
+        let fallback_width = ui.available_width().max(0.0);
+        let response = ui.add_sized(
+            egui::vec2(fallback_width, 0.0),
             egui::TextEdit::multiline(&mut fallback)
-                .desired_width(f32::INFINITY)
+                .desired_width(fallback_width)
                 .font(FontId::monospace(app.note_font_size))
                 .interactive(false),
         );
+        #[cfg(test)]
+        {
+            self.last_preview_fallback_rect = Some(response.rect);
+        }
     }
 
     fn render_inline_note_text(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, text: &str) {
@@ -4014,6 +4024,43 @@ mod tests {
         assert!(
             (content_rect.height() - preview_rect.height()).abs() < 8.0,
             "split preview pane should closely match content body height, content={content_rect:?}, preview={preview_rect:?}"
+        );
+    }
+
+    #[test]
+    fn split_preview_fallback_keeps_long_unbroken_text_inside_preview_pane() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note(""));
+        let long_unbroken_preview = "x".repeat(10_000);
+        let pane_width = 240.0;
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+
+        let _ = ctx.run(raw_input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(pane_width, 300.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(pane_width);
+                        panel.render_preview_fallback(ui, &mut app, &long_unbroken_preview);
+                    },
+                );
+            });
+        });
+
+        let fallback_rect = panel
+            .last_preview_fallback_rect
+            .expect("fallback TextEdit should be rendered");
+        assert!(
+            fallback_rect.width() <= pane_width + 1.0,
+            "fallback text edit should stay within the preview pane width instead of expanding the dialog, pane_width={pane_width}, fallback={fallback_rect:?}"
         );
     }
 
