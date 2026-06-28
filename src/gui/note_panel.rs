@@ -4197,6 +4197,46 @@ mod tests {
     }
 
     #[test]
+    fn short_and_long_notes_use_similar_outer_window_size() {
+        fn rendered_note_panel_rect(content: &str, slug: &str) -> egui::Rect {
+            let ctx = egui::Context::default();
+            let mut app = new_app(&ctx);
+            app.note_panel_default_size = (500.0, 360.0);
+
+            let mut note = empty_note(content);
+            note.slug = slug.into();
+            let mut panel = NotePanel::from_note(note);
+            panel.show_metadata = false;
+            panel.view_mode = NoteViewMode::Edit;
+
+            let window_id = egui::Id::new(("note_panel_window", panel.note.slug.clone()));
+            let raw_input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(raw_input, |ctx| {
+                panel.ui(ctx, &mut app);
+            });
+
+            ctx.memory(|memory| memory.area_rect(window_id))
+                .expect("note panel window rect should be remembered after rendering")
+        }
+
+        let short_rect = rendered_note_panel_rect("short note", "short-note");
+        let long_content = (0..300)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let long_rect = rendered_note_panel_rect(&long_content, "long-note");
+
+        assert!((short_rect.width() - long_rect.width()).abs() <= 40.0);
+        assert!((short_rect.height() - long_rect.height()).abs() <= 60.0);
+    }
+
+    #[test]
     fn split_panes_fill_allocated_body_height() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
