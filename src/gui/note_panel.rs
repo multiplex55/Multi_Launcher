@@ -1615,7 +1615,7 @@ impl NotePanel {
 
         ui.horizontal_top(|ui| {
             let outline_separator_width = 6.0 + ui.spacing().item_spacing.x * 2.0;
-            let mut content_width = body_width;
+            let content_width;
             {
                 self.outline_width = self.outline_width.clamp(120.0, 360.0);
                 let outline_budget = (body_width - outline_separator_width).max(0.0);
