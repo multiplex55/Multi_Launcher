@@ -1615,7 +1615,7 @@ impl NotePanel {
 
         ui.horizontal_top(|ui| {
             let outline_separator_width = 6.0 + ui.spacing().item_spacing.x * 2.0;
-            let mut content_width = body_width;
+            let content_width;
             {
                 self.outline_width = self.outline_width.clamp(120.0, 360.0);
                 let outline_budget = (body_width - outline_separator_width).max(0.0);
@@ -4054,23 +4054,55 @@ mod tests {
 
         let _ = ctx.run(raw_input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                ui.allocate_ui_with_layout(
-                    size,
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_width(size.x);
-                        ui.set_height(size.y);
-                        panel.render_note_body_row(
-                            ui,
-                            app,
-                            ctx,
-                            scroll_id_source.clone(),
-                            text_id_source.clone(),
-                        );
-                    },
-                );
+                ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_width(size.x);
+                    ui.set_height(size.y);
+                    panel.render_note_body_row(
+                        ui,
+                        app,
+                        ctx,
+                        scroll_id_source.clone(),
+                        text_id_source.clone(),
+                    );
+                });
             });
         });
+    }
+
+    fn assert_split_panes_share_content_width(
+        content_rect: egui::Rect,
+        editor_rect: egui::Rect,
+        preview_rect: egui::Rect,
+    ) {
+        let split_gap = (preview_rect.min.x - editor_rect.max.x).max(0.0);
+        assert!(
+            editor_rect.min.x >= content_rect.min.x - 1.0,
+            "split editor should start within the existing content body, content={content_rect:?}, editor={editor_rect:?}"
+        );
+        assert!(
+            preview_rect.max.x <= content_rect.max.x + 1.0,
+            "split preview should end within the existing content body, content={content_rect:?}, preview={preview_rect:?}"
+        );
+        assert!(
+            editor_rect.width() + split_gap + preview_rect.width() <= content_rect.width() + 1.0,
+            "split panes plus their separator/spacing should fit within the content width, content={content_rect:?}, editor={editor_rect:?}, preview={preview_rect:?}, gap={split_gap}"
+        );
+    }
+
+    fn assert_outline_and_content_share_body_width(
+        body_width: f32,
+        outline_rect: egui::Rect,
+        content_rect: egui::Rect,
+    ) {
+        let outline_gap = (content_rect.min.x - outline_rect.max.x).max(0.0);
+        assert!(
+            content_rect.min.x >= outline_rect.max.x,
+            "outline-visible content should start after the outline width plus separator budget, outline={outline_rect:?}, content={content_rect:?}"
+        );
+        assert!(
+            outline_rect.width() + outline_gap + content_rect.width() <= body_width + 1.0,
+            "outline plus separator/spacing plus content should share the existing note body width, outline={outline_rect:?}, content={content_rect:?}, gap={outline_gap}, body_width={body_width}"
+        );
     }
 
     #[test]
@@ -4316,8 +4348,10 @@ mod tests {
         let preview_rect = panel
             .last_split_preview_rect
             .expect("split preview pane should be allocated");
-        let split_gap = (preview_rect.min.x - editor_rect.max.x).max(0.0);
-
+        assert!(
+            panel.last_outline_rect.is_none(),
+            "closed outline should not allocate an outline pane in no-outline split view"
+        );
         assert!(
             content_rect.width() <= app.note_panel_default_size.0 + 1.0,
             "split view should keep the content near the configured note width instead of expanding toward the screen width, content={content_rect:?}"
@@ -4326,10 +4360,7 @@ mod tests {
             content_rect.width() < 700.0,
             "split view content should not approach a large screen width, content={content_rect:?}"
         );
-        assert!(
-            editor_rect.width() + split_gap + preview_rect.width() <= content_rect.width() + 1.0,
-            "split panes plus their separator/spacing should fit within the content width, content={content_rect:?}, editor={editor_rect:?}, preview={preview_rect:?}, gap={split_gap}"
-        );
+        assert_split_panes_share_content_width(content_rect, editor_rect, preview_rect);
     }
 
     #[test]
@@ -4356,8 +4387,10 @@ mod tests {
         let preview_rect = panel
             .last_split_preview_rect
             .expect("narrow split preview pane should be allocated");
-        let split_gap = (preview_rect.min.x - editor_rect.max.x).max(0.0);
-
+        assert!(
+            panel.last_outline_rect.is_none(),
+            "closed outline should not allocate an outline pane in narrow no-outline split view"
+        );
         assert!(
             content_rect.width() <= app.note_panel_default_size.0 + 1.0,
             "split view should allow a narrow configured dialog width, content={content_rect:?}"
@@ -4366,10 +4399,7 @@ mod tests {
             editor_rect.width() > 0.0 && preview_rect.width() > 0.0,
             "narrow split panes should remain positive, editor={editor_rect:?}, preview={preview_rect:?}"
         );
-        assert!(
-            editor_rect.width() + split_gap + preview_rect.width() <= content_rect.width() + 1.0,
-            "narrow split panes plus separator/spacing should not exceed content width, content={content_rect:?}, editor={editor_rect:?}, preview={preview_rect:?}, gap={split_gap}"
-        );
+        assert_split_panes_share_content_width(content_rect, editor_rect, preview_rect);
         assert!(
             content_rect.width() < 240.0,
             "narrow split content should remain too narrow to fit two old 120px minimum panes, content={content_rect:?}"
@@ -4407,22 +4437,14 @@ mod tests {
         let preview_rect = panel
             .last_split_preview_rect
             .expect("split preview pane should be allocated beside outline");
-        let outline_gap = (content_rect.min.x - outline_rect.max.x).max(0.0);
-        let split_gap = (preview_rect.min.x - editor_rect.max.x).max(0.0);
+        let body_width = app.note_panel_default_size.0;
 
         assert!(
             outline_rect.width() <= 220.0 + 1.0,
             "outline should not exceed configured width, outline={outline_rect:?}"
         );
-        assert!(
-            outline_rect.width() + outline_gap + content_rect.width()
-                <= app.note_panel_default_size.0 + 1.0,
-            "outline plus separator/spacing plus content should share the existing note body width, outline={outline_rect:?}, content={content_rect:?}, gap={outline_gap}"
-        );
-        assert!(
-            editor_rect.width() + split_gap + preview_rect.width() <= content_rect.width() + 1.0,
-            "split panes should derive from the content rect remaining after the outline, content={content_rect:?}, editor={editor_rect:?}, preview={preview_rect:?}, gap={split_gap}"
-        );
+        assert_outline_and_content_share_body_width(body_width, outline_rect, content_rect);
+        assert_split_panes_share_content_width(content_rect, editor_rect, preview_rect);
     }
 
     #[test]
@@ -4434,9 +4456,8 @@ mod tests {
         app.note_settings.split_view_enabled = true;
 
         let long_unbroken = "x".repeat(10_000);
-        let mut panel = NotePanel::from_note(empty_note(&format!(
-            "# Long preview\n\n{long_unbroken}"
-        )));
+        let mut panel =
+            NotePanel::from_note(empty_note(&format!("# Long preview\n\n{long_unbroken}")));
         panel.show_metadata = false;
         panel.view_mode = NoteViewMode::Split;
         panel.outline_open = false;
@@ -4446,14 +4467,22 @@ mod tests {
         let content_rect = panel
             .last_content_rect
             .expect("long preview content body pane should be allocated");
+        let editor_rect = panel
+            .last_split_editor_rect
+            .expect("long preview split editor pane should be allocated");
         let preview_rect = panel
             .last_split_preview_rect
             .expect("long preview split pane should be allocated");
 
         assert!(
+            panel.last_outline_rect.is_none(),
+            "closed outline should not allocate an outline pane with long split preview content"
+        );
+        assert!(
             content_rect.width() <= app.note_panel_default_size.0 + 1.0,
             "long unbroken preview content should not widen the dialog content rect, content={content_rect:?}"
         );
+        assert_split_panes_share_content_width(content_rect, editor_rect, preview_rect);
         assert!(
             preview_rect.width() <= content_rect.width() + 1.0,
             "long unbroken preview content should remain bounded by the content rect, content={content_rect:?}, preview={preview_rect:?}"
