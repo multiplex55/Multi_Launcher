@@ -11,6 +11,7 @@ pub mod convert_panel;
 pub mod dropcalc;
 pub mod emoji;
 pub mod fav;
+pub mod file_search;
 pub mod folders;
 pub mod help;
 pub mod history;
