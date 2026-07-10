@@ -13,6 +13,7 @@ mod convert_panel;
 mod cpu_list_dialog;
 mod dashboard_editor_dialog;
 mod fav_dialog;
+mod file_search_dialog;
 mod image_panel;
 mod macro_dialog;
 mod mouse_gesture_settings_dialog;
@@ -43,8 +44,8 @@ pub use add_action_dialog::AddActionDialog;
 pub use add_bookmark_dialog::AddBookmarkDialog;
 pub use alias_dialog::AliasDialog;
 pub use bookmark_alias_dialog::BookmarkAliasDialog;
-pub use brightness_dialog::BrightnessDialog;
 pub use brightness_dialog::BRIGHTNESS_QUERIES;
+pub use brightness_dialog::BrightnessDialog;
 pub use calendar_event_details::CalendarEventDetails;
 pub use calendar_event_editor::CalendarEventEditor;
 pub use calendar_popover::CalendarPopover;
@@ -52,19 +53,20 @@ pub use clipboard_dialog::ClipboardDialog;
 pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
+pub use file_search_dialog::{FileSearchDialogState, FileSearchMode, FileSearchScopeMode};
 pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
 pub use mouse_gesture_settings_dialog::MouseGestureSettingsDialog;
 pub use mouse_gestures_dialog::{GestureRecorder, MgGesturesDialog, RecorderConfig};
 pub use note_graph_dialog::NoteGraphDialog;
 pub use note_panel::{
-    build_nvim_command, build_wezterm_command, extract_links, show_wiki_link, spawn_external,
-    NotePanel,
+    NotePanel, build_nvim_command, build_wezterm_command, extract_links, show_wiki_link,
+    spawn_external,
 };
 pub use notes_dialog::NotesDialog;
 pub use screenshot_editor::{
-    render_markup_layers, MarkupArrow, MarkupHistory, MarkupLayer, MarkupRect, MarkupStroke,
-    MarkupText, MarkupTool, ScreenshotEditor,
+    MarkupArrow, MarkupHistory, MarkupLayer, MarkupRect, MarkupStroke, MarkupText, MarkupTool,
+    ScreenshotEditor, render_markup_layers,
 };
 pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;
@@ -74,34 +76,35 @@ pub use theme_settings_dialog::ThemeSettingsDialogState;
 pub use timer_dialog::{TimerCompletionDialog, TimerDialog};
 pub use toast_log_dialog::ToastLogDialog;
 pub use todo_dialog::TodoDialog;
-pub use todo_view_dialog::{todo_view_layout_sizes, todo_view_window_constraints, TodoViewDialog};
+pub use todo_view_dialog::{TodoViewDialog, todo_view_layout_sizes, todo_view_window_constraints};
 pub use unused_assets_dialog::UnusedAssetsDialog;
 pub use volume_dialog::VolumeDialog;
 
 use crate::actions::folders;
-use crate::actions::{load_actions, Action};
+use crate::actions::{Action, load_actions};
 use crate::actions_editor::ActionsEditor;
-use crate::common::query::{action_matches_filters, split_action_filters, ActionFilterMetadata};
+use crate::common::query::{ActionFilterMetadata, action_matches_filters, split_action_filters};
 use crate::dashboard::config::DashboardConfig;
 use crate::dashboard::widgets::{WidgetRegistry, WidgetSettingsContext};
 use crate::dashboard::{
     Dashboard, DashboardContext, DashboardDataCache, DashboardEvent, WidgetActivation,
 };
+use crate::file_search::coordinator::SearchCoordinator;
 use crate::help_window::HelpWindow;
-use crate::history::{self, HistoryEntry, HistoryPin, HISTORY_PINS_FILE};
+use crate::history::{self, HISTORY_PINS_FILE, HistoryEntry, HistoryPin};
 use crate::indexer;
 use crate::launcher::launch_action;
-use crate::mouse_gestures::db::{load_gestures, save_gestures, GESTURES_FILE};
+use crate::mouse_gestures::db::{GESTURES_FILE, load_gestures, save_gestures};
 use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
 use crate::multi_manager::state::MultiManagerState;
 use crate::multi_manager::ui::{MultiManagerDialog, MultiManagerSettingsDialog};
-use crate::plugin::{PluginManager, CAP_FORCE_LIST_RESULTS, CAP_GRID_RESULTS_COMPATIBLE};
+use crate::plugin::{CAP_FORCE_LIST_RESULTS, CAP_GRID_RESULTS_COMPATIBLE, PluginManager};
 use crate::plugin_editor::PluginEditor;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
-use crate::plugins::snippets::{remove_snippet, SNIPPETS_FILE};
+use crate::plugins::snippets::{SNIPPETS_FILE, remove_snippet};
 use crate::settings::{MultiManagerSettings, NoteSettings, QueryResultsLayoutSettings, Settings};
 use crate::settings_editor::SettingsEditor;
-use crate::toast_log::{append_toast_log, TOAST_LOG_FILE};
+use crate::toast_log::{TOAST_LOG_FILE, append_toast_log};
 use crate::usage::{self, USAGE_FILE};
 use crate::visibility::apply_visibility;
 use chrono::NaiveDate;
@@ -110,8 +113,8 @@ use dashboard_editor_dialog::DashboardEditorDialog;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
 use fst::{IntoStreamer, Map, MapBuilder, Streamer};
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
 #[cfg(test)]
@@ -120,11 +123,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::path::Path;
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Mutex;
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 use url::Url;
@@ -244,6 +247,7 @@ pub enum Panel {
     MouseGestureSettingsDialog,
     ThemeSettingsDialog,
     FavDialog,
+    FileSearchDialog,
     NotesDialog,
     NoteGraphDialog,
     UnusedAssetsDialog,
@@ -286,6 +290,7 @@ struct PanelStates {
     mouse_gesture_settings_dialog: bool,
     theme_settings_dialog: bool,
     fav_dialog: bool,
+    file_search_dialog: bool,
     notes_dialog: bool,
     note_graph_dialog: bool,
     unused_assets_dialog: bool,
@@ -410,6 +415,8 @@ pub struct LauncherApp {
     theme_settings_dialog_open: bool,
     theme_settings_dialog: ThemeSettingsDialogState,
     fav_dialog: FavDialog,
+    file_search_dialog: FileSearchDialogState,
+    file_search_coordinator: SearchCoordinator,
     notes_dialog: NotesDialog,
     note_graph_dialog: NoteGraphDialog,
     unused_assets_dialog: UnusedAssetsDialog,
@@ -1144,6 +1151,8 @@ impl LauncherApp {
             theme_settings_dialog_open: false,
             theme_settings_dialog: ThemeSettingsDialogState::default(),
             fav_dialog: FavDialog::default(),
+            file_search_dialog: FileSearchDialogState::default(),
+            file_search_coordinator: SearchCoordinator::new(),
             notes_dialog: NotesDialog::default(),
             note_graph_dialog: NoteGraphDialog::default(),
             unused_assets_dialog: UnusedAssetsDialog::default(),
@@ -1853,6 +1862,10 @@ impl LauncherApp {
                 self.fav_dialog.open = false;
                 self.panel_states.fav_dialog = false;
             }
+            Panel::FileSearchDialog => {
+                self.file_search_dialog.open = false;
+                self.panel_states.file_search_dialog = false;
+            }
             Panel::NotesDialog => {
                 self.notes_dialog.open = false;
                 self.panel_states.notes_dialog = false;
@@ -2015,6 +2028,10 @@ impl LauncherApp {
                 self.fav_dialog.open = false;
                 self.panel_states.fav_dialog = false;
             }
+            Panel::FileSearchDialog => {
+                self.file_search_dialog.open = false;
+                self.panel_states.file_search_dialog = false;
+            }
             Panel::NotesDialog => {
                 self.notes_dialog.open = false;
                 self.panel_states.notes_dialog = false;
@@ -2129,6 +2146,7 @@ impl LauncherApp {
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_dialog.open(),
             Panel::ThemeSettingsDialog => self.open_theme_settings_dialog(),
             Panel::FavDialog => self.fav_dialog.open = true,
+            Panel::FileSearchDialog => self.file_search_dialog.open = true,
             Panel::NotesDialog => self.notes_dialog.open = true,
             Panel::NoteGraphDialog => self.note_graph_dialog.open = true,
             Panel::UnusedAssetsDialog => self.unused_assets_dialog.open = true,
@@ -2264,6 +2282,11 @@ impl LauncherApp {
             Panel::ThemeSettingsDialog
         );
         check!(self.fav_dialog.open, fav_dialog, Panel::FavDialog);
+        check!(
+            self.file_search_dialog.open,
+            file_search_dialog,
+            Panel::FileSearchDialog
+        );
         check!(self.notes_dialog.open, notes_dialog, Panel::NotesDialog);
         check!(
             self.note_graph_dialog.open,
@@ -2353,7 +2376,7 @@ impl LauncherApp {
     /// Open a note panel for the given slug, optionally using a template for new notes.
     pub fn open_note_panel(&mut self, slug: &str, template: Option<&str>) {
         use crate::plugins::note::{
-            expand_template_variables, extract_aliases, get_template, load_notes, Note,
+            Note, expand_template_variables, extract_aliases, get_template, load_notes,
         };
         let note = load_notes()
             .unwrap_or_default()
@@ -2695,7 +2718,7 @@ mod tests {
         dashboard::config::OverflowMode,
         dashboard::layout::NormalizedSlot,
         plugin::PluginManager,
-        plugins::note::{append_note, load_notes, save_notes, NotePlugin},
+        plugins::note::{NotePlugin, append_note, load_notes, save_notes},
         settings::Settings,
         toast_log::TOAST_LOG_FILE,
     };
@@ -2704,8 +2727,8 @@ mod tests {
     use once_cell::sync::Lazy;
     use serde_json::json;
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     };
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
@@ -3036,10 +3059,11 @@ mod tests {
 
         app.query = "note today".into();
         app.search();
-        assert!(app
-            .results
-            .iter()
-            .any(|a| a.action == "note:new:2025-02-23"));
+        assert!(
+            app.results
+                .iter()
+                .any(|a| a.action == "note:new:2025-02-23")
+        );
 
         app.query = "note search alpha".into();
         app.last_results_valid = false;
@@ -3146,45 +3170,45 @@ mod tests {
         note_settings.split_view_enabled = false;
 
         app.update_paths(
-            None, // plugin_dirs
-            None, // index_paths
-            None, // enabled_plugins
-            None, // enabled_capabilities
-            None, // offscreen_pos
-            None, // enable_toasts
-            None, // show_inline_errors
-            None, // show_error_toasts
-            None, // toast_duration
-            None, // fuzzy_weight
-            None, // usage_weight
-            None, // match_exact
-            None, // follow_mouse
-            None, // static_enabled
-            None, // static_pos
-            None, // static_size
-            None, // hide_after_run
-            None, // clear_query_after_run
-            None, // require_confirm_destructive
-            None, // timer_refresh
-            None, // disable_timer_updates
-            None, // preserve_command
-            None, // query_autocomplete
-            None, // net_refresh
-            None, // net_unit
-            None, // screenshot_dir
-            None, // screenshot_save_file
-            None, // screenshot_use_editor
-            None, // screenshot_auto_save
-            None, // always_on_top
-            None, // page_jump
+            None,                // plugin_dirs
+            None,                // index_paths
+            None,                // enabled_plugins
+            None,                // enabled_capabilities
+            None,                // offscreen_pos
+            None,                // enable_toasts
+            None,                // show_inline_errors
+            None,                // show_error_toasts
+            None,                // toast_duration
+            None,                // fuzzy_weight
+            None,                // usage_weight
+            None,                // match_exact
+            None,                // follow_mouse
+            None,                // static_enabled
+            None,                // static_pos
+            None,                // static_size
+            None,                // hide_after_run
+            None,                // clear_query_after_run
+            None,                // require_confirm_destructive
+            None,                // timer_refresh
+            None,                // disable_timer_updates
+            None,                // preserve_command
+            None,                // query_autocomplete
+            None,                // net_refresh
+            None,                // net_unit
+            None,                // screenshot_dir
+            None,                // screenshot_save_file
+            None,                // screenshot_use_editor
+            None,                // screenshot_auto_save
+            None,                // always_on_top
+            None,                // page_jump
             Some(note_settings), // note_settings
-            None, // note_panel_default_size
-            None, // note_save_on_close
-            None, // note_always_overwrite
-            None, // note_images_as_links
-            None, // note_show_details
-            None, // note_more_limit
-            None, // show_dashboard_diagnostics
+            None,                // note_panel_default_size
+            None,                // note_save_on_close
+            None,                // note_always_overwrite
+            None,                // note_images_as_links
+            None,                // note_show_details
+            None,                // note_more_limit
+            None,                // show_dashboard_diagnostics
         );
 
         assert!(!app.note_settings.split_view_enabled);
@@ -3213,10 +3237,11 @@ mod tests {
             ActivationSource::Enter,
         );
 
-        assert!(app
-            .error
-            .as_ref()
-            .is_some_and(|msg| msg.contains("Malformed note action")));
+        assert!(
+            app.error
+                .as_ref()
+                .is_some_and(|msg| msg.contains("Malformed note action"))
+        );
 
         app.query = "app sample".into();
         app.last_results_valid = false;
@@ -4035,10 +4060,11 @@ mod tests {
             ActivationSource::Enter,
         );
 
-        assert!(app
-            .error
-            .as_ref()
-            .is_some_and(|msg| msg.contains("injected failure")));
+        assert!(
+            app.error
+                .as_ref()
+                .is_some_and(|msg| msg.contains("injected failure"))
+        );
         assert!(app.error_time.is_some());
 
         set_execute_action_hook(Some(Box::new(|_| Ok(()))));
