@@ -490,6 +490,11 @@ pub struct LauncherApp {
     confirm_modal: ConfirmationModal,
     pending_confirm: Option<PendingConfirmAction>,
     pub vim_mode: bool,
+    pub file_search_window_open: bool,
+    pub file_search_selected_kind: crate::file_search::model::SearchKind,
+    pub file_search_root: Option<std::path::PathBuf>,
+    pub file_search_text: String,
+    pub file_search_active: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1229,6 +1234,11 @@ impl LauncherApp {
             suggestions: Vec::new(),
             autocomplete_index: 0,
             vim_mode: false,
+            file_search_window_open: false,
+            file_search_selected_kind: crate::file_search::model::SearchKind::Filename,
+            file_search_root: None,
+            file_search_text: String::new(),
+            file_search_active: false,
         };
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
