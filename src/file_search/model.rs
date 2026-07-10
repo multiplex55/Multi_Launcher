@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 /// Describes whether a search should match file names or file contents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -80,11 +81,23 @@ pub enum FileKind {
     Other,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FilenameRank {
+    ExactFilename,
+    FilenameStartsWith,
+    FilenameContains,
+    FullPathContains,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilenameResult {
     pub path: PathBuf,
     pub file_name: String,
+    pub parent_directory: Option<PathBuf>,
     pub kind: FileKind,
+    pub size: Option<u64>,
+    pub modified: Option<SystemTime>,
+    pub rank: FilenameRank,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

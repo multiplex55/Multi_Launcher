@@ -252,7 +252,7 @@ pub fn send_result_limited(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_search::model::{FileKind, FilenameResult};
+    use crate::file_search::model::{FileKind, FilenameRank, FilenameResult};
     use std::path::PathBuf;
     use std::sync::Mutex;
     use std::time::Duration;
@@ -304,7 +304,11 @@ mod tests {
                         let result = SearchResult::Filename(FilenameResult {
                             path: PathBuf::from(format!("result-{i}")),
                             file_name: format!("result-{i}"),
+                            parent_directory: None,
                             kind: FileKind::File,
+                            size: None,
+                            modified: None,
+                            rank: FilenameRank::ExactFilename,
                         });
                         if !send_result_limited(
                             &events,
