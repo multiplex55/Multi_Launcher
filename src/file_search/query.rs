@@ -30,11 +30,11 @@ pub struct SearchRequestDraft {
 ///
 /// Returns `None` when the first token is not `fs` (case-insensitive).
 pub fn parse_file_search_query(query: &str) -> Option<FileSearchCommand> {
-    let tokens = match shlex::split(query) {
-        Some(tokens) => tokens,
-        None => {
+    let tokens = match split_shell_words_preserving_backslashes(query) {
+        Ok(tokens) => tokens,
+        Err(message) => {
             return Some(FileSearchCommand::Error(FileSearchError::InvalidQuery {
-                message: "Could not parse quoted file search query".to_string(),
+                message,
             }));
         }
     };
@@ -79,6 +79,50 @@ pub fn parse_file_search_query(query: &str) -> Option<FileSearchCommand> {
         root,
         search_text,
     }))
+}
+
+fn split_shell_words_preserving_backslashes(query: &str) -> Result<Vec<String>, String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut token_started = false;
+
+    for ch in query.chars() {
+        match quote {
+            Some(quote_char) if ch == quote_char => {
+                quote = None;
+                token_started = true;
+            }
+            Some(_) => {
+                current.push(ch);
+                token_started = true;
+            }
+            None if ch == '"' || ch == '\'' => {
+                quote = Some(ch);
+                token_started = true;
+            }
+            None if ch.is_whitespace() => {
+                if token_started {
+                    tokens.push(std::mem::take(&mut current));
+                    token_started = false;
+                }
+            }
+            None => {
+                current.push(ch);
+                token_started = true;
+            }
+        }
+    }
+
+    if quote.is_some() {
+        return Err("Could not parse quoted file search query".to_string());
+    }
+
+    if token_started {
+        tokens.push(current);
+    }
+
+    Ok(tokens)
 }
 
 fn parse_kind(token: &str) -> Option<SearchKind> {
