@@ -12,6 +12,7 @@ use crate::plugins::convert_panel::ConvertPanelPlugin;
 use crate::plugins::dropcalc::DropCalcPlugin;
 use crate::plugins::emoji::EmojiPlugin;
 use crate::plugins::fav::FavPlugin;
+use crate::plugins::file_search::FileSearchPlugin;
 use crate::plugins::folders::FoldersPlugin;
 use crate::plugins::help::HelpPlugin;
 use crate::plugins::history::HistoryPlugin;
@@ -155,6 +156,7 @@ impl PluginManager {
         self.register_with_settings(ClipboardPlugin::new(clipboard_limit), plugin_settings);
         self.register_with_settings(BookmarksPlugin::default(), plugin_settings);
         self.register_with_settings(FoldersPlugin::default(), plugin_settings);
+        self.register_with_settings(FileSearchPlugin, plugin_settings);
         self.register_with_settings(OmniSearchPlugin::new(actions.clone()), plugin_settings);
         self.register_with_settings(SystemPlugin, plugin_settings);
         self.register_with_settings(ProcessesPlugin, plugin_settings);
