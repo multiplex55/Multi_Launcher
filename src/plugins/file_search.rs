@@ -156,7 +156,7 @@ fn encode_payload<T: Serialize>(payload: &T) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use serde_json::Value;
 
     fn plugin() -> FileSearchPlugin {
@@ -167,8 +167,7 @@ mod tests {
         let encoded = action
             .strip_prefix(prefix)
             .expect("action should have expected prefix");
-        let bytes = URL_SAFE_NO_PAD
-            .decode(encoded)
+        let bytes = base64::Engine::decode(&URL_SAFE_NO_PAD, encoded)
             .expect("payload should be URL-safe base64");
         serde_json::from_slice(&bytes).expect("payload should be JSON")
     }
@@ -207,7 +206,10 @@ mod tests {
         let payload = decode_payload(&actions[0].action, "file_search:start:");
         assert_eq!(payload["kind"], "content");
         assert_eq!(payload["text"], "needle");
-        assert_eq!(payload["root"], temp.path().to_string_lossy());
+        assert_eq!(
+            payload["root"].as_str(),
+            Some(temp.path().to_string_lossy().as_ref())
+        );
     }
 
     #[test]
