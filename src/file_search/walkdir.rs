@@ -160,6 +160,10 @@ pub fn search_filenames_in_directory(
         }
     }
 
+    if cancellation.is_cancelled() {
+        summary.cancelled = true;
+    }
+
     summary.skipped_entries = summary
         .skipped_entries
         .saturating_add(skipped_before_descent.get());
