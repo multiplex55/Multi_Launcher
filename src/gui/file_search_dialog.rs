@@ -1,3 +1,8 @@
+use crate::actions::clipboard;
+use crate::file_search::actions::{
+    containing_directory, copied_filename, nested_search_root, open_path,
+    open_terminal_in_directory, reveal_path,
+};
 use crate::file_search::coordinator::{event_id, SearchCoordinator};
 use crate::file_search::model::{
     ContentFileResult, SearchBackend, SearchEvent, SearchId, SearchKind, SearchRequest,
@@ -280,15 +285,23 @@ impl FileSearchDialogState {
             ui.colored_label(egui::Color32::YELLOW, msg);
         }
         egui::ScrollArea::vertical().show(ui, |ui| match self.selected_mode {
-            FileSearchMode::Filename => self.filename_results(ui),
-            FileSearchMode::Content => self.content_results(ui),
+            FileSearchMode::Filename => self.filename_results(ui, coordinator),
+            FileSearchMode::Content => self.content_results(ui, coordinator),
         });
     }
 
-    fn filename_results(&self, ui: &mut egui::Ui) {
-        for result in &self.results {
-            if let SearchResult::Filename(item) = result {
-                ui.horizontal(|ui| {
+    fn filename_results(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {
+        let items: Vec<_> = self
+            .results
+            .iter()
+            .filter_map(|result| match result {
+                SearchResult::Filename(item) => Some(item.clone()),
+                SearchResult::ContentFile(_) => None,
+            })
+            .collect();
+        for item in items {
+            let response = ui
+                .horizontal(|ui| {
                     ui.label(&item.file_name);
                     ui.label(format!("{:?}", item.kind));
                     ui.label(
@@ -297,14 +310,23 @@ impl FileSearchDialogState {
                             .map(|p| p.display().to_string())
                             .unwrap_or_default(),
                     );
-                });
-            }
+                })
+                .response;
+            response.context_menu(|ui| {
+                self.result_context_menu(
+                    ui,
+                    &item.path,
+                    item.kind == crate::file_search::model::FileKind::Directory,
+                    coordinator,
+                )
+            });
         }
     }
 
-    fn content_results(&self, ui: &mut egui::Ui) {
-        for group in self.content_result_groups.values() {
-            egui::CollapsingHeader::new(format!(
+    fn content_results(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {
+        let groups: Vec<_> = self.content_result_groups.values().cloned().collect();
+        for group in groups {
+            let response = egui::CollapsingHeader::new(format!(
                 "{} ({} matches) - {}{}",
                 group.path.display(),
                 group.total_matches,
@@ -319,7 +341,104 @@ impl FileSearchDialogState {
                 for (line_no, line) in &group.lines {
                     ui.label(format!("{line_no}: {line}"));
                 }
+            })
+            .header_response;
+            response
+                .context_menu(|ui| self.result_context_menu(ui, &group.path, false, coordinator));
+        }
+    }
+
+    fn result_context_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        path: &std::path::Path,
+        is_directory: bool,
+        coordinator: &mut SearchCoordinator,
+    ) {
+        if ui.button("Open file or directory").clicked() {
+            self.run_result_action("open", || open_path(path));
+            ui.close_menu();
+        }
+        if ui.button("Reveal in Explorer").clicked() {
+            self.run_result_action("reveal", || reveal_path(path));
+            ui.close_menu();
+        }
+        if ui.button("Open containing directory").clicked() {
+            self.run_result_action("open containing directory", || {
+                let dir = containing_directory(path).ok_or_else(|| {
+                    anyhow::anyhow!("{} has no containing directory", path.display())
+                })?;
+                open_path(&dir)
             });
+            ui.close_menu();
+        }
+        if ui.button("Copy full path").clicked() {
+            self.run_result_action("copy full path", || {
+                clipboard::set_text(&path.display().to_string())?;
+                Ok(())
+            });
+            ui.close_menu();
+        }
+        if ui.button("Copy filename").clicked() {
+            self.run_result_action("copy filename", || {
+                let name = copied_filename(path)
+                    .ok_or_else(|| anyhow::anyhow!("{} has no filename", path.display()))?;
+                clipboard::set_text(&name)?;
+                Ok(())
+            });
+            ui.close_menu();
+        }
+        if ui.button("Open terminal in containing directory").clicked() {
+            self.run_result_action("open terminal", || {
+                let dir = containing_directory(path).ok_or_else(|| {
+                    anyhow::anyhow!("{} has no containing directory", path.display())
+                })?;
+                open_terminal_in_directory(&dir)
+            });
+            ui.close_menu();
+        }
+        if ui
+            .button("Start filename search beneath this directory")
+            .clicked()
+        {
+            self.start_nested_search(path, is_directory, FileSearchMode::Filename, coordinator);
+            ui.close_menu();
+        }
+        if ui
+            .button("Start content search beneath this directory")
+            .clicked()
+        {
+            self.start_nested_search(path, is_directory, FileSearchMode::Content, coordinator);
+            ui.close_menu();
+        }
+    }
+
+    fn run_result_action(&mut self, label: &str, action: impl FnOnce() -> anyhow::Result<()>) {
+        if let Err(err) = action() {
+            self.warning_error_message = Some(format!("Failed to {label}: {err}"));
+        }
+    }
+
+    fn start_nested_search(
+        &mut self,
+        path: &std::path::Path,
+        is_directory: bool,
+        mode: FileSearchMode,
+        coordinator: &mut SearchCoordinator,
+    ) {
+        match nested_search_root(path, is_directory) {
+            Some(root) => {
+                self.selected_mode = mode;
+                self.selected_scope = FileSearchScopeMode::Directory;
+                self.root_directory = root.display().to_string();
+                self.start_search(coordinator);
+            }
+            None => {
+                self.warning_error_message = Some(format!(
+                    "Cannot search beneath {} because it has no containing directory.",
+                    path.display()
+                ));
+            }
         }
     }
 }

@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{anyhow, Context};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -108,6 +111,70 @@ impl FileSearchStartPayload {
     }
 }
 
+pub fn nested_search_root(path: &Path, is_directory: bool) -> Option<PathBuf> {
+    if is_directory {
+        Some(path.to_path_buf())
+    } else {
+        path.parent().map(Path::to_path_buf)
+    }
+}
+
+pub fn containing_directory(path: &Path) -> Option<PathBuf> {
+    path.parent().map(Path::to_path_buf)
+}
+
+pub fn copied_filename(path: &Path) -> Option<String> {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+}
+
+pub fn windows_reveal_args(path: &Path) -> Vec<String> {
+    vec![format!("/select,{}", path.display())]
+}
+
+pub fn open_path(path: &Path) -> anyhow::Result<()> {
+    open::that(path).with_context(|| format!("open {}", path.display()))
+}
+
+pub fn reveal_path(path: &Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let status = Command::new("explorer")
+            .args(windows_reveal_args(path))
+            .spawn()
+            .with_context(|| format!("reveal {} in Explorer", path.display()))?;
+        let _ = status;
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let target = path.parent().unwrap_or(path);
+        open::that(target).with_context(|| format!("reveal {}", path.display()))
+    }
+}
+
+pub fn open_terminal_in_directory(dir: &Path) -> anyhow::Result<()> {
+    if !dir.is_dir() {
+        return Err(anyhow!("{} is not a directory", dir.display()));
+    }
+    let mut command = if crate::plugins::shell::use_wezterm() {
+        let mut c = Command::new("wezterm");
+        c.arg("start");
+        c
+    } else if cfg!(target_os = "windows") {
+        Command::new("cmd")
+    } else {
+        let mut c = Command::new("sh");
+        c.arg("-lc").arg("${TERMINAL:-x-terminal-emulator}");
+        c
+    };
+    command
+        .current_dir(dir)
+        .spawn()
+        .with_context(|| format!("open terminal in {}", dir.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +226,45 @@ mod tests {
         let decoded: FileSearchStartPayload = decode_action_payload(&encoded).unwrap();
         let err = decoded.validate().unwrap_err();
         assert!(err.contains("text"));
+    }
+
+    #[test]
+    fn file_result_uses_parent_for_nested_search() {
+        assert_eq!(
+            nested_search_root(Path::new("/tmp/project/src/main.rs"), false),
+            Some(PathBuf::from("/tmp/project/src"))
+        );
+    }
+
+    #[test]
+    fn directory_result_uses_itself_for_nested_search() {
+        assert_eq!(
+            nested_search_root(Path::new("/tmp/project/src"), true),
+            Some(PathBuf::from("/tmp/project/src"))
+        );
+    }
+
+    #[test]
+    fn containing_directory_action_uses_parent() {
+        assert_eq!(
+            containing_directory(Path::new("/tmp/project/src/main.rs")),
+            Some(PathBuf::from("/tmp/project/src"))
+        );
+    }
+
+    #[test]
+    fn copied_filename_extracts_leaf_name() {
+        assert_eq!(
+            copied_filename(Path::new("/tmp/project/src/main.rs")).as_deref(),
+            Some("main.rs")
+        );
+    }
+
+    #[test]
+    fn windows_reveal_argument_construction_selects_path() {
+        assert_eq!(
+            windows_reveal_args(Path::new(r"C:\Users\alice\file.txt")),
+            vec![r"/select,C:\Users\alice\file.txt".to_string()]
+        );
     }
 }
