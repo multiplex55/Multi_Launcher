@@ -3,6 +3,7 @@ pub mod actions_editor;
 
 pub mod common;
 pub mod dashboard;
+pub mod file_search;
 pub mod help_window;
 pub mod history;
 pub mod hotkey;
