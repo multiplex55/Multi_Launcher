@@ -1232,6 +1232,8 @@ impl eframe::App for LauncherApp {
         let mut fav_dlg = std::mem::take(&mut self.fav_dialog);
         fav_dlg.ui(ctx, self);
         self.fav_dialog = fav_dlg;
+        self.file_search_dialog
+            .ui(ctx, &mut self.file_search_coordinator);
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
         notes_dlg.ui(ctx, self);
         self.notes_dialog = notes_dlg;

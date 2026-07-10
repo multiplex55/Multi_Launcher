@@ -847,38 +847,58 @@ impl LauncherApp {
         };
 
         if action == OPEN_ACTION {
-            self.file_search_window_open = true;
+            self.file_search_dialog.open = true;
             return true;
         }
         if action == CANCEL_ACTION {
-            self.file_search_active = false;
+            self.file_search_dialog
+                .cancel_search(&mut self.file_search_coordinator);
             return true;
         }
         if let Some(encoded) = action.strip_prefix(MODE_PREFIX) {
-            self.file_search_window_open = true;
+            self.file_search_dialog.open = true;
             match decode_action_payload::<FileSearchModePayload>(encoded).and_then(|payload| {
                 payload.validate()?;
                 Ok(payload)
             }) {
                 Ok(payload) => {
-                    self.file_search_selected_kind = payload.search_kind();
+                    let mode = match payload.search_kind() {
+                        crate::file_search::model::SearchKind::Filename => {
+                            crate::gui::FileSearchMode::Filename
+                        }
+                        crate::file_search::model::SearchKind::Content => {
+                            crate::gui::FileSearchMode::Content
+                        }
+                    };
+                    self.file_search_dialog.open_with_mode(mode);
                 }
                 Err(err) => self.report_file_search_action_error(err),
             }
             return true;
         }
         if let Some(encoded) = action.strip_prefix(START_PREFIX) {
-            self.file_search_window_open = true;
+            self.file_search_dialog.open = true;
             match decode_action_payload::<FileSearchStartPayload>(encoded).and_then(|payload| {
                 payload.validate()?;
                 Ok(payload)
             }) {
                 Ok(payload) => {
-                    self.file_search_active = false;
-                    self.file_search_selected_kind = payload.search_kind();
-                    self.file_search_root = payload.root_path();
-                    self.file_search_text = payload.text;
-                    self.file_search_active = true;
+                    self.file_search_dialog.selected_mode = match payload.search_kind() {
+                        crate::file_search::model::SearchKind::Filename => {
+                            crate::gui::FileSearchMode::Filename
+                        }
+                        crate::file_search::model::SearchKind::Content => {
+                            crate::gui::FileSearchMode::Content
+                        }
+                    };
+                    if let Some(root) = payload.root_path() {
+                        self.file_search_dialog.selected_scope =
+                            crate::gui::FileSearchScopeMode::Directory;
+                        self.file_search_dialog.root_directory = root.display().to_string();
+                    }
+                    self.file_search_dialog.search_text = payload.text;
+                    self.file_search_dialog
+                        .start_search(&mut self.file_search_coordinator);
                 }
                 Err(err) => self.report_file_search_action_error(err),
             }

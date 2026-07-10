@@ -1,0 +1,456 @@
+use crate::file_search::coordinator::{event_id, SearchCoordinator};
+use crate::file_search::model::{
+    ContentFileResult, SearchBackend, SearchEvent, SearchId, SearchKind, SearchRequest,
+    SearchResult, SearchScope, SearchStatus,
+};
+use eframe::egui;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+const DEFAULT_WINDOW_SIZE: egui::Vec2 = egui::vec2(760.0, 560.0);
+const MAX_RESULTS: usize = 500;
+const MAX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileSearchMode {
+    Filename,
+    Content,
+}
+
+impl From<FileSearchMode> for SearchKind {
+    fn from(value: FileSearchMode) -> Self {
+        match value {
+            FileSearchMode::Filename => SearchKind::Filename,
+            FileSearchMode::Content => SearchKind::Content,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileSearchScopeMode {
+    Global,
+    Directory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentResultGroup {
+    pub path: PathBuf,
+    pub total_matches: usize,
+    pub first_line: Option<String>,
+    pub lines: Vec<(usize, String)>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileSearchDialogState {
+    pub open: bool,
+    pub selected_mode: FileSearchMode,
+    pub selected_scope: FileSearchScopeMode,
+    pub search_text: String,
+    pub root_directory: String,
+    pub case_sensitive: bool,
+    pub include_hidden: bool,
+    pub active_search_id: Option<SearchId>,
+    pub current_status: SearchStatus,
+    pub backend: Option<SearchBackend>,
+    pub results: Vec<SearchResult>,
+    pub content_result_groups: BTreeMap<PathBuf, ContentResultGroup>,
+    pub warning_error_message: Option<String>,
+    pub inaccessible_path_warnings: usize,
+    pub persisted_window_size: egui::Vec2,
+}
+
+impl Default for FileSearchDialogState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            selected_mode: FileSearchMode::Filename,
+            selected_scope: FileSearchScopeMode::Global,
+            search_text: String::new(),
+            root_directory: String::new(),
+            case_sensitive: false,
+            include_hidden: false,
+            active_search_id: None,
+            current_status: SearchStatus::Pending,
+            backend: None,
+            results: Vec::new(),
+            content_result_groups: BTreeMap::new(),
+            warning_error_message: None,
+            inaccessible_path_warnings: 0,
+            persisted_window_size: DEFAULT_WINDOW_SIZE,
+        }
+    }
+}
+
+impl FileSearchDialogState {
+    pub fn open_with_mode(&mut self, mode: FileSearchMode) {
+        self.selected_mode = mode;
+        self.open = true;
+    }
+
+    pub fn start_search(&mut self, coordinator: &mut SearchCoordinator) -> Option<SearchId> {
+        let text = self.search_text.trim();
+        if text.is_empty() {
+            self.warning_error_message = Some("Enter search text before searching.".to_string());
+            return None;
+        }
+        let scope = match self.selected_scope {
+            FileSearchScopeMode::Global => SearchScope::Global,
+            FileSearchScopeMode::Directory => {
+                let root = self.root_directory.trim();
+                if root.is_empty() {
+                    self.warning_error_message = Some("Choose a root directory first.".to_string());
+                    return None;
+                }
+                SearchScope::Directory {
+                    root: PathBuf::from(root),
+                }
+            }
+        };
+        let request = SearchRequest {
+            kind: self.selected_mode.into(),
+            scope,
+            text: text.to_string(),
+            case_sensitive: self.case_sensitive,
+            include_hidden_files: self.include_hidden,
+            max_results: MAX_RESULTS,
+            max_file_size_bytes: MAX_FILE_SIZE_BYTES,
+            included_extensions: Vec::new(),
+            excluded_extensions: Vec::new(),
+            excluded_directory_names: Vec::new(),
+        };
+        self.results.clear();
+        self.content_result_groups.clear();
+        self.warning_error_message = None;
+        self.inaccessible_path_warnings = 0;
+        self.current_status = SearchStatus::Running;
+        self.backend = Some(SearchCoordinator::select_backend(&request));
+        let id = coordinator.start_search(request);
+        self.active_search_id = Some(id);
+        Some(id)
+    }
+
+    pub fn cancel_search(&mut self, coordinator: &mut SearchCoordinator) {
+        if self.active_search_id.is_some() && self.current_status == SearchStatus::Running {
+            coordinator.cancel_active();
+            self.current_status = SearchStatus::Cancelled;
+        }
+    }
+
+    pub fn drain_events(&mut self, coordinator: &mut SearchCoordinator) {
+        for event in coordinator.drain_events_including_stale() {
+            self.apply_event(event);
+        }
+    }
+
+    pub fn apply_event(&mut self, event: SearchEvent) {
+        if Some(event_id(&event)) != self.active_search_id {
+            return;
+        }
+        match event {
+            SearchEvent::Started { backend, .. } => {
+                self.backend = Some(backend);
+                self.current_status = SearchStatus::Running;
+            }
+            SearchEvent::Result { result, .. } => self.push_result(result),
+            SearchEvent::Progress { progress, .. } => {
+                self.inaccessible_path_warnings = progress
+                    .directories_scanned
+                    .saturating_sub(progress.files_scanned)
+                    .try_into()
+                    .unwrap_or(usize::MAX);
+            }
+            SearchEvent::Completed { .. } => self.current_status = SearchStatus::Completed,
+            SearchEvent::Cancelled { .. } => self.current_status = SearchStatus::Cancelled,
+            SearchEvent::Failed { error, .. } => {
+                self.current_status = SearchStatus::Failed;
+                self.warning_error_message = Some(error);
+            }
+        }
+    }
+
+    fn push_result(&mut self, result: SearchResult) {
+        if let SearchResult::ContentFile(content) = &result {
+            self.upsert_content_group(content);
+        }
+        self.results.push(result);
+    }
+
+    fn upsert_content_group(&mut self, content: &ContentFileResult) {
+        let lines: Vec<_> = content
+            .matches
+            .iter()
+            .take(20)
+            .map(|m| (m.line_number, m.line.clone()))
+            .collect();
+        self.content_result_groups.insert(
+            content.path.clone(),
+            ContentResultGroup {
+                path: content.path.clone(),
+                total_matches: content.matches.len(),
+                first_line: content.matches.first().map(|m| m.line.clone()),
+                lines,
+                truncated: content.matches.len() > 20,
+            },
+        );
+    }
+
+    pub fn ui(&mut self, ctx: &egui::Context, coordinator: &mut SearchCoordinator) {
+        self.drain_events(coordinator);
+        if !self.open {
+            return;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.current_status == SearchStatus::Running {
+                self.cancel_search(coordinator);
+            } else {
+                self.open = false;
+            }
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            self.start_search(coordinator);
+        }
+        let mut open = self.open;
+        if let Some(resp) = egui::Window::new("File Search")
+            .open(&mut open)
+            .default_size(DEFAULT_WINDOW_SIZE)
+            .min_size(egui::vec2(520.0, 360.0))
+            .resizable(true)
+            .show(ctx, |ui| self.contents(ui, coordinator))
+        {
+            self.persisted_window_size = resp.response.rect.size();
+        }
+        self.open = open;
+    }
+
+    fn contents(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.selected_mode,
+                FileSearchMode::Filename,
+                "Filename",
+            );
+            ui.selectable_value(&mut self.selected_mode, FileSearchMode::Content, "Content");
+            ui.separator();
+            ui.selectable_value(
+                &mut self.selected_scope,
+                FileSearchScopeMode::Global,
+                "Global",
+            );
+            ui.selectable_value(
+                &mut self.selected_scope,
+                FileSearchScopeMode::Directory,
+                "Directory",
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Search");
+            ui.text_edit_singleline(&mut self.search_text);
+        });
+        ui.horizontal(|ui| {
+            ui.label("Root");
+            ui.text_edit_singleline(&mut self.root_directory);
+            if ui.button("Pick…").clicked() {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    self.root_directory = path.display().to_string();
+                    self.selected_scope = FileSearchScopeMode::Directory;
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.case_sensitive, "Case-sensitive");
+            ui.checkbox(&mut self.include_hidden, "Include hidden");
+            if ui.button("Search").clicked() {
+                self.start_search(coordinator);
+            }
+            if ui.button("Cancel").clicked() {
+                self.cancel_search(coordinator);
+            }
+        });
+        ui.label(format!(
+            "Backend: {} | Status: {:?} | Results: {} | Inaccessible-path warnings: {}",
+            self.backend
+                .map(|b| format!("{b:?}"))
+                .unwrap_or_else(|| "not selected".to_string()),
+            self.current_status,
+            self.results.len(),
+            self.inaccessible_path_warnings
+        ));
+        if let Some(msg) = &self.warning_error_message {
+            ui.colored_label(egui::Color32::YELLOW, msg);
+        }
+        egui::ScrollArea::vertical().show(ui, |ui| match self.selected_mode {
+            FileSearchMode::Filename => self.filename_results(ui),
+            FileSearchMode::Content => self.content_results(ui),
+        });
+    }
+
+    fn filename_results(&self, ui: &mut egui::Ui) {
+        for result in &self.results {
+            if let SearchResult::Filename(item) = result {
+                ui.horizontal(|ui| {
+                    ui.label(&item.file_name);
+                    ui.label(format!("{:?}", item.kind));
+                    ui.label(
+                        item.parent_directory
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default(),
+                    );
+                });
+            }
+        }
+    }
+
+    fn content_results(&self, ui: &mut egui::Ui) {
+        for group in self.content_result_groups.values() {
+            egui::CollapsingHeader::new(format!(
+                "{} ({} matches) - {}{}",
+                group.path.display(),
+                group.total_matches,
+                group.first_line.as_deref().unwrap_or(""),
+                if group.truncated {
+                    " … truncated"
+                } else {
+                    ""
+                }
+            ))
+            .show(ui, |ui| {
+                for (line_no, line) in &group.lines {
+                    ui.label(format!("{line_no}: {line}"));
+                }
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file_search::model::{
+        ContentMatch, FileKind, FilenameRank, FilenameResult, SearchProgress,
+    };
+
+    #[test]
+    fn opening_with_mode_preselected() {
+        let mut state = FileSearchDialogState::default();
+        state.open_with_mode(FileSearchMode::Content);
+        assert!(state.open);
+        assert_eq!(state.selected_mode, FileSearchMode::Content);
+    }
+
+    #[test]
+    fn starting_search_sets_active_state() {
+        let mut state = FileSearchDialogState {
+            search_text: "foo".into(),
+            ..Default::default()
+        };
+        let mut coordinator = SearchCoordinator::new();
+        let id = state.start_search(&mut coordinator);
+        assert!(id.is_some());
+        assert_eq!(state.active_search_id, id);
+        assert_eq!(state.current_status, SearchStatus::Running);
+    }
+
+    #[test]
+    fn cancelling_search_updates_status() {
+        let mut state = FileSearchDialogState {
+            search_text: "foo".into(),
+            ..Default::default()
+        };
+        let mut coordinator = SearchCoordinator::new();
+        state.start_search(&mut coordinator);
+        state.cancel_search(&mut coordinator);
+        assert_eq!(state.current_status, SearchStatus::Cancelled);
+    }
+
+    #[test]
+    fn applying_active_events_updates_results_and_status() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(7)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Started {
+            id: SearchId(7),
+            backend: SearchBackend::WalkDir,
+        });
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(7),
+            result: SearchResult::Filename(FilenameResult {
+                path: "a.txt".into(),
+                file_name: "a.txt".into(),
+                parent_directory: Some("/tmp".into()),
+                kind: FileKind::File,
+                size: None,
+                modified: None,
+                rank: FilenameRank::ExactFilename,
+            }),
+        });
+        state.apply_event(SearchEvent::Progress {
+            id: SearchId(7),
+            progress: SearchProgress {
+                files_scanned: 2,
+                directories_scanned: 5,
+                results_found: 1,
+                status: SearchStatus::Running,
+            },
+        });
+        state.apply_event(SearchEvent::Completed { id: SearchId(7) });
+        assert_eq!(state.backend, Some(SearchBackend::WalkDir));
+        assert_eq!(state.results.len(), 1);
+        assert_eq!(state.inaccessible_path_warnings, 3);
+        assert_eq!(state.current_status, SearchStatus::Completed);
+    }
+
+    #[test]
+    fn ignoring_stale_events() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(2)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Failed {
+            id: SearchId(1),
+            error: "old".into(),
+        });
+        assert_eq!(state.current_status, SearchStatus::Pending);
+        assert!(state.warning_error_message.is_none());
+    }
+
+    #[test]
+    fn content_events_group_matches() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(1)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(1),
+            result: SearchResult::ContentFile(ContentFileResult {
+                path: "src/lib.rs".into(),
+                matches: vec![ContentMatch {
+                    line_number: 4,
+                    line: "needle".into(),
+                    byte_start: 0,
+                    byte_end: 6,
+                }],
+            }),
+        });
+        assert_eq!(state.content_result_groups.len(), 1);
+        assert_eq!(
+            state
+                .content_result_groups
+                .values()
+                .next()
+                .unwrap()
+                .total_matches,
+            1
+        );
+    }
+
+    #[test]
+    fn preserving_dimensions() {
+        let mut state = FileSearchDialogState::default();
+        state.persisted_window_size = egui::vec2(900.0, 700.0);
+        state.open_with_mode(FileSearchMode::Filename);
+        assert_eq!(state.persisted_window_size, egui::vec2(900.0, 700.0));
+    }
+}
