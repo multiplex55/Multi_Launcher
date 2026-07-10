@@ -1,24 +1,13 @@
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use serde::Serialize;
-
 use crate::actions::Action;
+use crate::file_search::actions::{
+    encode_action_payload, mode_action_payload, start_action_payload, MODE_PREFIX, OPEN_ACTION,
+    START_PREFIX,
+};
 use crate::file_search::model::SearchKind;
 use crate::file_search::query::{FileSearchCommand, SearchRequestDraft};
 use crate::plugin::Plugin;
 
 pub struct FileSearchPlugin;
-
-#[derive(Debug, Serialize)]
-struct ModePayload {
-    kind: &'static str,
-}
-
-#[derive(Debug, Serialize)]
-struct StartPayload {
-    kind: &'static str,
-    root: Option<String>,
-    text: String,
-}
 
 impl Plugin for FileSearchPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
@@ -65,7 +54,7 @@ fn open_action() -> Action {
     Action {
         label: "Open file search".into(),
         desc: "Open local filename/content search".into(),
-        action: "file_search:open".into(),
+        action: OPEN_ACTION.into(),
         args: None,
     }
 }
@@ -75,10 +64,10 @@ fn mode_action(kind: SearchKind) -> Action {
         label: format!("Open file search ({})", kind_label(kind)),
         desc: format!("Open local search with {} mode selected", kind_label(kind)),
         action: format!(
-            "file_search:mode:{}",
-            encode_payload(&ModePayload {
-                kind: kind_payload(kind)
-            })
+            "{}{}",
+            MODE_PREFIX,
+            encode_action_payload(&mode_action_payload(kind))
+                .expect("file search action payload should serialize")
         ),
         args: None,
     }
@@ -89,29 +78,29 @@ fn start_action(request: SearchRequestDraft) -> Action {
         .root
         .as_ref()
         .map(|path| path.to_string_lossy().into_owned());
-    let payload = StartPayload {
-        kind: kind_payload(request.kind),
-        root,
-        text: request.search_text.clone(),
-    };
+    let payload = start_action_payload(request.kind, root, request.search_text.clone());
     Action {
         label: format!("Start {} search", kind_label(request.kind)),
         desc: request.search_text,
-        action: format!("file_search:start:{}", encode_payload(&payload)),
+        action: format!(
+            "{}{}",
+            START_PREFIX,
+            encode_action_payload(&payload).expect("file search action payload should serialize")
+        ),
         args: None,
     }
 }
 
 fn request_directory_action(kind: SearchKind, search_text: String) -> Action {
-    let payload = StartPayload {
-        kind: kind_payload(kind),
-        root: None,
-        text: search_text.clone(),
-    };
+    let payload = start_action_payload(kind, None, search_text.clone());
     Action {
         label: format!("Choose folder for {} search", kind_label(kind)),
         desc: search_text,
-        action: format!("file_search:mode:{}", encode_payload(&payload)),
+        action: format!(
+            "{}{}",
+            MODE_PREFIX,
+            encode_action_payload(&payload).expect("file search action payload should serialize")
+        ),
         args: None,
     }
 }
@@ -120,7 +109,7 @@ fn error_action(message: String) -> Action {
     Action {
         label: "Invalid file search query".into(),
         desc: message,
-        action: "file_search:open".into(),
+        action: OPEN_ACTION.into(),
         args: None,
     }
 }
@@ -134,23 +123,11 @@ fn command_action(query: &str, desc: &str) -> Action {
     }
 }
 
-fn kind_payload(kind: SearchKind) -> &'static str {
-    match kind {
-        SearchKind::Filename => "file",
-        SearchKind::Content => "content",
-    }
-}
-
 fn kind_label(kind: SearchKind) -> &'static str {
     match kind {
         SearchKind::Filename => "filename",
         SearchKind::Content => "content",
     }
-}
-
-fn encode_payload<T: Serialize>(payload: &T) -> String {
-    let json = serde_json::to_vec(payload).expect("file search action payload should serialize");
-    URL_SAFE_NO_PAD.encode(json)
 }
 
 #[cfg(test)]

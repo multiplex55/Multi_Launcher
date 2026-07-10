@@ -50,6 +50,9 @@ impl LauncherApp {
         query_override: Option<String>,
         source: ActivationSource,
     ) {
+        if self.handle_file_search_action(&a.action) {
+            return;
+        }
         if let Some(new_query) = query_override {
             self.query = new_query;
             self.last_timer_query =
@@ -835,6 +838,59 @@ impl LauncherApp {
         } else if self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open() {
             self.focus_input();
         }
+    }
+
+    fn handle_file_search_action(&mut self, action: &str) -> bool {
+        use crate::file_search::actions::{
+            decode_action_payload, FileSearchModePayload, FileSearchStartPayload, CANCEL_ACTION,
+            MODE_PREFIX, OPEN_ACTION, START_PREFIX,
+        };
+
+        if action == OPEN_ACTION {
+            self.file_search_window_open = true;
+            return true;
+        }
+        if action == CANCEL_ACTION {
+            self.file_search_active = false;
+            return true;
+        }
+        if let Some(encoded) = action.strip_prefix(MODE_PREFIX) {
+            self.file_search_window_open = true;
+            match decode_action_payload::<FileSearchModePayload>(encoded).and_then(|payload| {
+                payload.validate()?;
+                Ok(payload)
+            }) {
+                Ok(payload) => {
+                    self.file_search_selected_kind = payload.search_kind();
+                }
+                Err(err) => self.report_file_search_action_error(err),
+            }
+            return true;
+        }
+        if let Some(encoded) = action.strip_prefix(START_PREFIX) {
+            self.file_search_window_open = true;
+            match decode_action_payload::<FileSearchStartPayload>(encoded).and_then(|payload| {
+                payload.validate()?;
+                Ok(payload)
+            }) {
+                Ok(payload) => {
+                    self.file_search_active = false;
+                    self.file_search_selected_kind = payload.search_kind();
+                    self.file_search_root = payload.root_path();
+                    self.file_search_text = payload.text;
+                    self.file_search_active = true;
+                }
+                Err(err) => self.report_file_search_action_error(err),
+            }
+            return true;
+        }
+        false
+    }
+
+    fn report_file_search_action_error(&mut self, err: String) {
+        let msg = format!("Invalid file search action: {err}");
+        self.set_inline_error(msg.clone());
+        self.add_error_toast(msg);
     }
 
     fn record_history_usage(&mut self, action: &Action, query: &str, source: ActivationSource) {
