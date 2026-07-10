@@ -50,6 +50,7 @@ pub struct SearchId(pub u64);
 pub enum SearchBackend {
     Everything,
     Ripgrep,
+    WalkDir,
     Native,
 }
 
