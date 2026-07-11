@@ -4125,6 +4125,19 @@ mod tests {
     }
 
     #[test]
+    fn launcher_query_is_not_refocused_while_file_search_remains_open() {
+        assert!(!LauncherApp::launcher_query_focus_should_be_requested(
+            true, false, true
+        ));
+        assert!(!LauncherApp::launcher_query_focus_should_be_requested(
+            false, true, true
+        ));
+        assert!(LauncherApp::launcher_query_focus_should_be_requested(
+            false, true, false
+        ));
+    }
+
+    #[test]
     fn arrow_page_tab_navigation_requires_query_focus() {
         assert!(!LauncherApp::launcher_query_keyboard_enabled(false));
         assert!(LauncherApp::launcher_query_keyboard_enabled(true));

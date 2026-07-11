@@ -5,7 +5,7 @@ use crate::file_search::model::{
 };
 use crate::file_search::settings::FileSearchSettings;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 
 #[derive(Debug, Clone, Default)]
@@ -531,6 +531,18 @@ mod tests {
         }
     }
 
+    fn assert_no_unwired_placeholder(events: &[SearchEvent]) {
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                SearchEvent::Failed { error, .. }
+                    if error.contains("Search backend execution is not wired yet")
+                        || error.contains("not wired yet")
+            )),
+            "events: {events:?}"
+        );
+    }
+
     #[test]
     fn from_settings_installs_production_dispatcher() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -566,11 +578,7 @@ mod tests {
                 ..
             } if result.file_name == expected
         )));
-        assert!(!events.iter().any(|event| matches!(
-            event,
-            SearchEvent::Failed { error, .. } if error.contains("not wired yet")
-                || error.contains("Search backend execution is not wired yet")
-        )));
+        assert_no_unwired_placeholder(&events);
     }
 
     #[test]
@@ -604,13 +612,67 @@ mod tests {
                 ..
             } if result.file_name == expected
         )));
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, SearchEvent::Completed { .. })));
-        assert!(!events.iter().any(|event| matches!(
-            event,
-            SearchEvent::Failed { error, .. } if error.contains("not wired yet")
-        )));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SearchEvent::Completed { .. }))
+        );
+        assert_no_unwired_placeholder(&events);
+    }
+
+    #[test]
+    fn production_content_search_uses_ripgrep_and_returns_result_when_available() {
+        let Ok(ripgrep) =
+            crate::file_search::ripgrep::resolve_ripgrep_executable(std::path::Path::new("rg"))
+        else {
+            return;
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let expected = temp.path().join("content-hit.txt");
+        std::fs::write(&expected, "alpha needle omega\n").expect("write file");
+        std::fs::write(temp.path().join("miss.txt"), "alpha omega\n").expect("write miss file");
+        let settings = FileSearchSettings {
+            ripgrep_executable_path: ripgrep,
+            max_search_results: 10,
+            ..FileSearchSettings::default()
+        };
+        let mut coordinator = SearchCoordinator::from_settings(settings.clone());
+
+        coordinator.start_search(SearchRequest {
+            kind: SearchKind::Content,
+            scope: SearchScope::Directory {
+                root: temp.path().to_path_buf(),
+            },
+            text: "needle".to_owned(),
+            case_sensitive: settings.case_sensitive,
+            include_hidden_files: settings.include_hidden_files,
+            max_results: settings.max_search_results,
+            max_file_size_bytes: settings.max_content_search_file_size_bytes,
+            included_extensions: Vec::new(),
+            excluded_extensions: Vec::new(),
+            excluded_directory_names: settings.excluded_directory_names.clone(),
+        });
+
+        let events = drain_until_terminal(&mut coordinator);
+        assert_eq!(coordinator.last_backend(), Some(SearchBackend::Ripgrep));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                SearchEvent::Result {
+                    result: SearchResult::ContentFile(result),
+                    ..
+                } if result.path == expected
+                    && result.matches.iter().any(|m| m.line_text.contains("needle"))
+            )),
+            "events: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SearchEvent::Completed { .. })),
+            "events: {events:?}"
+        );
+        assert_no_unwired_placeholder(&events);
     }
 
     #[test]
@@ -650,7 +712,12 @@ mod tests {
             })
             .expect("failed event");
         assert!(error.contains(&missing_rg.display().to_string()), "{error}");
+        assert!(error.contains("ripgrep"), "{error}");
         assert!(!error.contains("not wired yet"), "{error}");
+        assert!(
+            !error.contains("Search backend execution is not wired yet"),
+            "{error}"
+        );
     }
 
     #[test]

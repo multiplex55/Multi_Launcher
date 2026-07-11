@@ -16,6 +16,14 @@ impl LauncherApp {
         !file_search_open
     }
 
+    pub(crate) fn launcher_query_focus_should_be_requested(
+        just_became_visible: bool,
+        focus_query: bool,
+        file_search_open: bool,
+    ) -> bool {
+        (just_became_visible || focus_query) && !file_search_open
+    }
+
     pub(crate) fn result_context_menu_kind(&self, action: &Action) -> ResultContextMenuKind {
         if self.folder_aliases.contains_key(&action.action) && !action.action.starts_with("folder:")
         {
@@ -871,7 +879,11 @@ impl eframe::App for LauncherApp {
                         .id_source(input_id)
                         .desired_width(f32::INFINITY),
                 );
-                if just_became_visible || self.focus_query {
+                if Self::launcher_query_focus_should_be_requested(
+                    just_became_visible,
+                    self.focus_query,
+                    self.file_search_dialog.open,
+                ) {
                     query_response.request_focus();
                     self.focus_query = false;
                 }
@@ -1359,7 +1371,7 @@ mod tests {
     use super::*;
     use crate::{plugin::PluginManager, settings::Settings};
     use eframe::egui;
-    use std::sync::{atomic::AtomicBool, Arc};
+    use std::sync::{Arc, atomic::AtomicBool};
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
