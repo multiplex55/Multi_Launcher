@@ -392,6 +392,16 @@ mod tests {
         );
         assert_eq!(
             SearchCoordinator::select_backend(&request(
+                SearchKind::Filename,
+                SearchScope::File {
+                    path: "file.txt".into()
+                },
+                10
+            )),
+            SearchBackend::WalkDir
+        );
+        assert_eq!(
+            SearchCoordinator::select_backend(&request(
                 SearchKind::Content,
                 SearchScope::Global,
                 10
@@ -641,5 +651,46 @@ mod tests {
             .expect("failed event");
         assert!(error.contains(&missing_rg.display().to_string()), "{error}");
         assert!(!error.contains("not wired yet"), "{error}");
+    }
+
+    #[test]
+    fn production_global_filename_search_with_everything_disabled_fails_as_everything() {
+        let settings = FileSearchSettings {
+            everything_enabled: false,
+            ..FileSearchSettings::default()
+        };
+        let mut coordinator = SearchCoordinator::with_settings(settings);
+
+        coordinator.start_search(SearchRequest {
+            kind: SearchKind::Filename,
+            scope: SearchScope::Global,
+            text: "needle".to_owned(),
+            case_sensitive: false,
+            include_hidden_files: false,
+            max_results: 10,
+            max_file_size_bytes: 1024,
+            included_extensions: Vec::new(),
+            excluded_extensions: Vec::new(),
+            excluded_directory_names: Vec::new(),
+        });
+
+        let events = drain_until_terminal(&mut coordinator);
+        assert_eq!(coordinator.last_backend(), Some(SearchBackend::Everything));
+        let error = events
+            .iter()
+            .find_map(|event| match event {
+                SearchEvent::Failed { error, .. } => Some(error.as_str()),
+                _ => None,
+            })
+            .expect("failed event");
+        assert!(
+            error.contains("Everything filename search is unavailable"),
+            "{error}"
+        );
+        assert!(
+            error.contains("Everything filename search is disabled in settings"),
+            "{error}"
+        );
+        assert!(!error.contains("ripgrep"), "{error}");
     }
 }

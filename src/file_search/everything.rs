@@ -190,8 +190,12 @@ pub fn search_with_everything(
     if request.kind != SearchKind::Filename || request.scope != SearchScope::Global {
         return Err("Everything search only supports global filename requests".to_owned());
     }
-    let executable = detect_everything_executable(settings).ok_or_else(|| {
-        "Everything filename search is unavailable; install Everything/ES.exe or configure the Everything executable path in settings".to_owned()
+    let diagnostic = everything_diagnostic(settings);
+    let executable = diagnostic.detected_path.ok_or_else(|| {
+        let reason = diagnostic.unavailable_reason.unwrap_or_else(|| {
+            "Everything filename search is unavailable; install Everything/ES.exe or configure the Everything executable path in settings".to_owned()
+        });
+        format!("Everything filename search is unavailable: {reason}")
     })?;
     let spec = build_everything_command(executable, &request, settings);
     let mut child = Command::new(&spec.executable)
