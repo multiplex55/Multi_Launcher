@@ -102,7 +102,8 @@ pub fn search_content_with_ripgrep(
         });
     }
 
-    let executable = detect_ripgrep_executable(&settings.ripgrep_executable_path)?;
+    let executable = resolve_ripgrep_executable(&settings.ripgrep_executable_path)?;
+    tracing::debug!(executable = %executable.display(), "starting ripgrep content search");
     let roots = search_roots(&request, settings)?;
     let mut command = build_ripgrep_command(&executable, &request, settings, &roots);
     let mut child = command
@@ -148,7 +149,7 @@ pub fn search_content_with_ripgrep(
         summary.stderr = stderr;
         return Ok(summary);
     }
-    handle_exit_status(status, &stderr)?;
+    handle_exit_status(status, &executable, &stderr)?;
     let mut summary =
         parse_ripgrep_json_limited(&stdout, per_file_match_limit, request.max_results)?;
     summary.stderr = stderr;
@@ -162,40 +163,58 @@ fn per_file_match_limit(request: &SearchRequest, settings: &FileSearchSettings) 
     }
 }
 
-pub fn detect_ripgrep_executable(configured: &Path) -> Result<PathBuf, FileSearchError> {
-    if !configured.as_os_str().is_empty() && configured.components().count() > 1 {
+pub fn resolve_ripgrep_executable(configured: &Path) -> Result<PathBuf, FileSearchError> {
+    let configured = if configured.as_os_str().is_empty() {
+        Path::new("rg")
+    } else {
+        configured
+    };
+
+    if path_contains_directory_components(configured) {
         if configured.is_file() {
             return Ok(configured.to_path_buf());
         }
         return Err(FileSearchError::BackendUnavailable {
             backend: "ripgrep".to_owned(),
             message: format!(
-                "configured executable '{}' was not found",
+                "configured ripgrep executable '{}' does not exist or is not a file",
                 configured.display()
             ),
         });
     }
-    let name = if configured.as_os_str().is_empty() {
-        "rg".into()
-    } else {
-        configured.to_path_buf()
-    };
-    find_on_path(&name).ok_or_else(|| FileSearchError::BackendUnavailable {
+
+    find_on_process_path(configured).ok_or_else(|| FileSearchError::BackendUnavailable {
         backend: "ripgrep".to_owned(),
-        message: "ripgrep executable was not found in PATH".to_owned(),
+        message: format!(
+            "ripgrep executable '{}' was not found on PATH",
+            configured.display()
+        ),
     })
 }
 
-fn find_on_path(name: &Path) -> Option<PathBuf> {
+#[allow(dead_code)]
+pub fn detect_ripgrep_executable(configured: &Path) -> Result<PathBuf, FileSearchError> {
+    resolve_ripgrep_executable(configured)
+}
+
+fn path_contains_directory_components(path: &Path) -> bool {
+    path.components().count() > 1
+}
+
+fn find_on_process_path(name: &Path) -> Option<PathBuf> {
     let paths = env::var_os("PATH")?;
-    for dir in env::split_paths(&paths) {
+    find_on_path(name, env::split_paths(&paths))
+}
+
+fn find_on_path(name: &Path, paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    for dir in paths {
         let candidate = dir.join(name);
         if candidate.is_file() {
             return Some(candidate);
         }
         #[cfg(windows)]
-        {
-            let exe = candidate.with_extension("exe");
+        if name.extension().is_none() {
+            let exe = dir.join(format!("{}.exe", name.as_os_str().to_string_lossy()));
             if exe.is_file() {
                 return Some(exe);
             }
@@ -282,12 +301,16 @@ fn read_to_string(reader: impl Read) -> String {
     output
 }
 
-fn handle_exit_status(status: ExitStatus, stderr: &str) -> Result<(), FileSearchError> {
+fn handle_exit_status(
+    status: ExitStatus,
+    executable: &Path,
+    stderr: &str,
+) -> Result<(), FileSearchError> {
     match status.code() {
         Some(0) | Some(1) => Ok(()),
         Some(2) if is_non_fatal_ripgrep_stderr(stderr) => Ok(()),
-        _ => Err(FileSearchError::ProcessLaunchFailure {
-            executable: PathBuf::from("rg"),
+        _ => Err(FileSearchError::ProcessFatalStatus {
+            executable: executable.to_path_buf(),
             message: if stderr.trim().is_empty() {
                 format!("ripgrep exited with status {status}")
             } else {
@@ -397,7 +420,6 @@ fn parse_match_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
 
     fn req(root: PathBuf) -> SearchRequest {
         SearchRequest {
@@ -468,9 +490,9 @@ mod tests {
 
     #[test]
     fn backend_errors_are_distinct_from_no_matches() {
-        assert!(handle_exit_status(fake_status(1), "").is_ok());
-        assert!(handle_exit_status(fake_status(2), "unrecognized flag").is_err());
-        assert!(handle_exit_status(fake_status(2), "Permission denied").is_ok());
+        assert!(handle_exit_status(fake_status(1), Path::new("rg"), "").is_ok());
+        assert!(handle_exit_status(fake_status(2), Path::new("rg"), "unrecognized flag").is_err());
+        assert!(handle_exit_status(fake_status(2), Path::new("rg"), "Permission denied").is_ok());
     }
 
     #[cfg(unix)]
@@ -529,6 +551,77 @@ mod tests {
     }
 
     #[test]
+    fn resolves_bare_rg_from_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("rg");
+        std::fs::write(&executable, "").unwrap();
+
+        assert_eq!(
+            find_on_path(Path::new("rg"), [temp.path().to_path_buf()]),
+            Some(executable)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolves_bare_rg_exe_from_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("rg.exe");
+        std::fs::write(&executable, "").unwrap();
+
+        assert_eq!(
+            find_on_path(Path::new("rg.exe"), [temp.path().to_path_buf()]),
+            Some(executable)
+        );
+    }
+
+    #[test]
+    fn nonexistent_absolute_path_error_contains_configured_path() {
+        let configured = if cfg!(windows) {
+            PathBuf::from(r"C:\definitely\missing\rg.exe")
+        } else {
+            PathBuf::from("/definitely/missing/rg")
+        };
+        let error = resolve_ripgrep_executable(&configured)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&configured.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn relative_path_with_directory_components_must_exist() {
+        let configured = PathBuf::from("missing-dir/rg");
+        let error = resolve_ripgrep_executable(&configured)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&configured.display().to_string()), "{error}");
+
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("rg");
+        std::fs::write(&file, "").unwrap();
+        assert_eq!(resolve_ripgrep_executable(&file).unwrap(), file);
+    }
+
+    #[test]
+    fn settings_diagnostics_and_runtime_use_same_resolver_output() {
+        let Ok(resolved) = resolve_ripgrep_executable(Path::new("rg")) else {
+            return;
+        };
+        let settings = FileSearchSettings {
+            ripgrep_executable_path: PathBuf::from("rg"),
+            ..FileSearchSettings::default()
+        };
+        assert_eq!(
+            crate::file_search::settings::detect_ripgrep_executable(&settings),
+            Some(resolved.clone())
+        );
+        assert_eq!(
+            resolve_ripgrep_executable(&settings.ripgrep_executable_path).unwrap(),
+            resolved
+        );
+    }
+
+    #[test]
     fn query_starting_with_dash_is_after_separator() {
         let temp = tempfile::tempdir().unwrap();
         let request = SearchRequest {
@@ -551,22 +644,47 @@ mod tests {
 
     #[test]
     fn optional_integration_runs_when_rg_is_detected() {
-        let Ok(executable) = detect_ripgrep_executable(Path::new("rg")) else {
+        let Ok(executable) = resolve_ripgrep_executable(Path::new("rg")) else {
             return;
         };
         let temp = tempfile::tempdir().unwrap();
-        std::fs::write(temp.path().join("file.txt"), "hello Needle\n").unwrap();
+        let file = temp.path().join("file.txt");
+        std::fs::write(&file, "hello needle\n").unwrap();
         let settings = FileSearchSettings {
             ripgrep_executable_path: executable,
             ..FileSearchSettings::default()
         };
-        let (_tx, _rx) = mpsc::channel::<SearchEvent>();
-        let summary = search_content_with_ripgrep(
-            req(temp.path().to_path_buf()),
-            &settings,
-            &CancellationToken::new(),
-        )
-        .unwrap();
-        assert_eq!(summary.results.len(), 1);
+        let mut coordinator =
+            crate::file_search::coordinator::SearchCoordinator::from_settings(settings);
+        coordinator.start_search(req(temp.path().to_path_buf()));
+        let mut events = Vec::new();
+        for _ in 0..200 {
+            events.extend(coordinator.drain_current_events());
+            if events.iter().any(|event| {
+                matches!(
+                    event,
+                    SearchEvent::Completed { .. } | SearchEvent::Failed { .. }
+                )
+            }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SearchEvent::Completed { .. })),
+            "events: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                SearchEvent::Result {
+                    result: SearchResult::ContentFile(result),
+                    ..
+                } if result.path == file
+            )),
+            "events: {events:?}"
+        );
     }
 }

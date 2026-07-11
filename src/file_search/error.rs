@@ -19,6 +19,10 @@ pub enum FileSearchError {
         executable: PathBuf,
         message: String,
     },
+    ProcessFatalStatus {
+        executable: PathBuf,
+        message: String,
+    },
     ProcessOutputParseFailure {
         backend: String,
         message: String,
@@ -49,6 +53,16 @@ impl fmt::Display for FileSearchError {
                 message,
             } => {
                 write!(f, "Failed to launch '{}': {message}", executable.display())
+            }
+            Self::ProcessFatalStatus {
+                executable,
+                message,
+            } => {
+                write!(
+                    f,
+                    "Search process '{}' returned a fatal status: {message}",
+                    executable.display()
+                )
             }
             Self::ProcessOutputParseFailure { backend, message } => {
                 write!(f, "Failed to parse output from '{backend}': {message}")
