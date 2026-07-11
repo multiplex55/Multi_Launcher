@@ -184,3 +184,107 @@ fn existing_prefix_commands_remain_equivalent() {
 
     assert_eq!(routed_view, direct_view);
 }
+
+#[test]
+fn builtin_search_filtered_routes_file_omni_and_folder_prefixes() {
+    use multi_launcher::plugins::file_search::FileSearchPlugin;
+    use multi_launcher::plugins::folders::FoldersPlugin;
+    use multi_launcher::plugins::omni_search::OmniSearchPlugin;
+
+    let actions = Arc::new(vec![Action {
+        label: "plan app".into(),
+        desc: "launcher".into(),
+        action: "app:plan".into(),
+        args: None,
+    }]);
+    let mut pm = PluginManager::new();
+    pm.register(Box::new(FileSearchPlugin::default()));
+    pm.register(Box::new(OmniSearchPlugin::new(Arc::clone(&actions))));
+    pm.register(Box::new(FoldersPlugin::default()));
+
+    let fs = pm.search_filtered("fs", None, None);
+    assert!(fs.iter().any(|a| a.action == "file_search:open"));
+    assert!(!fs.iter().any(|a| a.action == "app:plan"));
+
+    let omni = pm.search_filtered("o plan", None, None);
+    assert!(omni.iter().any(|a| a.action == "app:plan"));
+    assert!(!omni.iter().any(|a| a.action.starts_with("file_search:")));
+
+    let folders = pm.search_filtered("f list", None, None);
+    assert!(folders.iter().any(|a| a.action.starts_with("folder:")));
+    assert!(!folders.iter().any(|a| a.action.starts_with("file_search:")));
+
+    let unrelated = pm.search_filtered("plain query", None, None);
+    assert!(!unrelated
+        .iter()
+        .any(|a| a.action.starts_with("file_search:")));
+}
+
+#[test]
+fn file_search_plugin_prefix_is_only_fs() {
+    use multi_launcher::plugin::Plugin;
+    use multi_launcher::plugins::file_search::FileSearchPlugin;
+
+    let plugin = FileSearchPlugin::default();
+    assert_eq!(plugin.query_prefixes(), &["fs"]);
+}
+
+#[test]
+fn constructing_manager_with_file_search_settings_preserves_omni_and_indexer_behavior() {
+    use multi_launcher::file_search::settings::FileSearchSettings;
+    use multi_launcher::indexer::index_paths;
+    use multi_launcher::settings::{NetUnit, Settings};
+    use serde_json::json;
+    use std::collections::HashMap;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("indexed.txt");
+    std::fs::write(&file_path, "indexed").unwrap();
+    let roots = vec![dir.path().display().to_string()];
+    let indexed_before = index_paths(&roots).unwrap();
+
+    let actions = Arc::new(vec![Action {
+        label: "plan app".into(),
+        desc: "launcher".into(),
+        action: "app:plan".into(),
+        args: None,
+    }]);
+    let mut plugin_settings = HashMap::new();
+    plugin_settings.insert(
+        "omni_search".to_string(),
+        json!({"include_apps": false, "include_notes": false, "include_todos": false, "include_calendar": false, "include_folders": false, "include_bookmarks": false}),
+    );
+    plugin_settings.insert(
+        "file_search".to_string(),
+        serde_json::to_value(FileSearchSettings {
+            global_content_search_roots: vec![dir.path().to_path_buf()],
+            max_search_results: 7,
+            everything_enabled: false,
+            ..FileSearchSettings::default()
+        })
+        .unwrap(),
+    );
+
+    let mut pm = PluginManager::new();
+    pm.reload_from_dirs(
+        &[],
+        Settings::default().clipboard_limit,
+        NetUnit::Bytes,
+        false,
+        &plugin_settings,
+        Arc::clone(&actions),
+    );
+
+    let omni = pm.search_filtered("o plan", None, None);
+    assert!(!omni.iter().any(|a| a.action == "app:plan"));
+
+    let indexed_after = index_paths(&roots).unwrap();
+    let action_view = |actions: Vec<Action>| {
+        actions
+            .into_iter()
+            .map(|a| (a.label, a.desc, a.action, a.args))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(action_view(indexed_before), action_view(indexed_after));
+}

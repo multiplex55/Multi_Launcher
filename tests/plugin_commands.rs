@@ -135,3 +135,53 @@ fn omni_search_settings_from_plugin_manager_are_applied() {
     assert!(!app.results.iter().any(|a| a.action == "todo:done:0"));
     assert!(app.results.iter().any(|a| a.action == "app:plan"));
 }
+
+#[test]
+fn command_collection_keeps_existing_folder_and_omni_commands_and_adds_file_search_commands() {
+    use multi_launcher::plugins::file_search::FileSearchPlugin;
+    use multi_launcher::plugins::folders::FoldersPlugin;
+    use multi_launcher::plugins::omni_search::OmniSearchPlugin;
+
+    fn command_view(actions: &[Action]) -> std::collections::HashSet<(String, String, String)> {
+        actions
+            .iter()
+            .map(|a| (a.label.clone(), a.desc.clone(), a.action.clone()))
+            .collect()
+    }
+
+    let actions = Arc::new(Vec::new());
+    let mut previous = PluginManager::new();
+    previous.register(Box::new(FoldersPlugin::default()));
+    previous.register(Box::new(OmniSearchPlugin::new(Arc::clone(&actions))));
+    let previous_commands = command_view(&previous.commands());
+
+    let mut current = PluginManager::new();
+    current.register(Box::new(FoldersPlugin::default()));
+    current.register(Box::new(OmniSearchPlugin::new(Arc::clone(&actions))));
+    current.register(Box::new(FileSearchPlugin::default()));
+    let current_commands = command_view(&current.commands());
+
+    for command in &previous_commands {
+        assert!(
+            current_commands.contains(command),
+            "missing previous command: {command:?}"
+        );
+    }
+
+    for expected in [
+        ("fs", "File Search", "query:fs "),
+        ("fs file", "File Search", "query:fs file "),
+        ("fs content", "File Search", "query:fs content "),
+        ("fs here file", "File Search", "query:fs here file "),
+        ("fs here content", "File Search", "query:fs here content "),
+    ] {
+        assert!(
+            current_commands.contains(&(
+                expected.0.to_string(),
+                expected.1.to_string(),
+                expected.2.to_string()
+            )),
+            "missing file-search command: {expected:?}"
+        );
+    }
+}
