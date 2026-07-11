@@ -1,13 +1,15 @@
 use crate::actions::clipboard;
 use crate::file_search::actions::{
-    InvocationTarget, containing_directory, copied_filename, nested_search_root,
+    containing_directory, copied_filename, nested_search_root,
     open_configured_terminal_in_directory, open_in_configured_editor, open_path, reveal_path,
+    InvocationTarget,
 };
-use crate::file_search::coordinator::{SearchCoordinator, event_id};
+use crate::file_search::coordinator::{event_id, SearchCoordinator};
 use crate::file_search::model::{
     ContentFileResult, ContentMatch, SearchBackend, SearchEvent, SearchId, SearchKind,
     SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
+use crate::file_search::preview::PreviewRequest;
 use crate::file_search::settings::FileSearchSettings;
 use eframe::egui;
 use std::collections::BTreeMap;
@@ -61,6 +63,7 @@ pub struct FileSearchDialogState {
     pub content_result_groups: BTreeMap<PathBuf, ContentResultGroup>,
     pub warning_error_message: Option<String>,
     pub inaccessible_path_warnings: usize,
+    pub last_preview_request: Option<PreviewRequest>,
     pub persisted_window_size: egui::Vec2,
     pub settings: FileSearchSettings,
 }
@@ -82,6 +85,7 @@ impl Default for FileSearchDialogState {
             content_result_groups: BTreeMap::new(),
             warning_error_message: None,
             inaccessible_path_warnings: 0,
+            last_preview_request: None,
             persisted_window_size: DEFAULT_WINDOW_SIZE,
             settings: FileSearchSettings::default(),
         }
@@ -370,6 +374,27 @@ impl FileSearchDialogState {
         self.result_context_menu(ui, path, false, first_match, coordinator);
     }
 
+    pub fn request_preview(
+        &mut self,
+        path: &std::path::Path,
+        first_match: Option<&ContentMatch>,
+    ) -> PreviewRequest {
+        let request = first_match
+            .map(|content_match| {
+                PreviewRequest::for_match(
+                    path,
+                    content_match.line_number,
+                    content_match
+                        .column
+                        .map(|column| column.saturating_add(1))
+                        .unwrap_or(1),
+                )
+            })
+            .unwrap_or_else(|| PreviewRequest::new(path));
+        self.last_preview_request = Some(request.clone());
+        request
+    }
+
     fn start_file_content_search(
         &mut self,
         path: &std::path::Path,
@@ -426,6 +451,10 @@ impl FileSearchDialogState {
                     },
                 )
             });
+            ui.close_menu();
+        }
+        if ui.button("Preview").clicked() {
+            self.request_preview(path, first_match);
             ui.close_menu();
         }
         if ui.button("Open file or directory").clicked() {
@@ -642,5 +671,45 @@ mod tests {
         state.persisted_window_size = egui::vec2(900.0, 700.0);
         state.open_with_mode(FileSearchMode::Filename);
         assert_eq!(state.persisted_window_size, egui::vec2(900.0, 700.0));
+    }
+
+    #[test]
+    fn requesting_preview_records_match_context() {
+        let mut state = FileSearchDialogState::default();
+        let path = PathBuf::from("src/lib.rs");
+        let content_match = ContentMatch::new(12, "hello needle".into(), 6, 12);
+
+        let request = state.request_preview(&path, Some(&content_match));
+
+        assert_eq!(request.path, path);
+        assert_eq!(request.selected_match.unwrap().line, 12);
+        assert_eq!(request.selected_match.unwrap().column, 7);
+        assert_eq!(state.last_preview_request, Some(request));
+    }
+
+    #[test]
+    fn context_menu_nested_search_uses_file_parent_or_directory_itself() {
+        let mut state = FileSearchDialogState {
+            search_text: "needle".into(),
+            ..Default::default()
+        };
+        let mut coordinator = SearchCoordinator::new();
+
+        state.start_nested_search(
+            std::path::Path::new("/tmp/project/file.txt"),
+            false,
+            FileSearchMode::Filename,
+            &mut coordinator,
+        );
+        assert_eq!(state.root_directory, "/tmp/project");
+
+        state.start_nested_search(
+            std::path::Path::new("/tmp/project/src"),
+            true,
+            FileSearchMode::Content,
+            &mut coordinator,
+        );
+        assert_eq!(state.root_directory, "/tmp/project/src");
+        assert_eq!(state.selected_mode, FileSearchMode::Content);
     }
 }

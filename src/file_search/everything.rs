@@ -639,4 +639,30 @@ exit /b 3
         assert!(err.contains("Everything search failed"));
         assert!(err.contains("failure"));
     }
+
+    #[test]
+    fn optional_integration_runs_only_when_enabled_and_detected() {
+        if env::var_os("MULTI_LAUNCHER_TEST_EVERYTHING").is_none() {
+            return;
+        }
+        let settings = FileSearchSettings {
+            everything_enabled: true,
+            ..FileSearchSettings::default()
+        };
+        if detect_everything_executable(&settings).is_none() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        search_with_everything(
+            request("definitely-not-a-real-file-search-fixture"),
+            &settings,
+            &CancellationToken::new(),
+            &tx,
+            SearchId(99),
+        )
+        .unwrap();
+        assert!(rx
+            .try_iter()
+            .any(|event| matches!(event, SearchEvent::Completed { id: SearchId(99) })));
+    }
 }
