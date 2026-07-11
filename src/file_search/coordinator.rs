@@ -1,9 +1,11 @@
+use crate::file_search::executor::FileSearchExecutor;
 use crate::file_search::model::{
     SearchBackend, SearchEvent, SearchId, SearchKind, SearchRequest, SearchResult, SearchScope,
     SearchStatus,
 };
+use crate::file_search::settings::FileSearchSettings;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::thread;
 
 #[derive(Debug, Clone, Default)]
@@ -49,29 +51,6 @@ pub trait SearchExecutor: Send + Sync + 'static {
     );
 }
 
-#[derive(Clone)]
-struct UnimplementedExecutor;
-
-impl SearchExecutor for UnimplementedExecutor {
-    fn execute(
-        &self,
-        id: SearchId,
-        _request: SearchRequest,
-        token: CancellationToken,
-        events: mpsc::Sender<SearchEvent>,
-    ) {
-        if token.is_cancelled() {
-            let _ = events.send(SearchEvent::Cancelled { id });
-            return;
-        }
-
-        let _ = events.send(SearchEvent::Failed {
-            id,
-            error: "Search backend execution is not wired yet".to_string(),
-        });
-    }
-}
-
 pub struct SearchCoordinator {
     next_id: u64,
     active_search_id: Option<SearchId>,
@@ -92,7 +71,11 @@ impl Default for SearchCoordinator {
 
 impl SearchCoordinator {
     pub fn new() -> Self {
-        Self::with_executor(Arc::new(UnimplementedExecutor))
+        Self::with_settings(FileSearchSettings::default())
+    }
+
+    pub fn with_settings(settings: FileSearchSettings) -> Self {
+        Self::with_executor(Arc::new(FileSearchExecutor::new(settings)))
     }
 
     pub fn with_executor(executor: Arc<dyn SearchExecutor>) -> Self {
@@ -492,5 +475,105 @@ mod tests {
             .filter(|event| matches!(event, SearchEvent::Result { .. }))
             .count();
         assert_eq!(results, 2);
+    }
+    fn drain_until_terminal(coordinator: &mut SearchCoordinator) -> Vec<SearchEvent> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut all_events = Vec::new();
+        loop {
+            let events = coordinator.drain_current_events();
+            let terminal = events.iter().any(|event| {
+                matches!(
+                    event,
+                    SearchEvent::Completed { .. }
+                        | SearchEvent::Cancelled { .. }
+                        | SearchEvent::Failed { .. }
+                )
+            });
+            all_events.extend(events);
+            if terminal || std::time::Instant::now() >= deadline {
+                return all_events;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn production_directory_filename_search_uses_walkdir_and_returns_result() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let expected = "known-production-filename.txt";
+        std::fs::write(temp.path().join(expected), "contents").expect("write file");
+        let mut coordinator = SearchCoordinator::new();
+
+        coordinator.start_search(SearchRequest {
+            kind: SearchKind::Filename,
+            scope: SearchScope::Directory {
+                root: temp.path().to_path_buf(),
+            },
+            text: expected.to_owned(),
+            case_sensitive: false,
+            include_hidden_files: false,
+            max_results: 10,
+            max_file_size_bytes: 1024,
+            included_extensions: Vec::new(),
+            excluded_extensions: Vec::new(),
+            excluded_directory_names: Vec::new(),
+        });
+
+        let events = drain_until_terminal(&mut coordinator);
+        assert_eq!(coordinator.last_backend(), Some(SearchBackend::WalkDir));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SearchEvent::Result {
+                result: SearchResult::Filename(result),
+                ..
+            } if result.file_name == expected
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, SearchEvent::Completed { .. })));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            SearchEvent::Failed { error, .. } if error.contains("not wired yet")
+        )));
+    }
+
+    #[test]
+    fn production_content_search_with_missing_ripgrep_fails_with_configured_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("haystack.txt"), "needle").expect("write file");
+        let missing_rg = temp.path().join("missing").join("rg");
+        assert!(missing_rg.is_absolute());
+        let settings = FileSearchSettings {
+            ripgrep_executable_path: missing_rg.clone(),
+            ..FileSearchSettings::default()
+        };
+        let mut coordinator = SearchCoordinator::with_settings(settings);
+
+        coordinator.start_search(SearchRequest {
+            kind: SearchKind::Content,
+            scope: SearchScope::Directory {
+                root: temp.path().to_path_buf(),
+            },
+            text: "needle".to_owned(),
+            case_sensitive: false,
+            include_hidden_files: false,
+            max_results: 10,
+            max_file_size_bytes: 1024,
+            included_extensions: Vec::new(),
+            excluded_extensions: Vec::new(),
+            excluded_directory_names: Vec::new(),
+        });
+
+        let events = drain_until_terminal(&mut coordinator);
+        assert_eq!(coordinator.last_backend(), Some(SearchBackend::Ripgrep));
+        let error = events
+            .iter()
+            .find_map(|event| match event {
+                SearchEvent::Failed { error, .. } => Some(error.as_str()),
+                _ => None,
+            })
+            .expect("failed event");
+        assert!(error.contains(&missing_rg.display().to_string()), "{error}");
+        assert!(!error.contains("not wired yet"), "{error}");
     }
 }

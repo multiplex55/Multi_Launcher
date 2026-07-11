@@ -2,6 +2,7 @@ pub mod actions;
 pub mod coordinator;
 pub mod error;
 pub mod everything;
+pub mod executor;
 pub mod model;
 pub mod preview;
 pub mod query;
