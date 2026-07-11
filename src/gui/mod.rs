@@ -4070,6 +4070,54 @@ mod tests {
     }
 
     #[test]
+    fn launcher_enter_activation_requires_query_focus_and_closed_file_search() {
+        assert!(!LauncherApp::launcher_enter_activation_enabled(
+            false, false
+        ));
+        assert!(LauncherApp::launcher_enter_activation_enabled(true, false));
+        assert!(!LauncherApp::launcher_enter_activation_enabled(true, true));
+    }
+
+    #[test]
+    fn fs_query_text_does_not_imply_launcher_keyboard_ownership() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "fs".into();
+        app.results = vec![Action {
+            label: "File Search".into(),
+            desc: "Open file search".into(),
+            action: crate::file_search::actions::OPEN_ACTION.into(),
+            args: None,
+        }];
+        app.selected = Some(0);
+
+        assert!(!LauncherApp::launcher_query_keyboard_enabled(false));
+        assert!(!LauncherApp::launcher_enter_activation_enabled(
+            false,
+            app.file_search_dialog.open
+        ));
+    }
+
+    #[test]
+    fn open_file_search_disables_launcher_enter_activation() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "fs".into();
+        app.file_search_dialog.open = true;
+
+        assert!(!LauncherApp::launcher_enter_activation_enabled(
+            true,
+            app.file_search_dialog.open
+        ));
+    }
+
+    #[test]
+    fn arrow_page_tab_navigation_requires_query_focus() {
+        assert!(!LauncherApp::launcher_query_keyboard_enabled(false));
+        assert!(LauncherApp::launcher_query_keyboard_enabled(true));
+    }
+
+    #[test]
     fn grid_layout_defaults_to_enabled_for_non_prefixed_queries() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);

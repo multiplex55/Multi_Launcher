@@ -1,6 +1,17 @@
 use super::*;
 
 impl LauncherApp {
+    pub(crate) fn launcher_query_keyboard_enabled(query_has_focus: bool) -> bool {
+        query_has_focus
+    }
+
+    pub(crate) fn launcher_enter_activation_enabled(
+        query_has_focus: bool,
+        file_search_open: bool,
+    ) -> bool {
+        query_has_focus && !file_search_open
+    }
+
     pub(crate) fn result_context_menu_kind(&self, action: &Action) -> ResultContextMenuKind {
         if self.folder_aliases.contains_key(&action.action) && !action.action.starts_with("folder:")
         {
@@ -851,17 +862,18 @@ impl eframe::App for LauncherApp {
                     }
                 }
 
-                let input = ui.add(
+                let query_response = ui.add(
                     egui::TextEdit::singleline(&mut self.query)
                         .id_source(input_id)
                         .desired_width(f32::INFINITY),
                 );
                 if just_became_visible || self.focus_query {
-                    input.request_focus();
+                    query_response.request_focus();
                     self.focus_query = false;
                 }
+                let query_has_focus = query_response.has_focus();
 
-                if input.changed() {
+                if query_response.changed() {
                     self.autocomplete_index = 0;
                     if Self::is_note_search_query(&self.query) {
                         self.last_note_search_change = Some(Instant::now());
@@ -897,50 +909,31 @@ impl eframe::App for LauncherApp {
                     }
                 }
 
-                if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-                    self.handle_key(egui::Key::ArrowDown);
+                if Self::launcher_query_keyboard_enabled(query_has_focus) {
+                    for key in [
+                        egui::Key::ArrowDown,
+                        egui::Key::ArrowUp,
+                        egui::Key::PageDown,
+                        egui::Key::PageUp,
+                        egui::Key::ArrowLeft,
+                        egui::Key::ArrowRight,
+                        egui::Key::Num8,
+                        egui::Key::Num2,
+                        egui::Key::Num4,
+                        egui::Key::Num6,
+                    ] {
+                        if ctx.input(|i| i.key_pressed(key)) {
+                            self.handle_key(key);
+                        }
+                    }
                 }
-
-                if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-                    self.handle_key(egui::Key::ArrowUp);
-                }
-
-                if ctx.input(|i| i.key_pressed(egui::Key::PageDown)) {
-                    self.handle_key(egui::Key::PageDown);
-                }
-
-                if ctx.input(|i| i.key_pressed(egui::Key::PageUp)) {
-                    self.handle_key(egui::Key::PageUp);
-                }
-                if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-                    self.handle_key(egui::Key::ArrowLeft);
-                }
-
-                if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-                    self.handle_key(egui::Key::ArrowRight);
-                }
-
-                if ctx.input(|i| i.key_pressed(egui::Key::Num8)) {
-                    self.handle_key(egui::Key::Num8);
-                }
-
-                if ctx.input(|i| i.key_pressed(egui::Key::Num2)) {
-                    self.handle_key(egui::Key::Num2);
-                }
-
-                if ctx.input(|i| i.key_pressed(egui::Key::Num4)) {
-                    self.handle_key(egui::Key::Num4);
-                }
-
-                if ctx.input(|i| i.key_pressed(egui::Key::Num6)) {
-                    self.handle_key(egui::Key::Num6);
-                }
-
 
                 let tab = ctx.input(|i| i.key_pressed(egui::Key::Tab));
                 let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
                 let mut accepted_suggestion = false;
-                if tab || (enter && self.selected.is_none()) {
+                if Self::launcher_query_keyboard_enabled(query_has_focus)
+                    && (tab || (enter && self.selected.is_none()))
+                {
                     accepted_suggestion = self.accept_suggestion(tab);
                 }
                 if accepted_suggestion {
@@ -957,6 +950,10 @@ impl eframe::App for LauncherApp {
                 let mut launch_idx: Option<usize> = None;
                 if !accepted_suggestion
                     && enter
+                    && Self::launcher_enter_activation_enabled(
+                        query_has_focus,
+                        self.file_search_dialog.open,
+                    )
                     && !self.bookmark_alias_dialog.open
                     && !self.tempfile_alias_dialog.open
                     && !self.tempfile_dialog.open
