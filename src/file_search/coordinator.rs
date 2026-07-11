@@ -61,6 +61,7 @@ pub struct SearchCoordinator {
     last_backend: Option<SearchBackend>,
     diagnostics: SearchDiagnostics,
     executor: Arc<dyn SearchExecutor>,
+    production_settings: Option<FileSearchSettings>,
 }
 
 impl Default for SearchCoordinator {
@@ -71,14 +72,26 @@ impl Default for SearchCoordinator {
 
 impl SearchCoordinator {
     pub fn new() -> Self {
-        Self::with_settings(FileSearchSettings::default())
+        Self::from_settings(FileSearchSettings::default())
+    }
+
+    pub fn from_settings(settings: FileSearchSettings) -> Self {
+        let executor = Arc::new(FileSearchExecutor::new(settings.clone()));
+        Self::with_executor_and_settings(executor, Some(settings))
     }
 
     pub fn with_settings(settings: FileSearchSettings) -> Self {
-        Self::with_executor(Arc::new(FileSearchExecutor::new(settings)))
+        Self::from_settings(settings)
     }
 
     pub fn with_executor(executor: Arc<dyn SearchExecutor>) -> Self {
+        Self::with_executor_and_settings(executor, None)
+    }
+
+    fn with_executor_and_settings(
+        executor: Arc<dyn SearchExecutor>,
+        production_settings: Option<FileSearchSettings>,
+    ) -> Self {
         let (event_sender, event_receiver) = mpsc::channel();
         Self {
             next_id: 1,
@@ -90,7 +103,18 @@ impl SearchCoordinator {
             last_backend: None,
             diagnostics: SearchDiagnostics::default(),
             executor,
+            production_settings,
         }
+    }
+
+    pub fn reconfigure_from_settings(&mut self, settings: FileSearchSettings) {
+        self.cancel_active();
+        self.executor = Arc::new(FileSearchExecutor::new(settings.clone()));
+        self.production_settings = Some(settings);
+    }
+
+    pub fn production_settings(&self) -> Option<&FileSearchSettings> {
+        self.production_settings.as_ref()
     }
 
     pub fn start_search(&mut self, request: SearchRequest) -> SearchId {
@@ -495,6 +519,48 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn from_settings_installs_production_dispatcher() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let expected = "configured-dispatcher-filename.txt";
+        std::fs::write(temp.path().join(expected), "contents").expect("write file");
+        let settings = FileSearchSettings {
+            max_search_results: 3,
+            ..FileSearchSettings::default()
+        };
+        let mut coordinator = SearchCoordinator::from_settings(settings.clone());
+
+        assert_eq!(coordinator.production_settings(), Some(&settings));
+        coordinator.start_search(SearchRequest {
+            kind: SearchKind::Filename,
+            scope: SearchScope::Directory {
+                root: temp.path().to_path_buf(),
+            },
+            text: expected.to_owned(),
+            case_sensitive: settings.case_sensitive,
+            include_hidden_files: settings.include_hidden_files,
+            max_results: settings.max_search_results,
+            max_file_size_bytes: settings.max_content_search_file_size_bytes,
+            included_extensions: Vec::new(),
+            excluded_extensions: Vec::new(),
+            excluded_directory_names: settings.excluded_directory_names.clone(),
+        });
+
+        let events = drain_until_terminal(&mut coordinator);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SearchEvent::Result {
+                result: SearchResult::Filename(result),
+                ..
+            } if result.file_name == expected
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            SearchEvent::Failed { error, .. } if error.contains("not wired yet")
+                || error.contains("Search backend execution is not wired yet")
+        )));
     }
 
     #[test]
