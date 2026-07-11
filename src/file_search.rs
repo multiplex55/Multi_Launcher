@@ -3,6 +3,7 @@ pub mod coordinator;
 pub mod error;
 pub mod everything;
 pub mod model;
+pub mod preview;
 pub mod query;
 pub mod ripgrep;
 pub mod settings;
