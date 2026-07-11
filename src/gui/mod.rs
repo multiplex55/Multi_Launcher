@@ -1731,41 +1731,97 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
+    const TRACKED_PANELS: [Panel; 39] = [
+        Panel::AliasDialog,
+        Panel::BookmarkAliasDialog,
+        Panel::TempfileAliasDialog,
+        Panel::TempfileDialog,
+        Panel::AddBookmarkDialog,
+        Panel::HelpOverlay,
+        Panel::HelpWindow,
+        Panel::TimerDialog,
+        Panel::CompletionDialog,
+        Panel::ShellCmdDialog,
+        Panel::SnippetDialog,
+        Panel::MacroDialog,
+        Panel::MouseGesturesDialog,
+        Panel::MouseGestureSettingsDialog,
+        Panel::ThemeSettingsDialog,
+        Panel::FavDialog,
+        Panel::FileSearchDialog,
+        Panel::NotesDialog,
+        Panel::NoteGraphDialog,
+        Panel::UnusedAssetsDialog,
+        Panel::NotePanel,
+        Panel::ImagePanel,
+        Panel::ScreenshotEditor,
+        Panel::TodoDialog,
+        Panel::TodoViewDialog,
+        Panel::ClipboardDialog,
+        Panel::ConvertPanel,
+        Panel::VolumeDialog,
+        Panel::BrightnessDialog,
+        Panel::CpuListDialog,
+        Panel::ToastLogDialog,
+        Panel::CalendarPopover,
+        Panel::CalendarEventEditor,
+        Panel::CalendarEventDetails,
+        Panel::Editor,
+        Panel::Settings,
+        Panel::Plugins,
+        Panel::MultiManagerDialog,
+        Panel::MultiManagerSettingsDialog,
+    ];
+
+    fn is_panel_open(&self, panel: Panel) -> bool {
+        match panel {
+            Panel::AliasDialog => self.alias_dialog.open,
+            Panel::BookmarkAliasDialog => self.bookmark_alias_dialog.open,
+            Panel::TempfileAliasDialog => self.tempfile_alias_dialog.open,
+            Panel::TempfileDialog => self.tempfile_dialog.open,
+            Panel::AddBookmarkDialog => self.add_bookmark_dialog.open,
+            Panel::HelpOverlay => self.help_window.overlay_open,
+            Panel::HelpWindow => self.help_window.open,
+            Panel::TimerDialog => self.timer_dialog.open,
+            Panel::CompletionDialog => self.completion_dialog.open,
+            Panel::ShellCmdDialog => self.shell_cmd_dialog.open,
+            Panel::SnippetDialog => self.snippet_dialog.open,
+            Panel::MacroDialog => self.macro_dialog.open,
+            Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open,
+            Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_dialog.open,
+            Panel::ThemeSettingsDialog => self.theme_settings_dialog_open,
+            Panel::FavDialog => self.fav_dialog.open,
+            Panel::FileSearchDialog => self.file_search_dialog.open,
+            Panel::NotesDialog => self.notes_dialog.open,
+            Panel::NoteGraphDialog => self.note_graph_dialog.open,
+            Panel::UnusedAssetsDialog => self.unused_assets_dialog.open,
+            Panel::NotePanel => !self.note_panels.is_empty(),
+            Panel::ImagePanel => !self.image_panels.is_empty(),
+            Panel::ScreenshotEditor => !self.screenshot_editors.is_empty(),
+            Panel::TodoDialog => self.todo_dialog.open,
+            Panel::TodoViewDialog => self.todo_view_dialog.open,
+            Panel::ClipboardDialog => self.clipboard_dialog.open,
+            Panel::ConvertPanel => self.convert_panel.open,
+            Panel::VolumeDialog => self.volume_dialog.open,
+            Panel::BrightnessDialog => self.brightness_dialog.open,
+            Panel::CpuListDialog => self.cpu_list_dialog.open,
+            Panel::ToastLogDialog => self.toast_log_dialog.open,
+            Panel::CalendarPopover => self.calendar_popover_open,
+            Panel::CalendarEventEditor => self.calendar_editor_open,
+            Panel::CalendarEventDetails => self.calendar_details_open,
+            Panel::Editor => self.show_editor,
+            Panel::Settings => self.show_settings,
+            Panel::Plugins => self.show_plugins,
+            Panel::MultiManagerDialog => self.multi_manager_dialog.open,
+            Panel::MultiManagerSettingsDialog => self.multi_manager_settings_dialog.open,
+        }
+    }
+
     fn any_panel_open(&self) -> bool {
-        self.alias_dialog.open
-            || self.bookmark_alias_dialog.open
-            || self.tempfile_alias_dialog.open
-            || self.tempfile_dialog.open
-            || self.add_bookmark_dialog.open
-            || self.timer_dialog.open
-            || self.shell_cmd_dialog.open
-            || self.snippet_dialog.open
-            || self.macro_dialog.open
-            || self.mouse_gestures_dialog.open
-            || self.mouse_gesture_settings_dialog.open
-            || self.theme_settings_dialog_open
-            || self.fav_dialog.open
-            || self.notes_dialog.open
-            || self.note_graph_dialog.open
-            || self.unused_assets_dialog.open
-            || !self.note_panels.is_empty()
-            || !self.image_panels.is_empty()
-            || self.todo_dialog.open
-            || self.todo_view_dialog.open
-            || self.clipboard_dialog.open
-            || self.convert_panel.open
-            || self.volume_dialog.open
-            || self.brightness_dialog.open
-            || self.cpu_list_dialog.open
-            || self.toast_log_dialog.open
-            || self.calendar_popover_open
-            || self.calendar_editor_open
-            || self.calendar_details_open
-            || self.help_window.open
-            || self.help_window.overlay_open
-            || self.show_editor
-            || self.show_settings
-            || self.show_plugins
+        Self::TRACKED_PANELS
+            .iter()
+            .copied()
+            .any(|panel| self.is_panel_open(panel))
     }
 
     pub fn unregister_all_hotkeys(&self) {
@@ -2239,158 +2295,61 @@ impl LauncherApp {
 
     fn update_panel_stack(&mut self) {
         macro_rules! check {
-            ($cond:expr, $field:ident, $kind:expr) => {
-                if $cond && !self.panel_states.$field {
+            ($field:ident, $kind:expr) => {{
+                let is_open = self.is_panel_open($kind);
+                if is_open && !self.panel_states.$field {
                     self.panel_stack.retain(|p| *p != $kind);
                     self.panel_stack.push($kind);
                     self.panel_states.$field = true;
-                } else if !$cond && self.panel_states.$field {
+                } else if !is_open && self.panel_states.$field {
                     self.panel_stack.retain(|p| *p != $kind);
                     self.panel_states.$field = false;
                 }
-            };
+            }};
         }
 
-        check!(self.alias_dialog.open, alias_dialog, Panel::AliasDialog);
+        check!(alias_dialog, Panel::AliasDialog);
+        check!(bookmark_alias_dialog, Panel::BookmarkAliasDialog);
+        check!(tempfile_alias_dialog, Panel::TempfileAliasDialog);
+        check!(tempfile_dialog, Panel::TempfileDialog);
+        check!(add_bookmark_dialog, Panel::AddBookmarkDialog);
+        check!(help_overlay, Panel::HelpOverlay);
+        check!(help_window, Panel::HelpWindow);
+        check!(timer_dialog, Panel::TimerDialog);
+        check!(completion_dialog, Panel::CompletionDialog);
+        check!(shell_cmd_dialog, Panel::ShellCmdDialog);
+        check!(snippet_dialog, Panel::SnippetDialog);
+        check!(macro_dialog, Panel::MacroDialog);
+        check!(mouse_gestures_dialog, Panel::MouseGesturesDialog);
         check!(
-            self.bookmark_alias_dialog.open,
-            bookmark_alias_dialog,
-            Panel::BookmarkAliasDialog
-        );
-        check!(
-            self.tempfile_alias_dialog.open,
-            tempfile_alias_dialog,
-            Panel::TempfileAliasDialog
-        );
-        check!(
-            self.tempfile_dialog.open,
-            tempfile_dialog,
-            Panel::TempfileDialog
-        );
-        check!(
-            self.add_bookmark_dialog.open,
-            add_bookmark_dialog,
-            Panel::AddBookmarkDialog
-        );
-        check!(
-            self.help_window.overlay_open,
-            help_overlay,
-            Panel::HelpOverlay
-        );
-        check!(self.help_window.open, help_window, Panel::HelpWindow);
-        check!(self.timer_dialog.open, timer_dialog, Panel::TimerDialog);
-        check!(
-            self.completion_dialog.open,
-            completion_dialog,
-            Panel::CompletionDialog
-        );
-        check!(
-            self.shell_cmd_dialog.open,
-            shell_cmd_dialog,
-            Panel::ShellCmdDialog
-        );
-        check!(
-            self.snippet_dialog.open,
-            snippet_dialog,
-            Panel::SnippetDialog
-        );
-        check!(self.macro_dialog.open, macro_dialog, Panel::MacroDialog);
-        check!(
-            self.mouse_gestures_dialog.open,
-            mouse_gestures_dialog,
-            Panel::MouseGesturesDialog
-        );
-        check!(
-            self.mouse_gesture_settings_dialog.open,
             mouse_gesture_settings_dialog,
             Panel::MouseGestureSettingsDialog
         );
+        check!(theme_settings_dialog, Panel::ThemeSettingsDialog);
+        check!(fav_dialog, Panel::FavDialog);
+        check!(file_search_dialog, Panel::FileSearchDialog);
+        check!(notes_dialog, Panel::NotesDialog);
+        check!(note_graph_dialog, Panel::NoteGraphDialog);
+        check!(unused_assets_dialog, Panel::UnusedAssetsDialog);
+        check!(note_panel, Panel::NotePanel);
+        check!(image_panel, Panel::ImagePanel);
+        check!(screenshot_editor, Panel::ScreenshotEditor);
+        check!(todo_dialog, Panel::TodoDialog);
+        check!(todo_view_dialog, Panel::TodoViewDialog);
+        check!(clipboard_dialog, Panel::ClipboardDialog);
+        check!(convert_panel, Panel::ConvertPanel);
+        check!(volume_dialog, Panel::VolumeDialog);
+        check!(brightness_dialog, Panel::BrightnessDialog);
+        check!(cpu_list_dialog, Panel::CpuListDialog);
+        check!(toast_log_dialog, Panel::ToastLogDialog);
+        check!(calendar_popover, Panel::CalendarPopover);
+        check!(calendar_event_editor, Panel::CalendarEventEditor);
+        check!(calendar_event_details, Panel::CalendarEventDetails);
+        check!(editor, Panel::Editor);
+        check!(settings, Panel::Settings);
+        check!(plugins, Panel::Plugins);
+        check!(multi_manager_dialog, Panel::MultiManagerDialog);
         check!(
-            self.theme_settings_dialog_open,
-            theme_settings_dialog,
-            Panel::ThemeSettingsDialog
-        );
-        check!(self.fav_dialog.open, fav_dialog, Panel::FavDialog);
-        check!(
-            self.file_search_dialog.open,
-            file_search_dialog,
-            Panel::FileSearchDialog
-        );
-        check!(self.notes_dialog.open, notes_dialog, Panel::NotesDialog);
-        check!(
-            self.note_graph_dialog.open,
-            note_graph_dialog,
-            Panel::NoteGraphDialog
-        );
-        check!(
-            self.unused_assets_dialog.open,
-            unused_assets_dialog,
-            Panel::UnusedAssetsDialog
-        );
-        check!(!self.note_panels.is_empty(), note_panel, Panel::NotePanel);
-        check!(
-            !self.image_panels.is_empty(),
-            image_panel,
-            Panel::ImagePanel
-        );
-        check!(
-            !self.screenshot_editors.is_empty(),
-            screenshot_editor,
-            Panel::ScreenshotEditor
-        );
-        check!(self.todo_dialog.open, todo_dialog, Panel::TodoDialog);
-        check!(
-            self.todo_view_dialog.open,
-            todo_view_dialog,
-            Panel::TodoViewDialog
-        );
-        check!(
-            self.clipboard_dialog.open,
-            clipboard_dialog,
-            Panel::ClipboardDialog
-        );
-        check!(self.convert_panel.open, convert_panel, Panel::ConvertPanel);
-        check!(self.volume_dialog.open, volume_dialog, Panel::VolumeDialog);
-        check!(
-            self.brightness_dialog.open,
-            brightness_dialog,
-            Panel::BrightnessDialog
-        );
-        check!(
-            self.cpu_list_dialog.open,
-            cpu_list_dialog,
-            Panel::CpuListDialog
-        );
-        check!(
-            self.toast_log_dialog.open,
-            toast_log_dialog,
-            Panel::ToastLogDialog
-        );
-        check!(
-            self.calendar_popover_open,
-            calendar_popover,
-            Panel::CalendarPopover
-        );
-        check!(
-            self.calendar_editor_open,
-            calendar_event_editor,
-            Panel::CalendarEventEditor
-        );
-        check!(
-            self.calendar_details_open,
-            calendar_event_details,
-            Panel::CalendarEventDetails
-        );
-        check!(self.show_editor, editor, Panel::Editor);
-        check!(self.show_settings, settings, Panel::Settings);
-        check!(self.show_plugins, plugins, Panel::Plugins);
-        check!(
-            self.multi_manager_dialog.open,
-            multi_manager_dialog,
-            Panel::MultiManagerDialog
-        );
-        check!(
-            self.multi_manager_settings_dialog.open,
             multi_manager_settings_dialog,
             Panel::MultiManagerSettingsDialog
         );
@@ -2863,6 +2822,36 @@ mod tests {
 
         fn query_prefixes(&self) -> &[&str] {
             &["note"]
+        }
+    }
+
+    #[test]
+    fn file_search_dialog_counts_as_any_panel_open() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+
+        app.file_search_dialog.open = true;
+
+        assert!(app.any_panel_open());
+    }
+
+    #[test]
+    fn tracked_openable_panels_count_as_any_panel_open() {
+        let ctx = egui::Context::default();
+        let openable_panels = LauncherApp::TRACKED_PANELS.iter().copied().filter(|panel| {
+            !matches!(
+                panel,
+                Panel::NotePanel | Panel::ImagePanel | Panel::ScreenshotEditor
+            )
+        });
+
+        for panel in openable_panels {
+            let mut app = new_app(&ctx);
+            app.ensure_open(panel);
+            assert!(
+                app.any_panel_open(),
+                "expected {panel:?} to count as an open panel"
+            );
         }
     }
 
