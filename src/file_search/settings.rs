@@ -136,20 +136,7 @@ impl fmt::Display for FileSearchDiagnosticsState {
 }
 
 pub fn detect_ripgrep_executable(settings: &FileSearchSettings) -> Option<PathBuf> {
-    let configured = &settings.ripgrep_executable_path;
-    if executable_path_is_configured_file(configured) == Some(true) {
-        return Some(configured.clone());
-    }
-    find_on_path(configured)
-}
-
-fn find_on_path(path: &PathBuf) -> Option<PathBuf> {
-    let name = path.file_name()?;
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|dir| dir.join(name))
-            .find(|candidate| candidate.is_file())
-    })
+    crate::file_search::ripgrep::resolve_ripgrep_executable(&settings.ripgrep_executable_path).ok()
 }
 
 impl Default for FileSearchSettings {
@@ -223,7 +210,9 @@ impl FileSearchSettings {
             });
         }
 
-        if executable_path_is_configured_file(&self.ripgrep_executable_path) == Some(false) {
+        if crate::file_search::ripgrep::resolve_ripgrep_executable(&self.ripgrep_executable_path)
+            .is_err()
+        {
             diagnostics.push(FileSearchSettingsDiagnostic::MissingExecutable {
                 name: "ripgrep",
                 path: self.ripgrep_executable_path.clone(),
