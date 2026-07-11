@@ -310,9 +310,21 @@ fn read_stdout<R: Read>(
 }
 
 fn read_bounded<R: Read>(mut reader: R, limit: usize) -> String {
-    let mut buf = Vec::new();
-    let _ = reader.by_ref().take(limit as u64).read_to_end(&mut buf);
-    String::from_utf8_lossy(&buf).into_owned()
+    let mut captured = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => {
+                let remaining = limit.saturating_sub(captured.len());
+                if remaining > 0 {
+                    captured.extend_from_slice(&chunk[..read.min(remaining)]);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&captured).into_owned()
 }
 
 pub fn parse_everything_output(
@@ -580,18 +592,36 @@ mod tests {
     #[test]
     fn nonzero_status_is_reported_with_bounded_stderr() {
         let temp = tempfile::tempdir().unwrap();
-        let script = temp.path().join("es.exe");
+        #[cfg(unix)]
+        let script = temp.path().join("es");
+        #[cfg(windows)]
+        let script = temp.path().join("es.cmd");
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::write(&script, "#!/bin/sh\necho failure >&2\nexit 3\n").unwrap();
+            fs::write(
+                &script,
+                "#!/bin/sh
+echo failure >&2
+exit 3
+",
+            )
+            .unwrap();
             let mut p = fs::metadata(&script).unwrap().permissions();
             p.set_mode(0o755);
             fs::set_permissions(&script, p).unwrap();
         }
         #[cfg(windows)]
         {
-            fs::write(&script, "@echo off\necho failure 1>&2\nexit /b 3\n").unwrap();
+            fs::write(
+                &script,
+                "@echo off
+echo failure 1>&2
+exit /b 3
+",
+            )
+            .unwrap();
         }
         let settings = FileSearchSettings {
             everything_enabled: true,
