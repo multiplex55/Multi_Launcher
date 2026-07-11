@@ -1,8 +1,8 @@
 use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
 use crate::file_search::error::FileSearchError;
 use crate::file_search::model::{
-    ContentFileResult, ContentMatch, SearchEvent, SearchId, SearchKind, SearchProgress,
-    SearchRequest, SearchResult, SearchScope, SearchStatus,
+    ContentFileResult, ContentFileResultBuilder, ContentMatch, SearchEvent, SearchId, SearchKind,
+    SearchProgress, SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::settings::FileSearchSettings;
 use serde_json::Value;
@@ -140,24 +140,26 @@ pub fn search_content_with_ripgrep(
 
     let stdout = stdout_handle.join().unwrap_or_default();
     let stderr = stderr_handle.join().unwrap_or_default();
+    let per_file_match_limit = per_file_match_limit(&request, settings);
     if cancelled {
-        let mut summary = parse_ripgrep_json_limited(
-            &stdout,
-            settings.max_matches_per_content_file,
-            request.max_results,
-        )?;
+        let mut summary =
+            parse_ripgrep_json_limited(&stdout, per_file_match_limit, request.max_results)?;
         summary.cancelled = true;
         summary.stderr = stderr;
         return Ok(summary);
     }
     handle_exit_status(status, &stderr)?;
-    let mut summary = parse_ripgrep_json_limited(
-        &stdout,
-        settings.max_matches_per_content_file,
-        request.max_results,
-    )?;
+    let mut summary =
+        parse_ripgrep_json_limited(&stdout, per_file_match_limit, request.max_results)?;
     summary.stderr = stderr;
     Ok(summary)
+}
+
+fn per_file_match_limit(request: &SearchRequest, settings: &FileSearchSettings) -> usize {
+    match &request.scope {
+        SearchScope::File { .. } => usize::MAX,
+        _ => settings.max_matches_per_content_file,
+    }
 }
 
 pub fn detect_ripgrep_executable(configured: &Path) -> Result<PathBuf, FileSearchError> {
@@ -259,13 +261,14 @@ fn search_roots(
 ) -> Result<Vec<PathBuf>, FileSearchError> {
     let roots = match &request.scope {
         SearchScope::Directory { root } => vec![root.clone()],
+        SearchScope::File { path } => vec![path.clone()],
         SearchScope::Global => settings.global_content_search_roots.clone(),
     };
     for root in &roots {
-        if !root.is_dir() {
+        if !(root.is_dir() || root.is_file()) {
             return Err(FileSearchError::InvalidDirectory {
                 path: root.clone(),
-                message: "path is not a directory".to_owned(),
+                message: "path is not a directory or file".to_owned(),
             });
         }
     }
@@ -314,7 +317,7 @@ fn parse_ripgrep_json_limited(
     max_matches_per_file: usize,
     max_result_files: usize,
 ) -> Result<RipgrepSearchSummary, FileSearchError> {
-    let mut files: BTreeMap<PathBuf, Vec<ContentMatch>> = BTreeMap::new();
+    let mut files: BTreeMap<PathBuf, ContentFileResultBuilder> = BTreeMap::new();
     let mut files_scanned = 0_u64;
     for line in output.lines() {
         if line.trim().is_empty() {
@@ -343,7 +346,7 @@ fn parse_ripgrep_json_limited(
     let results: Vec<_> = files
         .into_iter()
         .take(max_result_files)
-        .map(|(path, matches)| ContentFileResult { path, matches })
+        .map(|(_path, builder)| builder.finish())
         .collect();
     Ok(RipgrepSearchSummary {
         results_found: results.len(),
@@ -356,7 +359,7 @@ fn parse_ripgrep_json_limited(
 
 fn parse_match_event(
     value: &Value,
-    files: &mut BTreeMap<PathBuf, Vec<ContentMatch>>,
+    files: &mut BTreeMap<PathBuf, ContentFileResultBuilder>,
     max_matches_per_file: usize,
 ) -> Result<(), FileSearchError> {
     let data = &value["data"];
@@ -372,21 +375,20 @@ fn parse_match_event(
         .and_then(Value::as_str)
         .unwrap_or("");
     let line_number = data.get("line_number").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let entry = files.entry(PathBuf::from(path)).or_default();
-    if entry.len() >= max_matches_per_file {
-        return Ok(());
-    }
+    let normalized_line = line.trim_end_matches(['\r', '\n']).to_owned();
+    let entry = files.entry(PathBuf::from(path)).or_insert_with(|| {
+        ContentFileResultBuilder::new(PathBuf::from(path), max_matches_per_file)
+    });
     if let Some(submatches) = data.get("submatches").and_then(Value::as_array) {
         for submatch in submatches {
-            if entry.len() >= max_matches_per_file {
-                break;
-            }
-            entry.push(ContentMatch {
+            let byte_start = submatch.get("start").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let byte_end = submatch.get("end").and_then(Value::as_u64).unwrap_or(0) as usize;
+            entry.push_match(ContentMatch::new(
                 line_number,
-                line: line.trim_end_matches(['\r', '\n']).to_owned(),
-                byte_start: submatch.get("start").and_then(Value::as_u64).unwrap_or(0) as usize,
-                byte_end: submatch.get("end").and_then(Value::as_u64).unwrap_or(0) as usize,
-            });
+                normalized_line.clone(),
+                byte_start,
+                byte_end,
+            ));
         }
     }
     Ok(())
@@ -491,6 +493,38 @@ mod tests {
                 .matches
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn grouped_results_count_total_matches_past_limit_and_truncate() {
+        let json = r#"{"type":"match","data":{"path":{"text":"a.txt"},"lines":{"text":"needle needle\n"},"line_number":1,"submatches":[{"start":0,"end":6},{"start":7,"end":13}]}}"#;
+        let result = parse_ripgrep_json(json, 1).unwrap().results.remove(0);
+        assert_eq!(result.total_matches, 2);
+        assert_eq!(result.matches.len(), 1);
+        assert!(result.truncated);
+    }
+
+    #[test]
+    fn grouped_results_keep_same_filename_in_different_directories_separate() {
+        let json = concat!(
+            r#"{"type":"match","data":{"path":{"text":"one/a.txt"},"lines":{"text":"needle\n"},"line_number":1,"submatches":[{"start":0,"end":6}]}}"#,
+            "\n",
+            r#"{"type":"match","data":{"path":{"text":"two/a.txt"},"lines":{"text":"needle\n"},"line_number":2,"submatches":[{"start":0,"end":6}]}}"#
+        );
+        let summary = parse_ripgrep_json(json, 25).unwrap();
+        assert_eq!(summary.results.len(), 2);
+        assert!(
+            summary
+                .results
+                .iter()
+                .any(|r| r.path == PathBuf::from("one/a.txt"))
+        );
+        assert!(
+            summary
+                .results
+                .iter()
+                .any(|r| r.path == PathBuf::from("two/a.txt"))
         );
     }
 

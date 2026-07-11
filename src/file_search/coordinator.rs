@@ -3,7 +3,7 @@ use crate::file_search::model::{
     SearchStatus,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 
 #[derive(Debug, Clone, Default)]
@@ -173,6 +173,7 @@ impl SearchCoordinator {
         match (&request.kind, &request.scope) {
             (SearchKind::Filename, SearchScope::Directory { .. }) => SearchBackend::WalkDir,
             (SearchKind::Filename, SearchScope::Global) => SearchBackend::Everything,
+            (SearchKind::Filename, SearchScope::File { .. }) => SearchBackend::WalkDir,
             (SearchKind::Content, _) => SearchBackend::Ripgrep,
         }
     }

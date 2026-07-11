@@ -3,10 +3,10 @@ use crate::file_search::actions::{
     containing_directory, copied_filename, nested_search_root, open_path,
     open_terminal_in_directory, reveal_path,
 };
-use crate::file_search::coordinator::{event_id, SearchCoordinator};
+use crate::file_search::coordinator::{SearchCoordinator, event_id};
 use crate::file_search::model::{
-    ContentFileResult, SearchBackend, SearchEvent, SearchId, SearchKind, SearchRequest,
-    SearchResult, SearchScope, SearchStatus,
+    ContentFileResult, ContentMatch, SearchBackend, SearchEvent, SearchId, SearchKind,
+    SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use eframe::egui;
 use std::collections::BTreeMap;
@@ -42,7 +42,7 @@ pub struct ContentResultGroup {
     pub path: PathBuf,
     pub total_matches: usize,
     pub first_line: Option<String>,
-    pub lines: Vec<(usize, String)>,
+    pub matches: Vec<ContentMatch>,
     pub truncated: bool,
 }
 
@@ -182,20 +182,14 @@ impl FileSearchDialogState {
     }
 
     fn upsert_content_group(&mut self, content: &ContentFileResult) {
-        let lines: Vec<_> = content
-            .matches
-            .iter()
-            .take(20)
-            .map(|m| (m.line_number, m.line.clone()))
-            .collect();
         self.content_result_groups.insert(
             content.path.clone(),
             ContentResultGroup {
                 path: content.path.clone(),
-                total_matches: content.matches.len(),
+                total_matches: content.total_matches,
                 first_line: content.matches.first().map(|m| m.line.clone()),
-                lines,
-                truncated: content.matches.len() > 20,
+                matches: content.matches.clone(),
+                truncated: content.truncated,
             },
         );
     }
@@ -338,14 +332,73 @@ impl FileSearchDialogState {
                 }
             ))
             .show(ui, |ui| {
-                for (line_no, line) in &group.lines {
-                    ui.label(format!("{line_no}: {line}"));
+                for content_match in &group.matches {
+                    let column = content_match
+                        .column
+                        .map(|column| format!(":{}", column.saturating_add(1)))
+                        .unwrap_or_default();
+                    ui.label(format!(
+                        "{}{}: {}",
+                        content_match.line_number, column, content_match.line
+                    ));
+                }
+                if group.truncated {
+                    ui.weak("Additional matches omitted. Use the context menu to search only this file.");
                 }
             })
             .header_response;
             response
-                .context_menu(|ui| self.result_context_menu(ui, &group.path, false, coordinator));
+                .context_menu(|ui| self.content_result_context_menu(ui, &group.path, coordinator));
         }
+    }
+
+    fn content_result_context_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        path: &std::path::Path,
+        coordinator: &mut SearchCoordinator,
+    ) {
+        if ui.button("Show all matches in this file").clicked() {
+            self.start_file_content_search(path, coordinator);
+            ui.close_menu();
+        }
+        self.result_context_menu(ui, path, false, coordinator);
+    }
+
+    fn start_file_content_search(
+        &mut self,
+        path: &std::path::Path,
+        coordinator: &mut SearchCoordinator,
+    ) {
+        let text = self.search_text.trim();
+        if text.is_empty() {
+            self.warning_error_message =
+                Some("Enter search text before searching this file.".to_string());
+            return;
+        }
+        let request = SearchRequest {
+            kind: SearchKind::Content,
+            scope: SearchScope::File {
+                path: path.to_path_buf(),
+            },
+            text: text.to_string(),
+            case_sensitive: self.case_sensitive,
+            include_hidden_files: self.include_hidden,
+            max_results: 1,
+            max_file_size_bytes: MAX_FILE_SIZE_BYTES,
+            included_extensions: Vec::new(),
+            excluded_extensions: Vec::new(),
+            excluded_directory_names: Vec::new(),
+        };
+        self.selected_mode = FileSearchMode::Content;
+        self.results.clear();
+        self.content_result_groups.clear();
+        self.warning_error_message = None;
+        self.inaccessible_path_warnings = 0;
+        self.current_status = SearchStatus::Running;
+        self.backend = Some(SearchCoordinator::select_backend(&request));
+        let id = coordinator.start_search(request);
+        self.active_search_id = Some(id);
     }
 
     fn result_context_menu(
@@ -545,12 +598,9 @@ mod tests {
             id: SearchId(1),
             result: SearchResult::ContentFile(ContentFileResult {
                 path: "src/lib.rs".into(),
-                matches: vec![ContentMatch {
-                    line_number: 4,
-                    line: "needle".into(),
-                    byte_start: 0,
-                    byte_end: 6,
-                }],
+                total_matches: 1,
+                matches: vec![ContentMatch::new(4, "needle".into(), 0, 6)],
+                truncated: false,
             }),
         });
         assert_eq!(state.content_result_groups.len(), 1);
