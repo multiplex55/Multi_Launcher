@@ -17,6 +17,9 @@ use std::path::PathBuf;
 
 const DEFAULT_WINDOW_SIZE: egui::Vec2 = egui::vec2(760.0, 560.0);
 
+pub const FILE_SEARCH_SEARCH_FIELD_ID_SOURCE: &str = "file_search_search_text";
+pub const FILE_SEARCH_ROOT_FIELD_ID_SOURCE: &str = "file_search_root_directory";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileSearchMode {
     Filename,
@@ -66,6 +69,7 @@ pub struct FileSearchDialogState {
     pub last_preview_request: Option<PreviewRequest>,
     pub persisted_window_size: egui::Vec2,
     pub settings: FileSearchSettings,
+    pub request_search_focus: bool,
 }
 
 impl Default for FileSearchDialogState {
@@ -88,14 +92,54 @@ impl Default for FileSearchDialogState {
             last_preview_request: None,
             persisted_window_size: DEFAULT_WINDOW_SIZE,
             settings: FileSearchSettings::default(),
+            request_search_focus: false,
         }
     }
 }
 
 impl FileSearchDialogState {
+    pub fn search_field_id() -> egui::Id {
+        egui::Id::new(FILE_SEARCH_SEARCH_FIELD_ID_SOURCE)
+    }
+
+    pub fn root_field_id() -> egui::Id {
+        egui::Id::new(FILE_SEARCH_ROOT_FIELD_ID_SOURCE)
+    }
+
+    pub fn open(&mut self) {
+        self.open = true;
+        self.request_search_focus = true;
+    }
+
     pub fn open_with_mode(&mut self, mode: FileSearchMode) {
         self.selected_mode = mode;
-        self.open = true;
+        self.open();
+    }
+
+    pub fn open_and_start(
+        &mut self,
+        mode: FileSearchMode,
+        root: Option<PathBuf>,
+        text: String,
+        coordinator: &mut SearchCoordinator,
+    ) -> Option<SearchId> {
+        self.selected_mode = mode;
+        if let Some(root) = root {
+            self.selected_scope = FileSearchScopeMode::Directory;
+            self.root_directory = root.display().to_string();
+        }
+        self.search_text = text;
+        self.open();
+        self.start_search(coordinator)
+    }
+
+    pub fn consume_search_focus_request(&mut self) -> bool {
+        if self.request_search_focus {
+            self.request_search_focus = false;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn start_search(&mut self, coordinator: &mut SearchCoordinator) -> Option<SearchId> {
@@ -246,7 +290,13 @@ impl FileSearchDialogState {
         });
         ui.horizontal(|ui| {
             ui.label("Search");
-            let search_response = ui.text_edit_singleline(&mut self.search_text);
+            let search_response = ui.add(
+                egui::TextEdit::singleline(&mut self.search_text)
+                    .id_source(Self::search_field_id()),
+            );
+            if self.consume_search_focus_request() {
+                search_response.request_focus();
+            }
             if search_response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.start_search(coordinator);
                 ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
@@ -254,7 +304,10 @@ impl FileSearchDialogState {
         });
         ui.horizontal(|ui| {
             ui.label("Root");
-            let root_response = ui.text_edit_singleline(&mut self.root_directory);
+            let root_response = ui.add(
+                egui::TextEdit::singleline(&mut self.root_directory)
+                    .id_source(Self::root_field_id()),
+            );
             if root_response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.start_search(coordinator);
                 ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
@@ -564,6 +617,67 @@ mod tests {
         state.open_with_mode(FileSearchMode::Content);
         assert!(state.open);
         assert_eq!(state.selected_mode, FileSearchMode::Content);
+    }
+
+    #[test]
+    fn opening_file_search_requests_search_focus_once() {
+        let mut state = FileSearchDialogState::default();
+
+        state.open();
+
+        assert!(state.open);
+        assert!(state.request_search_focus);
+    }
+
+    #[test]
+    fn consuming_search_focus_request_clears_flag_after_one_use() {
+        let mut state = FileSearchDialogState::default();
+        state.open();
+
+        assert!(state.consume_search_focus_request());
+        assert!(!state.request_search_focus);
+        assert!(!state.consume_search_focus_request());
+    }
+
+    #[test]
+    fn reopening_file_search_requests_search_focus_again() {
+        let mut state = FileSearchDialogState::default();
+        state.open();
+        assert!(state.consume_search_focus_request());
+
+        state.open_with_mode(FileSearchMode::Content);
+
+        assert!(state.request_search_focus);
+        assert_eq!(state.selected_mode, FileSearchMode::Content);
+    }
+
+    #[test]
+    fn root_field_has_stable_distinct_id_and_does_not_rearm_search_focus() {
+        let mut state = FileSearchDialogState::default();
+        state.open();
+        assert!(state.consume_search_focus_request());
+
+        let root_id = FileSearchDialogState::root_field_id();
+        let search_id = FileSearchDialogState::search_field_id();
+
+        assert_ne!(root_id, search_id);
+        assert!(!state.request_search_focus);
+        assert!(!state.consume_search_focus_request());
+    }
+
+    #[test]
+    fn opening_file_search_does_not_depend_on_launcher_query_text() {
+        let launcher_query = String::from("fs");
+        let mut state = FileSearchDialogState::default();
+
+        state.open();
+
+        assert_eq!(launcher_query, "fs");
+        assert!(state.request_search_focus);
+        assert_ne!(
+            FileSearchDialogState::search_field_id(),
+            egui::Id::new("query_input")
+        );
     }
 
     #[test]
