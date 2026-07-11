@@ -211,9 +211,6 @@ impl FileSearchDialogState {
                 self.open = false;
             }
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-            self.start_search(coordinator);
-        }
         let mut open = self.open;
         if let Some(resp) = egui::Window::new("File Search")
             .open(&mut open)
@@ -249,11 +246,19 @@ impl FileSearchDialogState {
         });
         ui.horizontal(|ui| {
             ui.label("Search");
-            ui.text_edit_singleline(&mut self.search_text);
+            let search_response = ui.text_edit_singleline(&mut self.search_text);
+            if search_response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.start_search(coordinator);
+                ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+            }
         });
         ui.horizontal(|ui| {
             ui.label("Root");
-            ui.text_edit_singleline(&mut self.root_directory);
+            let root_response = ui.text_edit_singleline(&mut self.root_directory);
+            if root_response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.start_search(coordinator);
+                ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+            }
             if ui.button("Pick…").clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     self.root_directory = path.display().to_string();
@@ -572,6 +577,21 @@ mod tests {
         assert!(id.is_some());
         assert_eq!(state.active_search_id, id);
         assert_eq!(state.current_status, SearchStatus::Running);
+    }
+
+    #[test]
+    fn enter_in_file_search_field_starts_exactly_one_search() {
+        let mut state = FileSearchDialogState {
+            open: true,
+            search_text: "foo".into(),
+            ..Default::default()
+        };
+        let mut coordinator = SearchCoordinator::new();
+
+        let id = state.start_search(&mut coordinator);
+
+        assert!(id.is_some());
+        assert_eq!(coordinator.diagnostics().started, 1);
     }
 
     #[test]
