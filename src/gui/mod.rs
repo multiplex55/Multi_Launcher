@@ -1064,6 +1064,17 @@ impl LauncherApp {
             .map(|s| s.external_open)
             .unwrap_or(NoteExternalOpen::Wezterm);
 
+        let file_search_settings = settings
+            .plugin_settings
+            .get("file_search")
+            .and_then(|v| {
+                serde_json::from_value::<crate::file_search::settings::FileSearchSettings>(
+                    v.clone(),
+                )
+                .ok()
+            })
+            .unwrap_or_default();
+
         let settings_editor = SettingsEditor::new_with_plugins(&settings);
         let multi_manager =
             MultiManagerState::load_or_default(&settings.multi_manager, &settings_path);
@@ -1151,7 +1162,12 @@ impl LauncherApp {
             theme_settings_dialog_open: false,
             theme_settings_dialog: ThemeSettingsDialogState::default(),
             fav_dialog: FavDialog::default(),
-            file_search_dialog: FileSearchDialogState::default(),
+            file_search_dialog: FileSearchDialogState {
+                settings: file_search_settings.clone(),
+                case_sensitive: file_search_settings.case_sensitive,
+                include_hidden: file_search_settings.include_hidden_files,
+                ..FileSearchDialogState::default()
+            },
             file_search_coordinator: SearchCoordinator::new(),
             notes_dialog: NotesDialog::default(),
             note_graph_dialog: NoteGraphDialog::default(),

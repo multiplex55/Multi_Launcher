@@ -5,9 +5,23 @@ use crate::file_search::actions::{
 };
 use crate::file_search::model::SearchKind;
 use crate::file_search::query::{FileSearchCommand, SearchRequestDraft};
+use crate::file_search::settings::{FileSearchDiagnosticsState, FileSearchSettings};
 use crate::plugin::Plugin;
+use eframe::egui;
+use std::path::PathBuf;
 
-pub struct FileSearchPlugin;
+#[derive(Debug, Clone)]
+pub struct FileSearchPlugin {
+    settings: FileSearchSettings,
+}
+
+impl Default for FileSearchPlugin {
+    fn default() -> Self {
+        Self {
+            settings: FileSearchSettings::default(),
+        }
+    }
+}
 
 impl Plugin for FileSearchPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
@@ -48,6 +62,137 @@ impl Plugin for FileSearchPlugin {
     fn query_prefixes(&self) -> &[&str] {
         &["fs"]
     }
+
+    fn default_settings(&self) -> Option<serde_json::Value> {
+        serde_json::to_value(FileSearchSettings::default()).ok()
+    }
+
+    fn apply_settings(&mut self, value: &serde_json::Value) {
+        self.settings = serde_json::from_value(value.clone()).unwrap_or_else(|error| {
+            tracing::warn!(%error, "invalid file_search settings; using defaults");
+            FileSearchSettings::default()
+        });
+        for diagnostic in self.settings.validate() {
+            tracing::warn!(%diagnostic, "file_search settings warning");
+        }
+    }
+
+    fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
+        let mut cfg: FileSearchSettings = serde_json::from_value(value.clone()).unwrap_or_default();
+        ui.heading("File Search");
+        path_list_editor(
+            ui,
+            "Global content-search roots",
+            &mut cfg.global_content_search_roots,
+        );
+        string_list_editor(
+            ui,
+            "Excluded directory names",
+            &mut cfg.excluded_directory_names,
+        );
+        ui.add(
+            egui::Slider::new(&mut cfg.max_search_results, 1..=10_000).text("Max search results"),
+        );
+        ui.add(
+            egui::Slider::new(&mut cfg.max_matches_per_content_file, 1..=1_000)
+                .text("Max matches per content file"),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Max content-search file size (bytes)");
+            ui.add(
+                egui::DragValue::new(&mut cfg.max_content_search_file_size_bytes)
+                    .speed(1024.0)
+                    .clamp_range(1..=u64::MAX),
+            );
+        });
+        ui.checkbox(&mut cfg.include_hidden_files, "Include hidden by default");
+        ui.checkbox(&mut cfg.case_sensitive, "Case-sensitive by default");
+        ui.checkbox(&mut cfg.everything_enabled, "Everything enabled");
+        path_field(
+            ui,
+            "Everything executable path",
+            &mut cfg.everything_executable_path,
+        );
+        path_field(
+            ui,
+            "ripgrep executable path",
+            &mut cfg.ripgrep_executable_path,
+        );
+        ui.horizontal(|ui| {
+            ui.label("Preferred editor command");
+            ui.text_edit_singleline(&mut cfg.preferred_editor_command);
+        });
+        string_list_editor(ui, "Preferred editor args", &mut cfg.preferred_editor_args);
+        ui.horizontal(|ui| {
+            ui.label("Preferred terminal command");
+            ui.text_edit_singleline(&mut cfg.preferred_terminal_command);
+        });
+        string_list_editor(
+            ui,
+            "Preferred terminal args",
+            &mut cfg.preferred_terminal_args,
+        );
+        for diagnostic in cfg.validate() {
+            ui.colored_label(egui::Color32::YELLOW, diagnostic.to_string());
+        }
+        ui.collapsing("Diagnostics", |ui| {
+            ui.monospace(FileSearchDiagnosticsState::from_settings(&cfg).to_string());
+        });
+        self.settings = cfg.clone();
+        if let Ok(v) = serde_json::to_value(&cfg) {
+            *value = v;
+        }
+    }
+}
+
+fn path_field(ui: &mut egui::Ui, label: &str, path: &mut PathBuf) {
+    let mut text = path.display().to_string();
+    ui.horizontal(|ui| {
+        ui.label(label);
+        if ui.text_edit_singleline(&mut text).changed() {
+            *path = PathBuf::from(text.trim());
+        }
+    });
+}
+
+fn path_list_editor(ui: &mut egui::Ui, label: &str, paths: &mut Vec<PathBuf>) {
+    ui.collapsing(label, |ui| {
+        let mut remove = None;
+        for (idx, path) in paths.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                path_field(ui, "", path);
+                if ui.button("Remove").clicked() {
+                    remove = Some(idx);
+                }
+            });
+        }
+        if let Some(idx) = remove {
+            paths.remove(idx);
+        }
+        if ui.button("Add root").clicked() {
+            paths.push(PathBuf::new());
+        }
+    });
+}
+
+fn string_list_editor(ui: &mut egui::Ui, label: &str, items: &mut Vec<String>) {
+    ui.collapsing(label, |ui| {
+        let mut remove = None;
+        for (idx, item) in items.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.text_edit_singleline(item);
+                if ui.button("Remove").clicked() {
+                    remove = Some(idx);
+                }
+            });
+        }
+        if let Some(idx) = remove {
+            items.remove(idx);
+        }
+        if ui.button("Add").clicked() {
+            items.push(String::new());
+        }
+    });
 }
 
 fn open_action() -> Action {
@@ -137,7 +282,7 @@ mod tests {
     use serde_json::Value;
 
     fn plugin() -> FileSearchPlugin {
-        FileSearchPlugin
+        FileSearchPlugin::default()
     }
 
     fn decode_payload(action: &str, prefix: &str) -> Value {

@@ -1,7 +1,10 @@
+use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
 
 /// Settings used to construct and validate file-search requests/backends.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FileSearchSettings {
     pub global_content_search_roots: Vec<PathBuf>,
     pub excluded_directory_names: Vec<String>,
@@ -35,6 +38,118 @@ pub enum FileSearchSettingsDiagnostic {
         value: u64,
         message: String,
     },
+}
+
+impl fmt::Display for FileSearchSettingsDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidRootPath { path, message } => {
+                write!(f, "Invalid root '{}': {message}", path.display())
+            }
+            Self::MissingExecutable { name, path } => {
+                write!(f, "Missing {name} executable: '{}'", path.display())
+            }
+            Self::UnusableMaxValue {
+                field,
+                value,
+                message,
+            } => {
+                write!(f, "Invalid {field} ({value}): {message}")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSearchDiagnosticsState {
+    pub everything_enabled: bool,
+    pub detected_everything: Option<PathBuf>,
+    pub detected_ripgrep: Option<PathBuf>,
+    pub valid_roots: Vec<PathBuf>,
+    pub invalid_roots: Vec<PathBuf>,
+    pub current_backend: Option<String>,
+    pub active_search_state: String,
+    pub last_search_duration_ms: Option<u128>,
+    pub last_result_count: usize,
+    pub last_backend_error: Option<String>,
+    pub inaccessible_entry_count: usize,
+    pub preview_cache_usage: String,
+}
+
+impl FileSearchDiagnosticsState {
+    pub fn from_settings(settings: &FileSearchSettings) -> Self {
+        let mut valid_roots = Vec::new();
+        let mut invalid_roots = Vec::new();
+        for root in &settings.global_content_search_roots {
+            if root.is_dir() {
+                valid_roots.push(root.clone());
+            } else {
+                invalid_roots.push(root.clone());
+            }
+        }
+        Self {
+            everything_enabled: settings.everything_enabled,
+            detected_everything: crate::file_search::everything::detect_everything_executable(
+                settings,
+            ),
+            detected_ripgrep: detect_ripgrep_executable(settings),
+            valid_roots,
+            invalid_roots,
+            current_backend: None,
+            active_search_state: "idle".to_owned(),
+            last_search_duration_ms: None,
+            last_result_count: 0,
+            last_backend_error: None,
+            inaccessible_entry_count: 0,
+            preview_cache_usage: "0 entries".to_owned(),
+        }
+    }
+}
+
+impl fmt::Display for FileSearchDiagnosticsState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Everything enabled: {}; detected es.exe: {}; detected rg: {}; valid roots: {}; invalid roots: {}; current backend: {}; active search state: {}; last search duration: {}; last result count: {}; last backend error: {}; inaccessible entries: {}; preview cache: {}",
+            self.everything_enabled,
+            self.detected_everything
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "not detected".into()),
+            self.detected_ripgrep
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "not detected".into()),
+            self.valid_roots.len(),
+            self.invalid_roots.len(),
+            self.current_backend.as_deref().unwrap_or("none"),
+            self.active_search_state,
+            self.last_search_duration_ms
+                .map(|ms| format!("{ms} ms"))
+                .unwrap_or_else(|| "none".into()),
+            self.last_result_count,
+            self.last_backend_error.as_deref().unwrap_or("none"),
+            self.inaccessible_entry_count,
+            self.preview_cache_usage
+        )
+    }
+}
+
+pub fn detect_ripgrep_executable(settings: &FileSearchSettings) -> Option<PathBuf> {
+    let configured = &settings.ripgrep_executable_path;
+    if executable_path_is_configured_file(configured) == Some(true) {
+        return Some(configured.clone());
+    }
+    find_on_path(configured)
+}
+
+fn find_on_path(path: &PathBuf) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+    })
 }
 
 impl Default for FileSearchSettings {
@@ -311,5 +426,69 @@ mod tests {
                 ..
             }
         )));
+    }
+}
+
+#[cfg(test)]
+mod diagnostics_state_tests {
+    use super::*;
+
+    #[test]
+    fn settings_deserialization_with_missing_fields_uses_defaults() {
+        let parsed: FileSearchSettings =
+            serde_json::from_str(r#"{"max_search_results":42}"#).unwrap();
+        assert_eq!(parsed.max_search_results, 42);
+        assert_eq!(
+            parsed.max_matches_per_content_file,
+            FileSearchSettings::default().max_matches_per_content_file
+        );
+        assert_eq!(parsed.ripgrep_executable_path, PathBuf::from("rg"));
+    }
+
+    #[test]
+    fn invalid_settings_do_not_panic() {
+        let settings = FileSearchSettings {
+            global_content_search_roots: vec![PathBuf::from("/definitely/missing/root")],
+            everything_enabled: true,
+            everything_executable_path: PathBuf::from("/definitely/missing/es.exe"),
+            ripgrep_executable_path: PathBuf::from("/definitely/missing/rg"),
+            max_search_results: 0,
+            max_matches_per_content_file: 0,
+            max_content_search_file_size_bytes: 0,
+            ..FileSearchSettings::default()
+        };
+        let diagnostics = settings.validate();
+        assert!(diagnostics.len() >= 5);
+    }
+
+    #[test]
+    fn diagnostics_formatting_includes_expected_fields() {
+        let state = FileSearchDiagnosticsState {
+            everything_enabled: true,
+            detected_everything: Some(PathBuf::from("es.exe")),
+            detected_ripgrep: Some(PathBuf::from("rg")),
+            valid_roots: vec![PathBuf::from("/")],
+            invalid_roots: vec![PathBuf::from("/missing")],
+            current_backend: Some("ripgrep".into()),
+            active_search_state: "running".into(),
+            last_search_duration_ms: Some(12),
+            last_result_count: 7,
+            last_backend_error: Some("boom".into()),
+            inaccessible_entry_count: 3,
+            preview_cache_usage: "2 entries".into(),
+        };
+        let formatted = state.to_string();
+        assert!(formatted.contains("Everything enabled: true"));
+        assert!(formatted.contains("current backend: ripgrep"));
+        assert!(formatted.contains("preview cache: 2 entries"));
+    }
+
+    #[test]
+    fn sensitive_query_text_is_not_in_normal_diagnostics_string() {
+        let secret = "super-secret-content-query";
+        let mut state = FileSearchDiagnosticsState::from_settings(&FileSearchSettings::default());
+        state.active_search_state = "running".into();
+        let formatted = state.to_string();
+        assert!(!formatted.contains(secret));
     }
 }

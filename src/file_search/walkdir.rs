@@ -6,7 +6,7 @@ use crate::file_search::model::{
 use crate::file_search::settings::FileSearchSettings;
 use std::cell::Cell;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc;
 use walkdir::{DirEntry, WalkDir};
 
@@ -300,6 +300,7 @@ mod tests {
     use super::*;
     use crate::file_search::model::SearchScope;
     use std::fs;
+    use std::path::PathBuf;
 
     fn request(root: PathBuf, text: &str, max_results: usize) -> SearchRequest {
         SearchRequest {
