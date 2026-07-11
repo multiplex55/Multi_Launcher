@@ -1,7 +1,7 @@
 use eframe::egui;
 use multi_launcher::actions::Action;
 use multi_launcher::gui::LauncherApp;
-use multi_launcher::plugin::PluginManager;
+use multi_launcher::plugin::{Plugin, PluginManager};
 use multi_launcher::settings::Settings;
 use serde_json::json;
 use std::sync::{atomic::AtomicBool, Arc};
@@ -134,4 +134,44 @@ fn omni_search_settings_from_plugin_manager_are_applied() {
     assert!(!app.results.iter().any(|a| a.action == "calendar:upcoming"));
     assert!(!app.results.iter().any(|a| a.action == "todo:done:0"));
     assert!(app.results.iter().any(|a| a.action == "app:plan"));
+}
+
+#[test]
+fn command_collection_keeps_existing_folder_and_omni_commands_and_adds_file_search_commands() {
+    use multi_launcher::plugins::file_search::FileSearchPlugin;
+    use multi_launcher::plugins::folders::FoldersPlugin;
+    use multi_launcher::plugins::omni_search::OmniSearchPlugin;
+
+    fn command_view(actions: &[Action]) -> std::collections::HashSet<(String, String, String)> {
+        actions
+            .iter()
+            .map(|a| (a.label.clone(), a.desc.clone(), a.action.clone()))
+            .collect()
+    }
+
+    let actions = Arc::new(Vec::new());
+    let mut previous = PluginManager::new();
+    previous.register(Box::new(FoldersPlugin::default()));
+    previous.register(Box::new(OmniSearchPlugin::new(Arc::clone(&actions))));
+    let previous_commands = command_view(&previous.commands());
+
+    let mut current = PluginManager::new();
+    current.register(Box::new(FoldersPlugin::default()));
+    current.register(Box::new(OmniSearchPlugin::new(Arc::clone(&actions))));
+    current.register(Box::new(FileSearchPlugin::default()));
+    let current_commands = command_view(&current.commands());
+
+    for command in &previous_commands {
+        assert!(
+            current_commands.contains(command),
+            "missing previous command: {command:?}"
+        );
+    }
+
+    for expected in command_view(&FileSearchPlugin::default().commands()) {
+        assert!(
+            current_commands.contains(&expected),
+            "missing file-search command: {expected:?}"
+        );
+    }
 }
