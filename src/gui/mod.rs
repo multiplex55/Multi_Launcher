@@ -4112,6 +4112,19 @@ mod tests {
     }
 
     #[test]
+    fn open_file_search_disables_launcher_wide_escape_handling() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.file_search_dialog.open = true;
+        app.visible_flag.store(true, Ordering::SeqCst);
+
+        assert!(!LauncherApp::launcher_escape_handling_enabled(
+            app.file_search_dialog.open
+        ));
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn arrow_page_tab_navigation_requires_query_focus() {
         assert!(!LauncherApp::launcher_query_keyboard_enabled(false));
         assert!(LauncherApp::launcher_query_keyboard_enabled(true));

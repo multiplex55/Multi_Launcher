@@ -41,6 +41,20 @@ pub enum FileSearchScopeMode {
     Directory,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileSearchEscapeAction {
+    Cancel,
+    Close,
+}
+
+pub fn handle_escape_action(status: SearchStatus) -> FileSearchEscapeAction {
+    if status == SearchStatus::Running {
+        FileSearchEscapeAction::Cancel
+    } else {
+        FileSearchEscapeAction::Close
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentResultGroup {
     pub path: PathBuf,
@@ -191,6 +205,15 @@ impl FileSearchDialogState {
         }
     }
 
+    pub fn handle_escape(&mut self, coordinator: &mut SearchCoordinator) -> FileSearchEscapeAction {
+        let action = handle_escape_action(self.current_status);
+        match action {
+            FileSearchEscapeAction::Cancel => self.cancel_search(coordinator),
+            FileSearchEscapeAction::Close => self.open = false,
+        }
+        action
+    }
+
     pub fn drain_events(&mut self, coordinator: &mut SearchCoordinator) {
         for event in coordinator.drain_events_including_stale() {
             self.apply_event(event);
@@ -249,11 +272,10 @@ impl FileSearchDialogState {
             return;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self.current_status == SearchStatus::Running {
-                self.cancel_search(coordinator);
-            } else {
-                self.open = false;
+            if self.handle_escape(coordinator) == FileSearchEscapeAction::Cancel {
+                ctx.request_repaint();
             }
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         }
         let mut open = self.open;
         if let Some(resp) = egui::Window::new("File Search")
@@ -300,6 +322,7 @@ impl FileSearchDialogState {
             if search_response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.start_search(coordinator);
                 ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                ui.ctx().request_repaint();
             }
         });
         ui.horizontal(|ui| {
@@ -311,6 +334,7 @@ impl FileSearchDialogState {
             if root_response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.start_search(coordinator);
                 ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                ui.ctx().request_repaint();
             }
             if ui.button("Pick…").clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
@@ -327,6 +351,7 @@ impl FileSearchDialogState {
             }
             if ui.button("Cancel").clicked() {
                 self.cancel_search(coordinator);
+                ui.ctx().request_repaint();
             }
         });
         ui.label(format!(
@@ -718,6 +743,89 @@ mod tests {
         state.start_search(&mut coordinator);
         state.cancel_search(&mut coordinator);
         assert_eq!(state.current_status, SearchStatus::Cancelled);
+    }
+
+    #[test]
+    fn escape_while_running_cancels_and_leaves_dialog_open() {
+        let mut state = FileSearchDialogState {
+            open: true,
+            search_text: "foo".into(),
+            ..Default::default()
+        };
+        let mut coordinator = SearchCoordinator::new();
+        state.start_search(&mut coordinator);
+
+        let action = state.handle_escape(&mut coordinator);
+
+        assert_eq!(action, FileSearchEscapeAction::Cancel);
+        assert!(state.open);
+        assert_eq!(state.current_status, SearchStatus::Cancelled);
+    }
+
+    #[test]
+    fn escape_while_idle_closes_dialog() {
+        let mut state = FileSearchDialogState {
+            open: true,
+            current_status: SearchStatus::Completed,
+            ..Default::default()
+        };
+        let mut coordinator = SearchCoordinator::new();
+
+        let action = state.handle_escape(&mut coordinator);
+
+        assert_eq!(action, FileSearchEscapeAction::Close);
+        assert!(!state.open);
+    }
+
+    #[test]
+    fn second_escape_after_cancellation_closes_now_idle_dialog() {
+        let mut state = FileSearchDialogState {
+            open: true,
+            search_text: "foo".into(),
+            ..Default::default()
+        };
+        let mut coordinator = SearchCoordinator::new();
+        state.start_search(&mut coordinator);
+
+        assert_eq!(
+            state.handle_escape(&mut coordinator),
+            FileSearchEscapeAction::Cancel
+        );
+        assert_eq!(
+            state.handle_escape(&mut coordinator),
+            FileSearchEscapeAction::Close
+        );
+
+        assert!(!state.open);
+    }
+
+    #[test]
+    fn escape_ui_consumes_key_after_file_search_handles_it() {
+        let ctx = egui::Context::default();
+        let mut state = FileSearchDialogState {
+            open: true,
+            current_status: SearchStatus::Completed,
+            ..Default::default()
+        };
+        let mut coordinator = SearchCoordinator::new();
+
+        ctx.begin_frame(egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        });
+        state.ui(&ctx, &mut coordinator);
+        let consumed_by_later_launcher_code =
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        let _ = ctx.end_frame();
+
+        assert!(!consumed_by_later_launcher_code);
+        assert!(!state.open);
     }
 
     #[test]

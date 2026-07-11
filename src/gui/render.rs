@@ -12,6 +12,10 @@ impl LauncherApp {
         query_has_focus && !file_search_open
     }
 
+    pub(crate) fn launcher_escape_handling_enabled(file_search_open: bool) -> bool {
+        !file_search_open
+    }
+
     pub(crate) fn result_context_menu_kind(&self, action: &Action) -> ResultContextMenuKind {
         if self.folder_aliases.contains_key(&action.action) && !action.action.starts_with("folder:")
         {
@@ -891,7 +895,9 @@ impl eframe::App for LauncherApp {
                     });
                 }
 
-                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if Self::launcher_escape_handling_enabled(self.file_search_dialog.open)
+                    && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+                {
                     if self.any_panel_open() {
                         if self.close_front_dialog() {
                             ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
