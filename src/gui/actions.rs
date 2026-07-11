@@ -847,7 +847,7 @@ impl LauncherApp {
         };
 
         if action == OPEN_ACTION {
-            self.file_search_dialog.open = true;
+            self.file_search_dialog.open();
             return true;
         }
         if action == CANCEL_ACTION {
@@ -856,7 +856,7 @@ impl LauncherApp {
             return true;
         }
         if let Some(encoded) = action.strip_prefix(MODE_PREFIX) {
-            self.file_search_dialog.open = true;
+            self.file_search_dialog.open();
             match decode_action_payload::<FileSearchModePayload>(encoded).and_then(|payload| {
                 payload.validate()?;
                 Ok(payload)
@@ -877,13 +877,13 @@ impl LauncherApp {
             return true;
         }
         if let Some(encoded) = action.strip_prefix(START_PREFIX) {
-            self.file_search_dialog.open = true;
+            self.file_search_dialog.open();
             match decode_action_payload::<FileSearchStartPayload>(encoded).and_then(|payload| {
                 payload.validate()?;
                 Ok(payload)
             }) {
                 Ok(payload) => {
-                    self.file_search_dialog.selected_mode = match payload.search_kind() {
+                    let mode = match payload.search_kind() {
                         crate::file_search::model::SearchKind::Filename => {
                             crate::gui::FileSearchMode::Filename
                         }
@@ -891,14 +891,13 @@ impl LauncherApp {
                             crate::gui::FileSearchMode::Content
                         }
                     };
-                    if let Some(root) = payload.root_path() {
-                        self.file_search_dialog.selected_scope =
-                            crate::gui::FileSearchScopeMode::Directory;
-                        self.file_search_dialog.root_directory = root.display().to_string();
-                    }
-                    self.file_search_dialog.search_text = payload.text;
-                    self.file_search_dialog
-                        .start_search(&mut self.file_search_coordinator);
+                    let root = payload.root_path();
+                    self.file_search_dialog.open_and_start(
+                        mode,
+                        root,
+                        payload.text,
+                        &mut self.file_search_coordinator,
+                    );
                 }
                 Err(err) => self.report_file_search_action_error(err),
             }

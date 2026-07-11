@@ -2231,7 +2231,7 @@ impl LauncherApp {
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_dialog.open(),
             Panel::ThemeSettingsDialog => self.open_theme_settings_dialog(),
             Panel::FavDialog => self.fav_dialog.open = true,
-            Panel::FileSearchDialog => self.file_search_dialog.open = true,
+            Panel::FileSearchDialog => self.file_search_dialog.open(),
             Panel::NotesDialog => self.notes_dialog.open = true,
             Panel::NoteGraphDialog => self.note_graph_dialog.open = true,
             Panel::UnusedAssetsDialog => self.unused_assets_dialog.open = true,
