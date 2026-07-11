@@ -270,7 +270,7 @@ fn constructing_manager_with_file_search_settings_preserves_omni_and_indexer_beh
     pm.reload_from_dirs(
         &[],
         Settings::default().clipboard_limit,
-        NetUnit::Bytes,
+        NetUnit::Auto,
         false,
         &plugin_settings,
         Arc::clone(&actions),
