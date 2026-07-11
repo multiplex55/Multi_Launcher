@@ -604,6 +604,19 @@ impl LauncherApp {
         self.mouse_gesture_settings_dialog.open();
     }
 
+    pub fn apply_file_search_settings(
+        &mut self,
+        settings: crate::file_search::settings::FileSearchSettings,
+    ) {
+        self.file_search_dialog
+            .cancel_search(&mut self.file_search_coordinator);
+        self.file_search_coordinator
+            .reconfigure_from_settings(settings.clone());
+        self.file_search_dialog.case_sensitive = settings.case_sensitive;
+        self.file_search_dialog.include_hidden = settings.include_hidden_files;
+        self.file_search_dialog.settings = settings;
+    }
+
     pub fn open_theme_settings_dialog(&mut self) {
         self.theme_settings_dialog_open = true;
         self.theme_settings_dialog.request_reload();
@@ -1168,7 +1181,7 @@ impl LauncherApp {
                 include_hidden: file_search_settings.include_hidden_files,
                 ..FileSearchDialogState::default()
             },
-            file_search_coordinator: SearchCoordinator::new(),
+            file_search_coordinator: SearchCoordinator::from_settings(file_search_settings),
             notes_dialog: NotesDialog::default(),
             note_graph_dialog: NoteGraphDialog::default(),
             unused_assets_dialog: UnusedAssetsDialog::default(),
@@ -3858,6 +3871,60 @@ mod tests {
             NOTE_SEARCH_DEBOUNCE,
         ));
     }
+    #[test]
+    fn launcher_new_shares_file_search_settings_with_dialog_and_coordinator() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        let file_search_settings = crate::file_search::settings::FileSearchSettings {
+            global_content_search_roots: vec![std::path::PathBuf::from("/tmp/search-root")],
+            excluded_directory_names: vec!["skip-me".to_owned()],
+            max_search_results: 123,
+            max_matches_per_content_file: 7,
+            max_content_search_file_size_bytes: 456_789,
+            include_hidden_files: true,
+            case_sensitive: true,
+            everything_executable_path: std::path::PathBuf::from("custom-everything.exe"),
+            ripgrep_executable_path: std::path::PathBuf::from("custom-rg"),
+            everything_enabled: false,
+            ..crate::file_search::settings::FileSearchSettings::default()
+        };
+        settings.plugin_settings.insert(
+            "file_search".to_owned(),
+            serde_json::to_value(file_search_settings.clone()).expect("serialize settings"),
+        );
+
+        let app = LauncherApp::new(
+            &ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new(),
+            "actions.json".into(),
+            "settings.json".into(),
+            settings,
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert_eq!(app.file_search_dialog.settings, file_search_settings);
+        assert_eq!(
+            app.file_search_dialog.case_sensitive,
+            file_search_settings.case_sensitive
+        );
+        assert_eq!(
+            app.file_search_dialog.include_hidden,
+            file_search_settings.include_hidden_files
+        );
+        assert_eq!(
+            app.file_search_coordinator.production_settings(),
+            Some(&file_search_settings)
+        );
+    }
+
     #[test]
     fn launcher_new_normalizes_conflicting_follow_mouse_static_config() {
         let ctx = egui::Context::default();
