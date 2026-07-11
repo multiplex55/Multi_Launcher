@@ -210,8 +210,10 @@ fn builtin_search_filtered_routes_file_omni_and_folder_prefixes() {
     assert!(omni.iter().any(|a| a.action == "app:plan"));
     assert!(!omni.iter().any(|a| a.action.starts_with("file_search:")));
 
-    let folders = pm.search_filtered("f list", None, None);
-    assert!(folders.iter().any(|a| a.action.starts_with("folder:")));
+    let dir = tempfile::tempdir().unwrap();
+    let folder_query = format!("f add {}", dir.path().display());
+    let folders = pm.search_filtered(&folder_query, None, None);
+    assert!(folders.iter().any(|a| a.action.starts_with("folder:add:")));
     assert!(!folders.iter().any(|a| a.action.starts_with("file_search:")));
 
     let unrelated = pm.search_filtered("plain query", None, None);

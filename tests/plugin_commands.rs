@@ -1,7 +1,7 @@
 use eframe::egui;
 use multi_launcher::actions::Action;
 use multi_launcher::gui::LauncherApp;
-use multi_launcher::plugin::PluginManager;
+use multi_launcher::plugin::{Plugin, PluginManager};
 use multi_launcher::settings::Settings;
 use serde_json::json;
 use std::sync::{atomic::AtomicBool, Arc};
@@ -168,19 +168,9 @@ fn command_collection_keeps_existing_folder_and_omni_commands_and_adds_file_sear
         );
     }
 
-    for expected in [
-        ("fs", "File Search", "query:fs "),
-        ("fs file", "File Search", "query:fs file "),
-        ("fs content", "File Search", "query:fs content "),
-        ("fs here file", "File Search", "query:fs here file "),
-        ("fs here content", "File Search", "query:fs here content "),
-    ] {
+    for expected in command_view(&FileSearchPlugin::default().commands()) {
         assert!(
-            current_commands.contains(&(
-                expected.0.to_string(),
-                expected.1.to_string(),
-                expected.2.to_string()
-            )),
+            current_commands.contains(&expected),
             "missing file-search command: {expected:?}"
         );
     }
