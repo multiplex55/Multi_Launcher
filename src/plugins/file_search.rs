@@ -1,7 +1,7 @@
 use crate::actions::Action;
 use crate::file_search::actions::{
-    MODE_PREFIX, OPEN_ACTION, START_PREFIX, encode_action_payload, mode_action_payload,
-    start_action_payload,
+    encode_action_payload, mode_action_payload, start_action_payload, MODE_PREFIX, OPEN_ACTION,
+    START_PREFIX,
 };
 use crate::file_search::model::SearchKind;
 use crate::file_search::query::{FileSearchCommand, SearchRequestDraft};
@@ -102,7 +102,7 @@ impl Plugin for FileSearchPlugin {
             ui.add(
                 egui::DragValue::new(&mut cfg.max_content_search_file_size_bytes)
                     .speed(1024.0)
-                    .range(1..=u64::MAX),
+                    .clamp_range(1..=u64::MAX),
             );
         });
         ui.checkbox(&mut cfg.include_hidden_files, "Include hidden by default");
