@@ -156,7 +156,7 @@ impl PluginManager {
         self.register_with_settings(ClipboardPlugin::new(clipboard_limit), plugin_settings);
         self.register_with_settings(BookmarksPlugin::default(), plugin_settings);
         self.register_with_settings(FoldersPlugin::default(), plugin_settings);
-        self.register_with_settings(FileSearchPlugin, plugin_settings);
+        self.register_with_settings(FileSearchPlugin::default(), plugin_settings);
         self.register_with_settings(OmniSearchPlugin::new(actions.clone()), plugin_settings);
         self.register_with_settings(SystemPlugin, plugin_settings);
         self.register_with_settings(ProcessesPlugin, plugin_settings);

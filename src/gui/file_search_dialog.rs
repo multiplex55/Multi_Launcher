@@ -1,10 +1,9 @@
 use crate::actions::clipboard;
 use crate::file_search::actions::{
-    containing_directory, copied_filename, nested_search_root,
+    InvocationTarget, containing_directory, copied_filename, nested_search_root,
     open_configured_terminal_in_directory, open_in_configured_editor, open_path, reveal_path,
-    InvocationTarget,
 };
-use crate::file_search::coordinator::{event_id, SearchCoordinator};
+use crate::file_search::coordinator::{SearchCoordinator, event_id};
 use crate::file_search::model::{
     ContentFileResult, ContentMatch, SearchBackend, SearchEvent, SearchId, SearchKind,
     SearchRequest, SearchResult, SearchScope, SearchStatus,
@@ -15,8 +14,6 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 const DEFAULT_WINDOW_SIZE: egui::Vec2 = egui::vec2(760.0, 560.0);
-const MAX_RESULTS: usize = 500;
-const MAX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileSearchMode {
@@ -122,11 +119,11 @@ impl FileSearchDialogState {
             text: text.to_string(),
             case_sensitive: self.case_sensitive,
             include_hidden_files: self.include_hidden,
-            max_results: MAX_RESULTS,
-            max_file_size_bytes: MAX_FILE_SIZE_BYTES,
+            max_results: self.settings.max_search_results.max(1),
+            max_file_size_bytes: self.settings.max_content_search_file_size_bytes.max(1),
             included_extensions: Vec::new(),
             excluded_extensions: Vec::new(),
-            excluded_directory_names: Vec::new(),
+            excluded_directory_names: self.settings.excluded_directory_names.clone(),
         };
         self.results.clear();
         self.content_result_groups.clear();
@@ -393,7 +390,7 @@ impl FileSearchDialogState {
             case_sensitive: self.case_sensitive,
             include_hidden_files: self.include_hidden,
             max_results: 1,
-            max_file_size_bytes: MAX_FILE_SIZE_BYTES,
+            max_file_size_bytes: self.settings.max_content_search_file_size_bytes.max(1),
             included_extensions: Vec::new(),
             excluded_extensions: Vec::new(),
             excluded_directory_names: Vec::new(),
