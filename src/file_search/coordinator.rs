@@ -662,7 +662,7 @@ mod tests {
                     result: SearchResult::ContentFile(result),
                     ..
                 } if result.path == expected
-                    && result.matches.iter().any(|m| m.line_text.contains("needle"))
+                    && result.matches.iter().any(|m| m.line.contains("needle"))
             )),
             "events: {events:?}"
         );
