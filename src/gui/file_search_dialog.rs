@@ -14,8 +14,10 @@ use crate::file_search::settings::FileSearchSettings;
 use eframe::egui;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 const DEFAULT_WINDOW_SIZE: egui::Vec2 = egui::vec2(760.0, 560.0);
+const ACTIVE_SEARCH_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 
 pub const FILE_SEARCH_SEARCH_FIELD_ID_SOURCE: &str = "file_search_search_text";
 pub const FILE_SEARCH_ROOT_FIELD_ID_SOURCE: &str = "file_search_root_directory";
@@ -84,6 +86,7 @@ pub struct FileSearchDialogState {
     pub persisted_window_size: egui::Vec2,
     pub settings: FileSearchSettings,
     pub request_search_focus: bool,
+    pub request_immediate_repaint: bool,
 }
 
 impl Default for FileSearchDialogState {
@@ -107,6 +110,7 @@ impl Default for FileSearchDialogState {
             persisted_window_size: DEFAULT_WINDOW_SIZE,
             settings: FileSearchSettings::default(),
             request_search_focus: false,
+            request_immediate_repaint: false,
         }
     }
 }
@@ -144,12 +148,29 @@ impl FileSearchDialogState {
         }
         self.search_text = text;
         self.open();
-        self.start_search(coordinator)
+        let id = self.start_search(coordinator);
+        if id.is_some() {
+            self.request_immediate_repaint = true;
+        }
+        id
     }
 
     pub fn consume_search_focus_request(&mut self) -> bool {
         if self.request_search_focus {
             self.request_search_focus = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn requires_repaint_polling(&self) -> bool {
+        self.current_status == SearchStatus::Running
+    }
+
+    pub fn consume_immediate_repaint_request(&mut self) -> bool {
+        if self.request_immediate_repaint {
+            self.request_immediate_repaint = false;
             true
         } else {
             false
@@ -195,6 +216,7 @@ impl FileSearchDialogState {
         self.backend = Some(SearchCoordinator::select_backend(&request));
         let id = coordinator.start_search(request);
         self.active_search_id = Some(id);
+        self.request_immediate_repaint = true;
         Some(id)
     }
 
@@ -202,6 +224,7 @@ impl FileSearchDialogState {
         if self.active_search_id.is_some() && self.current_status == SearchStatus::Running {
             coordinator.cancel_active();
             self.current_status = SearchStatus::Cancelled;
+            self.request_immediate_repaint = true;
         }
     }
 
@@ -214,15 +237,17 @@ impl FileSearchDialogState {
         action
     }
 
-    pub fn drain_events(&mut self, coordinator: &mut SearchCoordinator) {
-        for event in coordinator.drain_events_including_stale() {
-            self.apply_event(event);
+    pub fn drain_events(&mut self, coordinator: &mut SearchCoordinator) -> bool {
+        let mut observed_terminal_event = false;
+        for event in coordinator.drain_current_events() {
+            observed_terminal_event |= self.apply_event(event);
         }
+        observed_terminal_event
     }
 
-    pub fn apply_event(&mut self, event: SearchEvent) {
+    pub fn apply_event(&mut self, event: SearchEvent) -> bool {
         if Some(event_id(&event)) != self.active_search_id {
-            return;
+            return false;
         }
         match event {
             SearchEvent::Started { backend, .. } => {
@@ -237,13 +262,24 @@ impl FileSearchDialogState {
                     .try_into()
                     .unwrap_or(usize::MAX);
             }
-            SearchEvent::Completed { .. } => self.current_status = SearchStatus::Completed,
-            SearchEvent::Cancelled { .. } => self.current_status = SearchStatus::Cancelled,
+            SearchEvent::Completed { .. } => {
+                self.current_status = SearchStatus::Completed;
+                self.request_immediate_repaint = true;
+                return true;
+            }
+            SearchEvent::Cancelled { .. } => {
+                self.current_status = SearchStatus::Cancelled;
+                self.request_immediate_repaint = true;
+                return true;
+            }
             SearchEvent::Failed { error, .. } => {
                 self.current_status = SearchStatus::Failed;
                 self.warning_error_message = Some(error);
+                self.request_immediate_repaint = true;
+                return true;
             }
         }
+        false
     }
 
     fn push_result(&mut self, result: SearchResult) {
@@ -268,6 +304,12 @@ impl FileSearchDialogState {
 
     pub fn ui(&mut self, ctx: &egui::Context, coordinator: &mut SearchCoordinator) {
         self.drain_events(coordinator);
+        if self.consume_immediate_repaint_request() {
+            ctx.request_repaint();
+        }
+        if self.requires_repaint_polling() {
+            ctx.request_repaint_after(ACTIVE_SEARCH_REPAINT_INTERVAL);
+        }
         if !self.open {
             return;
         }
@@ -347,7 +389,9 @@ impl FileSearchDialogState {
             ui.checkbox(&mut self.case_sensitive, "Case-sensitive");
             ui.checkbox(&mut self.include_hidden, "Include hidden");
             if ui.button("Search").clicked() {
-                self.start_search(coordinator);
+                if self.start_search(coordinator).is_some() {
+                    ui.ctx().request_repaint();
+                }
             }
             if ui.button("Cancel").clicked() {
                 self.cancel_search(coordinator);
@@ -452,6 +496,7 @@ impl FileSearchDialogState {
     ) {
         if ui.button("Show all matches in this file").clicked() {
             self.start_file_content_search(path, coordinator);
+            ui.ctx().request_repaint();
             ui.close_menu();
         }
         self.result_context_menu(ui, path, false, first_match, coordinator);
@@ -512,6 +557,7 @@ impl FileSearchDialogState {
         self.backend = Some(SearchCoordinator::select_backend(&request));
         let id = coordinator.start_search(request);
         self.active_search_id = Some(id);
+        self.request_immediate_repaint = true;
     }
 
     fn result_context_menu(
@@ -588,6 +634,7 @@ impl FileSearchDialogState {
             .clicked()
         {
             self.start_nested_search(path, is_directory, FileSearchMode::Filename, coordinator);
+            ui.ctx().request_repaint();
             ui.close_menu();
         }
         if ui
@@ -595,6 +642,7 @@ impl FileSearchDialogState {
             .clicked()
         {
             self.start_nested_search(path, is_directory, FileSearchMode::Content, coordinator);
+            ui.ctx().request_repaint();
             ui.close_menu();
         }
     }
@@ -703,6 +751,77 @@ mod tests {
             FileSearchDialogState::search_field_id(),
             egui::Id::new("query_input")
         );
+    }
+
+    #[test]
+    fn repaint_polling_only_required_while_running() {
+        let mut state = FileSearchDialogState::default();
+
+        state.current_status = SearchStatus::Running;
+        assert!(state.requires_repaint_polling());
+
+        for status in [
+            SearchStatus::Pending,
+            SearchStatus::Completed,
+            SearchStatus::Cancelled,
+            SearchStatus::Failed,
+        ] {
+            state.current_status = status;
+            assert!(!state.requires_repaint_polling());
+        }
+    }
+
+    #[test]
+    fn starting_search_sets_immediate_repaint_request() {
+        let mut state = FileSearchDialogState {
+            search_text: "foo".into(),
+            ..Default::default()
+        };
+        let mut coordinator = SearchCoordinator::new();
+
+        let id = state.start_search(&mut coordinator);
+
+        assert!(id.is_some());
+        assert!(state.consume_immediate_repaint_request());
+        assert!(!state.consume_immediate_repaint_request());
+    }
+
+    #[test]
+    fn terminal_events_request_immediate_repaint_and_stop_polling() {
+        for event in [
+            SearchEvent::Completed { id: SearchId(7) },
+            SearchEvent::Cancelled { id: SearchId(7) },
+            SearchEvent::Failed {
+                id: SearchId(7),
+                error: "boom".into(),
+            },
+        ] {
+            let mut state = FileSearchDialogState {
+                active_search_id: Some(SearchId(7)),
+                current_status: SearchStatus::Running,
+                ..Default::default()
+            };
+
+            assert!(state.apply_event(event));
+
+            assert!(!state.requires_repaint_polling());
+            assert!(state.consume_immediate_repaint_request());
+        }
+    }
+
+    #[test]
+    fn cancellation_stops_polling_after_cancelled_event_is_observed() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(7)),
+            current_status: SearchStatus::Running,
+            ..Default::default()
+        };
+        assert!(state.requires_repaint_polling());
+
+        assert!(state.apply_event(SearchEvent::Cancelled { id: SearchId(7) }));
+
+        assert_eq!(state.current_status, SearchStatus::Cancelled);
+        assert!(!state.requires_repaint_polling());
     }
 
     #[test]
