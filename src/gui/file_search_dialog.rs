@@ -1,13 +1,15 @@
 use crate::actions::clipboard;
 use crate::file_search::actions::{
-    containing_directory, copied_filename, nested_search_root, open_path,
-    open_terminal_in_directory, reveal_path,
+    containing_directory, copied_filename, nested_search_root,
+    open_configured_terminal_in_directory, open_in_configured_editor, open_path, reveal_path,
+    InvocationTarget,
 };
-use crate::file_search::coordinator::{SearchCoordinator, event_id};
+use crate::file_search::coordinator::{event_id, SearchCoordinator};
 use crate::file_search::model::{
     ContentFileResult, ContentMatch, SearchBackend, SearchEvent, SearchId, SearchKind,
     SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
+use crate::file_search::settings::FileSearchSettings;
 use eframe::egui;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -63,6 +65,7 @@ pub struct FileSearchDialogState {
     pub warning_error_message: Option<String>,
     pub inaccessible_path_warnings: usize,
     pub persisted_window_size: egui::Vec2,
+    pub settings: FileSearchSettings,
 }
 
 impl Default for FileSearchDialogState {
@@ -83,6 +86,7 @@ impl Default for FileSearchDialogState {
             warning_error_message: None,
             inaccessible_path_warnings: 0,
             persisted_window_size: DEFAULT_WINDOW_SIZE,
+            settings: FileSearchSettings::default(),
         }
     }
 }
@@ -311,6 +315,7 @@ impl FileSearchDialogState {
                     ui,
                     &item.path,
                     item.kind == crate::file_search::model::FileKind::Directory,
+                    None,
                     coordinator,
                 )
             });
@@ -347,8 +352,10 @@ impl FileSearchDialogState {
                 }
             })
             .header_response;
-            response
-                .context_menu(|ui| self.content_result_context_menu(ui, &group.path, coordinator));
+            let first_match = group.matches.first().cloned();
+            response.context_menu(|ui| {
+                self.content_result_context_menu(ui, &group.path, first_match.as_ref(), coordinator)
+            });
         }
     }
 
@@ -356,13 +363,14 @@ impl FileSearchDialogState {
         &mut self,
         ui: &mut egui::Ui,
         path: &std::path::Path,
+        first_match: Option<&ContentMatch>,
         coordinator: &mut SearchCoordinator,
     ) {
         if ui.button("Show all matches in this file").clicked() {
             self.start_file_content_search(path, coordinator);
             ui.close_menu();
         }
-        self.result_context_menu(ui, path, false, coordinator);
+        self.result_context_menu(ui, path, false, first_match, coordinator);
     }
 
     fn start_file_content_search(
@@ -406,8 +414,23 @@ impl FileSearchDialogState {
         ui: &mut egui::Ui,
         path: &std::path::Path,
         is_directory: bool,
+        first_match: Option<&ContentMatch>,
         coordinator: &mut SearchCoordinator,
     ) {
+        if ui.button("Open in configured editor").clicked() {
+            let settings = self.settings.clone();
+            self.run_result_action("open in configured editor", || {
+                open_in_configured_editor(
+                    &settings,
+                    InvocationTarget {
+                        file: path,
+                        line: first_match.map(|m| m.line_number),
+                        column: first_match.and_then(|m| m.column.map(|c| c.saturating_add(1))),
+                    },
+                )
+            });
+            ui.close_menu();
+        }
         if ui.button("Open file or directory").clicked() {
             self.run_result_action("open", || open_path(path));
             ui.close_menu();
@@ -442,11 +465,12 @@ impl FileSearchDialogState {
             ui.close_menu();
         }
         if ui.button("Open terminal in containing directory").clicked() {
+            let settings = self.settings.clone();
             self.run_result_action("open terminal", || {
                 let dir = containing_directory(path).ok_or_else(|| {
                     anyhow::anyhow!("{} has no containing directory", path.display())
                 })?;
-                open_terminal_in_directory(&dir)
+                open_configured_terminal_in_directory(&settings, &dir)
             });
             ui.close_menu();
         }

@@ -7,6 +7,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::file_search::model::SearchKind;
+use crate::file_search::settings::FileSearchSettings;
 
 pub const OPEN_ACTION: &str = "file_search:open";
 pub const MODE_PREFIX: &str = "file_search:mode:";
@@ -111,6 +112,168 @@ impl FileSearchStartPayload {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvocationTarget<'a> {
+    pub file: &'a Path,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandInvocation {
+    pub executable: PathBuf,
+    pub args: Vec<String>,
+    pub working_dir: Option<PathBuf>,
+}
+
+fn path_entries() -> Vec<PathBuf> {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect())
+        .unwrap_or_default()
+}
+
+pub fn configured_executable_available(executable: &str) -> bool {
+    let trimmed = executable.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let path = Path::new(trimmed);
+    if path.components().count() > 1 || path.is_absolute() {
+        return path.is_file();
+    }
+    path_entries().into_iter().any(|dir| {
+        let candidate = dir.join(trimmed);
+        candidate.is_file()
+            || (cfg!(target_os = "windows") && candidate.with_extension("exe").is_file())
+    })
+}
+
+pub fn expand_invocation_template(
+    template: &[String],
+    target: &InvocationTarget<'_>,
+) -> anyhow::Result<Vec<String>> {
+    let parent = target.file.parent().unwrap_or(target.file);
+    let line = target.line.map(|v| v.to_string()).unwrap_or_default();
+    let column = target.column.map(|v| v.to_string()).unwrap_or_default();
+    let mut args = Vec::new();
+    for item in template {
+        let pieces =
+            shlex::split(item).ok_or_else(|| anyhow!("invalid argument template: {item}"))?;
+        for piece in pieces {
+            args.push(
+                piece
+                    .replace("{file}", &target.file.display().to_string())
+                    .replace("{parent}", &parent.display().to_string())
+                    .replace("{line}", &line)
+                    .replace("{column}", &column),
+            );
+        }
+    }
+    Ok(args)
+}
+
+pub fn editor_invocation(
+    settings: &FileSearchSettings,
+    target: InvocationTarget<'_>,
+) -> anyhow::Result<CommandInvocation> {
+    let executable = settings.preferred_editor_command.trim();
+    if executable.is_empty() {
+        return Err(anyhow!(
+            "configure a preferred editor executable before opening File Search results in an editor"
+        ));
+    }
+    if !configured_executable_available(executable) {
+        return Err(anyhow!(
+            "configured editor executable '{}' is unavailable; update File Search settings to an installed editor path",
+            executable
+        ));
+    }
+    let template = if settings.preferred_editor_args.is_empty() {
+        vec!["{file}".to_string()]
+    } else {
+        settings.preferred_editor_args.clone()
+    };
+    Ok(CommandInvocation {
+        executable: PathBuf::from(executable),
+        args: expand_invocation_template(&template, &target)?,
+        working_dir: None,
+    })
+}
+
+pub fn terminal_invocation(
+    settings: &FileSearchSettings,
+    dir: &Path,
+) -> anyhow::Result<CommandInvocation> {
+    if !dir.is_dir() {
+        return Err(anyhow!("{} is not a directory", dir.display()));
+    }
+    let executable = settings.preferred_terminal_command.trim();
+    if executable.is_empty() {
+        let inv = if crate::plugins::shell::use_wezterm() {
+            CommandInvocation {
+                executable: "wezterm".into(),
+                args: vec!["start".into()],
+                working_dir: Some(dir.to_path_buf()),
+            }
+        } else if cfg!(target_os = "windows") {
+            CommandInvocation {
+                executable: "cmd".into(),
+                args: Vec::new(),
+                working_dir: Some(dir.to_path_buf()),
+            }
+        } else {
+            CommandInvocation {
+                executable: "sh".into(),
+                args: vec!["-lc".into(), "${TERMINAL:-x-terminal-emulator}".into()],
+                working_dir: Some(dir.to_path_buf()),
+            }
+        };
+        return Ok(inv);
+    }
+    if !configured_executable_available(executable) {
+        return Err(anyhow!(
+            "configured terminal executable '{}' is unavailable; update File Search settings to an installed terminal path",
+            executable
+        ));
+    }
+    let target = InvocationTarget {
+        file: dir,
+        line: None,
+        column: None,
+    };
+    Ok(CommandInvocation {
+        executable: PathBuf::from(executable),
+        args: expand_invocation_template(&settings.preferred_terminal_args, &target)?,
+        working_dir: Some(dir.to_path_buf()),
+    })
+}
+
+pub fn spawn_invocation(invocation: CommandInvocation) -> anyhow::Result<()> {
+    let mut command = Command::new(&invocation.executable);
+    command.args(&invocation.args);
+    if let Some(dir) = &invocation.working_dir {
+        command.current_dir(dir);
+    }
+    command
+        .spawn()
+        .with_context(|| format!("run {}", invocation.executable.display()))?;
+    Ok(())
+}
+
+pub fn open_in_configured_editor(
+    settings: &FileSearchSettings,
+    target: InvocationTarget<'_>,
+) -> anyhow::Result<()> {
+    spawn_invocation(editor_invocation(settings, target)?)
+}
+
+pub fn open_configured_terminal_in_directory(
+    settings: &FileSearchSettings,
+    dir: &Path,
+) -> anyhow::Result<()> {
+    spawn_invocation(terminal_invocation(settings, dir)?)
+}
+
 pub fn nested_search_root(path: &Path, is_directory: bool) -> Option<PathBuf> {
     if is_directory {
         Some(path.to_path_buf())
@@ -154,6 +317,10 @@ pub fn reveal_path(path: &Path) -> anyhow::Result<()> {
 }
 
 pub fn open_terminal_in_directory(dir: &Path) -> anyhow::Result<()> {
+    return open_configured_terminal_in_directory(&FileSearchSettings::default(), dir);
+}
+
+pub fn legacy_open_terminal_in_directory(dir: &Path) -> anyhow::Result<()> {
     if !dir.is_dir() {
         return Err(anyhow!("{} is not a directory", dir.display()));
     }
@@ -265,6 +432,104 @@ mod tests {
         assert_eq!(
             windows_reveal_args(Path::new(r"C:\Users\alice\file.txt")),
             vec![r"/select,C:\Users\alice\file.txt".to_string()]
+        );
+    }
+
+    fn executable_settings(executable: &std::path::Path) -> FileSearchSettings {
+        FileSearchSettings {
+            preferred_editor_command: executable.display().to_string(),
+            preferred_terminal_command: executable.display().to_string(),
+            ..FileSearchSettings::default()
+        }
+    }
+
+    #[test]
+    fn placeholder_expansion_preserves_spaces_and_unicode() {
+        let target = InvocationTarget {
+            file: Path::new("/tmp/space dir/雪 file.txt"),
+            line: Some(12),
+            column: Some(4),
+        };
+        let args = expand_invocation_template(
+            &["--goto '{file}:{line}:{column}' --parent {parent}".to_string()],
+            &target,
+        )
+        .unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "--goto",
+                "/tmp/space dir/雪 file.txt:12:4",
+                "--parent",
+                "/tmp/space dir"
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_configured_editor_is_rejected() {
+        let settings = FileSearchSettings {
+            preferred_editor_command: "/definitely/missing/editor".to_string(),
+            ..FileSearchSettings::default()
+        };
+        let err = editor_invocation(
+            &settings,
+            InvocationTarget {
+                file: Path::new("/tmp/a.txt"),
+                line: None,
+                column: None,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("configured editor executable"));
+    }
+
+    #[test]
+    fn file_result_editor_arguments_use_file_placeholders() {
+        let exe = std::env::current_exe().unwrap();
+        let mut settings = executable_settings(&exe);
+        settings.preferred_editor_args = vec!["--open".into(), "{file}".into()];
+        let invocation = editor_invocation(
+            &settings,
+            InvocationTarget {
+                file: Path::new("/tmp/project/main.rs"),
+                line: None,
+                column: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(invocation.args, vec!["--open", "/tmp/project/main.rs"]);
+    }
+
+    #[test]
+    fn content_result_editor_arguments_include_line_and_column() {
+        let exe = std::env::current_exe().unwrap();
+        let mut settings = executable_settings(&exe);
+        settings.preferred_editor_args = vec!["--goto".into(), "{file}:{line}:{column}".into()];
+        let invocation = editor_invocation(
+            &settings,
+            InvocationTarget {
+                file: Path::new("/tmp/project/main.rs"),
+                line: Some(42),
+                column: Some(9),
+            },
+        )
+        .unwrap();
+        assert_eq!(invocation.args, vec!["--goto", "/tmp/project/main.rs:42:9"]);
+    }
+
+    #[test]
+    fn configured_terminal_uses_containing_directory_as_working_directory() {
+        let exe = std::env::current_exe().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let mut settings = executable_settings(&exe);
+        settings.preferred_terminal_args = vec!["--cwd".into(), "{file}".into()];
+        let invocation = terminal_invocation(&settings, temp.path()).unwrap();
+        assert_eq!(invocation.working_dir.as_deref(), Some(temp.path()));
+        assert_eq!(
+            invocation.args,
+            vec!["--cwd".to_string(), temp.path().display().to_string()]
         );
     }
 }
