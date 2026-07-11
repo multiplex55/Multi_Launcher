@@ -115,6 +115,28 @@ impl FileSearchSettings {
             });
         }
 
+        if !self.preferred_editor_command.trim().is_empty()
+            && !crate::file_search::actions::configured_executable_available(
+                &self.preferred_editor_command,
+            )
+        {
+            diagnostics.push(FileSearchSettingsDiagnostic::MissingExecutable {
+                name: "preferred editor",
+                path: PathBuf::from(self.preferred_editor_command.trim()),
+            });
+        }
+
+        if !self.preferred_terminal_command.trim().is_empty()
+            && !crate::file_search::actions::configured_executable_available(
+                &self.preferred_terminal_command,
+            )
+        {
+            diagnostics.push(FileSearchSettingsDiagnostic::MissingExecutable {
+                name: "preferred terminal",
+                path: PathBuf::from(self.preferred_terminal_command.trim()),
+            });
+        }
+
         diagnostics
     }
 
@@ -260,6 +282,32 @@ mod tests {
             diagnostic,
             FileSearchSettingsDiagnostic::MissingExecutable {
                 name: "ripgrep",
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn validation_reports_missing_preferred_invocation_executables() {
+        let settings = FileSearchSettings {
+            preferred_editor_command: "/definitely/missing/editor".to_string(),
+            preferred_terminal_command: "/definitely/missing/terminal".to_string(),
+            ..FileSearchSettings::default()
+        };
+
+        let diagnostics = settings.validate_configured_executables();
+
+        assert!(diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            FileSearchSettingsDiagnostic::MissingExecutable {
+                name: "preferred editor",
+                ..
+            }
+        )));
+        assert!(diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            FileSearchSettingsDiagnostic::MissingExecutable {
+                name: "preferred terminal",
                 ..
             }
         )));
