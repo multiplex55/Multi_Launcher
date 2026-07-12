@@ -1,9 +1,7 @@
 use crate::common::lru::LruCache;
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -159,11 +157,12 @@ pub struct PreviewError {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct PreviewCacheKey {
     path: PathBuf,
-    modified_hash: u64,
-    line_range: Option<PreviewLineRange>,
-    selected_match: Option<PreviewMatchSelection>,
+    modified: Option<SystemTime>,
+    len_bytes: u64,
     max_bytes_full_file_preview: usize,
     max_lines_around_match: usize,
+    selected_line: Option<usize>,
+    line_range: Option<PreviewLineRange>,
     oversized_beginning_preview_bytes: usize,
 }
 
@@ -189,17 +188,18 @@ impl PreviewCache {
             Ok(metadata) => metadata,
             Err(error) => return error_preview(&request.path, error),
         };
-        let key = cache_key(request, metadata.modified().ok());
+        let key = cache_key(request, &metadata);
         if let Some(cached) = self.entries.get(&key) {
-            let mut preview = cached.clone();
+            let mut preview = styled_preview(cached, request);
             preview.cache_hit = true;
             return preview;
         }
 
         let mut preview = build_preview(request, metadata);
+        clear_match_ranges(&mut preview);
         preview.cache_hit = false;
         self.entries.insert(key, preview.clone());
-        preview
+        styled_preview(&preview, request)
     }
 }
 
@@ -213,17 +213,51 @@ pub fn preview_file(request: &PreviewRequest) -> FilePreview {
     )
 }
 
-fn cache_key(request: &PreviewRequest, modified: Option<SystemTime>) -> PreviewCacheKey {
-    let mut hasher = DefaultHasher::new();
-    modified.hash(&mut hasher);
+fn cache_key(request: &PreviewRequest, metadata: &fs::Metadata) -> PreviewCacheKey {
+    let context_only = metadata.len() > request.max_bytes_full_file_preview as u64
+        && request.selected_match.is_some()
+        && request.line_range.is_none();
     PreviewCacheKey {
         path: request.path.clone(),
-        modified_hash: hasher.finish(),
-        line_range: request.line_range,
-        selected_match: request.selected_match.clone(),
+        modified: metadata.modified().ok(),
+        len_bytes: metadata.len(),
         max_bytes_full_file_preview: request.max_bytes_full_file_preview,
         max_lines_around_match: request.max_lines_around_match,
+        selected_line: context_only
+            .then(|| {
+                request
+                    .selected_match
+                    .as_ref()
+                    .map(|selected| selected.line)
+            })
+            .flatten(),
+        line_range: request.line_range,
         oversized_beginning_preview_bytes: request.oversized_beginning_preview_bytes,
+    }
+}
+
+fn styled_preview(preview: &FilePreview, request: &PreviewRequest) -> FilePreview {
+    let mut preview = preview.clone();
+    if preview.kind == PreviewKind::Text {
+        apply_match_ranges(&mut preview, request.selected_match.as_ref());
+    }
+    preview
+}
+
+fn clear_match_ranges(preview: &mut FilePreview) {
+    for line in &mut preview.lines {
+        line.match_ranges.clear();
+    }
+}
+
+fn apply_match_ranges(preview: &mut FilePreview, selected: Option<&PreviewMatchSelection>) {
+    for line in &mut preview.lines {
+        line.match_ranges.clear();
+        if let Some(selected) = selected {
+            if selected.line == line.line_number {
+                line.match_ranges = match_ranges_for_text(&line.text, selected);
+            }
+        }
     }
 }
 
@@ -320,7 +354,11 @@ fn text_preview(
 ) -> FilePreview {
     let text = String::from_utf8_lossy(bytes);
     let lossy = matches!(text, std::borrow::Cow::Owned(_));
-    let range = request.effective_line_range();
+    let range = if coverage == PreviewCoverage::Complete {
+        request.line_range
+    } else {
+        request.effective_line_range()
+    };
     let selected = request.selected_match.as_ref();
     let mut lines = Vec::new();
 
@@ -469,28 +507,30 @@ fn preview_line(
     text: String,
     selected: Option<&PreviewMatchSelection>,
 ) -> PreviewLine {
-    let mut match_ranges = Vec::new();
-    if let Some(selected) = selected {
-        if selected.line == line_number {
-            let chars = text.chars().count();
-            let start = selected.start_column.saturating_sub(1).min(chars);
-            let end = selected
-                .end_column()
-                .saturating_sub(1)
-                .min(chars)
-                .max(start + 1)
-                .min(chars);
-            match_ranges.push(PreviewMatchRange {
-                start_column: start + 1,
-                end_column: end + 1,
-            });
-        }
-    }
+    let match_ranges = selected
+        .filter(|selected| selected.line == line_number)
+        .map(|selected| match_ranges_for_text(&text, selected))
+        .unwrap_or_default();
     PreviewLine {
         line_number,
         text,
         match_ranges,
     }
+}
+
+fn match_ranges_for_text(text: &str, selected: &PreviewMatchSelection) -> Vec<PreviewMatchRange> {
+    let chars = text.chars().count();
+    let start = selected.start_column.saturating_sub(1).min(chars);
+    let end = selected
+        .end_column()
+        .saturating_sub(1)
+        .min(chars)
+        .max(start + 1)
+        .min(chars);
+    vec![PreviewMatchRange {
+        start_column: start + 1,
+        end_column: end + 1,
+    }]
 }
 
 fn read_bounded(path: &Path, max_bytes: usize) -> io::Result<(Vec<u8>, bool)> {
@@ -896,6 +936,134 @@ three
         let preview = cache.preview(&request);
         assert!(!preview.cache_hit);
         assert_eq!(preview.lines[0].text, "two");
+    }
+
+    #[test]
+    fn cache_distinguishes_large_file_selected_lines() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("large-selected-lines.txt");
+        let mut contents = String::new();
+        for line in 1..=100 {
+            contents.push_str(&format!(
+                "line {line}
+"
+            ));
+        }
+        write_file(&path, contents.as_bytes());
+        let mut cache = PreviewCache::new(4);
+        let mut first = PreviewRequest::for_match(&path, 40, 1);
+        first.max_bytes_full_file_preview = 32;
+        first.max_lines_around_match = 1;
+        let mut second = PreviewRequest::for_match(&path, 80, 1);
+        second.max_bytes_full_file_preview = 32;
+        second.max_lines_around_match = 1;
+
+        let first_preview = cache.preview(&first);
+        let second_preview = cache.preview(&second);
+
+        assert!(!first_preview.cache_hit);
+        assert!(!second_preview.cache_hit);
+        assert_eq!(first_preview.displayed_start_line, Some(39));
+        assert_eq!(second_preview.displayed_start_line, Some(79));
+    }
+
+    #[test]
+    fn cache_invalidates_after_file_length_change() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cache-length.txt");
+        write_file(&path, b"one");
+        let mut cache = PreviewCache::new(2);
+        let request = PreviewRequest::new(&path);
+        assert_eq!(cache.preview(&request).metadata.len_bytes, 3);
+        sleep(Duration::from_millis(20));
+        write_file(&path, b"three");
+        let preview = cache.preview(&request);
+        assert!(!preview.cache_hit);
+        assert_eq!(preview.metadata.len_bytes, 5);
+        assert_eq!(preview.lines[0].text, "three");
+    }
+
+    #[test]
+    fn full_preview_size_limit_affects_cache_identity() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cache-limit.txt");
+        write_file(
+            &path, b"abcdef
+",
+        );
+        let mut cache = PreviewCache::new(2);
+        let full = PreviewRequest::new(&path);
+        let mut beginning = PreviewRequest::new(&path);
+        beginning.max_bytes_full_file_preview = 3;
+        beginning.oversized_beginning_preview_bytes = 3;
+
+        assert_eq!(cache.preview(&full).coverage, PreviewCoverage::Complete);
+        let preview = cache.preview(&beginning);
+        assert!(!preview.cache_hit);
+        assert_eq!(preview.coverage, PreviewCoverage::BeginningOnly);
+        assert_eq!(preview.lines[0].text, "abc");
+    }
+
+    #[test]
+    fn context_line_count_affects_cache_identity() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cache-context-count.txt");
+        let mut contents = String::new();
+        for line in 1..=50 {
+            contents.push_str(&format!(
+                "line {line}
+"
+            ));
+        }
+        write_file(&path, contents.as_bytes());
+        let mut cache = PreviewCache::new(2);
+        let mut one = PreviewRequest::for_match(&path, 25, 1);
+        one.max_bytes_full_file_preview = 16;
+        one.max_lines_around_match = 1;
+        let mut two = PreviewRequest::for_match(&path, 25, 1);
+        two.max_bytes_full_file_preview = 16;
+        two.max_lines_around_match = 2;
+
+        assert_eq!(cache.preview(&one).lines.len(), 3);
+        let preview = cache.preview(&two);
+        assert!(!preview.cache_hit);
+        assert_eq!(preview.lines.len(), 5);
+    }
+
+    #[test]
+    fn small_complete_file_preview_reuses_cache_for_different_selected_match() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cache-small-selected.txt");
+        write_file(
+            &path,
+            b"alpha
+beta
+gamma
+",
+        );
+        let mut cache = PreviewCache::new(2);
+        let first = PreviewRequest::for_match(&path, 1, 1);
+        let second = PreviewRequest::for_match(&path, 3, 1);
+
+        let first_preview = cache.preview(&first);
+        let second_preview = cache.preview(&second);
+
+        assert!(!first_preview.cache_hit);
+        assert!(second_preview.cache_hit);
+        assert_eq!(
+            first_preview
+                .lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            second_preview
+                .lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(first_preview.lines[0].match_ranges.len() == 1);
+        assert!(second_preview.lines[2].match_ranges.len() == 1);
     }
 
     #[test]
