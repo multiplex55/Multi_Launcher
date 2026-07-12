@@ -1,11 +1,13 @@
 use crate::actions::Action;
 use crate::file_search::actions::{
-    MODE_PREFIX, OPEN_ACTION, START_PREFIX, encode_action_payload, mode_action_payload,
-    start_action_payload,
+    encode_action_payload, mode_action_payload, start_action_payload, MODE_PREFIX, OPEN_ACTION,
+    START_PREFIX,
 };
 use crate::file_search::model::SearchKind;
 use crate::file_search::query::{FileSearchCommand, SearchRequestDraft};
-use crate::file_search::settings::{FileSearchDiagnosticsState, FileSearchSettings};
+use crate::file_search::settings::{
+    FileSearchDiagnosticsState, FileSearchSettings, DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES,
+};
 use crate::plugin::Plugin;
 use eframe::egui;
 use std::path::PathBuf;
@@ -105,6 +107,7 @@ impl Plugin for FileSearchPlugin {
                     .clamp_range(1..=u64::MAX),
             );
         });
+        full_preview_limit_mib_editor(ui, &mut cfg.max_full_preview_file_size_bytes);
         ui.checkbox(&mut cfg.include_hidden_files, "Include hidden by default");
         ui.checkbox(&mut cfg.case_sensitive, "Case-sensitive by default");
         ui.checkbox(
@@ -146,6 +149,32 @@ impl Plugin for FileSearchPlugin {
         if let Ok(v) = serde_json::to_value(&cfg) {
             *value = v;
         }
+    }
+}
+
+const BYTES_PER_MIB: u64 = 1024 * 1024;
+
+fn full_preview_limit_mib_editor(ui: &mut egui::Ui, bytes: &mut u64) {
+    let max_mib = u64::MAX / BYTES_PER_MIB;
+    let mut mib = (*bytes / BYTES_PER_MIB).max(1);
+    ui.horizontal(|ui| {
+        ui.label("Full-file preview limit (MiB)");
+        if ui
+            .add(
+                egui::DragValue::new(&mut mib)
+                    .speed(1.0)
+                    .clamp_range(1..=max_mib),
+            )
+            .changed()
+        {
+            *bytes = mib
+                .max(1)
+                .checked_mul(BYTES_PER_MIB)
+                .unwrap_or(DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES);
+        }
+    });
+    if *bytes == 0 {
+        *bytes = DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES;
     }
 }
 

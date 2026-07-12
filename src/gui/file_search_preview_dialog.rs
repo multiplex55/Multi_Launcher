@@ -118,7 +118,7 @@ impl FileSearchPreviewDialogState {
         &mut self,
         path: impl AsRef<Path>,
         content_match: ContentMatch,
-        _settings: &FileSearchSettings,
+        settings: &FileSearchSettings,
     ) {
         let mut request = PreviewRequest::for_match(
             path.as_ref(),
@@ -128,6 +128,10 @@ impl FileSearchPreviewDialogState {
                 .map(|column| column.saturating_add(1))
                 .unwrap_or(1),
         );
+        request.max_bytes_full_file_preview = settings
+            .max_full_preview_file_size_bytes
+            .try_into()
+            .unwrap_or(usize::MAX);
         if let Some(selection) = request.selected_match.as_mut() {
             selection.source_line = Some(content_match.line.clone());
             selection.match_length = Some(
