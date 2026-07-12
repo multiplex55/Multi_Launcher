@@ -287,7 +287,8 @@ fn no_match_pass_through_click_sends_right_click() {
     service.update_config(config);
 
     assert!(handle.emit(HookEvent::RButtonDown));
-    sleep(Duration::from_millis(5));
+    // Give the worker time to capture the initial cursor position before moving.
+    sleep(Duration::from_millis(50));
     cursor_provider.set_position((50.0, 0.0));
     assert!(handle.emit(HookEvent::RButtonUp));
     sleep(Duration::from_millis(50));
@@ -325,7 +326,8 @@ fn no_match_noop_does_not_send_right_click() {
     service.update_config(config);
 
     assert!(handle.emit(HookEvent::RButtonDown));
-    sleep(Duration::from_millis(5));
+    // Give the worker time to capture the initial cursor position before moving.
+    sleep(Duration::from_millis(50));
     cursor_provider.set_position((50.0, 0.0));
     assert!(handle.emit(HookEvent::RButtonUp));
     sleep(Duration::from_millis(50));
