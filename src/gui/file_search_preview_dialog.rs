@@ -215,7 +215,7 @@ impl FileSearchPreviewDialogState {
         match preview.kind {
             PreviewKind::Text => {
                 egui::ScrollArea::both()
-                    .id_salt(preview_scroll_id_source(&request.path))
+                    .id_source(preview_scroll_id_source(&request.path))
                     .show(ui, |ui| {
                         for line in &preview.lines {
                             let response =
