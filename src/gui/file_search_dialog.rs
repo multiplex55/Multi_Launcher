@@ -11,6 +11,7 @@ use crate::file_search::model::{
 };
 use crate::file_search::preview::PreviewRequest;
 use crate::file_search::settings::FileSearchSettings;
+use crate::gui::file_search_preview_dialog::FileSearchPreviewDialogState;
 use eframe::egui::{self, WidgetText};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -171,7 +172,7 @@ pub struct FileSearchDialogState {
     pub selected_result: Option<SelectedFileSearchResult>,
     pub warning_error_message: Option<String>,
     pub inaccessible_path_warnings: usize,
-    pub last_preview_request: Option<PreviewRequest>,
+    pub preview_dialog: FileSearchPreviewDialogState,
     pub persisted_window_size: egui::Vec2,
     pub settings: FileSearchSettings,
     pub request_search_focus: bool,
@@ -196,7 +197,7 @@ impl Default for FileSearchDialogState {
             selected_result: None,
             warning_error_message: None,
             inaccessible_path_warnings: 0,
-            last_preview_request: None,
+            preview_dialog: FileSearchPreviewDialogState::default(),
             persisted_window_size: DEFAULT_WINDOW_SIZE,
             settings: FileSearchSettings::default(),
             request_search_focus: false,
@@ -911,7 +912,18 @@ impl FileSearchDialogState {
                 request
             })
             .unwrap_or_else(|| PreviewRequest::new(path));
-        self.last_preview_request = Some(request.clone());
+        if let Some(content_match) = first_match.cloned() {
+            self.preview_dialog
+                .open_content_match(path, content_match, &self.settings);
+        } else {
+            self.preview_dialog.open = true;
+            self.preview_dialog.current_request = Some(request.clone());
+            self.preview_dialog.selected_match = None;
+            self.preview_dialog.action_error_message = None;
+            self.preview_dialog.pending_auto_scroll = false;
+            self.preview_dialog.reset_horizontal_scroll = true;
+            self.preview_dialog.load_current_preview();
+        }
         request
     }
 
@@ -1774,7 +1786,7 @@ mod tests {
         assert_eq!(selected_match.source_line.as_deref(), Some("hello needle"));
         assert_eq!(selected_match.match_length, Some(6));
         assert_eq!(selected_match.end_column, Some(13));
-        assert_eq!(state.last_preview_request, Some(request));
+        assert_eq!(state.preview_dialog.current_request, Some(request));
     }
 
     #[test]
@@ -2138,7 +2150,7 @@ mod tests {
             Some(OpenSelectedFileSearchResultAction::PreviewContent { request }) => {
                 assert_eq!(request.path, PathBuf::from(path));
                 assert_eq!(request.selected_match.as_ref().unwrap().line, 1);
-                assert_eq!(state.last_preview_request, Some(request));
+                assert_eq!(state.preview_dialog.current_request, Some(request));
             }
             other => panic!("expected preview action, got {other:?}"),
         }
@@ -2164,8 +2176,8 @@ mod tests {
 
         assert_eq!(double_click_action, open_action);
         assert_eq!(
-            double_click_state.last_preview_request,
-            open_button_state.last_preview_request
+            double_click_state.preview_dialog.current_request,
+            open_button_state.preview_dialog.current_request
         );
     }
 
