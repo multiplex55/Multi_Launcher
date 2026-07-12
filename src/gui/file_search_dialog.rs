@@ -1,17 +1,17 @@
 use crate::actions::clipboard;
 use crate::file_search::actions::{
-    InvocationTarget, containing_directory, copied_filename, nested_search_root,
+    containing_directory, copied_filename, nested_search_root,
     open_configured_terminal_in_directory, open_in_configured_editor, open_path, reveal_path,
+    InvocationTarget,
 };
-use crate::file_search::coordinator::{SearchCoordinator, event_id};
+use crate::file_search::coordinator::{event_id, SearchCoordinator};
 use crate::file_search::model::{
-    ContentFileResult, ContentMatch, SearchBackend, SearchEvent, SearchId, SearchKind,
+    ContentFileResult, ContentMatch, FileKind, SearchBackend, SearchEvent, SearchId, SearchKind,
     SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::preview::PreviewRequest;
 use crate::file_search::settings::FileSearchSettings;
 use eframe::egui;
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -57,12 +57,41 @@ pub fn handle_escape_action(status: SearchStatus) -> FileSearchEscapeAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContentResultGroup {
+pub struct FileSearchResultRowId {
+    pub search_id: SearchId,
+    pub backend_result_index: usize,
+    pub match_index: Option<usize>,
     pub path: PathBuf,
-    pub total_matches: usize,
-    pub first_line: Option<String>,
-    pub matches: Vec<ContentMatch>,
-    pub truncated: bool,
+    pub line_number: Option<usize>,
+    pub column: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileSearchRowPayload {
+    Filename {
+        path: PathBuf,
+        display_filename: String,
+        parent_directory_display: String,
+        kind: FileKind,
+    },
+    Content {
+        path: PathBuf,
+        content_match: ContentMatch,
+        is_last_displayed_match_from_truncated_file: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSearchResultRow {
+    pub id: FileSearchResultRowId,
+    pub payload: FileSearchRowPayload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedFileSearchResult {
+    pub row_id: FileSearchResultRowId,
+    pub path: PathBuf,
+    pub match_context: Option<ContentMatch>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -78,7 +107,7 @@ pub struct FileSearchDialogState {
     pub current_status: SearchStatus,
     pub backend: Option<SearchBackend>,
     pub results: Vec<SearchResult>,
-    pub content_result_groups: BTreeMap<PathBuf, ContentResultGroup>,
+    pub result_rows: Vec<FileSearchResultRow>,
     pub warning_error_message: Option<String>,
     pub inaccessible_path_warnings: usize,
     pub last_preview_request: Option<PreviewRequest>,
@@ -102,7 +131,7 @@ impl Default for FileSearchDialogState {
             current_status: SearchStatus::Pending,
             backend: None,
             results: Vec::new(),
-            content_result_groups: BTreeMap::new(),
+            result_rows: Vec::new(),
             warning_error_message: None,
             inaccessible_path_warnings: 0,
             last_preview_request: None,
@@ -208,7 +237,7 @@ impl FileSearchDialogState {
             excluded_directory_names: self.settings.excluded_directory_names.clone(),
         };
         self.results.clear();
-        self.content_result_groups.clear();
+        self.result_rows.clear();
         self.warning_error_message = None;
         self.inaccessible_path_warnings = 0;
         self.current_status = SearchStatus::Running;
@@ -285,23 +314,54 @@ impl FileSearchDialogState {
     }
 
     fn push_result(&mut self, result: SearchResult) {
-        if let SearchResult::ContentFile(content) = &result {
-            self.upsert_content_group(content);
+        let backend_result_index = self.results.len();
+        let search_id = self.active_search_id.unwrap_or(SearchId(0));
+        match &result {
+            SearchResult::Filename(item) => {
+                self.result_rows.push(FileSearchResultRow {
+                    id: FileSearchResultRowId {
+                        search_id,
+                        backend_result_index,
+                        match_index: None,
+                        path: item.path.clone(),
+                        line_number: None,
+                        column: None,
+                    },
+                    payload: FileSearchRowPayload::Filename {
+                        path: item.path.clone(),
+                        display_filename: item.file_name.clone(),
+                        parent_directory_display: item
+                            .parent_directory
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default(),
+                        kind: item.kind,
+                    },
+                });
+            }
+            SearchResult::ContentFile(content) => {
+                let last_displayed_match_index = content.matches.len().checked_sub(1);
+                for (match_index, content_match) in content.matches.iter().cloned().enumerate() {
+                    self.result_rows.push(FileSearchResultRow {
+                        id: FileSearchResultRowId {
+                            search_id,
+                            backend_result_index,
+                            match_index: Some(match_index),
+                            path: content.path.clone(),
+                            line_number: Some(content_match.line_number),
+                            column: content_match.column,
+                        },
+                        payload: FileSearchRowPayload::Content {
+                            path: content.path.clone(),
+                            content_match,
+                            is_last_displayed_match_from_truncated_file: content.truncated
+                                && Some(match_index) == last_displayed_match_index,
+                        },
+                    });
+                }
+            }
         }
         self.results.push(result);
-    }
-
-    fn upsert_content_group(&mut self, content: &ContentFileResult) {
-        self.content_result_groups.insert(
-            content.path.clone(),
-            ContentResultGroup {
-                path: content.path.clone(),
-                total_matches: content.total_matches,
-                first_line: content.matches.first().map(|m| m.line.clone()),
-                matches: content.matches.clone(),
-                truncated: content.truncated,
-            },
-        );
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, coordinator: &mut SearchCoordinator) {
@@ -419,32 +479,37 @@ impl FileSearchDialogState {
     }
 
     fn filename_results(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {
-        let items: Vec<_> = self
-            .results
+        let rows: Vec<_> = self
+            .result_rows
             .iter()
-            .filter_map(|result| match result {
-                SearchResult::Filename(item) => Some(item.clone()),
-                SearchResult::ContentFile(_) => None,
+            .filter_map(|row| match &row.payload {
+                FileSearchRowPayload::Filename {
+                    path,
+                    display_filename,
+                    parent_directory_display,
+                    kind,
+                } => Some((
+                    path.clone(),
+                    display_filename.clone(),
+                    parent_directory_display.clone(),
+                    *kind,
+                )),
+                FileSearchRowPayload::Content { .. } => None,
             })
             .collect();
-        for item in items {
+        for (path, display_filename, parent_directory_display, kind) in rows {
             let response = ui
                 .horizontal(|ui| {
-                    ui.label(&item.file_name);
-                    ui.label(format!("{:?}", item.kind));
-                    ui.label(
-                        item.parent_directory
-                            .as_ref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_default(),
-                    );
+                    ui.label(display_filename);
+                    ui.label(format!("{:?}", kind));
+                    ui.label(parent_directory_display);
                 })
                 .response;
             response.context_menu(|ui| {
                 self.result_context_menu(
                     ui,
-                    &item.path,
-                    item.kind == crate::file_search::model::FileKind::Directory,
+                    &path,
+                    kind == crate::file_search::model::FileKind::Directory,
                     None,
                     coordinator,
                 )
@@ -453,38 +518,45 @@ impl FileSearchDialogState {
     }
 
     fn content_results(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {
-        let groups: Vec<_> = self.content_result_groups.values().cloned().collect();
-        for group in groups {
-            let response = egui::CollapsingHeader::new(format!(
-                "{} ({} matches) - {}{}",
-                group.path.display(),
-                group.total_matches,
-                group.first_line.as_deref().unwrap_or(""),
-                if group.truncated {
-                    " … truncated"
-                } else {
-                    ""
-                }
-            ))
-            .show(ui, |ui| {
-                for content_match in &group.matches {
-                    let column = content_match
-                        .column
-                        .map(|column| format!(":{}", column.saturating_add(1)))
-                        .unwrap_or_default();
-                    ui.label(format!(
-                        "{}{}: {}",
-                        content_match.line_number, column, content_match.line
-                    ));
-                }
-                if group.truncated {
-                    ui.weak("Additional matches omitted. Use the context menu to search only this file.");
-                }
+        let rows: Vec<_> = self
+            .result_rows
+            .iter()
+            .filter_map(|row| match &row.payload {
+                FileSearchRowPayload::Content {
+                    path,
+                    content_match,
+                    is_last_displayed_match_from_truncated_file,
+                } => Some((
+                    path.clone(),
+                    content_match.clone(),
+                    *is_last_displayed_match_from_truncated_file,
+                )),
+                FileSearchRowPayload::Filename { .. } => None,
             })
-            .header_response;
-            let first_match = group.matches.first().cloned();
+            .collect();
+        for (path, content_match, is_last_displayed_match_from_truncated_file) in rows {
+            let column = content_match
+                .column
+                .map(|column| format!(":{}", column.saturating_add(1)))
+                .unwrap_or_default();
+            let response = ui
+                .horizontal(|ui| {
+                    ui.label(format!(
+                        "{}:{}{}: {}{}",
+                        path.display(),
+                        content_match.line_number,
+                        column,
+                        content_match.line,
+                        if is_last_displayed_match_from_truncated_file {
+                            " … truncated"
+                        } else {
+                            ""
+                        }
+                    ));
+                })
+                .response;
             response.context_menu(|ui| {
-                self.content_result_context_menu(ui, &group.path, first_match.as_ref(), coordinator)
+                self.content_result_context_menu(ui, &path, Some(&content_match), coordinator)
             });
         }
     }
@@ -552,7 +624,7 @@ impl FileSearchDialogState {
         };
         self.selected_mode = FileSearchMode::Content;
         self.results.clear();
-        self.content_result_groups.clear();
+        self.result_rows.clear();
         self.warning_error_message = None;
         self.inaccessible_path_warnings = 0;
         self.current_status = SearchStatus::Running;
@@ -1026,7 +1098,36 @@ mod tests {
     }
 
     #[test]
-    fn content_events_group_matches() {
+    fn same_filename_in_different_directories_creates_distinct_rows() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(1)),
+            ..Default::default()
+        };
+        for parent in ["/tmp/a", "/tmp/b"] {
+            state.apply_event(SearchEvent::Result {
+                id: SearchId(1),
+                result: SearchResult::Filename(FilenameResult {
+                    path: PathBuf::from(parent).join("main.rs"),
+                    file_name: "main.rs".into(),
+                    parent_directory: Some(parent.into()),
+                    kind: FileKind::File,
+                    size: None,
+                    modified: None,
+                    rank: FilenameRank::ExactFilename,
+                }),
+            });
+        }
+
+        assert_eq!(state.result_rows.len(), 2);
+        assert_ne!(state.result_rows[0].id.path, state.result_rows[1].id.path);
+        assert_ne!(
+            state.result_rows[0].id.backend_result_index,
+            state.result_rows[1].id.backend_result_index
+        );
+    }
+
+    #[test]
+    fn multiple_content_matches_in_one_file_create_multiple_rows() {
         let mut state = FileSearchDialogState {
             active_search_id: Some(SearchId(1)),
             ..Default::default()
@@ -1035,21 +1136,113 @@ mod tests {
             id: SearchId(1),
             result: SearchResult::ContentFile(ContentFileResult {
                 path: "src/lib.rs".into(),
-                total_matches: 1,
-                matches: vec![ContentMatch::new(4, "needle".into(), 0, 6)],
+                total_matches: 2,
+                matches: vec![
+                    ContentMatch::new(4, "first needle".into(), 6, 12),
+                    ContentMatch::new(8, "second needle".into(), 7, 13),
+                ],
+                truncated: true,
+            }),
+        });
+
+        assert_eq!(state.result_rows.len(), 2);
+        assert_eq!(state.result_rows[0].id.match_index, Some(0));
+        assert_eq!(state.result_rows[1].id.match_index, Some(1));
+        match &state.result_rows[1].payload {
+            FileSearchRowPayload::Content {
+                is_last_displayed_match_from_truncated_file,
+                ..
+            } => {
+                assert!(*is_last_displayed_match_from_truncated_file);
+            }
+            _ => panic!("expected content row"),
+        }
+    }
+
+    #[test]
+    fn multiple_matches_on_same_line_create_distinct_rows() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(1)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(1),
+            result: SearchResult::ContentFile(ContentFileResult {
+                path: "src/lib.rs".into(),
+                total_matches: 2,
+                matches: vec![
+                    ContentMatch::new(4, "needle needle".into(), 0, 6),
+                    ContentMatch::new(4, "needle needle".into(), 7, 13),
+                ],
                 truncated: false,
             }),
         });
-        assert_eq!(state.content_result_groups.len(), 1);
-        assert_eq!(
-            state
-                .content_result_groups
-                .values()
-                .next()
-                .unwrap()
-                .total_matches,
-            1
-        );
+
+        assert_eq!(state.result_rows.len(), 2);
+        assert_eq!(state.result_rows[0].id.line_number, Some(4));
+        assert_eq!(state.result_rows[1].id.line_number, Some(4));
+        assert_eq!(state.result_rows[0].id.column, Some(0));
+        assert_eq!(state.result_rows[1].id.column, Some(7));
+        assert_ne!(state.result_rows[0].id, state.result_rows[1].id);
+    }
+
+    #[test]
+    fn flattened_rows_preserve_backend_and_match_order() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(1)),
+            ..Default::default()
+        };
+        for (path, line) in [("b.rs", 20), ("a.rs", 10)] {
+            state.apply_event(SearchEvent::Result {
+                id: SearchId(1),
+                result: SearchResult::ContentFile(ContentFileResult {
+                    path: path.into(),
+                    total_matches: 1,
+                    matches: vec![ContentMatch::new(line, format!("{path} needle"), 0, 6)],
+                    truncated: false,
+                }),
+            });
+        }
+
+        assert_eq!(state.result_rows[0].id.path, PathBuf::from("b.rs"));
+        assert_eq!(state.result_rows[1].id.path, PathBuf::from("a.rs"));
+        assert_eq!(state.result_rows[0].id.backend_result_index, 0);
+        assert_eq!(state.result_rows[1].id.backend_result_index, 1);
+    }
+
+    #[test]
+    fn flattened_content_row_retains_exact_path_line_column_and_content() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(7)),
+            ..Default::default()
+        };
+        let content_match = ContentMatch::new(12, "hello needle".into(), 6, 12);
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(7),
+            result: SearchResult::ContentFile(ContentFileResult {
+                path: "src/lib.rs".into(),
+                total_matches: 1,
+                matches: vec![content_match.clone()],
+                truncated: false,
+            }),
+        });
+
+        assert_eq!(state.result_rows.len(), 1);
+        assert_eq!(state.result_rows[0].id.search_id, SearchId(7));
+        assert_eq!(state.result_rows[0].id.path, PathBuf::from("src/lib.rs"));
+        assert_eq!(state.result_rows[0].id.line_number, Some(12));
+        assert_eq!(state.result_rows[0].id.column, Some(6));
+        match &state.result_rows[0].payload {
+            FileSearchRowPayload::Content {
+                path,
+                content_match: row_match,
+                ..
+            } => {
+                assert_eq!(path, &PathBuf::from("src/lib.rs"));
+                assert_eq!(row_match, &content_match);
+            }
+            _ => panic!("expected content row"),
+        }
     }
 
     #[test]
