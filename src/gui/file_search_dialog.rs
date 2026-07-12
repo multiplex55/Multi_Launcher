@@ -130,6 +130,30 @@ pub enum OpenSelectedFileSearchResultAction {
     PreviewContent { request: PreviewRequest },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSearchContextMenuIntent {
+    pub action: FileSearchContextMenuAction,
+    pub path: PathBuf,
+    pub content_match: Option<ContentMatch>,
+    pub is_directory: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileSearchContextMenuAction {
+    OpenInConfiguredEditor,
+    Preview,
+    OpenFileOrDirectory,
+    RevealInExplorer,
+    OpenContainingDirectory,
+    CopyFullPath,
+    CopyFilename,
+    CopyMatchingLine,
+    OpenTerminal,
+    NestedFilenameSearch,
+    NestedContentSearch,
+    ShowAllMatchesInThisFile,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileSearchDialogState {
     pub open: bool,
@@ -768,7 +792,7 @@ impl FileSearchDialogState {
                     });
                 }
                 response.context_menu(|ui| {
-                    self.content_result_context_menu(ui, &path, Some(&content_match), coordinator)
+                    self.content_result_context_menu(ui, &path, content_match.clone(), coordinator)
                 });
                 if double_clicked {
                     self.open_result_row(&FileSearchResultRow {
@@ -788,7 +812,7 @@ impl FileSearchDialogState {
         &mut self,
         ui: &mut egui::Ui,
         path: &std::path::Path,
-        first_match: Option<&ContentMatch>,
+        content_match: ContentMatch,
         coordinator: &mut SearchCoordinator,
     ) {
         if ui.button("Show all matches in this file").clicked() {
@@ -796,7 +820,7 @@ impl FileSearchDialogState {
             ui.ctx().request_repaint();
             ui.close_menu();
         }
-        self.result_context_menu(ui, path, false, first_match, coordinator);
+        self.result_context_menu(ui, path, false, Some(content_match), coordinator);
     }
 
     pub fn can_open_selected_result(&self) -> bool {
@@ -876,6 +900,54 @@ impl FileSearchDialogState {
         request
     }
 
+    pub fn context_menu_intents_for_row(
+        row: &FileSearchResultRow,
+    ) -> Vec<FileSearchContextMenuIntent> {
+        let (path, is_directory, content_match) = match &row.payload {
+            FileSearchRowPayload::Filename { path, kind, .. } => (
+                path.clone(),
+                *kind == crate::file_search::model::FileKind::Directory,
+                None,
+            ),
+            FileSearchRowPayload::Content {
+                path,
+                content_match,
+                ..
+            } => (path.clone(), false, Some(content_match.clone())),
+        };
+
+        let mut actions = vec![
+            FileSearchContextMenuAction::OpenInConfiguredEditor,
+            FileSearchContextMenuAction::Preview,
+            FileSearchContextMenuAction::OpenFileOrDirectory,
+            FileSearchContextMenuAction::RevealInExplorer,
+            FileSearchContextMenuAction::OpenContainingDirectory,
+            FileSearchContextMenuAction::CopyFullPath,
+            FileSearchContextMenuAction::CopyFilename,
+        ];
+        if content_match.is_some() {
+            actions.push(FileSearchContextMenuAction::CopyMatchingLine);
+        }
+        actions.extend([
+            FileSearchContextMenuAction::OpenTerminal,
+            FileSearchContextMenuAction::NestedFilenameSearch,
+            FileSearchContextMenuAction::NestedContentSearch,
+        ]);
+        if content_match.is_some() {
+            actions.push(FileSearchContextMenuAction::ShowAllMatchesInThisFile);
+        }
+
+        actions
+            .into_iter()
+            .map(|action| FileSearchContextMenuIntent {
+                action,
+                path: path.clone(),
+                content_match: content_match.clone(),
+                is_directory,
+            })
+            .collect()
+    }
+
     fn start_file_content_search(
         &mut self,
         path: &std::path::Path,
@@ -920,7 +992,7 @@ impl FileSearchDialogState {
         ui: &mut egui::Ui,
         path: &std::path::Path,
         is_directory: bool,
-        first_match: Option<&ContentMatch>,
+        first_match: Option<ContentMatch>,
         coordinator: &mut SearchCoordinator,
     ) {
         if ui.button("Open in configured editor").clicked() {
@@ -930,15 +1002,17 @@ impl FileSearchDialogState {
                     &settings,
                     InvocationTarget {
                         file: path,
-                        line: first_match.map(|m| m.line_number),
-                        column: first_match.and_then(|m| m.column.map(|c| c.saturating_add(1))),
+                        line: first_match.as_ref().map(|m| m.line_number),
+                        column: first_match
+                            .as_ref()
+                            .and_then(|m| m.column.map(|c| c.saturating_add(1))),
                     },
                 )
             });
             ui.close_menu();
         }
         if ui.button("Preview").clicked() {
-            self.request_preview(path, first_match);
+            self.request_preview(path, first_match.as_ref());
             ui.close_menu();
         }
         if ui.button("Open file or directory").clicked() {
@@ -977,6 +1051,16 @@ impl FileSearchDialogState {
                 Ok(())
             });
             ui.close_menu();
+        }
+        if let Some(content_match) = first_match.as_ref() {
+            if ui.button("Copy matching line").clicked() {
+                let line = content_match.line.clone();
+                self.run_result_action("copy matching line", || {
+                    clipboard::set_text(&line)?;
+                    Ok(())
+                });
+                ui.close_menu();
+            }
         }
         if ui.button("Open terminal in containing directory").clicked() {
             let settings = self.settings.clone();
@@ -1675,6 +1759,125 @@ mod tests {
     }
 
     #[test]
+    fn content_row_editor_context_intent_uses_that_rows_line_and_column() {
+        let row = FileSearchResultRow {
+            id: FileSearchResultRowId {
+                search_id: SearchId(1),
+                backend_result_index: 0,
+                match_index: Some(1),
+                path: "src/lib.rs".into(),
+                line_number: Some(42),
+                column: Some(9),
+            },
+            payload: FileSearchRowPayload::Content {
+                path: "src/lib.rs".into(),
+                content_match: ContentMatch::new(42, "row-specific needle".into(), 9, 15),
+                is_last_displayed_match_from_truncated_file: false,
+            },
+        };
+
+        let intent = FileSearchDialogState::context_menu_intents_for_row(&row)
+            .into_iter()
+            .find(|intent| intent.action == FileSearchContextMenuAction::OpenInConfiguredEditor)
+            .expect("editor intent should be available");
+
+        assert_eq!(intent.path, PathBuf::from("src/lib.rs"));
+        let intent_match = intent.content_match.as_ref().unwrap();
+        assert_eq!(intent_match.line_number, 42);
+        assert_eq!(intent_match.column.map(|column| column + 1), Some(10));
+    }
+
+    #[test]
+    fn content_row_preview_context_intent_uses_that_rows_line_and_content() {
+        let content_match = ContentMatch::new(8, "second row content".into(), 3, 9);
+        let row = FileSearchResultRow {
+            id: FileSearchResultRowId {
+                search_id: SearchId(1),
+                backend_result_index: 0,
+                match_index: Some(1),
+                path: "src/lib.rs".into(),
+                line_number: Some(8),
+                column: Some(3),
+            },
+            payload: FileSearchRowPayload::Content {
+                path: "src/lib.rs".into(),
+                content_match: content_match.clone(),
+                is_last_displayed_match_from_truncated_file: false,
+            },
+        };
+
+        let intent = FileSearchDialogState::context_menu_intents_for_row(&row)
+            .into_iter()
+            .find(|intent| intent.action == FileSearchContextMenuAction::Preview)
+            .expect("preview intent should be available");
+
+        assert_eq!(intent.path, PathBuf::from("src/lib.rs"));
+        assert_eq!(intent.content_match, Some(content_match));
+    }
+
+    #[test]
+    fn show_all_matches_context_intent_uses_the_rows_path() {
+        let row = FileSearchResultRow {
+            id: FileSearchResultRowId {
+                search_id: SearchId(1),
+                backend_result_index: 0,
+                match_index: Some(0),
+                path: "src/selected.rs".into(),
+                line_number: Some(5),
+                column: Some(1),
+            },
+            payload: FileSearchRowPayload::Content {
+                path: "src/selected.rs".into(),
+                content_match: ContentMatch::new(5, "selected needle".into(), 1, 7),
+                is_last_displayed_match_from_truncated_file: false,
+            },
+        };
+
+        let intent = FileSearchDialogState::context_menu_intents_for_row(&row)
+            .into_iter()
+            .find(|intent| intent.action == FileSearchContextMenuAction::ShowAllMatchesInThisFile)
+            .expect("show all matches intent should be available");
+
+        assert_eq!(intent.path, PathBuf::from("src/selected.rs"));
+    }
+
+    #[test]
+    fn filename_context_menu_actions_remain_available_after_flattening() {
+        let row = FileSearchResultRow {
+            id: FileSearchResultRowId {
+                search_id: SearchId(1),
+                backend_result_index: 0,
+                match_index: None,
+                path: "src/lib.rs".into(),
+                line_number: None,
+                column: None,
+            },
+            payload: FileSearchRowPayload::Filename {
+                path: "src/lib.rs".into(),
+                display_filename: "lib.rs".into(),
+                parent_directory_display: "src".into(),
+                kind: FileKind::File,
+            },
+        };
+        let actions: Vec<_> = FileSearchDialogState::context_menu_intents_for_row(&row)
+            .into_iter()
+            .map(|intent| intent.action)
+            .collect();
+
+        assert!(actions.contains(&FileSearchContextMenuAction::OpenInConfiguredEditor));
+        assert!(actions.contains(&FileSearchContextMenuAction::Preview));
+        assert!(actions.contains(&FileSearchContextMenuAction::OpenFileOrDirectory));
+        assert!(actions.contains(&FileSearchContextMenuAction::RevealInExplorer));
+        assert!(actions.contains(&FileSearchContextMenuAction::OpenContainingDirectory));
+        assert!(actions.contains(&FileSearchContextMenuAction::CopyFullPath));
+        assert!(actions.contains(&FileSearchContextMenuAction::CopyFilename));
+        assert!(actions.contains(&FileSearchContextMenuAction::OpenTerminal));
+        assert!(actions.contains(&FileSearchContextMenuAction::NestedFilenameSearch));
+        assert!(actions.contains(&FileSearchContextMenuAction::NestedContentSearch));
+        assert!(!actions.contains(&FileSearchContextMenuAction::ShowAllMatchesInThisFile));
+    }
+
+    #[test]
     fn context_menu_nested_search_uses_file_parent_or_directory_itself() {
         let mut state = FileSearchDialogState {
             search_text: "needle".into(),
@@ -1899,10 +2102,12 @@ mod tests {
 
         assert!(action.is_none());
         assert_eq!(state.selected_result().cloned(), selected_before);
-        assert!(state
-            .warning_error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("missing or inaccessible")));
+        assert!(
+            state
+                .warning_error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("missing or inaccessible"))
+        );
     }
 
     #[test]
