@@ -6,12 +6,12 @@ use crate::file_search::actions::{
 };
 use crate::file_search::coordinator::{event_id, SearchCoordinator};
 use crate::file_search::model::{
-    ContentFileResult, ContentMatch, FileKind, SearchBackend, SearchEvent, SearchId, SearchKind,
-    SearchRequest, SearchResult, SearchScope, SearchStatus,
+    ContentMatch, FileKind, SearchBackend, SearchEvent, SearchId, SearchKind, SearchRequest,
+    SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::preview::PreviewRequest;
 use crate::file_search::settings::FileSearchSettings;
-use eframe::egui;
+use eframe::egui::{self, WidgetText};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -75,6 +75,14 @@ pub fn result_row_id_source(
 
 pub fn results_scroll_id_source(mode: FileSearchMode) -> (&'static str, FileSearchMode) {
     ("file_search_results_scroll", mode)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileSearchResultCounts {
+    pub filename_rows: usize,
+    pub content_matched_files: usize,
+    pub content_displayed_match_rows: usize,
+    pub content_truncated_displayed_matches: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -441,6 +449,62 @@ impl FileSearchDialogState {
         self.results.push(result);
     }
 
+    pub fn result_counts(&self) -> FileSearchResultCounts {
+        FileSearchResultCounts {
+            filename_rows: self.filename_row_count(),
+            content_matched_files: self.content_matched_file_count(),
+            content_displayed_match_rows: self.content_displayed_match_row_count(),
+            content_truncated_displayed_matches: self.content_truncated_displayed_match_count(),
+        }
+    }
+
+    pub fn filename_row_count(&self) -> usize {
+        self.result_rows
+            .iter()
+            .filter(|row| matches!(row.payload, FileSearchRowPayload::Filename { .. }))
+            .count()
+    }
+
+    pub fn content_matched_file_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|result| matches!(result, SearchResult::ContentFile(_)))
+            .count()
+    }
+
+    pub fn content_displayed_match_row_count(&self) -> usize {
+        self.result_rows
+            .iter()
+            .filter(|row| matches!(row.payload, FileSearchRowPayload::Content { .. }))
+            .count()
+    }
+
+    pub fn content_truncated_displayed_match_count(&self) -> usize {
+        self.result_rows
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.payload,
+                    FileSearchRowPayload::Content {
+                        is_last_displayed_match_from_truncated_file: true,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    fn result_count_status_text(&self) -> String {
+        let counts = self.result_counts();
+        match self.selected_mode {
+            FileSearchMode::Filename => format!("Results: {}", counts.filename_rows),
+            FileSearchMode::Content => format!(
+                "Rows: {} | Matched files: {}",
+                counts.content_displayed_match_rows, counts.content_matched_files
+            ),
+        }
+    }
+
     pub fn ui(&mut self, ctx: &egui::Context, coordinator: &mut SearchCoordinator) {
         self.drain_events(coordinator);
         if self.consume_immediate_repaint_request() {
@@ -540,23 +604,27 @@ impl FileSearchDialogState {
             }
         });
         ui.label(format!(
-            "Backend: {} | Status: {:?} | Results: {} | Inaccessible-path warnings: {}",
+            "Backend: {} | Status: {:?} | {} | Inaccessible-path warnings: {}",
             self.backend
                 .map(|b| format!("{b:?}"))
                 .unwrap_or_else(|| "not selected".to_string()),
             self.current_status,
-            self.results.len(),
+            self.result_count_status_text(),
             self.inaccessible_path_warnings
         ));
         if let Some(msg) = &self.warning_error_message {
             ui.colored_label(egui::Color32::YELLOW, msg);
         }
-        egui::ScrollArea::vertical()
-            .id_source(results_scroll_id_source(self.selected_mode))
-            .show(ui, |ui| match self.selected_mode {
-                FileSearchMode::Filename => self.filename_results(ui, coordinator),
-                FileSearchMode::Content => self.content_results(ui, coordinator),
-            });
+        let results_region_size = ui.available_size();
+        ui.allocate_ui_with_layout(results_region_size, *ui.layout(), |ui| {
+            egui::ScrollArea::both()
+                .id_source(results_scroll_id_source(self.selected_mode))
+                .auto_shrink([false, false])
+                .show(ui, |ui| match self.selected_mode {
+                    FileSearchMode::Filename => self.filename_results(ui, coordinator),
+                    FileSearchMode::Content => self.content_results(ui, coordinator),
+                });
+        });
     }
 
     fn filename_results(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {
@@ -589,8 +657,7 @@ impl FileSearchDialogState {
                     .selected_result()
                     .map(|selected| selected.row_id == row_id)
                     .unwrap_or(false);
-                let response = ui
-                    .selectable_label(is_selected, row_text)
+                let response = non_wrapping_selectable_label(ui, is_selected, row_text)
                     .on_hover_text(path.display().to_string());
                 let double_clicked = response.double_clicked();
                 if response.clicked() {
@@ -676,8 +743,7 @@ impl FileSearchDialogState {
                     .selected_result()
                     .map(|selected| selected.row_id == row_id)
                     .unwrap_or(false);
-                let response = ui
-                    .selectable_label(is_selected, row_text)
+                let response = non_wrapping_selectable_label(ui, is_selected, row_text)
                     .on_hover_text(path.display().to_string());
                 let double_clicked = response.double_clicked();
                 if response.clicked() {
@@ -902,11 +968,49 @@ impl FileSearchDialogState {
     }
 }
 
+fn non_wrapping_selectable_label(
+    ui: &mut egui::Ui,
+    selected: bool,
+    text: impl Into<WidgetText>,
+) -> egui::Response {
+    let text = text.into();
+    let button_padding = ui.spacing().button_padding;
+    let total_extra = button_padding + button_padding;
+    let galley = text.into_galley(ui, Some(false), f32::INFINITY, egui::TextStyle::Button);
+    let mut desired_size = total_extra + galley.size();
+    desired_size.y = desired_size.y.max(ui.spacing().interact_size.y);
+    let (rect, response) = ui.allocate_at_least(desired_size, egui::Sense::click());
+
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, selected, galley.text())
+    });
+
+    if ui.is_rect_visible(response.rect) {
+        let text_pos = ui
+            .layout()
+            .align_size_within_rect(galley.size(), rect.shrink2(button_padding))
+            .min;
+        let visuals = ui.style().interact_selectable(&response, selected);
+        if selected || response.hovered() || response.highlighted() || response.has_focus() {
+            let rect = rect.expand(visuals.expansion);
+            ui.painter().rect(
+                rect,
+                visuals.rounding,
+                visuals.weak_bg_fill,
+                visuals.bg_stroke,
+            );
+        }
+        ui.painter().galley(text_pos, galley, visuals.text_color());
+    }
+
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::file_search::model::{
-        ContentMatch, FileKind, FilenameRank, FilenameResult, SearchProgress,
+        ContentFileResult, ContentMatch, FileKind, FilenameRank, FilenameResult, SearchProgress,
     };
 
     #[test]
@@ -1542,6 +1646,94 @@ mod tests {
             modified: None,
             rank: FilenameRank::ExactFilename,
         })
+    }
+
+    fn content_search_result(
+        path: &str,
+        total_matches: usize,
+        displayed_matches: usize,
+        truncated: bool,
+    ) -> SearchResult {
+        SearchResult::ContentFile(ContentFileResult {
+            path: path.into(),
+            total_matches,
+            matches: (0..displayed_matches)
+                .map(|index| ContentMatch::new(index + 1, format!("line {index} needle"), 5, 11))
+                .collect(),
+            truncated,
+        })
+    }
+
+    #[test]
+    fn filename_row_count_counts_displayed_filename_rows() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(1)),
+            ..Default::default()
+        };
+        for path in ["/tmp/a.txt", "/tmp/b.txt"] {
+            state.apply_event(SearchEvent::Result {
+                id: SearchId(1),
+                result: filename_search_result(path),
+            });
+        }
+
+        assert_eq!(state.filename_row_count(), 2);
+        assert_eq!(state.result_counts().filename_rows, 2);
+    }
+
+    #[test]
+    fn content_matched_file_count_counts_grouped_files() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(1)),
+            ..Default::default()
+        };
+        for path in ["src/lib.rs", "src/main.rs"] {
+            state.apply_event(SearchEvent::Result {
+                id: SearchId(1),
+                result: content_search_result(path, 3, 2, false),
+            });
+        }
+
+        assert_eq!(state.content_matched_file_count(), 2);
+        assert_eq!(state.result_counts().content_matched_files, 2);
+    }
+
+    #[test]
+    fn content_displayed_match_row_count_counts_selectable_rows() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(1)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(1),
+            result: content_search_result("src/lib.rs", 3, 2, false),
+        });
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(1),
+            result: content_search_result("src/main.rs", 1, 1, false),
+        });
+
+        assert_eq!(state.content_displayed_match_row_count(), 3);
+        assert_eq!(state.result_counts().content_displayed_match_rows, 3);
+    }
+
+    #[test]
+    fn truncated_displayed_match_count_counts_truncated_file_markers() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(1)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(1),
+            result: content_search_result("src/lib.rs", 10, 3, true),
+        });
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(1),
+            result: content_search_result("src/main.rs", 2, 2, false),
+        });
+
+        assert_eq!(state.content_truncated_displayed_match_count(), 1);
+        assert_eq!(state.result_counts().content_truncated_displayed_matches, 1);
     }
 
     fn state_with_selected_filename(path: &str) -> FileSearchDialogState {
