@@ -124,6 +124,13 @@ pub struct SelectedFileSearchResult {
     pub payload: SelectedFileSearchResultPayload,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenSelectedFileSearchResultAction {
+    RevealFile { path: PathBuf },
+    OpenDirectory { path: PathBuf },
+    PreviewContent { request: PreviewRequest },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileSearchDialogState {
     pub open: bool,
@@ -602,6 +609,13 @@ impl FileSearchDialogState {
                 self.cancel_search(coordinator);
                 ui.ctx().request_repaint();
             }
+            if ui
+                .add_enabled(self.can_open_selected_result(), egui::Button::new("Open"))
+                .clicked()
+            {
+                self.open_selected_result();
+                ui.ctx().request_repaint();
+            }
         });
         ui.label(format!(
             "Backend: {} | Status: {:?} | {} | Inaccessible-path warnings: {}",
@@ -681,16 +695,14 @@ impl FileSearchDialogState {
                     )
                 });
                 if double_clicked {
-                    let settings = self.settings.clone();
-                    self.run_result_action("open in configured editor", || {
-                        open_in_configured_editor(
-                            &settings,
-                            InvocationTarget {
-                                file: &path,
-                                line: None,
-                                column: None,
-                            },
-                        )
+                    self.open_result_row(&FileSearchResultRow {
+                        id: row_id.clone(),
+                        payload: FileSearchRowPayload::Filename {
+                            path: path.clone(),
+                            display_filename: display_filename.clone(),
+                            parent_directory_display: parent_directory_display.clone(),
+                            kind,
+                        },
                     });
                 }
             });
@@ -760,16 +772,13 @@ impl FileSearchDialogState {
                     self.content_result_context_menu(ui, &path, Some(&content_match), coordinator)
                 });
                 if double_clicked {
-                    let settings = self.settings.clone();
-                    self.run_result_action("open in configured editor", || {
-                        open_in_configured_editor(
-                            &settings,
-                            InvocationTarget {
-                                file: &path,
-                                line: Some(content_match.line_number),
-                                column: content_match.column.map(|c| c.saturating_add(1)),
-                            },
-                        )
+                    self.open_result_row(&FileSearchResultRow {
+                        id: row_id.clone(),
+                        payload: FileSearchRowPayload::Content {
+                            path: path.clone(),
+                            content_match: content_match.clone(),
+                            is_last_displayed_match_from_truncated_file,
+                        },
                     });
                 }
             });
@@ -789,6 +798,73 @@ impl FileSearchDialogState {
             ui.close_menu();
         }
         self.result_context_menu(ui, path, false, first_match, coordinator);
+    }
+
+    pub fn can_open_selected_result(&self) -> bool {
+        self.selected_result.is_some()
+    }
+
+    pub fn resolve_open_selected_result_action(
+        &mut self,
+    ) -> Option<OpenSelectedFileSearchResultAction> {
+        let selected = self.selected_result.clone()?;
+        match selected.payload {
+            SelectedFileSearchResultPayload::Filename { path, kind } => {
+                let metadata = match std::fs::metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(err) => {
+                        self.warning_error_message = Some(format!(
+                            "Cannot open {}: path is missing or inaccessible ({err}).",
+                            path.display()
+                        ));
+                        return None;
+                    }
+                };
+
+                if metadata.is_file() {
+                    Some(OpenSelectedFileSearchResultAction::RevealFile { path })
+                } else if metadata.is_dir() {
+                    Some(OpenSelectedFileSearchResultAction::OpenDirectory { path })
+                } else {
+                    self.warning_error_message = Some(format!(
+                        "Cannot open {}: unsupported filesystem object (stored result kind: {kind:?}).",
+                        path.display()
+                    ));
+                    None
+                }
+            }
+            SelectedFileSearchResultPayload::Content {
+                path,
+                content_match,
+            } => {
+                let request = self.request_preview(&path, Some(&content_match));
+                Some(OpenSelectedFileSearchResultAction::PreviewContent { request })
+            }
+        }
+    }
+
+    pub fn open_selected_result(&mut self) -> Option<OpenSelectedFileSearchResultAction> {
+        let action = self.resolve_open_selected_result_action()?;
+        match &action {
+            OpenSelectedFileSearchResultAction::RevealFile { path } => {
+                let path = path.clone();
+                self.run_result_action("reveal", || reveal_path(&path));
+            }
+            OpenSelectedFileSearchResultAction::OpenDirectory { path } => {
+                let path = path.clone();
+                self.run_result_action("open", || open_path(&path));
+            }
+            OpenSelectedFileSearchResultAction::PreviewContent { .. } => {}
+        }
+        Some(action)
+    }
+
+    pub fn open_result_row(
+        &mut self,
+        row: &FileSearchResultRow,
+    ) -> Option<OpenSelectedFileSearchResultAction> {
+        self.select_result(row);
+        self.open_selected_result()
     }
 
     pub fn request_preview(
@@ -1632,6 +1708,10 @@ mod tests {
         assert_eq!(state.selected_mode, FileSearchMode::Content);
     }
     fn filename_search_result(path: &str) -> SearchResult {
+        filename_search_result_with_kind(path, FileKind::File)
+    }
+
+    fn filename_search_result_with_kind(path: &str, kind: FileKind) -> SearchResult {
         let path_buf = PathBuf::from(path);
         SearchResult::Filename(FilenameResult {
             file_name: path_buf
@@ -1641,7 +1721,7 @@ mod tests {
                 .to_string(),
             parent_directory: path_buf.parent().map(PathBuf::from),
             path: path_buf,
-            kind: FileKind::File,
+            kind,
             size: None,
             modified: None,
             rank: FilenameRank::ExactFilename,
@@ -1737,17 +1817,138 @@ mod tests {
     }
 
     fn state_with_selected_filename(path: &str) -> FileSearchDialogState {
+        state_with_selected_filename_kind(path, FileKind::File)
+    }
+
+    fn state_with_selected_filename_kind(path: &str, kind: FileKind) -> FileSearchDialogState {
         let mut state = FileSearchDialogState {
             active_search_id: Some(SearchId(1)),
             ..Default::default()
         };
         state.apply_event(SearchEvent::Result {
             id: SearchId(1),
-            result: filename_search_result(path),
+            result: filename_search_result_with_kind(path, kind),
         });
         let row = state.result_rows[0].clone();
         state.select_result(&row);
         state
+    }
+
+    fn state_with_selected_content(path: &str) -> FileSearchDialogState {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(1)),
+            selected_mode: FileSearchMode::Content,
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(1),
+            result: content_search_result(path, 1, 1, false),
+        });
+        let row = state.result_rows[0].clone();
+        state.select_result(&row);
+        state
+    }
+
+    #[test]
+    fn open_unavailable_with_no_selection() {
+        let state = FileSearchDialogState::default();
+
+        assert!(!state.can_open_selected_result());
+    }
+
+    #[test]
+    fn filename_file_selection_resolves_to_reveal_behavior() {
+        let temp = tempfile::tempdir().unwrap();
+        let file_path = temp.path().join("needle.txt");
+        std::fs::write(&file_path, "needle").unwrap();
+        let mut state = state_with_selected_filename_kind(
+            &file_path.display().to_string(),
+            FileKind::Directory,
+        );
+
+        let action = state.resolve_open_selected_result_action();
+
+        assert_eq!(
+            action,
+            Some(OpenSelectedFileSearchResultAction::RevealFile { path: file_path })
+        );
+        assert!(state.warning_error_message.is_none());
+    }
+
+    #[test]
+    fn filename_directory_selection_resolves_to_directory_open_behavior() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir_path = temp.path().join("subdir");
+        std::fs::create_dir(&dir_path).unwrap();
+        let mut state =
+            state_with_selected_filename_kind(&dir_path.display().to_string(), FileKind::File);
+
+        let action = state.resolve_open_selected_result_action();
+
+        assert_eq!(
+            action,
+            Some(OpenSelectedFileSearchResultAction::OpenDirectory { path: dir_path })
+        );
+        assert!(state.warning_error_message.is_none());
+    }
+
+    #[test]
+    fn missing_path_preserves_selection_and_returns_visible_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing_path = temp.path().join("missing.txt");
+        let mut state = state_with_selected_filename(&missing_path.display().to_string());
+        let selected_before = state.selected_result().cloned();
+
+        let action = state.resolve_open_selected_result_action();
+
+        assert!(action.is_none());
+        assert_eq!(state.selected_result().cloned(), selected_before);
+        assert!(state
+            .warning_error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("missing or inaccessible")));
+    }
+
+    #[test]
+    fn content_selection_resolves_to_preview_behavior() {
+        let path = "src/lib.rs";
+        let mut state = state_with_selected_content(path);
+
+        let action = state.resolve_open_selected_result_action();
+
+        match action {
+            Some(OpenSelectedFileSearchResultAction::PreviewContent { request }) => {
+                assert_eq!(request.path, PathBuf::from(path));
+                assert_eq!(request.selected_match.unwrap().line, 1);
+                assert_eq!(state.last_preview_request, Some(request));
+            }
+            other => panic!("expected preview action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn double_click_uses_same_dispatch_path_as_open() {
+        let path = "src/lib.rs";
+        let mut open_button_state = state_with_selected_content(path);
+        let mut double_click_state = FileSearchDialogState {
+            active_search_id: Some(SearchId(1)),
+            selected_mode: FileSearchMode::Content,
+            ..Default::default()
+        };
+        double_click_state.apply_event(SearchEvent::Result {
+            id: SearchId(1),
+            result: content_search_result(path, 1, 1, false),
+        });
+        let double_clicked_row = double_click_state.result_rows[0].clone();
+
+        let open_action = open_button_state.open_selected_result();
+        let double_click_action = double_click_state.open_result_row(&double_clicked_row);
+
+        assert_eq!(double_click_action, open_action);
+        assert_eq!(
+            double_click_state.last_preview_request,
+            open_button_state.last_preview_request
+        );
     }
 
     #[test]
