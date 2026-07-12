@@ -291,6 +291,38 @@ pub fn copied_filename(path: &Path) -> Option<String> {
         .map(|name| name.to_string_lossy().to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExplorerAction {
+    OpenDirectory(PathBuf),
+    RevealFile(PathBuf),
+    Unsupported { path: PathBuf, reason: String },
+}
+
+pub fn resolve_explorer_action(path: &Path) -> anyhow::Result<ExplorerAction> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("{} is missing or inaccessible", path.display()))?;
+    if metadata.is_dir() {
+        Ok(ExplorerAction::OpenDirectory(path.to_path_buf()))
+    } else if metadata.is_file() {
+        Ok(ExplorerAction::RevealFile(path.to_path_buf()))
+    } else {
+        Ok(ExplorerAction::Unsupported {
+            path: path.to_path_buf(),
+            reason: "unsupported filesystem object; expected a file or directory".to_string(),
+        })
+    }
+}
+
+pub fn execute_explorer_action(action: ExplorerAction) -> anyhow::Result<()> {
+    match action {
+        ExplorerAction::OpenDirectory(path) => open_path(&path),
+        ExplorerAction::RevealFile(path) => reveal_path(&path),
+        ExplorerAction::Unsupported { path, reason } => {
+            Err(anyhow!("cannot open {}: {reason}", path.display()))
+        }
+    }
+}
+
 pub fn windows_reveal_args(path: &Path) -> Vec<String> {
     vec![format!("/select,{}", path.display())]
 }
@@ -531,5 +563,70 @@ mod tests {
             invocation.args,
             vec!["--cwd".to_string(), temp.path().display().to_string()]
         );
+    }
+    #[test]
+    fn file_resolves_to_reveal() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("space 雪.txt");
+        std::fs::write(&path, "needle").unwrap();
+
+        assert_eq!(
+            resolve_explorer_action(&path).unwrap(),
+            ExplorerAction::RevealFile(path)
+        );
+    }
+
+    #[test]
+    fn directory_resolves_to_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("dir 雪");
+        std::fs::create_dir(&path).unwrap();
+
+        assert_eq!(
+            resolve_explorer_action(&path).unwrap(),
+            ExplorerAction::OpenDirectory(path)
+        );
+    }
+
+    #[test]
+    fn missing_path_returns_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("missing.txt");
+
+        let err = resolve_explorer_action(&path).unwrap_err().to_string();
+
+        assert!(err.contains("missing or inaccessible"));
+        assert!(err.contains("missing.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsupported_entry_returns_clear_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("pipe");
+        let status = Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("run mkfifo for unsupported-entry coverage");
+        assert!(status.success(), "mkfifo should create a FIFO");
+
+        match resolve_explorer_action(&path).unwrap() {
+            ExplorerAction::Unsupported {
+                path: actual,
+                reason,
+            } => {
+                assert_eq!(actual, path);
+                assert!(reason.contains("unsupported filesystem object"));
+            }
+            other => panic!("expected unsupported action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn windows_reveal_args_preserves_spaces_and_unicode_in_one_argument() {
+        let args = windows_reveal_args(Path::new(r"C:\Users\alice\space dir\雪 file.txt"));
+
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0], r"/select,C:\Users\alice\space dir\雪 file.txt");
     }
 }

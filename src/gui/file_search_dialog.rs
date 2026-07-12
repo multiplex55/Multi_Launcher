@@ -1,8 +1,8 @@
 use crate::actions::clipboard;
 use crate::file_search::actions::{
-    containing_directory, copied_filename, nested_search_root,
-    open_configured_terminal_in_directory, open_in_configured_editor, open_path, reveal_path,
-    InvocationTarget,
+    containing_directory, copied_filename, execute_explorer_action, nested_search_root,
+    open_configured_terminal_in_directory, open_in_configured_editor, open_path,
+    resolve_explorer_action, ExplorerAction, InvocationTarget,
 };
 use crate::file_search::coordinator::{event_id, SearchCoordinator};
 use crate::file_search::model::{
@@ -126,8 +126,7 @@ pub struct SelectedFileSearchResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenSelectedFileSearchResultAction {
-    RevealFile { path: PathBuf },
-    OpenDirectory { path: PathBuf },
+    Explorer(ExplorerAction),
     PreviewContent { request: PreviewRequest },
 }
 
@@ -810,27 +809,20 @@ impl FileSearchDialogState {
         let selected = self.selected_result.clone()?;
         match selected.payload {
             SelectedFileSearchResultPayload::Filename { path, kind } => {
-                let metadata = match std::fs::metadata(&path) {
-                    Ok(metadata) => metadata,
-                    Err(err) => {
+                match resolve_explorer_action(&path) {
+                    Ok(ExplorerAction::Unsupported { path, reason }) => {
                         self.warning_error_message = Some(format!(
-                            "Cannot open {}: path is missing or inaccessible ({err}).",
+                            "Cannot open {}: {reason} (stored result kind: {kind:?}).",
                             path.display()
                         ));
-                        return None;
+                        None
                     }
-                };
-
-                if metadata.is_file() {
-                    Some(OpenSelectedFileSearchResultAction::RevealFile { path })
-                } else if metadata.is_dir() {
-                    Some(OpenSelectedFileSearchResultAction::OpenDirectory { path })
-                } else {
-                    self.warning_error_message = Some(format!(
-                        "Cannot open {}: unsupported filesystem object (stored result kind: {kind:?}).",
-                        path.display()
-                    ));
-                    None
+                    Ok(action) => Some(OpenSelectedFileSearchResultAction::Explorer(action)),
+                    Err(err) => {
+                        self.warning_error_message =
+                            Some(format!("Cannot open {}: {err}.", path.display()));
+                        None
+                    }
                 }
             }
             SelectedFileSearchResultPayload::Content {
@@ -846,13 +838,9 @@ impl FileSearchDialogState {
     pub fn open_selected_result(&mut self) -> Option<OpenSelectedFileSearchResultAction> {
         let action = self.resolve_open_selected_result_action()?;
         match &action {
-            OpenSelectedFileSearchResultAction::RevealFile { path } => {
-                let path = path.clone();
-                self.run_result_action("reveal", || reveal_path(&path));
-            }
-            OpenSelectedFileSearchResultAction::OpenDirectory { path } => {
-                let path = path.clone();
-                self.run_result_action("open", || open_path(&path));
+            OpenSelectedFileSearchResultAction::Explorer(action) => {
+                let action = action.clone();
+                self.run_result_action("open", || execute_explorer_action(action));
             }
             OpenSelectedFileSearchResultAction::PreviewContent { .. } => {}
         }
@@ -954,11 +942,15 @@ impl FileSearchDialogState {
             ui.close_menu();
         }
         if ui.button("Open file or directory").clicked() {
-            self.run_result_action("open", || open_path(path));
+            self.run_result_action("open", || {
+                execute_explorer_action(resolve_explorer_action(path)?)
+            });
             ui.close_menu();
         }
         if ui.button("Reveal in Explorer").clicked() {
-            self.run_result_action("reveal", || reveal_path(path));
+            self.run_result_action("reveal", || {
+                execute_explorer_action(resolve_explorer_action(path)?)
+            });
             ui.close_menu();
         }
         if ui.button("Open containing directory").clicked() {
@@ -1870,7 +1862,9 @@ mod tests {
 
         assert_eq!(
             action,
-            Some(OpenSelectedFileSearchResultAction::RevealFile { path: file_path })
+            Some(OpenSelectedFileSearchResultAction::Explorer(
+                ExplorerAction::RevealFile(file_path)
+            ))
         );
         assert!(state.warning_error_message.is_none());
     }
@@ -1887,7 +1881,9 @@ mod tests {
 
         assert_eq!(
             action,
-            Some(OpenSelectedFileSearchResultAction::OpenDirectory { path: dir_path })
+            Some(OpenSelectedFileSearchResultAction::Explorer(
+                ExplorerAction::OpenDirectory(dir_path)
+            ))
         );
         assert!(state.warning_error_message.is_none());
     }
