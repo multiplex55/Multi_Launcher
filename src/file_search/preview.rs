@@ -97,8 +97,22 @@ pub struct FilePreview {
     pub metadata: PreviewMetadata,
     pub binary_or_unsupported: Option<UnsupportedPreview>,
     pub error: Option<PreviewError>,
-    pub truncated: bool,
+    pub coverage: PreviewCoverage,
+    pub displayed_start_line: Option<usize>,
+    pub displayed_end_line: Option<usize>,
+    pub warnings: Vec<String>,
+    pub lossy_utf8: bool,
     pub cache_hit: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewCoverage {
+    Complete,
+    BeginningOnly,
+    MatchContextOnly,
+    BinaryUnsupported,
+    Unsupported,
+    ReadError,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,7 +239,11 @@ fn build_preview(request: &PreviewRequest, metadata: fs::Metadata) -> FilePrevie
                 reason: "Directories cannot be previewed as text".to_string(),
             }),
             error: None,
-            truncated: false,
+            coverage: PreviewCoverage::Unsupported,
+            displayed_start_line: None,
+            displayed_end_line: None,
+            warnings: Vec::new(),
+            lossy_utf8: false,
             cache_hit: false,
         };
     }
@@ -255,14 +273,24 @@ fn build_preview(request: &PreviewRequest, metadata: fs::Metadata) -> FilePrevie
                 reason: "File appears to be binary".to_string(),
             }),
             error: None,
-            truncated: false,
+            coverage: PreviewCoverage::BinaryUnsupported,
+            displayed_start_line: None,
+            displayed_end_line: None,
+            warnings: Vec::new(),
+            lossy_utf8: false,
             cache_hit: false,
         };
     }
 
     if metadata.len() <= request.max_bytes_full_file_preview as u64 {
         return match fs::read(&request.path) {
-            Ok(bytes) => text_preview(request, preview_metadata, &bytes, false, false),
+            Ok(bytes) => text_preview(
+                request,
+                preview_metadata,
+                &bytes,
+                PreviewCoverage::Complete,
+                false,
+            ),
             Err(error) => error_preview(&request.path, error),
         };
     }
@@ -272,7 +300,13 @@ fn build_preview(request: &PreviewRequest, metadata: fs::Metadata) -> FilePrevie
     }
 
     match read_bounded(&request.path, request.oversized_beginning_preview_bytes) {
-        Ok((bytes, _)) => text_preview(request, preview_metadata, &bytes, true, true),
+        Ok((bytes, _)) => text_preview(
+            request,
+            preview_metadata,
+            &bytes,
+            PreviewCoverage::BeginningOnly,
+            true,
+        ),
         Err(error) => error_preview(&request.path, error),
     }
 }
@@ -281,7 +315,7 @@ fn text_preview(
     request: &PreviewRequest,
     metadata: PreviewMetadata,
     bytes: &[u8],
-    truncated: bool,
+    coverage: PreviewCoverage,
     beginning_only: bool,
 ) -> FilePreview {
     let text = String::from_utf8_lossy(bytes);
@@ -303,29 +337,30 @@ fn text_preview(
         lines.push(preview_line(line_number, line.to_string(), selected));
     }
 
-    let reason = if lossy {
-        Some("File contains invalid UTF-8; preview uses replacement characters".to_string())
-    } else if beginning_only {
-        Some(
-            "File is larger than the full-file preview limit; showing the beginning only"
-                .to_string(),
-        )
-    } else {
-        None
-    };
+    let mut warnings = Vec::new();
+    if lossy {
+        warnings
+            .push("File contains invalid UTF-8; replacement characters were inserted".to_string());
+    }
+
+    let reason = beginning_only.then(|| {
+        "File is larger than the full-file preview limit; showing the beginning only".to_string()
+    });
+    let displayed_start_line = lines.first().map(|line| line.line_number);
+    let displayed_end_line = lines.last().map(|line| line.line_number);
 
     FilePreview {
         path: request.path.clone(),
-        kind: if lossy {
-            PreviewKind::Unsupported
-        } else {
-            PreviewKind::Text
-        },
+        kind: PreviewKind::Text,
         lines,
         metadata,
         binary_or_unsupported: reason.map(|reason| UnsupportedPreview { reason }),
         error: None,
-        truncated,
+        coverage,
+        displayed_start_line,
+        displayed_end_line,
+        warnings,
+        lossy_utf8: lossy,
         cache_hit: false,
     }
 }
@@ -343,6 +378,7 @@ fn oversized_match_preview(request: &PreviewRequest, metadata: PreviewMetadata) 
     let mut lines = Vec::new();
     let mut line_number = 0usize;
     let mut found = false;
+    let mut lossy_utf8 = false;
 
     loop {
         buf.clear();
@@ -357,8 +393,9 @@ fn oversized_match_preview(request: &PreviewRequest, metadata: PreviewMetadata) 
         while matches!(buf.last(), Some(b'\n' | b'\r')) {
             buf.pop();
         }
-        let text = String::from_utf8_lossy(&buf).into_owned();
-        let preview = preview_line(line_number, text, Some(selected));
+        let text = String::from_utf8_lossy(&buf);
+        lossy_utf8 |= matches!(text, std::borrow::Cow::Owned(_));
+        let preview = preview_line(line_number, text.into_owned(), Some(selected));
 
         if !found {
             if line_number == selected.line {
@@ -394,21 +431,35 @@ fn oversized_match_preview(request: &PreviewRequest, metadata: PreviewMetadata) 
                     .to_string(),
             }),
             error: None,
-            truncated: true,
+            coverage: PreviewCoverage::Unsupported,
+            displayed_start_line: None,
+            displayed_end_line: None,
+            warnings: Vec::new(),
+            lossy_utf8: false,
             cache_hit: false,
         };
+    }
+
+    let mut warnings = Vec::new();
+    if lossy_utf8 {
+        warnings
+            .push("File contains invalid UTF-8; replacement characters were inserted".to_string());
     }
 
     FilePreview {
         path: request.path.clone(),
         kind: PreviewKind::Text,
+        displayed_start_line: lines.first().map(|line| line.line_number),
+        displayed_end_line: lines.last().map(|line| line.line_number),
         lines,
         metadata,
         binary_or_unsupported: Some(UnsupportedPreview {
             reason: "File is larger than the full-file preview limit; showing context around the selected match".to_string(),
         }),
         error: None,
-        truncated: true,
+        coverage: PreviewCoverage::MatchContextOnly,
+        warnings,
+        lossy_utf8,
         cache_hit: false,
     }
 }
@@ -483,7 +534,11 @@ fn unsupported_preview(path: PathBuf, metadata: PreviewMetadata, reason: &str) -
             reason: reason.to_string(),
         }),
         error: None,
-        truncated: false,
+        coverage: PreviewCoverage::Unsupported,
+        displayed_start_line: None,
+        displayed_end_line: None,
+        warnings: Vec::new(),
+        lossy_utf8: false,
         cache_hit: false,
     }
 }
@@ -504,7 +559,11 @@ fn error_preview(path: &Path, error: io::Error) -> FilePreview {
         error: Some(PreviewError {
             message: error.to_string(),
         }),
-        truncated: false,
+        coverage: PreviewCoverage::ReadError,
+        displayed_start_line: None,
+        displayed_end_line: None,
+        warnings: vec![format!("Unable to read preview: {error}")],
+        lossy_utf8: false,
         cache_hit: false,
     }
 }
@@ -524,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_reads_mark_preview_truncated() {
+    fn bounded_reads_mark_beginning_only_coverage() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("large.txt");
         write_file(&path, b"abcdef");
@@ -532,8 +591,10 @@ mod tests {
         request.max_bytes_full_file_preview = 3;
         request.oversized_beginning_preview_bytes = 3;
         let preview = preview_file(&request);
-        assert!(preview.truncated);
+        assert_eq!(preview.coverage, PreviewCoverage::BeginningOnly);
         assert_eq!(preview.lines[0].text, "abc");
+        assert_eq!(preview.displayed_start_line, Some(1));
+        assert_eq!(preview.displayed_end_line, Some(1));
         assert_eq!(preview.metadata.len_bytes, 6);
     }
 
@@ -546,7 +607,7 @@ mod tests {
         request.max_bytes_full_file_preview = 128;
         request.oversized_beginning_preview_bytes = 128;
         let preview = preview_file(&request);
-        assert!(preview.truncated);
+        assert_eq!(preview.coverage, PreviewCoverage::BeginningOnly);
         assert_eq!(preview.lines[0].text.len(), 128);
         assert_eq!(preview.metadata.len_bytes, 1024 * 1024);
     }
@@ -558,6 +619,8 @@ mod tests {
         write_file(&path, b"abc\0def");
         let preview = preview_file(&PreviewRequest::new(&path));
         assert_eq!(preview.kind, PreviewKind::Binary);
+        assert_eq!(preview.coverage, PreviewCoverage::BinaryUnsupported);
+        assert!(preview.lines.is_empty());
         assert!(preview
             .binary_or_unsupported
             .unwrap()
@@ -571,13 +634,14 @@ mod tests {
         let path = dir.path().join("bad.txt");
         write_file(&path, b"ok\xffbad");
         let preview = preview_file(&PreviewRequest::new(&path));
-        assert_eq!(preview.kind, PreviewKind::Unsupported);
+        assert_eq!(preview.kind, PreviewKind::Text);
+        assert_eq!(preview.coverage, PreviewCoverage::Complete);
+        assert!(preview.lossy_utf8);
         assert_eq!(preview.lines[0].text, "ok�bad");
         assert!(preview
-            .binary_or_unsupported
-            .unwrap()
-            .reason
-            .contains("invalid UTF-8"));
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("replacement characters")));
     }
 
     #[test]
@@ -635,7 +699,7 @@ three
 ",
         );
         let preview = preview_file(&PreviewRequest::for_match(&path, 2, 5));
-        assert!(!preview.truncated);
+        assert_eq!(preview.coverage, PreviewCoverage::Complete);
         assert_eq!(preview.lines.len(), 3);
         assert_eq!(preview.lines[1].text, "two match");
     }
@@ -687,7 +751,7 @@ five
         request.max_bytes_full_file_preview = 128;
         request.max_lines_around_match = 2;
         let preview = preview_file(&request);
-        assert!(preview.truncated);
+        assert_eq!(preview.coverage, PreviewCoverage::MatchContextOnly);
         assert_eq!(
             preview
                 .lines
@@ -762,7 +826,7 @@ ghijkl
         request.max_bytes_full_file_preview = 4;
         request.oversized_beginning_preview_bytes = 4;
         let preview = preview_file(&request);
-        assert!(preview.truncated);
+        assert_eq!(preview.coverage, PreviewCoverage::BeginningOnly);
         assert_eq!(preview.lines[0].text, "abcd");
         assert!(preview
             .binary_or_unsupported
@@ -786,12 +850,27 @@ three
         request.max_bytes_full_file_preview = 1;
         let preview = preview_file(&request);
         assert_eq!(preview.kind, PreviewKind::Unsupported);
+        assert_eq!(preview.coverage, PreviewCoverage::Unsupported);
         assert!(preview.lines.is_empty());
         assert!(preview
             .binary_or_unsupported
             .unwrap()
             .reason
             .contains("no longer exists"));
+    }
+
+    #[test]
+    fn missing_file_returns_visible_read_error_coverage() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("missing.txt");
+        let preview = preview_file(&PreviewRequest::new(&path));
+        assert_eq!(preview.kind, PreviewKind::Error);
+        assert_eq!(preview.coverage, PreviewCoverage::ReadError);
+        assert!(preview.error.is_some());
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Unable to read preview")));
     }
 
     #[test]
@@ -824,6 +903,7 @@ three
         let dir = tempdir().unwrap();
         let preview = preview_file(&PreviewRequest::new(dir.path()));
         assert_eq!(preview.kind, PreviewKind::Directory);
+        assert_eq!(preview.coverage, PreviewCoverage::Unsupported);
         assert!(preview.metadata.is_directory);
         assert!(preview.lines.is_empty());
     }
