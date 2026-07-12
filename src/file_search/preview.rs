@@ -195,7 +195,8 @@ impl PreviewCache {
             return preview;
         }
 
-        let mut preview = build_preview(request, metadata);
+        let cache_request = cache_storage_request(request, &metadata);
+        let mut preview = build_preview(&cache_request, metadata);
         clear_match_ranges(&mut preview);
         preview.cache_hit = false;
         self.entries.insert(key, preview.clone());
@@ -236,12 +237,38 @@ fn cache_key(request: &PreviewRequest, metadata: &fs::Metadata) -> PreviewCacheK
     }
 }
 
+fn cache_storage_request(request: &PreviewRequest, metadata: &fs::Metadata) -> PreviewRequest {
+    let complete_selected_preview = metadata.len() <= request.max_bytes_full_file_preview as u64
+        && request.selected_match.is_some()
+        && request.line_range.is_none();
+    if !complete_selected_preview {
+        return request.clone();
+    }
+
+    let mut cache_request = request.clone();
+    cache_request.selected_match = None;
+    cache_request
+}
+
 fn styled_preview(preview: &FilePreview, request: &PreviewRequest) -> FilePreview {
     let mut preview = preview.clone();
+    if preview.coverage == PreviewCoverage::Complete {
+        apply_line_range(&mut preview, request.effective_line_range());
+    }
     if preview.kind == PreviewKind::Text {
         apply_match_ranges(&mut preview, request.selected_match.as_ref());
     }
     preview
+}
+
+fn apply_line_range(preview: &mut FilePreview, range: Option<PreviewLineRange>) {
+    if let Some(range) = range {
+        preview
+            .lines
+            .retain(|line| line.line_number >= range.start && line.line_number <= range.end);
+        preview.displayed_start_line = preview.lines.first().map(|line| line.line_number);
+        preview.displayed_end_line = preview.lines.last().map(|line| line.line_number);
+    }
 }
 
 fn clear_match_ranges(preview: &mut FilePreview) {
@@ -354,11 +381,7 @@ fn text_preview(
 ) -> FilePreview {
     let text = String::from_utf8_lossy(bytes);
     let lossy = matches!(text, std::borrow::Cow::Owned(_));
-    let range = if coverage == PreviewCoverage::Complete {
-        request.line_range
-    } else {
-        request.effective_line_range()
-    };
+    let range = request.effective_line_range();
     let selected = request.selected_match.as_ref();
     let mut lines = Vec::new();
 
