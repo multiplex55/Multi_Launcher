@@ -880,12 +880,20 @@ impl FileSearchDialogState {
         self.open_selected_result()
     }
 
+    fn apply_preview_settings_to_request(&self, request: &mut PreviewRequest) {
+        request.max_bytes_full_file_preview = self
+            .settings
+            .max_full_preview_file_size_bytes
+            .try_into()
+            .unwrap_or(usize::MAX);
+    }
+
     pub fn request_preview(
         &mut self,
         path: &std::path::Path,
         first_match: Option<&ContentMatch>,
     ) -> PreviewRequest {
-        let request = first_match
+        let mut request = first_match
             .map(|content_match| {
                 let mut request = PreviewRequest::for_match(
                     path,
@@ -912,6 +920,7 @@ impl FileSearchDialogState {
                 request
             })
             .unwrap_or_else(|| PreviewRequest::new(path));
+        self.apply_preview_settings_to_request(&mut request);
         if let Some(content_match) = first_match.cloned() {
             self.preview_dialog
                 .open_content_match(path, content_match, &self.settings);
@@ -1773,7 +1782,13 @@ mod tests {
 
     #[test]
     fn requesting_preview_records_match_context() {
-        let mut state = FileSearchDialogState::default();
+        let mut state = FileSearchDialogState {
+            settings: FileSearchSettings {
+                max_full_preview_file_size_bytes: 7 * 1024 * 1024,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let path = PathBuf::from("src/lib.rs");
         let content_match = ContentMatch::new(12, "hello needle".into(), 6, 12);
 
@@ -1786,6 +1801,7 @@ mod tests {
         assert_eq!(selected_match.source_line.as_deref(), Some("hello needle"));
         assert_eq!(selected_match.match_length, Some(6));
         assert_eq!(selected_match.end_column, Some(13));
+        assert_eq!(request.max_bytes_full_file_preview, 7 * 1024 * 1024);
         assert_eq!(state.preview_dialog.current_request, Some(request));
     }
 
@@ -2143,6 +2159,7 @@ mod tests {
     fn content_selection_resolves_to_preview_behavior() {
         let path = "src/lib.rs";
         let mut state = state_with_selected_content(path);
+        state.settings.max_full_preview_file_size_bytes = 9 * 1024 * 1024;
 
         let action = state.resolve_open_selected_result_action();
 
@@ -2150,6 +2167,7 @@ mod tests {
             Some(OpenSelectedFileSearchResultAction::PreviewContent { request }) => {
                 assert_eq!(request.path, PathBuf::from(path));
                 assert_eq!(request.selected_match.as_ref().unwrap().line, 1);
+                assert_eq!(request.max_bytes_full_file_preview, 9 * 1024 * 1024);
                 assert_eq!(state.preview_dialog.current_request, Some(request));
             }
             other => panic!("expected preview action, got {other:?}"),
@@ -2160,9 +2178,14 @@ mod tests {
     fn double_click_uses_same_dispatch_path_as_open() {
         let path = "src/lib.rs";
         let mut open_button_state = state_with_selected_content(path);
+        open_button_state.settings.max_full_preview_file_size_bytes = 11 * 1024 * 1024;
         let mut double_click_state = FileSearchDialogState {
             active_search_id: Some(SearchId(1)),
             selected_mode: FileSearchMode::Content,
+            settings: FileSearchSettings {
+                max_full_preview_file_size_bytes: 11 * 1024 * 1024,
+                ..Default::default()
+            },
             ..Default::default()
         };
         double_click_state.apply_event(SearchEvent::Result {

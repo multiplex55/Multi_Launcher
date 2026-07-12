@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
 
+pub const DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES: u64 = 5 * 1024 * 1024;
+
 /// Settings used to construct and validate file-search requests/backends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -11,6 +13,7 @@ pub struct FileSearchSettings {
     pub max_search_results: usize,
     pub max_matches_per_content_file: usize,
     pub max_content_search_file_size_bytes: u64,
+    pub max_full_preview_file_size_bytes: u64,
     pub include_hidden_files: bool,
     pub case_sensitive: bool,
     pub everything_executable_path: PathBuf,
@@ -74,6 +77,7 @@ pub struct FileSearchDiagnosticsState {
     pub last_backend_error: Option<String>,
     pub inaccessible_entry_count: usize,
     pub preview_cache_usage: String,
+    pub max_full_preview_file_size_bytes: u64,
 }
 
 impl FileSearchDiagnosticsState {
@@ -102,6 +106,7 @@ impl FileSearchDiagnosticsState {
             last_backend_error: None,
             inaccessible_entry_count: 0,
             preview_cache_usage: "0 entries".to_owned(),
+            max_full_preview_file_size_bytes: settings.max_full_preview_file_size_bytes,
         }
     }
 }
@@ -110,7 +115,7 @@ impl fmt::Display for FileSearchDiagnosticsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Use Everything for global filename search: {}; detected es.exe: {}; detected rg: {}; valid roots: {}; invalid roots: {}; current backend: {}; active search state: {}; last search duration: {}; last result count: {}; last backend error: {}; inaccessible entries: {}; preview cache: {}",
+            "Use Everything for global filename search: {}; detected es.exe: {}; detected rg: {}; valid roots: {}; invalid roots: {}; current backend: {}; active search state: {}; last search duration: {}; last result count: {}; last backend error: {}; inaccessible entries: {}; preview cache: {}; full-file preview limit: {} bytes",
             self.everything_enabled,
             self.detected_everything
                 .as_ref()
@@ -130,7 +135,8 @@ impl fmt::Display for FileSearchDiagnosticsState {
             self.last_result_count,
             self.last_backend_error.as_deref().unwrap_or("none"),
             self.inaccessible_entry_count,
-            self.preview_cache_usage
+            self.preview_cache_usage,
+            self.max_full_preview_file_size_bytes
         )
     }
 }
@@ -158,6 +164,7 @@ impl Default for FileSearchSettings {
             max_search_results: 500,
             max_matches_per_content_file: 25,
             max_content_search_file_size_bytes: 2 * 1024 * 1024,
+            max_full_preview_file_size_bytes: DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES,
             include_hidden_files: false,
             case_sensitive: false,
             everything_executable_path: PathBuf::from("Everything.exe"),
@@ -271,6 +278,14 @@ impl FileSearchSettings {
             });
         }
 
+        if self.max_full_preview_file_size_bytes == 0 {
+            diagnostics.push(FileSearchSettingsDiagnostic::UnusableMaxValue {
+                field: "max_full_preview_file_size_bytes",
+                value: self.max_full_preview_file_size_bytes,
+                message: "must be greater than zero".to_owned(),
+            });
+        }
+
         diagnostics
     }
 }
@@ -310,6 +325,10 @@ mod tests {
         assert_eq!(settings.max_search_results, 500);
         assert_eq!(settings.max_matches_per_content_file, 25);
         assert_eq!(settings.max_content_search_file_size_bytes, 2 * 1024 * 1024);
+        assert_eq!(
+            settings.max_full_preview_file_size_bytes,
+            DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES
+        );
         assert!(!settings.include_hidden_files);
         assert!(!settings.case_sensitive);
         assert_eq!(
@@ -332,6 +351,7 @@ mod tests {
             max_search_results: 0,
             max_matches_per_content_file: 0,
             max_content_search_file_size_bytes: 0,
+            max_full_preview_file_size_bytes: 0,
             ..FileSearchSettings::default()
         };
 
@@ -359,6 +379,32 @@ mod tests {
             diagnostic,
             FileSearchSettingsDiagnostic::UnusableMaxValue {
                 field: "max_content_search_file_size_bytes",
+                ..
+            }
+        )));
+        assert!(diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            FileSearchSettingsDiagnostic::UnusableMaxValue {
+                field: "max_full_preview_file_size_bytes",
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn zero_preview_limit_creates_validation_diagnostic() {
+        let settings = FileSearchSettings {
+            max_full_preview_file_size_bytes: 0,
+            ..FileSearchSettings::default()
+        };
+
+        let diagnostics = settings.validate_max_values();
+
+        assert!(diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            FileSearchSettingsDiagnostic::UnusableMaxValue {
+                field: "max_full_preview_file_size_bytes",
+                value: 0,
                 ..
             }
         )));
@@ -432,6 +478,39 @@ mod diagnostics_state_tests {
             FileSearchSettings::default().max_matches_per_content_file
         );
         assert_eq!(parsed.ripgrep_executable_path, PathBuf::from("rg"));
+        assert_eq!(
+            parsed.max_full_preview_file_size_bytes,
+            DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES
+        );
+    }
+
+    #[test]
+    fn existing_settings_json_without_preview_limit_remains_deserializable() {
+        let parsed: FileSearchSettings = serde_json::from_str(
+            r#"{
+                "global_content_search_roots": [],
+                "excluded_directory_names": [".git", "target"],
+                "max_search_results": 123,
+                "max_matches_per_content_file": 10,
+                "max_content_search_file_size_bytes": 4096,
+                "include_hidden_files": true,
+                "case_sensitive": true,
+                "everything_executable_path": "Everything.exe",
+                "ripgrep_executable_path": "rg",
+                "everything_enabled": false,
+                "preferred_editor_command": "",
+                "preferred_editor_args": [],
+                "preferred_terminal_command": "",
+                "preferred_terminal_args": []
+            }"#,
+        )
+        .expect("old settings JSON should deserialize");
+
+        assert_eq!(parsed.max_search_results, 123);
+        assert_eq!(
+            parsed.max_full_preview_file_size_bytes,
+            DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES
+        );
     }
 
     #[test]
@@ -444,6 +523,7 @@ mod diagnostics_state_tests {
             max_search_results: 0,
             max_matches_per_content_file: 0,
             max_content_search_file_size_bytes: 0,
+            max_full_preview_file_size_bytes: 0,
             ..FileSearchSettings::default()
         };
         let diagnostics = settings.validate();
@@ -465,11 +545,13 @@ mod diagnostics_state_tests {
             last_backend_error: Some("boom".into()),
             inaccessible_entry_count: 3,
             preview_cache_usage: "2 entries".into(),
+            max_full_preview_file_size_bytes: DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES,
         };
         let formatted = state.to_string();
         assert!(formatted.contains("Use Everything for global filename search: true"));
         assert!(formatted.contains("current backend: ripgrep"));
         assert!(formatted.contains("preview cache: 2 entries"));
+        assert!(formatted.contains("full-file preview limit: 5242880 bytes"));
     }
 
     #[test]
