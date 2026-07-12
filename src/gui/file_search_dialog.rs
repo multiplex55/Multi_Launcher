@@ -1,9 +1,10 @@
 use crate::actions::clipboard;
 use crate::file_search::actions::{
-    InvocationTarget, containing_directory, copied_filename, nested_search_root,
+    containing_directory, copied_filename, nested_search_root,
     open_configured_terminal_in_directory, open_in_configured_editor, open_path, reveal_path,
+    InvocationTarget,
 };
-use crate::file_search::coordinator::{SearchCoordinator, event_id};
+use crate::file_search::coordinator::{event_id, SearchCoordinator};
 use crate::file_search::model::{
     ContentFileResult, ContentMatch, FileKind, SearchBackend, SearchEvent, SearchId, SearchKind,
     SearchRequest, SearchResult, SearchScope, SearchStatus,
@@ -98,10 +99,21 @@ pub struct FileSearchResultRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectedFileSearchResultPayload {
+    Filename {
+        path: PathBuf,
+        kind: FileKind,
+    },
+    Content {
+        path: PathBuf,
+        content_match: ContentMatch,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedFileSearchResult {
     pub row_id: FileSearchResultRowId,
-    pub path: PathBuf,
-    pub match_context: Option<ContentMatch>,
+    pub payload: SelectedFileSearchResultPayload,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -118,6 +130,7 @@ pub struct FileSearchDialogState {
     pub backend: Option<SearchBackend>,
     pub results: Vec<SearchResult>,
     pub result_rows: Vec<FileSearchResultRow>,
+    pub selected_result: Option<SelectedFileSearchResult>,
     pub warning_error_message: Option<String>,
     pub inaccessible_path_warnings: usize,
     pub last_preview_request: Option<PreviewRequest>,
@@ -142,6 +155,7 @@ impl Default for FileSearchDialogState {
             backend: None,
             results: Vec::new(),
             result_rows: Vec::new(),
+            selected_result: None,
             warning_error_message: None,
             inaccessible_path_warnings: 0,
             last_preview_request: None,
@@ -246,8 +260,7 @@ impl FileSearchDialogState {
             excluded_extensions: Vec::new(),
             excluded_directory_names: self.settings.excluded_directory_names.clone(),
         };
-        self.results.clear();
-        self.result_rows.clear();
+        self.clear_results_and_selection();
         self.warning_error_message = None;
         self.inaccessible_path_warnings = 0;
         self.current_status = SearchStatus::Running;
@@ -290,37 +303,91 @@ impl FileSearchDialogState {
         if Some(event_id(&event)) != self.active_search_id {
             return false;
         }
-        match event {
+        let observed_terminal_event = match event {
             SearchEvent::Started { backend, .. } => {
                 self.backend = Some(backend);
                 self.current_status = SearchStatus::Running;
+                false
             }
-            SearchEvent::Result { result, .. } => self.push_result(result),
+            SearchEvent::Result { result, .. } => {
+                self.push_result(result);
+                false
+            }
             SearchEvent::Progress { progress, .. } => {
                 self.inaccessible_path_warnings = progress
                     .directories_scanned
                     .saturating_sub(progress.files_scanned)
                     .try_into()
                     .unwrap_or(usize::MAX);
+                false
             }
             SearchEvent::Completed { .. } => {
                 self.current_status = SearchStatus::Completed;
                 self.request_immediate_repaint = true;
-                return true;
+                true
             }
             SearchEvent::Cancelled { .. } => {
                 self.current_status = SearchStatus::Cancelled;
                 self.request_immediate_repaint = true;
-                return true;
+                true
             }
             SearchEvent::Failed { error, .. } => {
                 self.current_status = SearchStatus::Failed;
                 self.warning_error_message = Some(error);
                 self.request_immediate_repaint = true;
-                return true;
+                true
             }
+        };
+        self.selection_is_valid();
+        observed_terminal_event
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selected_result = None;
+    }
+
+    pub fn select_result(&mut self, row: &FileSearchResultRow) {
+        let payload = match &row.payload {
+            FileSearchRowPayload::Filename { path, kind, .. } => {
+                SelectedFileSearchResultPayload::Filename {
+                    path: path.clone(),
+                    kind: *kind,
+                }
+            }
+            FileSearchRowPayload::Content {
+                path,
+                content_match,
+                ..
+            } => SelectedFileSearchResultPayload::Content {
+                path: path.clone(),
+                content_match: content_match.clone(),
+            },
+        };
+        self.selected_result = Some(SelectedFileSearchResult {
+            row_id: row.id.clone(),
+            payload,
+        });
+    }
+
+    pub fn selected_result(&self) -> Option<&SelectedFileSearchResult> {
+        self.selected_result.as_ref()
+    }
+
+    pub fn selection_is_valid(&mut self) -> bool {
+        let Some(selected) = &self.selected_result else {
+            return false;
+        };
+        let is_valid = self.result_rows.iter().any(|row| row.id == selected.row_id);
+        if !is_valid {
+            self.clear_selection();
         }
-        false
+        is_valid
+    }
+
+    pub fn clear_results_and_selection(&mut self) {
+        self.results.clear();
+        self.result_rows.clear();
+        self.clear_selection();
     }
 
     fn push_result(&mut self, result: SearchResult) {
@@ -405,6 +472,7 @@ impl FileSearchDialogState {
     }
 
     fn contents(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {
+        let previously_selected_mode = self.selected_mode;
         ui.horizontal(|ui| {
             ui.selectable_value(
                 &mut self.selected_mode,
@@ -412,6 +480,7 @@ impl FileSearchDialogState {
                 "Filename",
             );
             ui.selectable_value(&mut self.selected_mode, FileSearchMode::Content, "Content");
+            self.clear_selection_if_mode_changed(previously_selected_mode);
             ui.separator();
             ui.selectable_value(
                 &mut self.selected_scope,
@@ -516,10 +585,25 @@ impl FileSearchDialogState {
                     "{} | {:?} | {}",
                     display_filename, kind, parent_directory_display
                 );
+                let is_selected = self
+                    .selected_result()
+                    .map(|selected| selected.row_id == row_id)
+                    .unwrap_or(false);
                 let response = ui
-                    .selectable_label(false, row_text)
+                    .selectable_label(is_selected, row_text)
                     .on_hover_text(path.display().to_string());
                 let double_clicked = response.double_clicked();
+                if response.clicked() {
+                    self.select_result(&FileSearchResultRow {
+                        id: row_id.clone(),
+                        payload: FileSearchRowPayload::Filename {
+                            path: path.clone(),
+                            display_filename: display_filename.clone(),
+                            parent_directory_display: parent_directory_display.clone(),
+                            kind,
+                        },
+                    });
+                }
                 response.context_menu(|ui| {
                     self.result_context_menu(
                         ui,
@@ -543,6 +627,12 @@ impl FileSearchDialogState {
                     });
                 }
             });
+        }
+    }
+
+    fn clear_selection_if_mode_changed(&mut self, previously_selected_mode: FileSearchMode) {
+        if self.selected_mode != previously_selected_mode {
+            self.clear_selection();
         }
     }
 
@@ -582,10 +672,24 @@ impl FileSearchDialogState {
                         ""
                     }
                 );
+                let is_selected = self
+                    .selected_result()
+                    .map(|selected| selected.row_id == row_id)
+                    .unwrap_or(false);
                 let response = ui
-                    .selectable_label(false, row_text)
+                    .selectable_label(is_selected, row_text)
                     .on_hover_text(path.display().to_string());
                 let double_clicked = response.double_clicked();
+                if response.clicked() {
+                    self.select_result(&FileSearchResultRow {
+                        id: row_id.clone(),
+                        payload: FileSearchRowPayload::Content {
+                            path: path.clone(),
+                            content_match: content_match.clone(),
+                            is_last_displayed_match_from_truncated_file,
+                        },
+                    });
+                }
                 response.context_menu(|ui| {
                     self.content_result_context_menu(ui, &path, Some(&content_match), coordinator)
                 });
@@ -668,8 +772,7 @@ impl FileSearchDialogState {
             excluded_directory_names: Vec::new(),
         };
         self.selected_mode = FileSearchMode::Content;
-        self.results.clear();
-        self.result_rows.clear();
+        self.clear_results_and_selection();
         self.warning_error_message = None;
         self.inaccessible_path_warnings = 0;
         self.current_status = SearchStatus::Running;
@@ -1423,5 +1526,120 @@ mod tests {
         );
         assert_eq!(state.root_directory, "/tmp/project/src");
         assert_eq!(state.selected_mode, FileSearchMode::Content);
+    }
+    fn filename_search_result(path: &str) -> SearchResult {
+        let path_buf = PathBuf::from(path);
+        SearchResult::Filename(FilenameResult {
+            file_name: path_buf
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+            parent_directory: path_buf.parent().map(PathBuf::from),
+            path: path_buf,
+            kind: FileKind::File,
+            size: None,
+            modified: None,
+            rank: FilenameRank::ExactFilename,
+        })
+    }
+
+    fn state_with_selected_filename(path: &str) -> FileSearchDialogState {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(1)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(1),
+            result: filename_search_result(path),
+        });
+        let row = state.result_rows[0].clone();
+        state.select_result(&row);
+        state
+    }
+
+    #[test]
+    fn starting_a_search_clears_selection() {
+        let mut state = state_with_selected_filename("/tmp/a.txt");
+        state.search_text = "needle".into();
+        let mut coordinator = SearchCoordinator::new();
+
+        state.start_search(&mut coordinator);
+
+        assert!(state.selected_result().is_none());
+        assert!(state.result_rows.is_empty());
+    }
+
+    #[test]
+    fn switching_mode_clears_selection() {
+        let mut state = state_with_selected_filename("/tmp/a.txt");
+        let previous_mode = state.selected_mode;
+
+        state.selected_mode = FileSearchMode::Content;
+        state.clear_selection_if_mode_changed(previous_mode);
+
+        assert!(state.selected_result().is_none());
+    }
+
+    #[test]
+    fn repaint_without_mode_change_preserves_selection() {
+        let mut state = state_with_selected_filename("/tmp/a.txt");
+        let selected_before = state.selected_result().cloned();
+        let previous_mode = state.selected_mode;
+
+        state.clear_selection_if_mode_changed(previous_mode);
+
+        assert_eq!(state.selected_result().cloned(), selected_before);
+    }
+
+    #[test]
+    fn appending_new_results_preserves_valid_selection() {
+        let mut state = state_with_selected_filename("/tmp/a.txt");
+        let selected_before = state.selected_result().cloned();
+
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(1),
+            result: filename_search_result("/tmp/b.txt"),
+        });
+
+        assert_eq!(state.result_rows.len(), 2);
+        assert_eq!(state.selected_result().cloned(), selected_before);
+    }
+
+    #[test]
+    fn invalid_stale_selected_row_is_cleared_after_validation() {
+        let mut state = state_with_selected_filename("/tmp/a.txt");
+        state.result_rows.clear();
+
+        assert!(!state.selection_is_valid());
+
+        assert!(state.selected_result().is_none());
+    }
+
+    #[test]
+    fn enter_key_intent_does_not_open_selected_row() {
+        let ctx = egui::Context::default();
+        let mut state = state_with_selected_filename("/tmp/a.txt");
+        state.open = true;
+        state.current_status = SearchStatus::Completed;
+        let selected_before = state.selected_result().cloned();
+        let mut coordinator = SearchCoordinator::new();
+
+        ctx.begin_frame(egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        });
+        state.ui(&ctx, &mut coordinator);
+        let _ = ctx.end_frame();
+
+        assert_eq!(state.selected_result().cloned(), selected_before);
+        assert_eq!(coordinator.diagnostics().started, 0);
+        assert!(state.warning_error_message.is_none());
     }
 }
