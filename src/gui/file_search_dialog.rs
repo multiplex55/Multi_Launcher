@@ -74,6 +74,20 @@ pub fn result_row_id_source(
     ("file_search_result_row", search_id, row_id.clone())
 }
 
+pub fn omitted_matches_id_source(
+    search_id: SearchId,
+    backend_result_index: usize,
+    path: &std::path::Path,
+) -> (&'static str, SearchId, usize, PathBuf, &'static str) {
+    (
+        "file_search_result_row",
+        search_id,
+        backend_result_index,
+        path.to_path_buf(),
+        "omitted_matches",
+    )
+}
+
 pub fn results_scroll_id_source(mode: FileSearchMode) -> (&'static str, FileSearchMode) {
     ("file_search_results_scroll", mode)
 }
@@ -97,6 +111,7 @@ pub enum FileSearchRowPayload {
     Content {
         path: PathBuf,
         content_match: ContentMatch,
+        content_file_truncated: bool,
         is_last_displayed_match_from_truncated_file: bool,
     },
 }
@@ -470,6 +485,7 @@ impl FileSearchDialogState {
                         payload: FileSearchRowPayload::Content {
                             path: content.path.clone(),
                             content_match,
+                            content_file_truncated: content.truncated,
                             is_last_displayed_match_from_truncated_file: content.truncated
                                 && Some(match_index) == last_displayed_match_index,
                         },
@@ -747,17 +763,26 @@ impl FileSearchDialogState {
                 FileSearchRowPayload::Content {
                     path,
                     content_match,
+                    content_file_truncated,
                     is_last_displayed_match_from_truncated_file,
                 } => Some((
                     row.id.clone(),
                     path.clone(),
                     content_match.clone(),
+                    *content_file_truncated,
                     *is_last_displayed_match_from_truncated_file,
                 )),
                 FileSearchRowPayload::Filename { .. } => None,
             })
             .collect();
-        for (row_id, path, content_match, is_last_displayed_match_from_truncated_file) in rows {
+        for (
+            row_id,
+            path,
+            content_match,
+            content_file_truncated,
+            is_last_displayed_match_from_truncated_file,
+        ) in rows
+        {
             ui.push_id(result_row_id_source(row_id.search_id, &row_id), |ui| {
                 let column = content_match
                     .column
@@ -788,6 +813,7 @@ impl FileSearchDialogState {
                         payload: FileSearchRowPayload::Content {
                             path: path.clone(),
                             content_match: content_match.clone(),
+                            content_file_truncated,
                             is_last_displayed_match_from_truncated_file,
                         },
                     });
@@ -801,11 +827,23 @@ impl FileSearchDialogState {
                         payload: FileSearchRowPayload::Content {
                             path: path.clone(),
                             content_match: content_match.clone(),
+                            content_file_truncated,
                             is_last_displayed_match_from_truncated_file,
                         },
                     });
                 }
             });
+            if is_last_displayed_match_from_truncated_file {
+                ui.push_id(
+                    omitted_matches_id_source(row_id.search_id, row_id.backend_result_index, &path),
+                    |ui| {
+                        ui.label(
+                            egui::RichText::new("Additional matches in this file were omitted.")
+                                .weak(),
+                        );
+                    },
+                );
+            }
         }
     }
 
@@ -1600,6 +1638,132 @@ mod tests {
     }
 
     #[test]
+    fn truncated_content_metadata_survives_flattening() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(3)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(3),
+            result: SearchResult::ContentFile(ContentFileResult {
+                path: "src/lib.rs".into(),
+                total_matches: 3,
+                matches: vec![
+                    ContentMatch::new(4, "first needle".into(), 6, 12),
+                    ContentMatch::new(8, "second needle".into(), 7, 13),
+                ],
+                truncated: true,
+            }),
+        });
+
+        for row in &state.result_rows {
+            match &row.payload {
+                FileSearchRowPayload::Content {
+                    content_file_truncated,
+                    ..
+                } => assert!(*content_file_truncated),
+                _ => panic!("expected content row"),
+            }
+        }
+    }
+
+    #[test]
+    fn only_final_displayed_match_for_truncated_file_is_marked() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(4)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(4),
+            result: SearchResult::ContentFile(ContentFileResult {
+                path: "src/lib.rs".into(),
+                total_matches: 4,
+                matches: vec![
+                    ContentMatch::new(4, "first needle".into(), 6, 12),
+                    ContentMatch::new(8, "second needle".into(), 7, 13),
+                    ContentMatch::new(12, "third needle".into(), 8, 14),
+                ],
+                truncated: true,
+            }),
+        });
+
+        let marked: Vec<_> = state
+            .result_rows
+            .iter()
+            .map(|row| match &row.payload {
+                FileSearchRowPayload::Content {
+                    is_last_displayed_match_from_truncated_file,
+                    ..
+                } => *is_last_displayed_match_from_truncated_file,
+                _ => panic!("expected content row"),
+            })
+            .collect();
+
+        assert_eq!(marked, vec![false, false, true]);
+    }
+
+    #[test]
+    fn non_truncated_content_rows_are_not_marked() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(5)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(5),
+            result: SearchResult::ContentFile(ContentFileResult {
+                path: "src/lib.rs".into(),
+                total_matches: 2,
+                matches: vec![
+                    ContentMatch::new(4, "first needle".into(), 6, 12),
+                    ContentMatch::new(8, "second needle".into(), 7, 13),
+                ],
+                truncated: false,
+            }),
+        });
+
+        for row in &state.result_rows {
+            match &row.payload {
+                FileSearchRowPayload::Content {
+                    content_file_truncated,
+                    is_last_displayed_match_from_truncated_file,
+                    ..
+                } => {
+                    assert!(!*content_file_truncated);
+                    assert!(!*is_last_displayed_match_from_truncated_file);
+                }
+                _ => panic!("expected content row"),
+            }
+        }
+    }
+
+    #[test]
+    fn omitted_indicator_id_differs_from_selectable_row_ids() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(6)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(6),
+            result: SearchResult::ContentFile(ContentFileResult {
+                path: "src/lib.rs".into(),
+                total_matches: 3,
+                matches: vec![ContentMatch::new(4, "first needle".into(), 6, 12)],
+                truncated: true,
+            }),
+        });
+
+        let row_id = &state.result_rows[0].id;
+        let selectable_id = egui::Id::new(result_row_id_source(row_id.search_id, row_id));
+        let omitted_id = egui::Id::new(omitted_matches_id_source(
+            row_id.search_id,
+            row_id.backend_result_index,
+            &row_id.path,
+        ));
+
+        assert_ne!(selectable_id, omitted_id);
+    }
+
+    #[test]
     fn multiple_matches_on_same_line_create_distinct_rows() {
         let mut state = FileSearchDialogState {
             active_search_id: Some(SearchId(1)),
@@ -1819,6 +1983,7 @@ mod tests {
             payload: FileSearchRowPayload::Content {
                 path: "src/lib.rs".into(),
                 content_match: ContentMatch::new(42, "row-specific needle".into(), 9, 15),
+                content_file_truncated: false,
                 is_last_displayed_match_from_truncated_file: false,
             },
         };
@@ -1849,6 +2014,7 @@ mod tests {
             payload: FileSearchRowPayload::Content {
                 path: "src/lib.rs".into(),
                 content_match: content_match.clone(),
+                content_file_truncated: false,
                 is_last_displayed_match_from_truncated_file: false,
             },
         };
@@ -1876,6 +2042,7 @@ mod tests {
             payload: FileSearchRowPayload::Content {
                 path: "src/selected.rs".into(),
                 content_match: ContentMatch::new(5, "selected needle".into(), 1, 7),
+                content_file_truncated: false,
                 is_last_displayed_match_from_truncated_file: false,
             },
         };
