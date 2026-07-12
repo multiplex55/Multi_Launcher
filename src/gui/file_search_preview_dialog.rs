@@ -1,9 +1,14 @@
 use crate::file_search::actions::{InvocationTarget, open_in_configured_editor};
 use crate::file_search::model::ContentMatch;
-use crate::file_search::preview::{FilePreview, PreviewCache, PreviewKind, PreviewRequest};
+use crate::file_search::preview::{
+    FilePreview, PreviewKind, PreviewLoadOutcome, PreviewLoadStateMachine, PreviewLoadingState,
+    PreviewRequest, preview_file,
+};
 use crate::file_search::settings::FileSearchSettings;
 use eframe::egui;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 
 const DEFAULT_PREVIEW_WINDOW_SIZE: egui::Vec2 = egui::vec2(860.0, 620.0);
 
@@ -33,7 +38,8 @@ pub struct FileSearchPreviewDialogState {
     pub pending_auto_scroll: bool,
     pub persisted_window_size: egui::Vec2,
     pub reset_horizontal_scroll: bool,
-    preview_cache: PreviewCache,
+    load_state: PreviewLoadStateMachine,
+    preview_result_rx: Option<Receiver<(u64, PreviewLoadOutcome)>>,
 }
 
 impl std::fmt::Debug for FileSearchPreviewDialogState {
@@ -66,7 +72,8 @@ impl Clone for FileSearchPreviewDialogState {
             pending_auto_scroll: self.pending_auto_scroll,
             persisted_window_size: self.persisted_window_size,
             reset_horizontal_scroll: self.reset_horizontal_scroll,
-            preview_cache: PreviewCache::default(),
+            load_state: self.load_state.clone(),
+            preview_result_rx: None,
         }
     }
 }
@@ -99,7 +106,8 @@ impl Default for FileSearchPreviewDialogState {
             pending_auto_scroll: false,
             persisted_window_size: DEFAULT_PREVIEW_WINDOW_SIZE,
             reset_horizontal_scroll: false,
-            preview_cache: PreviewCache::default(),
+            load_state: PreviewLoadStateMachine::default(),
+            preview_result_rx: None,
         }
     }
 }
@@ -143,24 +151,75 @@ impl FileSearchPreviewDialogState {
         self.action_error_message = None;
         self.reset_horizontal_scroll = true;
         self.pending_auto_scroll = true;
-        self.load_current_preview();
+        self.start_loading_current_preview();
     }
 
     pub fn load_current_preview(&mut self) {
+        self.start_loading_current_preview();
+    }
+
+    pub fn start_loading_current_preview(&mut self) {
         let Some(request) = self.current_request.clone() else {
             self.loaded_preview = None;
             self.loading = false;
+            self.load_state.clear();
+            self.preview_result_rx = None;
             return;
         };
-        let preview = self.preview_cache.preview(&request);
-        self.load_error_message = preview.error.as_ref().map(|error| error.message.clone());
-        self.loaded_preview = Some(preview);
-        self.loading = false;
+
+        self.loaded_preview = None;
+        self.loading = true;
+        self.load_error_message = None;
+        let request_id = self.load_state.begin_request();
+        let (tx, rx) = mpsc::channel();
+        self.preview_result_rx = Some(rx);
+        thread::spawn(move || {
+            let preview = preview_file(&request);
+            let outcome = preview
+                .error
+                .as_ref()
+                .map(|error| PreviewLoadOutcome::Failed(error.message.clone()))
+                .unwrap_or_else(|| PreviewLoadOutcome::Loaded(preview));
+            let _ = tx.send((request_id, outcome));
+        });
+    }
+
+    fn poll_preview_result(&mut self) {
+        let Some(rx) = self.preview_result_rx.take() else {
+            return;
+        };
+        let mut keep_rx = true;
+        while let Ok((request_id, outcome)) = rx.try_recv() {
+            let accepted = self.load_state.complete_request(request_id, outcome);
+            if accepted {
+                match &self.load_state.state {
+                    PreviewLoadingState::Loaded { preview, .. } => {
+                        self.load_error_message = None;
+                        self.loaded_preview = Some(preview.clone());
+                        self.loading = false;
+                    }
+                    PreviewLoadingState::Failed { error, .. } => {
+                        self.load_error_message = Some(error.clone());
+                        self.loaded_preview = None;
+                        self.loading = false;
+                    }
+                    _ => {}
+                }
+                keep_rx = false;
+            }
+        }
+        if keep_rx {
+            self.preview_result_rx = Some(rx);
+        }
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, settings: &FileSearchSettings) {
         if !self.open {
             return;
+        }
+        self.poll_preview_result();
+        if self.load_state.is_loading() {
+            ctx.request_repaint();
         }
         let mut open = self.open;
         let mut size_to_persist = None;
@@ -205,7 +264,10 @@ impl FileSearchPreviewDialogState {
             ui.colored_label(egui::Color32::YELLOW, error);
         }
         if self.loading {
-            ui.spinner();
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Loading…");
+            });
             return;
         }
         let Some(preview) = &self.loaded_preview else {

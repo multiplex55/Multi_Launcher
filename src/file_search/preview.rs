@@ -12,6 +12,78 @@ pub const DEFAULT_MAX_LINES_AROUND_MATCH: usize = 3;
 pub const DEFAULT_BINARY_SAMPLE_BYTES: usize = 8192;
 pub const DEFAULT_CACHE_CAPACITY: usize = 64;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewLoadingState {
+    Idle,
+    Loading {
+        request_id: u64,
+    },
+    Loaded {
+        request_id: u64,
+        preview: FilePreview,
+    },
+    Failed {
+        request_id: u64,
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewLoadOutcome {
+    Loaded(FilePreview),
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewLoadStateMachine {
+    next_request_id: u64,
+    pub current_request_id: Option<u64>,
+    pub state: PreviewLoadingState,
+}
+
+impl Default for PreviewLoadStateMachine {
+    fn default() -> Self {
+        Self {
+            next_request_id: 0,
+            current_request_id: None,
+            state: PreviewLoadingState::Idle,
+        }
+    }
+}
+
+impl PreviewLoadStateMachine {
+    pub fn begin_request(&mut self) -> u64 {
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        let request_id = self.next_request_id;
+        self.current_request_id = Some(request_id);
+        self.state = PreviewLoadingState::Loading { request_id };
+        request_id
+    }
+
+    pub fn complete_request(&mut self, request_id: u64, outcome: PreviewLoadOutcome) -> bool {
+        if self.current_request_id != Some(request_id) {
+            return false;
+        }
+        self.state = match outcome {
+            PreviewLoadOutcome::Loaded(preview) => PreviewLoadingState::Loaded {
+                request_id,
+                preview,
+            },
+            PreviewLoadOutcome::Failed(error) => PreviewLoadingState::Failed { request_id, error },
+        };
+        true
+    }
+
+    pub fn clear(&mut self) {
+        self.current_request_id = None;
+        self.state = PreviewLoadingState::Idle;
+    }
+
+    pub fn is_loading(&self) -> bool {
+        matches!(self.state, PreviewLoadingState::Loading { .. })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PreviewRequest {
     pub path: PathBuf,
@@ -645,6 +717,96 @@ mod tests {
         file.sync_all().unwrap();
     }
 
+    fn preview_for_state_machine(path: &str, text: &str) -> FilePreview {
+        FilePreview {
+            path: PathBuf::from(path),
+            kind: PreviewKind::Text,
+            lines: vec![PreviewLine {
+                line_number: 1,
+                text: text.to_string(),
+                match_ranges: Vec::new(),
+            }],
+            metadata: PreviewMetadata {
+                is_directory: false,
+                len_bytes: text.len() as u64,
+                modified: None,
+                readonly: false,
+                sampled_bytes: text.len(),
+            },
+            binary_or_unsupported: None,
+            error: None,
+            coverage: PreviewCoverage::Complete,
+            displayed_start_line: Some(1),
+            displayed_end_line: Some(1),
+            warnings: Vec::new(),
+            lossy_utf8: false,
+            cache_hit: false,
+        }
+    }
+
+    #[test]
+    fn preview_state_machine_new_request_increments_request_id() {
+        let mut state = PreviewLoadStateMachine::default();
+        let first = state.begin_request();
+        let second = state.begin_request();
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert_eq!(state.current_request_id, Some(second));
+        assert_eq!(
+            state.state,
+            PreviewLoadingState::Loading { request_id: second }
+        );
+    }
+
+    #[test]
+    fn preview_state_machine_ignores_stale_response() {
+        let mut state = PreviewLoadStateMachine::default();
+        let stale = state.begin_request();
+        let current = state.begin_request();
+        let accepted = state.complete_request(
+            stale,
+            PreviewLoadOutcome::Loaded(preview_for_state_machine("stale.txt", "stale")),
+        );
+        assert!(!accepted);
+        assert_eq!(
+            state.state,
+            PreviewLoadingState::Loading {
+                request_id: current
+            }
+        );
+    }
+
+    #[test]
+    fn preview_state_machine_accepts_current_response() {
+        let mut state = PreviewLoadStateMachine::default();
+        let current = state.begin_request();
+        let preview = preview_for_state_machine("current.txt", "current");
+        let accepted = state.complete_request(current, PreviewLoadOutcome::Loaded(preview.clone()));
+        assert!(accepted);
+        assert_eq!(
+            state.state,
+            PreviewLoadingState::Loaded {
+                request_id: current,
+                preview
+            }
+        );
+    }
+
+    #[test]
+    fn preview_state_machine_new_request_clears_loaded_result_until_response_arrives() {
+        let mut state = PreviewLoadStateMachine::default();
+        let first = state.begin_request();
+        assert!(state.complete_request(
+            first,
+            PreviewLoadOutcome::Loaded(preview_for_state_machine("first.txt", "first")),
+        ));
+        let second = state.begin_request();
+        assert_eq!(
+            state.state,
+            PreviewLoadingState::Loading { request_id: second }
+        );
+    }
+
     #[test]
     fn bounded_reads_mark_beginning_only_coverage() {
         let dir = tempdir().unwrap();
@@ -684,11 +846,13 @@ mod tests {
         assert_eq!(preview.kind, PreviewKind::Binary);
         assert_eq!(preview.coverage, PreviewCoverage::BinaryUnsupported);
         assert!(preview.lines.is_empty());
-        assert!(preview
-            .binary_or_unsupported
-            .unwrap()
-            .reason
-            .contains("binary"));
+        assert!(
+            preview
+                .binary_or_unsupported
+                .unwrap()
+                .reason
+                .contains("binary")
+        );
     }
 
     #[test]
@@ -701,10 +865,12 @@ mod tests {
         assert_eq!(preview.coverage, PreviewCoverage::Complete);
         assert!(preview.lossy_utf8);
         assert_eq!(preview.lines[0].text, "ok�bad");
-        assert!(preview
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("replacement characters")));
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("replacement characters"))
+        );
     }
 
     #[test]
@@ -843,10 +1009,12 @@ five
         request.max_lines_around_match = 3;
         let preview = preview_file(&request);
         assert_eq!(preview.lines.len(), 7);
-        assert!(preview
-            .lines
-            .iter()
-            .all(|line| line.line_number >= 14_997 && line.line_number <= 15_003));
+        assert!(
+            preview
+                .lines
+                .iter()
+                .all(|line| line.line_number >= 14_997 && line.line_number <= 15_003)
+        );
     }
 
     #[test]
@@ -891,11 +1059,13 @@ ghijkl
         let preview = preview_file(&request);
         assert_eq!(preview.coverage, PreviewCoverage::BeginningOnly);
         assert_eq!(preview.lines[0].text, "abcd");
-        assert!(preview
-            .binary_or_unsupported
-            .unwrap()
-            .reason
-            .contains("beginning only"));
+        assert!(
+            preview
+                .binary_or_unsupported
+                .unwrap()
+                .reason
+                .contains("beginning only")
+        );
     }
 
     #[test]
@@ -915,11 +1085,13 @@ three
         assert_eq!(preview.kind, PreviewKind::Unsupported);
         assert_eq!(preview.coverage, PreviewCoverage::Unsupported);
         assert!(preview.lines.is_empty());
-        assert!(preview
-            .binary_or_unsupported
-            .unwrap()
-            .reason
-            .contains("no longer exists"));
+        assert!(
+            preview
+                .binary_or_unsupported
+                .unwrap()
+                .reason
+                .contains("no longer exists")
+        );
     }
 
     #[test]
@@ -930,10 +1102,12 @@ three
         assert_eq!(preview.kind, PreviewKind::Error);
         assert_eq!(preview.coverage, PreviewCoverage::ReadError);
         assert!(preview.error.is_some());
-        assert!(preview
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("Unable to read preview")));
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Unable to read preview"))
+        );
     }
 
     #[test]
