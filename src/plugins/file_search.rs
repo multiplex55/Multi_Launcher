@@ -1,7 +1,7 @@
 use crate::actions::Action;
 use crate::file_search::actions::{
-    encode_action_payload, mode_action_payload, start_action_payload, MODE_PREFIX, OPEN_ACTION,
-    START_PREFIX,
+    MODE_PREFIX, OPEN_ACTION, START_PREFIX, encode_action_payload, mode_action_payload,
+    start_action_payload,
 };
 use crate::file_search::model::SearchKind;
 use crate::file_search::query::{FileSearchCommand, SearchRequestDraft};
@@ -82,7 +82,7 @@ impl Plugin for FileSearchPlugin {
         ui.heading("File Search");
         path_list_editor(
             ui,
-            "Global content-search roots",
+            "Global ripgrep search roots",
             &mut cfg.global_content_search_roots,
         );
         string_list_editor(
@@ -107,7 +107,11 @@ impl Plugin for FileSearchPlugin {
         });
         ui.checkbox(&mut cfg.include_hidden_files, "Include hidden by default");
         ui.checkbox(&mut cfg.case_sensitive, "Case-sensitive by default");
-        ui.checkbox(&mut cfg.everything_enabled, "Everything enabled");
+        ui.checkbox(
+            &mut cfg.everything_enabled,
+            "Use Everything for global filename search",
+        );
+        ui.label("When disabled, global filename searches use the configured ripgrep executable.");
         path_field(
             ui,
             "Everything executable path",

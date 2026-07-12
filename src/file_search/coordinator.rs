@@ -122,7 +122,8 @@ impl SearchCoordinator {
 
         let id = SearchId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
-        let backend = Self::select_backend(&request);
+        let backend =
+            Self::select_backend_with_settings(&request, self.production_settings.as_ref());
         let token = CancellationToken::new();
 
         self.active_search_id = Some(id);
@@ -177,8 +178,20 @@ impl SearchCoordinator {
     }
 
     pub fn select_backend(request: &SearchRequest) -> SearchBackend {
+        Self::select_backend_with_settings(request, None)
+    }
+
+    pub fn select_backend_with_settings(
+        request: &SearchRequest,
+        settings: Option<&FileSearchSettings>,
+    ) -> SearchBackend {
         match (&request.kind, &request.scope) {
             (SearchKind::Filename, SearchScope::Directory { .. }) => SearchBackend::WalkDir,
+            (SearchKind::Filename, SearchScope::Global)
+                if settings.is_some_and(|settings| !settings.everything_enabled) =>
+            {
+                SearchBackend::Ripgrep
+            }
             (SearchKind::Filename, SearchScope::Global) => SearchBackend::Everything,
             (SearchKind::Filename, SearchScope::File { .. }) => SearchBackend::WalkDir,
             (SearchKind::Content, _) => SearchBackend::Ripgrep,
@@ -406,6 +419,22 @@ mod tests {
                 SearchScope::Global,
                 10
             )),
+            SearchBackend::Ripgrep
+        );
+    }
+
+    #[test]
+    fn everything_disabled_selects_ripgrep_for_global_filename_search() {
+        let settings = FileSearchSettings {
+            everything_enabled: false,
+            ..FileSearchSettings::default()
+        };
+
+        assert_eq!(
+            SearchCoordinator::select_backend_with_settings(
+                &request(SearchKind::Filename, SearchScope::Global, 10),
+                Some(&settings),
+            ),
             SearchBackend::Ripgrep
         );
     }
@@ -721,9 +750,59 @@ mod tests {
     }
 
     #[test]
-    fn production_global_filename_search_with_everything_disabled_fails_as_everything() {
+    fn everything_disabled_global_filename_search_returns_ripgrep_results_when_available() {
+        let Ok(ripgrep) =
+            crate::file_search::ripgrep::resolve_ripgrep_executable(std::path::Path::new("rg"))
+        else {
+            return;
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let expected = "global-ripgrep-hit.txt";
+        std::fs::write(temp.path().join(expected), "contents").expect("write file");
         let settings = FileSearchSettings {
+            global_content_search_roots: vec![temp.path().to_path_buf()],
             everything_enabled: false,
+            ripgrep_executable_path: ripgrep,
+            ..FileSearchSettings::default()
+        };
+        let mut coordinator = SearchCoordinator::with_settings(settings);
+
+        coordinator.start_search(SearchRequest {
+            kind: SearchKind::Filename,
+            scope: SearchScope::Global,
+            text: "global-ripgrep-hit".to_owned(),
+            case_sensitive: false,
+            include_hidden_files: false,
+            max_results: 10,
+            max_file_size_bytes: 1024,
+            included_extensions: Vec::new(),
+            excluded_extensions: Vec::new(),
+            excluded_directory_names: Vec::new(),
+        });
+
+        let events = drain_until_terminal(&mut coordinator);
+        assert_eq!(coordinator.last_backend(), Some(SearchBackend::Ripgrep));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                SearchEvent::Result {
+                    result: SearchResult::Filename(result),
+                    ..
+                } if result.file_name == expected
+            )),
+            "events: {events:?}"
+        );
+        assert_no_unwired_placeholder(&events);
+    }
+
+    #[test]
+    fn production_global_filename_search_with_everything_disabled_uses_ripgrep() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing_rg = temp.path().join("missing").join("rg");
+        let settings = FileSearchSettings {
+            global_content_search_roots: vec![temp.path().to_path_buf()],
+            everything_enabled: false,
+            ripgrep_executable_path: missing_rg.clone(),
             ..FileSearchSettings::default()
         };
         let mut coordinator = SearchCoordinator::with_settings(settings);
@@ -742,7 +821,7 @@ mod tests {
         });
 
         let events = drain_until_terminal(&mut coordinator);
-        assert_eq!(coordinator.last_backend(), Some(SearchBackend::Everything));
+        assert_eq!(coordinator.last_backend(), Some(SearchBackend::Ripgrep));
         let error = events
             .iter()
             .find_map(|event| match event {
@@ -750,14 +829,12 @@ mod tests {
                 _ => None,
             })
             .expect("failed event");
+        assert!(error.contains("ripgrep"), "{error}");
+        assert!(error.contains(&missing_rg.display().to_string()), "{error}");
+        assert!(!error.contains("Everything filename search"), "{error}");
         assert!(
-            error.contains("Everything filename search is unavailable"),
+            !error.contains("Search backend execution is not wired yet"),
             "{error}"
         );
-        assert!(
-            error.contains("Everything filename search is disabled in settings"),
-            "{error}"
-        );
-        assert!(!error.contains("ripgrep"), "{error}");
     }
 }

@@ -1,10 +1,9 @@
 use crate::actions::clipboard;
 use crate::file_search::actions::{
-    containing_directory, copied_filename, nested_search_root,
+    InvocationTarget, containing_directory, copied_filename, nested_search_root,
     open_configured_terminal_in_directory, open_in_configured_editor, open_path, reveal_path,
-    InvocationTarget,
 };
-use crate::file_search::coordinator::{event_id, SearchCoordinator};
+use crate::file_search::coordinator::{SearchCoordinator, event_id};
 use crate::file_search::model::{
     ContentFileResult, ContentMatch, SearchBackend, SearchEvent, SearchId, SearchKind,
     SearchRequest, SearchResult, SearchScope, SearchStatus,
@@ -213,7 +212,10 @@ impl FileSearchDialogState {
         self.warning_error_message = None;
         self.inaccessible_path_warnings = 0;
         self.current_status = SearchStatus::Running;
-        self.backend = Some(SearchCoordinator::select_backend(&request));
+        self.backend = Some(SearchCoordinator::select_backend_with_settings(
+            &request,
+            Some(&self.settings),
+        ));
         let id = coordinator.start_search(request);
         self.active_search_id = Some(id);
         self.request_immediate_repaint = true;
@@ -554,7 +556,10 @@ impl FileSearchDialogState {
         self.warning_error_message = None;
         self.inaccessible_path_warnings = 0;
         self.current_status = SearchStatus::Running;
-        self.backend = Some(SearchCoordinator::select_backend(&request));
+        self.backend = Some(SearchCoordinator::select_backend_with_settings(
+            &request,
+            Some(&self.settings),
+        ));
         let id = coordinator.start_search(request);
         self.active_search_id = Some(id);
         self.request_immediate_repaint = true;
@@ -835,6 +840,27 @@ mod tests {
         assert!(id.is_some());
         assert_eq!(state.active_search_id, id);
         assert_eq!(state.current_status, SearchStatus::Running);
+    }
+
+    #[test]
+    fn global_filename_search_uses_ripgrep_backend_when_everything_is_disabled() {
+        let settings = FileSearchSettings {
+            everything_enabled: false,
+            ..FileSearchSettings::default()
+        };
+        let mut state = FileSearchDialogState {
+            search_text: "foo".into(),
+            selected_mode: FileSearchMode::Filename,
+            selected_scope: FileSearchScopeMode::Global,
+            settings: settings.clone(),
+            ..Default::default()
+        };
+        let mut coordinator = SearchCoordinator::with_settings(settings);
+
+        state.start_search(&mut coordinator);
+
+        assert_eq!(state.backend, Some(SearchBackend::Ripgrep));
+        assert_eq!(coordinator.last_backend(), Some(SearchBackend::Ripgrep));
     }
 
     #[test]
