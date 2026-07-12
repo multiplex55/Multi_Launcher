@@ -14,6 +14,7 @@ mod cpu_list_dialog;
 mod dashboard_editor_dialog;
 mod fav_dialog;
 mod file_search_dialog;
+mod file_search_preview_dialog;
 mod image_panel;
 mod macro_dialog;
 mod mouse_gesture_settings_dialog;

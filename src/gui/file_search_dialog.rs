@@ -1,10 +1,9 @@
 use crate::actions::clipboard;
 use crate::file_search::actions::{
-    containing_directory, copied_filename, nested_search_root,
+    InvocationTarget, containing_directory, copied_filename, nested_search_root,
     open_configured_terminal_in_directory, open_in_configured_editor, open_path, reveal_path,
-    InvocationTarget,
 };
-use crate::file_search::coordinator::{event_id, SearchCoordinator};
+use crate::file_search::coordinator::{SearchCoordinator, event_id};
 use crate::file_search::model::{
     ContentFileResult, ContentMatch, FileKind, SearchBackend, SearchEvent, SearchId, SearchKind,
     SearchRequest, SearchResult, SearchScope, SearchStatus,
@@ -21,7 +20,7 @@ const ACTIVE_SEARCH_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 pub const FILE_SEARCH_SEARCH_FIELD_ID_SOURCE: &str = "file_search_search_text";
 pub const FILE_SEARCH_ROOT_FIELD_ID_SOURCE: &str = "file_search_root_directory";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileSearchMode {
     Filename,
     Content,
@@ -56,7 +55,7 @@ pub fn handle_escape_action(status: SearchStatus) -> FileSearchEscapeAction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FileSearchResultRowId {
     pub search_id: SearchId,
     pub backend_result_index: usize,
@@ -64,6 +63,17 @@ pub struct FileSearchResultRowId {
     pub path: PathBuf,
     pub line_number: Option<usize>,
     pub column: Option<usize>,
+}
+
+pub fn result_row_id_source(
+    search_id: SearchId,
+    row_id: &FileSearchResultRowId,
+) -> (&'static str, SearchId, FileSearchResultRowId) {
+    ("file_search_result_row", search_id, row_id.clone())
+}
+
+pub fn results_scroll_id_source(mode: FileSearchMode) -> (&'static str, FileSearchMode) {
+    ("file_search_results_scroll", mode)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -472,10 +482,12 @@ impl FileSearchDialogState {
         if let Some(msg) = &self.warning_error_message {
             ui.colored_label(egui::Color32::YELLOW, msg);
         }
-        egui::ScrollArea::vertical().show(ui, |ui| match self.selected_mode {
-            FileSearchMode::Filename => self.filename_results(ui, coordinator),
-            FileSearchMode::Content => self.content_results(ui, coordinator),
-        });
+        egui::ScrollArea::vertical()
+            .id_source(results_scroll_id_source(self.selected_mode))
+            .show(ui, |ui| match self.selected_mode {
+                FileSearchMode::Filename => self.filename_results(ui, coordinator),
+                FileSearchMode::Content => self.content_results(ui, coordinator),
+            });
     }
 
     fn filename_results(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {
@@ -489,6 +501,7 @@ impl FileSearchDialogState {
                     parent_directory_display,
                     kind,
                 } => Some((
+                    row.id.clone(),
                     path.clone(),
                     display_filename.clone(),
                     parent_directory_display.clone(),
@@ -497,22 +510,38 @@ impl FileSearchDialogState {
                 FileSearchRowPayload::Content { .. } => None,
             })
             .collect();
-        for (path, display_filename, parent_directory_display, kind) in rows {
-            let response = ui
-                .horizontal(|ui| {
-                    ui.label(display_filename);
-                    ui.label(format!("{:?}", kind));
-                    ui.label(parent_directory_display);
-                })
-                .response;
-            response.context_menu(|ui| {
-                self.result_context_menu(
-                    ui,
-                    &path,
-                    kind == crate::file_search::model::FileKind::Directory,
-                    None,
-                    coordinator,
-                )
+        for (row_id, path, display_filename, parent_directory_display, kind) in rows {
+            ui.push_id(result_row_id_source(row_id.search_id, &row_id), |ui| {
+                let row_text = format!(
+                    "{} | {:?} | {}",
+                    display_filename, kind, parent_directory_display
+                );
+                let response = ui
+                    .selectable_label(false, row_text)
+                    .on_hover_text(path.display().to_string());
+                let double_clicked = response.double_clicked();
+                response.context_menu(|ui| {
+                    self.result_context_menu(
+                        ui,
+                        &path,
+                        kind == crate::file_search::model::FileKind::Directory,
+                        None,
+                        coordinator,
+                    )
+                });
+                if double_clicked {
+                    let settings = self.settings.clone();
+                    self.run_result_action("open in configured editor", || {
+                        open_in_configured_editor(
+                            &settings,
+                            InvocationTarget {
+                                file: &path,
+                                line: None,
+                                column: None,
+                            },
+                        )
+                    });
+                }
             });
         }
     }
@@ -527,6 +556,7 @@ impl FileSearchDialogState {
                     content_match,
                     is_last_displayed_match_from_truncated_file,
                 } => Some((
+                    row.id.clone(),
                     path.clone(),
                     content_match.clone(),
                     *is_last_displayed_match_from_truncated_file,
@@ -534,29 +564,44 @@ impl FileSearchDialogState {
                 FileSearchRowPayload::Filename { .. } => None,
             })
             .collect();
-        for (path, content_match, is_last_displayed_match_from_truncated_file) in rows {
-            let column = content_match
-                .column
-                .map(|column| format!(":{}", column.saturating_add(1)))
-                .unwrap_or_default();
-            let response = ui
-                .horizontal(|ui| {
-                    ui.label(format!(
-                        "{}:{}{}: {}{}",
-                        path.display(),
-                        content_match.line_number,
-                        column,
-                        content_match.line,
-                        if is_last_displayed_match_from_truncated_file {
-                            " … truncated"
-                        } else {
-                            ""
-                        }
-                    ));
-                })
-                .response;
-            response.context_menu(|ui| {
-                self.content_result_context_menu(ui, &path, Some(&content_match), coordinator)
+        for (row_id, path, content_match, is_last_displayed_match_from_truncated_file) in rows {
+            ui.push_id(result_row_id_source(row_id.search_id, &row_id), |ui| {
+                let column = content_match
+                    .column
+                    .map(|column| format!(":{}", column.saturating_add(1)))
+                    .unwrap_or_default();
+                let row_text = format!(
+                    "{} | {}{} | {}{}",
+                    path.display(),
+                    content_match.line_number,
+                    column,
+                    content_match.line,
+                    if is_last_displayed_match_from_truncated_file {
+                        " … truncated"
+                    } else {
+                        ""
+                    }
+                );
+                let response = ui
+                    .selectable_label(false, row_text)
+                    .on_hover_text(path.display().to_string());
+                let double_clicked = response.double_clicked();
+                response.context_menu(|ui| {
+                    self.content_result_context_menu(ui, &path, Some(&content_match), coordinator)
+                });
+                if double_clicked {
+                    let settings = self.settings.clone();
+                    self.run_result_action("open in configured editor", || {
+                        open_in_configured_editor(
+                            &settings,
+                            InvocationTarget {
+                                file: &path,
+                                line: Some(content_match.line_number),
+                                column: content_match.column.map(|c| c.saturating_add(1)),
+                            },
+                        )
+                    });
+                }
             });
         }
     }
@@ -1243,6 +1288,93 @@ mod tests {
             }
             _ => panic!("expected content row"),
         }
+    }
+
+    #[test]
+    fn id_sources_distinguish_same_filename_in_different_directories() {
+        let left = FileSearchResultRowId {
+            search_id: SearchId(1),
+            backend_result_index: 0,
+            match_index: None,
+            path: "/tmp/a/main.rs".into(),
+            line_number: None,
+            column: None,
+        };
+        let right = FileSearchResultRowId {
+            path: "/tmp/b/main.rs".into(),
+            ..left.clone()
+        };
+
+        assert_ne!(
+            result_row_id_source(SearchId(1), &left),
+            result_row_id_source(SearchId(1), &right)
+        );
+    }
+
+    #[test]
+    fn id_sources_distinguish_two_matches_in_one_file() {
+        let first = FileSearchResultRowId {
+            search_id: SearchId(1),
+            backend_result_index: 0,
+            match_index: Some(0),
+            path: "src/lib.rs".into(),
+            line_number: Some(4),
+            column: Some(0),
+        };
+        let second = FileSearchResultRowId {
+            match_index: Some(1),
+            line_number: Some(8),
+            column: Some(7),
+            ..first.clone()
+        };
+
+        assert_ne!(
+            result_row_id_source(SearchId(1), &first),
+            result_row_id_source(SearchId(1), &second)
+        );
+    }
+
+    #[test]
+    fn id_sources_distinguish_two_matches_on_same_source_line() {
+        let first = FileSearchResultRowId {
+            search_id: SearchId(1),
+            backend_result_index: 0,
+            match_index: Some(0),
+            path: "src/lib.rs".into(),
+            line_number: Some(4),
+            column: Some(0),
+        };
+        let second = FileSearchResultRowId {
+            match_index: Some(1),
+            column: Some(7),
+            ..first.clone()
+        };
+
+        assert_ne!(
+            result_row_id_source(SearchId(1), &first),
+            result_row_id_source(SearchId(1), &second)
+        );
+    }
+
+    #[test]
+    fn id_sources_distinguish_equivalent_rows_from_different_searches() {
+        let row = FileSearchResultRowId {
+            search_id: SearchId(1),
+            backend_result_index: 0,
+            match_index: None,
+            path: "src/lib.rs".into(),
+            line_number: None,
+            column: None,
+        };
+        let other_search_row = FileSearchResultRowId {
+            search_id: SearchId(2),
+            ..row.clone()
+        };
+
+        assert_ne!(
+            result_row_id_source(SearchId(1), &row),
+            result_row_id_source(SearchId(2), &other_search_row)
+        );
     }
 
     #[test]
