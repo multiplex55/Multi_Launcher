@@ -6,8 +6,8 @@ use crate::file_search::actions::{
 };
 use crate::file_search::coordinator::{event_id, SearchCoordinator};
 use crate::file_search::model::{
-    ContentFileResult, ContentMatch, FileKind, SearchBackend, SearchEvent, SearchId, SearchKind,
-    SearchRequest, SearchResult, SearchScope, SearchStatus,
+    ContentMatch, FileKind, SearchBackend, SearchEvent, SearchId, SearchKind, SearchRequest,
+    SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::preview::PreviewRequest;
 use crate::file_search::settings::FileSearchSettings;
@@ -978,7 +978,7 @@ fn non_wrapping_selectable_label(
     let total_extra = button_padding + button_padding;
     let galley = text.into_galley(ui, Some(false), f32::INFINITY, egui::TextStyle::Button);
     let mut desired_size = total_extra + galley.size();
-    desired_size.y = desired_size.y.at_least(ui.spacing().interact_size.y);
+    desired_size.y = desired_size.y.max(ui.spacing().interact_size.y);
     let (rect, response) = ui.allocate_at_least(desired_size, egui::Sense::click());
 
     response.widget_info(|| {
@@ -1010,7 +1010,7 @@ fn non_wrapping_selectable_label(
 mod tests {
     use super::*;
     use crate::file_search::model::{
-        ContentMatch, FileKind, FilenameRank, FilenameResult, SearchProgress,
+        ContentFileResult, ContentMatch, FileKind, FilenameRank, FilenameResult, SearchProgress,
     };
 
     #[test]
