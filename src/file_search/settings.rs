@@ -110,7 +110,7 @@ impl fmt::Display for FileSearchDiagnosticsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Everything enabled: {}; detected es.exe: {}; detected rg: {}; valid roots: {}; invalid roots: {}; current backend: {}; active search state: {}; last search duration: {}; last result count: {}; last backend error: {}; inaccessible entries: {}; preview cache: {}",
+            "Use Everything for global filename search: {}; detected es.exe: {}; detected rg: {}; valid roots: {}; invalid roots: {}; current backend: {}; active search state: {}; last search duration: {}; last result count: {}; last backend error: {}; inaccessible entries: {}; preview cache: {}",
             self.everything_enabled,
             self.detected_everything
                 .as_ref()
@@ -467,7 +467,7 @@ mod diagnostics_state_tests {
             preview_cache_usage: "2 entries".into(),
         };
         let formatted = state.to_string();
-        assert!(formatted.contains("Everything enabled: true"));
+        assert!(formatted.contains("Use Everything for global filename search: true"));
         assert!(formatted.contains("current backend: ripgrep"));
         assert!(formatted.contains("preview cache: 2 entries"));
     }

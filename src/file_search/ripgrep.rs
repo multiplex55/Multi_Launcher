@@ -1,10 +1,12 @@
 use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
 use crate::file_search::error::FileSearchError;
 use crate::file_search::model::{
-    ContentFileResult, ContentFileResultBuilder, ContentMatch, SearchEvent, SearchId, SearchKind,
-    SearchProgress, SearchRequest, SearchResult, SearchScope, SearchStatus,
+    ContentFileResult, ContentFileResultBuilder, ContentMatch, FileKind, FilenameResult,
+    SearchEvent, SearchId, SearchKind, SearchProgress, SearchRequest, SearchResult, SearchScope,
+    SearchStatus,
 };
 use crate::file_search::settings::FileSearchSettings;
+use crate::file_search::walkdir::{rank_filename_match, sort_filename_results};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::env;
@@ -34,45 +36,19 @@ impl SearchExecutor for RipgrepSearchExecutor {
         token: CancellationToken,
         events: mpsc::Sender<SearchEvent>,
     ) {
-        match search_content_with_ripgrep(request, &self.settings, &token) {
-            Ok(summary) => {
-                for result in summary.results {
-                    if events
-                        .send(SearchEvent::Result {
-                            id,
-                            result: SearchResult::ContentFile(result),
-                        })
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-                let status = if summary.cancelled {
-                    SearchStatus::Cancelled
-                } else {
-                    SearchStatus::Completed
-                };
-                let _ = events.send(SearchEvent::Progress {
-                    id,
-                    progress: SearchProgress {
-                        files_scanned: summary.files_scanned,
-                        directories_scanned: 0,
-                        results_found: summary.results_found,
-                        status,
-                    },
-                });
-                let _ = if summary.cancelled {
-                    events.send(SearchEvent::Cancelled { id })
-                } else {
-                    events.send(SearchEvent::Completed { id })
-                };
+        let result = match request.kind {
+            SearchKind::Content => {
+                execute_content_search(id, request, &self.settings, &token, &events)
             }
-            Err(error) => {
-                let _ = events.send(SearchEvent::Failed {
-                    id,
-                    error: error.to_string(),
-                });
+            SearchKind::Filename => {
+                execute_filename_search(id, request, &self.settings, &token, &events)
             }
+        };
+        if let Err(error) = result {
+            let _ = events.send(SearchEvent::Failed {
+                id,
+                error: error.to_string(),
+            });
         }
     }
 }
@@ -80,6 +56,97 @@ impl SearchExecutor for RipgrepSearchExecutor {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RipgrepSearchSummary {
     pub results: Vec<ContentFileResult>,
+    pub results_found: usize,
+    pub files_scanned: u64,
+    pub cancelled: bool,
+    pub stderr: String,
+}
+
+fn execute_content_search(
+    id: SearchId,
+    request: SearchRequest,
+    settings: &FileSearchSettings,
+    token: &CancellationToken,
+    events: &mpsc::Sender<SearchEvent>,
+) -> Result<(), FileSearchError> {
+    let summary = search_content_with_ripgrep(request, settings, token)?;
+    for result in summary.results {
+        if events
+            .send(SearchEvent::Result {
+                id,
+                result: SearchResult::ContentFile(result),
+            })
+            .is_err()
+        {
+            return Ok(());
+        }
+    }
+    let status = if summary.cancelled {
+        SearchStatus::Cancelled
+    } else {
+        SearchStatus::Completed
+    };
+    let _ = events.send(SearchEvent::Progress {
+        id,
+        progress: SearchProgress {
+            files_scanned: summary.files_scanned,
+            directories_scanned: 0,
+            results_found: summary.results_found,
+            status,
+        },
+    });
+    let _ = if summary.cancelled {
+        events.send(SearchEvent::Cancelled { id })
+    } else {
+        events.send(SearchEvent::Completed { id })
+    };
+    Ok(())
+}
+
+fn execute_filename_search(
+    id: SearchId,
+    request: SearchRequest,
+    settings: &FileSearchSettings,
+    token: &CancellationToken,
+    events: &mpsc::Sender<SearchEvent>,
+) -> Result<(), FileSearchError> {
+    let summary = search_filenames_with_ripgrep(request, settings, token)?;
+    for result in summary.results {
+        if events
+            .send(SearchEvent::Result {
+                id,
+                result: SearchResult::Filename(result),
+            })
+            .is_err()
+        {
+            return Ok(());
+        }
+    }
+    let status = if summary.cancelled {
+        SearchStatus::Cancelled
+    } else {
+        SearchStatus::Completed
+    };
+    let _ = events.send(SearchEvent::Progress {
+        id,
+        progress: SearchProgress {
+            files_scanned: summary.files_scanned,
+            directories_scanned: 0,
+            results_found: summary.results_found,
+            status,
+        },
+    });
+    let _ = if summary.cancelled {
+        events.send(SearchEvent::Cancelled { id })
+    } else {
+        events.send(SearchEvent::Completed { id })
+    };
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RipgrepFilenameSearchSummary {
+    pub results: Vec<FilenameResult>,
     pub results_found: usize,
     pub files_scanned: u64,
     pub cancelled: bool,
@@ -153,6 +220,82 @@ pub fn search_content_with_ripgrep(
     let mut summary =
         parse_ripgrep_json_limited(&stdout, per_file_match_limit, request.max_results)?;
     summary.stderr = stderr;
+    Ok(summary)
+}
+
+pub fn search_filenames_with_ripgrep(
+    request: SearchRequest,
+    settings: &FileSearchSettings,
+    cancellation: &CancellationToken,
+) -> Result<RipgrepFilenameSearchSummary, FileSearchError> {
+    if request.kind != SearchKind::Filename {
+        return Err(FileSearchError::InvalidQuery {
+            message: "ripgrep filename search only supports filename requests".to_owned(),
+        });
+    }
+    if request.text.is_empty() {
+        return Err(FileSearchError::InvalidQuery {
+            message: "filename search query cannot be empty".to_owned(),
+        });
+    }
+
+    let executable = resolve_ripgrep_executable(&settings.ripgrep_executable_path)?;
+    let roots = search_roots(&request, settings)?;
+    let mut command = build_ripgrep_files_command(&executable, &request, settings, &roots);
+    let output = command
+        .output()
+        .map_err(|error| FileSearchError::ProcessLaunchFailure {
+            executable: executable.clone(),
+            message: error.to_string(),
+        })?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    handle_exit_status(output.status, &executable, &stderr)?;
+
+    let needle = if request.case_sensitive {
+        request.text.clone()
+    } else {
+        request.text.to_lowercase()
+    };
+    let mut summary = RipgrepFilenameSearchSummary {
+        stderr,
+        ..RipgrepFilenameSearchSummary::default()
+    };
+    let mut results = Vec::new();
+    for line in stdout.lines() {
+        if cancellation.is_cancelled() {
+            summary.cancelled = true;
+            break;
+        }
+        let path = PathBuf::from(line);
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| line.to_owned());
+        summary.files_scanned = summary.files_scanned.saturating_add(1);
+        if let Some(rank) = rank_filename_match(&file_name, &path, &needle, request.case_sensitive)
+        {
+            let metadata = path.metadata().ok();
+            results.push(FilenameResult {
+                path: path.clone(),
+                file_name,
+                parent_directory: path.parent().map(Path::to_path_buf),
+                kind: file_kind(metadata.as_ref()),
+                size: metadata.as_ref().filter(|m| m.is_file()).map(|m| m.len()),
+                modified: metadata.and_then(|m| m.modified().ok()),
+                rank,
+            });
+            summary.results_found += 1;
+            if results.len() >= request.max_results {
+                break;
+            }
+        }
+    }
+    if cancellation.is_cancelled() {
+        summary.cancelled = true;
+    }
+    sort_filename_results(&mut results);
+    summary.results = results;
     Ok(summary)
 }
 
@@ -262,6 +405,36 @@ pub fn build_ripgrep_command(
     command
 }
 
+pub fn build_ripgrep_files_command(
+    executable: &Path,
+    request: &SearchRequest,
+    settings: &FileSearchSettings,
+    roots: &[PathBuf],
+) -> Command {
+    let mut command = Command::new(executable);
+    command.arg("--files");
+    if request.include_hidden_files {
+        command.arg("--hidden");
+    }
+    for ext in &request.included_extensions {
+        command
+            .arg("--glob")
+            .arg(format!("*.{}", normalize_ext(ext)));
+    }
+    for ext in &request.excluded_extensions {
+        command
+            .arg("--glob")
+            .arg(format!("!*.{}", normalize_ext(ext)));
+    }
+    for dir in excluded_directory_names(request, settings) {
+        command.arg("--glob").arg(format!("!**/{dir}/**"));
+    }
+    for root in roots {
+        command.arg(root);
+    }
+    command
+}
+
 fn normalize_ext(ext: &str) -> &str {
     ext.trim_start_matches('.')
 }
@@ -299,6 +472,14 @@ fn read_to_string(reader: impl Read) -> String {
     let mut reader = BufReader::new(reader);
     let _ = reader.read_to_string(&mut output);
     output
+}
+
+fn file_kind(metadata: Option<&std::fs::Metadata>) -> FileKind {
+    match metadata {
+        Some(metadata) if metadata.is_file() => FileKind::File,
+        Some(metadata) if metadata.is_dir() => FileKind::Directory,
+        _ => FileKind::Other,
+    }
 }
 
 fn handle_exit_status(

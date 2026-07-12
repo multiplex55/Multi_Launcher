@@ -4,7 +4,7 @@ use crate::file_search::model::{SearchBackend, SearchEvent, SearchId, SearchRequ
 use crate::file_search::ripgrep::RipgrepSearchExecutor;
 use crate::file_search::settings::FileSearchSettings;
 use crate::file_search::walkdir::WalkDirSearchExecutor;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 
 /// Production file-search dispatcher that selects the configured backend for a
 /// request and delegates execution to the corresponding backend executor.
@@ -53,7 +53,7 @@ impl SearchExecutor for FileSearchExecutor {
         token: CancellationToken,
         events: mpsc::Sender<SearchEvent>,
     ) {
-        match SearchCoordinator::select_backend(&request) {
+        match SearchCoordinator::select_backend_with_settings(&request, Some(&self.settings)) {
             SearchBackend::Ripgrep => self.ripgrep.execute(id, request, token, events),
             SearchBackend::WalkDir => self.walkdir.execute(id, request, token, events),
             SearchBackend::Everything => self.everything.execute(id, request, token, events),
@@ -117,12 +117,16 @@ mod tests {
         walkdir: Arc<RecordingExecutor>,
         everything: Arc<RecordingExecutor>,
     ) -> FileSearchExecutor {
-        FileSearchExecutor::with_backend_executors(
-            FileSearchSettings::default(),
-            ripgrep,
-            walkdir,
-            everything,
-        )
+        dispatcher_with_settings(FileSearchSettings::default(), ripgrep, walkdir, everything)
+    }
+
+    fn dispatcher_with_settings(
+        settings: FileSearchSettings,
+        ripgrep: Arc<RecordingExecutor>,
+        walkdir: Arc<RecordingExecutor>,
+        everything: Arc<RecordingExecutor>,
+    ) -> FileSearchExecutor {
+        FileSearchExecutor::with_backend_executors(settings, ripgrep, walkdir, everything)
     }
 
     #[test]
@@ -176,7 +180,15 @@ mod tests {
         let ripgrep = Arc::new(RecordingExecutor::default());
         let walkdir = Arc::new(RecordingExecutor::default());
         let everything = Arc::new(RecordingExecutor::default());
-        let executor = dispatcher(ripgrep.clone(), walkdir.clone(), everything.clone());
+        let executor = dispatcher_with_settings(
+            FileSearchSettings {
+                everything_enabled: true,
+                ..FileSearchSettings::default()
+            },
+            ripgrep.clone(),
+            walkdir.clone(),
+            everything.clone(),
+        );
 
         let (tx, _rx) = mpsc::channel();
         executor.execute(
@@ -189,5 +201,33 @@ mod tests {
         assert!(ripgrep.calls().is_empty());
         assert!(walkdir.calls().is_empty());
         assert_eq!(everything.calls(), vec![SearchId(9)]);
+    }
+
+    #[test]
+    fn global_filename_request_routes_to_ripgrep_when_everything_disabled() {
+        let ripgrep = Arc::new(RecordingExecutor::default());
+        let walkdir = Arc::new(RecordingExecutor::default());
+        let everything = Arc::new(RecordingExecutor::default());
+        let executor = dispatcher_with_settings(
+            FileSearchSettings {
+                everything_enabled: false,
+                ..FileSearchSettings::default()
+            },
+            ripgrep.clone(),
+            walkdir.clone(),
+            everything.clone(),
+        );
+
+        let (tx, _rx) = mpsc::channel();
+        executor.execute(
+            SearchId(10),
+            request(SearchKind::Filename, SearchScope::Global),
+            CancellationToken::new(),
+            tx,
+        );
+
+        assert_eq!(ripgrep.calls(), vec![SearchId(10)]);
+        assert!(walkdir.calls().is_empty());
+        assert!(everything.calls().is_empty());
     }
 }
