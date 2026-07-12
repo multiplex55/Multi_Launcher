@@ -1228,6 +1228,26 @@ three
     }
 
     #[test]
+    fn beginning_preview_byte_limit_affects_cache_identity() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cache-beginning-limit.txt");
+        write_file(&path, b"abcdef\n");
+        let mut cache = PreviewCache::new(2);
+        let mut short = PreviewRequest::new(&path);
+        short.max_bytes_full_file_preview = 3;
+        short.oversized_beginning_preview_bytes = 3;
+        let mut longer = PreviewRequest::new(&path);
+        longer.max_bytes_full_file_preview = 3;
+        longer.oversized_beginning_preview_bytes = 5;
+
+        assert_eq!(cache.preview(&short).lines[0].text, "abc");
+        let preview = cache.preview(&longer);
+
+        assert!(!preview.cache_hit);
+        assert_eq!(preview.lines[0].text, "abcde");
+    }
+
+    #[test]
     fn small_complete_file_preview_reuses_cache_for_different_selected_match() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("cache-small-selected.txt");

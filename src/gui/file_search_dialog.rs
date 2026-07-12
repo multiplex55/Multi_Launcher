@@ -2384,13 +2384,15 @@ mod tests {
     }
 
     #[test]
-    fn switching_mode_clears_selection() {
+    fn switching_filename_content_mode_clears_selection() {
         let mut state = state_with_selected_filename("/tmp/a.txt");
         let previous_mode = state.selected_mode;
 
         state.selected_mode = FileSearchMode::Content;
         state.clear_selection_if_mode_changed(previous_mode);
 
+        assert_eq!(previous_mode, FileSearchMode::Filename);
+        assert_eq!(state.selected_mode, FileSearchMode::Content);
         assert!(state.selected_result().is_none());
     }
 
