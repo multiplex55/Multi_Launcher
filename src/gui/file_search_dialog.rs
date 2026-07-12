@@ -886,14 +886,29 @@ impl FileSearchDialogState {
     ) -> PreviewRequest {
         let request = first_match
             .map(|content_match| {
-                PreviewRequest::for_match(
+                let mut request = PreviewRequest::for_match(
                     path,
                     content_match.line_number,
                     content_match
                         .column
                         .map(|column| column.saturating_add(1))
                         .unwrap_or(1),
-                )
+                );
+                if let Some(selection) = request.selected_match.as_mut() {
+                    selection.source_line = Some(content_match.line.clone());
+                    selection.match_length = Some(
+                        content_match
+                            .byte_end
+                            .saturating_sub(content_match.byte_start)
+                            .max(1),
+                    );
+                    selection.end_column = Some(
+                        selection
+                            .start_column
+                            .saturating_add(selection.match_length.unwrap_or(1)),
+                    );
+                }
+                request
             })
             .unwrap_or_else(|| PreviewRequest::new(path));
         self.last_preview_request = Some(request.clone());
@@ -1753,8 +1768,12 @@ mod tests {
         let request = state.request_preview(&path, Some(&content_match));
 
         assert_eq!(request.path, path);
-        assert_eq!(request.selected_match.unwrap().line, 12);
-        assert_eq!(request.selected_match.unwrap().column, 7);
+        let selected_match = request.selected_match.as_ref().unwrap();
+        assert_eq!(selected_match.line, 12);
+        assert_eq!(selected_match.start_column, 7);
+        assert_eq!(selected_match.source_line.as_deref(), Some("hello needle"));
+        assert_eq!(selected_match.match_length, Some(6));
+        assert_eq!(selected_match.end_column, Some(13));
         assert_eq!(state.last_preview_request, Some(request));
     }
 
@@ -2102,12 +2121,10 @@ mod tests {
 
         assert!(action.is_none());
         assert_eq!(state.selected_result().cloned(), selected_before);
-        assert!(
-            state
-                .warning_error_message
-                .as_deref()
-                .is_some_and(|message| message.contains("missing or inaccessible"))
-        );
+        assert!(state
+            .warning_error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("missing or inaccessible")));
     }
 
     #[test]
@@ -2120,7 +2137,7 @@ mod tests {
         match action {
             Some(OpenSelectedFileSearchResultAction::PreviewContent { request }) => {
                 assert_eq!(request.path, PathBuf::from(path));
-                assert_eq!(request.selected_match.unwrap().line, 1);
+                assert_eq!(request.selected_match.as_ref().unwrap().line, 1);
                 assert_eq!(state.last_preview_request, Some(request));
             }
             other => panic!("expected preview action, got {other:?}"),

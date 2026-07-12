@@ -1,13 +1,15 @@
 use crate::common::lru::LruCache;
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
-use std::io::{self, Read};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-pub const DEFAULT_MAX_BYTES_PER_PREVIEW: usize = 64 * 1024;
+pub const DEFAULT_MAX_BYTES_FULL_FILE_PREVIEW: usize = 5 * 1024 * 1024;
+pub const DEFAULT_OVERSIZED_BEGINNING_PREVIEW_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_LINES_AROUND_MATCH: usize = 3;
 pub const DEFAULT_BINARY_SAMPLE_BYTES: usize = 8192;
 pub const DEFAULT_CACHE_CAPACITY: usize = 64;
@@ -17,8 +19,9 @@ pub struct PreviewRequest {
     pub path: PathBuf,
     pub line_range: Option<PreviewLineRange>,
     pub selected_match: Option<PreviewMatchSelection>,
-    pub max_bytes_per_preview: usize,
+    pub max_bytes_full_file_preview: usize,
     pub max_lines_around_match: usize,
+    pub oversized_beginning_preview_bytes: usize,
 }
 
 impl PreviewRequest {
@@ -27,21 +30,28 @@ impl PreviewRequest {
             path: path.into(),
             line_range: None,
             selected_match: None,
-            max_bytes_per_preview: DEFAULT_MAX_BYTES_PER_PREVIEW,
+            max_bytes_full_file_preview: DEFAULT_MAX_BYTES_FULL_FILE_PREVIEW,
             max_lines_around_match: DEFAULT_MAX_LINES_AROUND_MATCH,
+            oversized_beginning_preview_bytes: DEFAULT_OVERSIZED_BEGINNING_PREVIEW_BYTES,
         }
     }
 
     pub fn for_match(path: impl Into<PathBuf>, line: usize, column: usize) -> Self {
         Self {
-            selected_match: Some(PreviewMatchSelection { line, column }),
+            selected_match: Some(PreviewMatchSelection {
+                line,
+                source_line: None,
+                start_column: column,
+                end_column: Some(column.saturating_add(1)),
+                match_length: None,
+            }),
             ..Self::new(path)
         }
     }
 
     fn effective_line_range(&self) -> Option<PreviewLineRange> {
         self.line_range.or_else(|| {
-            self.selected_match.map(|selected| {
+            self.selected_match.as_ref().map(|selected| {
                 let start = selected
                     .line
                     .saturating_sub(self.max_lines_around_match)
@@ -59,10 +69,24 @@ pub struct PreviewLineRange {
     pub end: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PreviewMatchSelection {
     pub line: usize,
-    pub column: usize,
+    pub source_line: Option<String>,
+    pub start_column: usize,
+    pub end_column: Option<usize>,
+    pub match_length: Option<usize>,
+}
+
+impl PreviewMatchSelection {
+    fn end_column(&self) -> usize {
+        self.end_column
+            .or_else(|| {
+                self.match_length
+                    .map(|length| self.start_column.saturating_add(length))
+            })
+            .unwrap_or_else(|| self.start_column.saturating_add(1))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,6 +147,10 @@ struct PreviewCacheKey {
     path: PathBuf,
     modified_hash: u64,
     line_range: Option<PreviewLineRange>,
+    selected_match: Option<PreviewMatchSelection>,
+    max_bytes_full_file_preview: usize,
+    max_lines_around_match: usize,
+    oversized_beginning_preview_bytes: usize,
 }
 
 pub struct PreviewCache {
@@ -177,7 +205,11 @@ fn cache_key(request: &PreviewRequest, modified: Option<SystemTime>) -> PreviewC
     PreviewCacheKey {
         path: request.path.clone(),
         modified_hash: hasher.finish(),
-        line_range: request.effective_line_range(),
+        line_range: request.line_range,
+        selected_match: request.selected_match.clone(),
+        max_bytes_full_file_preview: request.max_bytes_full_file_preview,
+        max_lines_around_match: request.max_lines_around_match,
+        oversized_beginning_preview_bytes: request.oversized_beginning_preview_bytes,
     }
 }
 
@@ -189,7 +221,9 @@ fn build_preview(request: &PreviewRequest, metadata: fs::Metadata) -> FilePrevie
             kind: PreviewKind::Directory,
             lines: Vec::new(),
             metadata: preview_metadata,
-            binary_or_unsupported: None,
+            binary_or_unsupported: Some(UnsupportedPreview {
+                reason: "Directories cannot be previewed as text".to_string(),
+            }),
             error: None,
             truncated: false,
             cache_hit: false,
@@ -204,26 +238,41 @@ fn build_preview(request: &PreviewRequest, metadata: fs::Metadata) -> FilePrevie
         );
     }
 
-    match read_bounded(&request.path, request.max_bytes_per_preview) {
-        Ok((bytes, truncated)) => {
-            let sampled = bytes.len().min(DEFAULT_BINARY_SAMPLE_BYTES);
-            let metadata = to_preview_metadata(&metadata, sampled);
-            if is_likely_binary(&bytes[..sampled]) {
-                return FilePreview {
-                    path: request.path.clone(),
-                    kind: PreviewKind::Binary,
-                    lines: Vec::new(),
-                    metadata,
-                    binary_or_unsupported: Some(UnsupportedPreview {
-                        reason: "File appears to be binary".to_string(),
-                    }),
-                    error: None,
-                    truncated,
-                    cache_hit: false,
-                };
-            }
-            text_preview(request, metadata, &bytes, truncated)
-        }
+    let sample_limit = DEFAULT_BINARY_SAMPLE_BYTES.min(metadata.len() as usize);
+    let (sample, _) = match read_bounded(&request.path, sample_limit) {
+        Ok(sample) => sample,
+        Err(error) => return error_preview(&request.path, error),
+    };
+    let sampled = sample.len();
+    let preview_metadata = to_preview_metadata(&metadata, sampled);
+    if is_likely_binary(&sample) {
+        return FilePreview {
+            path: request.path.clone(),
+            kind: PreviewKind::Binary,
+            lines: Vec::new(),
+            metadata: preview_metadata,
+            binary_or_unsupported: Some(UnsupportedPreview {
+                reason: "File appears to be binary".to_string(),
+            }),
+            error: None,
+            truncated: false,
+            cache_hit: false,
+        };
+    }
+
+    if metadata.len() <= request.max_bytes_full_file_preview as u64 {
+        return match fs::read(&request.path) {
+            Ok(bytes) => text_preview(request, preview_metadata, &bytes, false, false),
+            Err(error) => error_preview(&request.path, error),
+        };
+    }
+
+    if request.selected_match.is_some() && request.line_range.is_none() {
+        return oversized_match_preview(request, preview_metadata);
+    }
+
+    match read_bounded(&request.path, request.oversized_beginning_preview_bytes) {
+        Ok((bytes, _)) => text_preview(request, preview_metadata, &bytes, true, true),
         Err(error) => error_preview(&request.path, error),
     }
 }
@@ -233,11 +282,12 @@ fn text_preview(
     metadata: PreviewMetadata,
     bytes: &[u8],
     truncated: bool,
+    beginning_only: bool,
 ) -> FilePreview {
     let text = String::from_utf8_lossy(bytes);
     let lossy = matches!(text, std::borrow::Cow::Owned(_));
     let range = request.effective_line_range();
-    let selected = request.selected_match;
+    let selected = request.selected_match.as_ref();
     let mut lines = Vec::new();
 
     for (idx, line) in text.lines().enumerate() {
@@ -250,23 +300,19 @@ fn text_preview(
                 break;
             }
         }
-        let mut match_ranges = Vec::new();
-        if let Some(selected) = selected {
-            if selected.line == line_number {
-                let start = selected.column.saturating_sub(1).min(line.chars().count());
-                let end = (start + 1).min(line.chars().count());
-                match_ranges.push(PreviewMatchRange {
-                    start_column: start + 1,
-                    end_column: end + 1,
-                });
-            }
-        }
-        lines.push(PreviewLine {
-            line_number,
-            text: line.to_string(),
-            match_ranges,
-        });
+        lines.push(preview_line(line_number, line.to_string(), selected));
     }
+
+    let reason = if lossy {
+        Some("File contains invalid UTF-8; preview uses replacement characters".to_string())
+    } else if beginning_only {
+        Some(
+            "File is larger than the full-file preview limit; showing the beginning only"
+                .to_string(),
+        )
+    } else {
+        None
+    };
 
     FilePreview {
         path: request.path.clone(),
@@ -277,12 +323,122 @@ fn text_preview(
         },
         lines,
         metadata,
-        binary_or_unsupported: lossy.then(|| UnsupportedPreview {
-            reason: "File contains invalid UTF-8; preview uses replacement characters".to_string(),
-        }),
+        binary_or_unsupported: reason.map(|reason| UnsupportedPreview { reason }),
         error: None,
         truncated,
         cache_hit: false,
+    }
+}
+
+fn oversized_match_preview(request: &PreviewRequest, metadata: PreviewMetadata) -> FilePreview {
+    let selected = request.selected_match.as_ref().expect("checked above");
+    let end = selected.line.saturating_add(request.max_lines_around_match);
+    let file = match File::open(&request.path) {
+        Ok(file) => file,
+        Err(error) => return error_preview(&request.path, error),
+    };
+    let mut reader = BufReader::new(file);
+    let mut buf = Vec::new();
+    let mut before: VecDeque<PreviewLine> = VecDeque::with_capacity(request.max_lines_around_match);
+    let mut lines = Vec::new();
+    let mut line_number = 0usize;
+    let mut found = false;
+
+    loop {
+        buf.clear();
+        let read = match reader.read_until(b'\n', &mut buf) {
+            Ok(read) => read,
+            Err(error) => return error_preview(&request.path, error),
+        };
+        if read == 0 {
+            break;
+        }
+        line_number += 1;
+        while matches!(buf.last(), Some(b'\n' | b'\r')) {
+            buf.pop();
+        }
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        let preview = preview_line(line_number, text, Some(selected));
+
+        if !found {
+            if line_number == selected.line {
+                found = true;
+                lines.extend(before.drain(..));
+                lines.push(preview);
+                if request.max_lines_around_match == 0 {
+                    break;
+                }
+            } else {
+                if before.len() == request.max_lines_around_match {
+                    before.pop_front();
+                }
+                before.push_back(preview);
+            }
+            continue;
+        }
+
+        lines.push(preview);
+        if line_number >= end {
+            break;
+        }
+    }
+
+    if !found {
+        return FilePreview {
+            path: request.path.clone(),
+            kind: PreviewKind::Unsupported,
+            lines: Vec::new(),
+            metadata,
+            binary_or_unsupported: Some(UnsupportedPreview {
+                reason: "Selected match line no longer exists; the file may have changed"
+                    .to_string(),
+            }),
+            error: None,
+            truncated: true,
+            cache_hit: false,
+        };
+    }
+
+    FilePreview {
+        path: request.path.clone(),
+        kind: PreviewKind::Text,
+        lines,
+        metadata,
+        binary_or_unsupported: Some(UnsupportedPreview {
+            reason: "File is larger than the full-file preview limit; showing context around the selected match".to_string(),
+        }),
+        error: None,
+        truncated: true,
+        cache_hit: false,
+    }
+}
+
+fn preview_line(
+    line_number: usize,
+    text: String,
+    selected: Option<&PreviewMatchSelection>,
+) -> PreviewLine {
+    let mut match_ranges = Vec::new();
+    if let Some(selected) = selected {
+        if selected.line == line_number {
+            let chars = text.chars().count();
+            let start = selected.start_column.saturating_sub(1).min(chars);
+            let end = selected
+                .end_column()
+                .saturating_sub(1)
+                .min(chars)
+                .max(start + 1)
+                .min(chars);
+            match_ranges.push(PreviewMatchRange {
+                start_column: start + 1,
+                end_column: end + 1,
+            });
+        }
+    }
+    PreviewLine {
+        line_number,
+        text,
+        match_ranges,
     }
 }
 
@@ -373,7 +529,8 @@ mod tests {
         let path = dir.path().join("large.txt");
         write_file(&path, b"abcdef");
         let mut request = PreviewRequest::new(&path);
-        request.max_bytes_per_preview = 3;
+        request.max_bytes_full_file_preview = 3;
+        request.oversized_beginning_preview_bytes = 3;
         let preview = preview_file(&request);
         assert!(preview.truncated);
         assert_eq!(preview.lines[0].text, "abc");
@@ -386,7 +543,8 @@ mod tests {
         let path = dir.path().join("large.txt");
         write_file(&path, &vec![b'a'; 1024 * 1024]);
         let mut request = PreviewRequest::new(&path);
-        request.max_bytes_per_preview = 128;
+        request.max_bytes_full_file_preview = 128;
+        request.oversized_beginning_preview_bytes = 128;
         let preview = preview_file(&request);
         assert!(preview.truncated);
         assert_eq!(preview.lines[0].text.len(), 128);
@@ -400,13 +558,11 @@ mod tests {
         write_file(&path, b"abc\0def");
         let preview = preview_file(&PreviewRequest::new(&path));
         assert_eq!(preview.kind, PreviewKind::Binary);
-        assert!(
-            preview
-                .binary_or_unsupported
-                .unwrap()
-                .reason
-                .contains("binary")
-        );
+        assert!(preview
+            .binary_or_unsupported
+            .unwrap()
+            .reason
+            .contains("binary"));
     }
 
     #[test]
@@ -417,13 +573,11 @@ mod tests {
         let preview = preview_file(&PreviewRequest::new(&path));
         assert_eq!(preview.kind, PreviewKind::Unsupported);
         assert_eq!(preview.lines[0].text, "ok�bad");
-        assert!(
-            preview
-                .binary_or_unsupported
-                .unwrap()
-                .reason
-                .contains("invalid UTF-8")
-        );
+        assert!(preview
+            .binary_or_unsupported
+            .unwrap()
+            .reason
+            .contains("invalid UTF-8"));
     }
 
     #[test]
@@ -467,6 +621,177 @@ mod tests {
                 end_column: 3
             }]
         );
+    }
+
+    #[test]
+    fn small_file_below_5_mib_loads_completely_even_with_selected_match() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("small.txt");
+        write_file(
+            &path,
+            b"one
+two match
+three
+",
+        );
+        let preview = preview_file(&PreviewRequest::for_match(&path, 2, 5));
+        assert!(!preview.truncated);
+        assert_eq!(preview.lines.len(), 3);
+        assert_eq!(preview.lines[1].text, "two match");
+    }
+
+    #[test]
+    fn selected_match_in_middle_of_small_file_is_included() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("small-middle.txt");
+        write_file(
+            &path,
+            b"one
+two
+needle here
+four
+five
+",
+        );
+        let preview = preview_file(&PreviewRequest::for_match(&path, 3, 1));
+        assert_eq!(
+            preview
+                .lines
+                .iter()
+                .map(|line| line.line_number)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            preview.lines[2].match_ranges[0],
+            PreviewMatchRange {
+                start_column: 1,
+                end_column: 2
+            }
+        );
+    }
+
+    #[test]
+    fn oversized_file_returns_context_around_late_match() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("late.txt");
+        let mut contents = String::new();
+        for line in 1..=10_000 {
+            contents.push_str(&format!(
+                "line {line}
+"
+            ));
+        }
+        write_file(&path, contents.as_bytes());
+        let mut request = PreviewRequest::for_match(&path, 9_000, 6);
+        request.max_bytes_full_file_preview = 128;
+        request.max_lines_around_match = 2;
+        let preview = preview_file(&request);
+        assert!(preview.truncated);
+        assert_eq!(
+            preview
+                .lines
+                .iter()
+                .map(|line| line.line_number)
+                .collect::<Vec<_>>(),
+            vec![8998, 8999, 9000, 9001, 9002]
+        );
+        assert_eq!(preview.lines[2].text, "line 9000");
+    }
+
+    #[test]
+    fn oversized_context_extraction_does_not_retain_whole_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bounded-context.txt");
+        let mut contents = String::new();
+        for line in 1..=20_000 {
+            contents.push_str(&format!(
+                "line {line}
+"
+            ));
+        }
+        write_file(&path, contents.as_bytes());
+        let mut request = PreviewRequest::for_match(&path, 15_000, 6);
+        request.max_bytes_full_file_preview = 256;
+        request.max_lines_around_match = 3;
+        let preview = preview_file(&request);
+        assert_eq!(preview.lines.len(), 7);
+        assert!(preview
+            .lines
+            .iter()
+            .all(|line| line.line_number >= 14_997 && line.line_number <= 15_003));
+    }
+
+    #[test]
+    fn oversized_source_line_numbers_are_preserved() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("numbers.txt");
+        let mut contents = String::new();
+        for line in 1..=300 {
+            contents.push_str(&format!(
+                "line {line}
+"
+            ));
+        }
+        write_file(&path, contents.as_bytes());
+        let mut request = PreviewRequest::for_match(&path, 250, 1);
+        request.max_bytes_full_file_preview = 32;
+        request.max_lines_around_match = 1;
+        let preview = preview_file(&request);
+        assert_eq!(
+            preview
+                .lines
+                .iter()
+                .map(|line| line.line_number)
+                .collect::<Vec<_>>(),
+            vec![249, 250, 251]
+        );
+    }
+
+    #[test]
+    fn oversized_preview_without_match_returns_bounded_beginning_plus_warning() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("beginning.txt");
+        write_file(
+            &path,
+            b"abcdef
+ghijkl
+",
+        );
+        let mut request = PreviewRequest::new(&path);
+        request.max_bytes_full_file_preview = 4;
+        request.oversized_beginning_preview_bytes = 4;
+        let preview = preview_file(&request);
+        assert!(preview.truncated);
+        assert_eq!(preview.lines[0].text, "abcd");
+        assert!(preview
+            .binary_or_unsupported
+            .unwrap()
+            .reason
+            .contains("beginning only"));
+    }
+
+    #[test]
+    fn selected_line_beyond_eof_reports_missing_line_state() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("changed.txt");
+        write_file(
+            &path,
+            b"one
+two
+three
+",
+        );
+        let mut request = PreviewRequest::for_match(&path, 10, 1);
+        request.max_bytes_full_file_preview = 1;
+        let preview = preview_file(&request);
+        assert_eq!(preview.kind, PreviewKind::Unsupported);
+        assert!(preview.lines.is_empty());
+        assert!(preview
+            .binary_or_unsupported
+            .unwrap()
+            .reason
+            .contains("no longer exists"));
     }
 
     #[test]
