@@ -6,17 +6,17 @@ pub use crate::file_search::discovery::{
 use crate::file_search::error::FileSearchError;
 use crate::file_search::matching::rank_filename_match;
 use crate::file_search::model::{
-    ContentFileResult, ContentFileResultBuilder, ContentMatch, FileKind, FilenameResult,
-    SearchEvent, SearchId, SearchKind, SearchProgress, SearchRequest, SearchResult, SearchScope,
-    SearchStatus,
+    ContentFileResult, ContentFileResultBuilder, ContentMatch, FileKind, FileTypeFilter,
+    FilenameResult, SearchEvent, SearchId, SearchKind, SearchProgress, SearchRequest, SearchResult,
+    SearchScope, SearchStatus, TextMatchRange,
 };
 use crate::file_search::settings::FileSearchSettings;
 use crate::file_search::sorting::sort_filename_results;
 use serde_json::Value;
-use std::collections::BTreeMap;
-use std::io::{BufReader, Read};
+use std::collections::HashSet;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -64,6 +64,7 @@ pub struct RipgrepSearchSummary {
     pub files_scanned: u64,
     pub cancelled: bool,
     pub stderr: String,
+    pub global_truncated: bool,
 }
 
 fn execute_content_search(
@@ -97,7 +98,7 @@ fn execute_content_search(
             directories_scanned: 0,
             results_found: summary.results_found,
             status,
-            global_truncated: false,
+            global_truncated: summary.global_truncated,
         },
     });
     let _ = if summary.cancelled {
@@ -139,7 +140,7 @@ fn execute_filename_search(
             directories_scanned: 0,
             results_found: summary.results_found,
             status,
-            global_truncated: false,
+            global_truncated: summary.global_truncated,
         },
     });
     let _ = if summary.cancelled {
@@ -157,6 +158,7 @@ pub struct RipgrepFilenameSearchSummary {
     pub files_scanned: u64,
     pub cancelled: bool,
     pub stderr: String,
+    pub global_truncated: bool,
 }
 
 pub fn search_content_with_ripgrep(
@@ -179,54 +181,106 @@ pub fn search_content_with_ripgrep(
     tracing::debug!(executable = %executable.display(), "starting ripgrep content search");
     let roots = search_roots(&request, settings)?;
     let mut command = build_ripgrep_command(&executable, &request, settings, &roots);
-    let mut child = command
+    let mut child = spawn_ripgrep_child(&mut command, &executable)?;
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    let stderr_handle = thread::spawn(move || read_bounded_to_string(stderr, STDERR_CAPTURE_LIMIT));
+    let per_file_match_limit = per_file_match_limit(&request, settings);
+    let stdout_handle = thread::spawn(move || {
+        parse_ripgrep_json_reader(
+            BufReader::new(stdout),
+            per_file_match_limit,
+            request.max_results,
+        )
+    });
+    let process = wait_for_child(&mut child, cancellation, None);
+    let mut summary = stdout_handle.join().unwrap_or_else(|_| {
+        Err(FileSearchError::ProcessOutputParseFailure {
+            backend: "ripgrep".to_owned(),
+            message: "stdout reader thread panicked".to_owned(),
+        })
+    })?;
+    let stderr = stderr_handle.join().unwrap_or_default();
+    summary.cancelled = process.cancelled;
+    summary.stderr = stderr.clone();
+    if !process.cancelled {
+        if let Some(status) = process.status {
+            handle_exit_status(status, &executable, &stderr)?;
+        }
+    }
+    Ok(summary)
+}
+
+#[derive(Debug)]
+struct ChildProcessResult {
+    status: Option<ExitStatus>,
+    cancelled: bool,
+}
+
+const STDERR_CAPTURE_LIMIT: usize = 64 * 1024;
+
+fn spawn_ripgrep_child(command: &mut Command, executable: &Path) -> Result<Child, FileSearchError> {
+    command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| FileSearchError::ProcessLaunchFailure {
-            executable: executable.clone(),
+            executable: executable.to_path_buf(),
             message: error.to_string(),
-        })?;
+        })
+}
 
-    let stdout = child.stdout.take().expect("stdout piped");
-    let stderr = child.stderr.take().expect("stderr piped");
-    let stdout_handle = thread::spawn(move || read_to_string(stdout));
-    let stderr_handle = thread::spawn(move || read_to_string(stderr));
+fn wait_for_child(
+    child: &mut Child,
+    cancellation: &CancellationToken,
+    stop: Option<&mpsc::Receiver<()>>,
+) -> ChildProcessResult {
+    let mut killed = false;
     let mut cancelled = false;
-    let status = loop {
-        if cancellation.is_cancelled() {
-            cancelled = true;
-            let _ = child.kill();
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => thread::sleep(Duration::from_millis(10)),
-            Err(error) => {
+    loop {
+        if cancellation.is_cancelled() || stop.is_some_and(|rx| rx.try_recv().is_ok()) {
+            cancelled = cancellation.is_cancelled();
+            if !killed {
                 let _ = child.kill();
-                return Err(FileSearchError::ProcessLaunchFailure {
-                    executable: executable.clone(),
-                    message: error.to_string(),
-                });
+                killed = true;
             }
         }
-    };
-    let _ = child.wait();
-
-    let stdout = stdout_handle.join().unwrap_or_default();
-    let stderr = stderr_handle.join().unwrap_or_default();
-    let per_file_match_limit = per_file_match_limit(&request, settings);
-    if cancelled {
-        let mut summary =
-            parse_ripgrep_json_limited(&stdout, per_file_match_limit, request.max_results)?;
-        summary.cancelled = true;
-        summary.stderr = stderr;
-        return Ok(summary);
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let _ = child.wait();
+                return ChildProcessResult {
+                    status: Some(status),
+                    cancelled,
+                };
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                if !killed {
+                    let _ = child.kill();
+                }
+                let status = child.wait().ok();
+                return ChildProcessResult {
+                    status,
+                    cancelled: true,
+                };
+            }
+        }
     }
-    handle_exit_status(status, &executable, &stderr)?;
-    let mut summary =
-        parse_ripgrep_json_limited(&stdout, per_file_match_limit, request.max_results)?;
-    summary.stderr = stderr;
-    Ok(summary)
+}
+
+fn read_bounded_to_string(reader: impl Read, limit: usize) -> String {
+    let mut reader = BufReader::new(reader);
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    while output.len() < limit {
+        let remaining = limit - output.len();
+        let read_len = remaining.min(buffer.len());
+        match reader.read(&mut buffer[..read_len]) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => output.extend_from_slice(&buffer[..n]),
+        }
+    }
+    String::from_utf8_lossy(&output).to_string()
 }
 
 pub fn search_filenames_with_ripgrep(
@@ -248,61 +302,85 @@ pub fn search_filenames_with_ripgrep(
     let executable = resolve_ripgrep_executable(&settings.ripgrep_executable_path)?;
     let roots = search_roots(&request, settings)?;
     let mut command = build_ripgrep_files_command(&executable, &request, settings, &roots);
-    let output = command
-        .output()
-        .map_err(|error| FileSearchError::ProcessLaunchFailure {
-            executable: executable.clone(),
-            message: error.to_string(),
-        })?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    handle_exit_status(output.status, &executable, &stderr)?;
+    let mut child = spawn_ripgrep_child(&mut command, &executable)?;
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    let stderr_handle = thread::spawn(move || read_bounded_to_string(stderr, STDERR_CAPTURE_LIMIT));
+    let (line_tx, line_rx) = mpsc::channel();
+    let stdout_handle = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if line_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
 
     let needle = if request.case_sensitive {
         request.text.clone()
     } else {
         request.text.to_lowercase()
     };
-    let mut summary = RipgrepFilenameSearchSummary {
-        stderr,
-        ..RipgrepFilenameSearchSummary::default()
-    };
+    let mut summary = RipgrepFilenameSearchSummary::default();
     let mut results = Vec::new();
-    for line in stdout.lines() {
+    let mut seen = HashSet::new();
+    let (stop_tx, stop_rx) = mpsc::channel();
+
+    loop {
         if cancellation.is_cancelled() {
             summary.cancelled = true;
+            let _ = stop_tx.send(());
             break;
         }
-        let path = PathBuf::from(line);
-        let file_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| line.to_owned());
-        summary.files_scanned = summary.files_scanned.saturating_add(1);
-        if let Some(rank) = rank_filename_match(&file_name, &path, &needle, request.case_sensitive)
-        {
-            let metadata = path.metadata().ok();
-            results.push(FilenameResult {
-                path: path.clone(),
-                file_name,
-                parent_directory: path.parent().map(Path::to_path_buf),
-                kind: file_kind(metadata.as_ref()),
-                size: metadata.as_ref().filter(|m| m.is_file()).map(|m| m.len()),
-                modified: metadata.and_then(|m| m.modified().ok()),
-                rank,
-                match_quality: rank,
-                filename_match_ranges: Vec::new(),
-                path_match_ranges: Vec::new(),
-                arrival_index: results.len(),
-            });
-            summary.results_found += 1;
-            if results.len() >= request.max_results {
-                break;
+        match line_rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(line) => {
+                summary.files_scanned = summary.files_scanned.saturating_add(1);
+                if let Some(result) =
+                    filename_result_from_path(&line, &needle, &request, results.len())
+                {
+                    let identity = crate::file_search::model::PathIdentity::from_path(&result.path);
+                    if seen.insert(identity) {
+                        results.push(result);
+                        summary.results_found += 1;
+                        if results.len() >= request.max_results {
+                            summary.global_truncated = true;
+                            let _ = stop_tx.send(());
+                            break;
+                        }
+                    }
+                }
             }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-    if cancellation.is_cancelled() {
-        summary.cancelled = true;
+
+    let process = wait_for_child(&mut child, cancellation, Some(&stop_rx));
+    let _ = stdout_handle.join();
+    let stderr = stderr_handle.join().unwrap_or_default();
+    summary.cancelled |= process.cancelled;
+    summary.stderr = stderr.clone();
+    if !summary.cancelled {
+        if let Some(status) = process.status {
+            handle_exit_status(status, &executable, &stderr)?;
+        }
+    }
+    while let Ok(line) = line_rx.try_recv() {
+        if results.len() >= request.max_results {
+            break;
+        }
+        summary.files_scanned = summary.files_scanned.saturating_add(1);
+        if let Some(result) = filename_result_from_path(&line, &needle, &request, results.len()) {
+            let identity = crate::file_search::model::PathIdentity::from_path(&result.path);
+            if seen.insert(identity) {
+                results.push(result);
+                summary.results_found += 1;
+            }
+        }
     }
     sort_filename_results(&mut results);
     summary.results = results;
@@ -326,7 +404,7 @@ pub fn build_ripgrep_command(
     roots: &[PathBuf],
 ) -> Command {
     let mut command = Command::new(executable);
-    command.arg("--json").arg("--fixed-strings");
+    command.arg("--json").arg("--no-ignore");
     if request.case_sensitive {
         command.arg("--case-sensitive");
     } else {
@@ -334,6 +412,9 @@ pub fn build_ripgrep_command(
     }
     if request.include_hidden_files {
         command.arg("--hidden");
+    }
+    if request.whole_word {
+        command.arg("--word-regexp");
     }
     command
         .arg("--max-filesize")
@@ -351,7 +432,18 @@ pub fn build_ripgrep_command(
     for dir in excluded_directory_names(request, settings) {
         command.arg("--glob").arg(format!("!**/{dir}/**"));
     }
-    command.arg("--").arg(&request.text);
+    command.arg("--fixed-strings");
+    match request.content_match_mode {
+        crate::file_search::model::ContentMatchMode::ExactPhrase => {
+            command.arg("-e").arg(&request.text);
+        }
+        crate::file_search::model::ContentMatchMode::AnyTerm => {
+            for term in normalized_terms(&request.text, request.case_sensitive) {
+                command.arg("-e").arg(term);
+            }
+        }
+    }
+    command.arg("--");
     for root in roots {
         command.arg(root);
     }
@@ -365,7 +457,7 @@ pub fn build_ripgrep_files_command(
     roots: &[PathBuf],
 ) -> Command {
     let mut command = Command::new(executable);
-    command.arg("--files");
+    command.arg("--files").arg("--no-ignore");
     if request.include_hidden_files {
         command.arg("--hidden");
     }
@@ -402,6 +494,91 @@ fn excluded_directory_names(
     names
 }
 
+fn normalized_terms(query: &str, case_sensitive: bool) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|term| {
+            if case_sensitive {
+                term.to_owned()
+            } else {
+                term.to_lowercase()
+            }
+        })
+        .filter(|term| !term.is_empty())
+        .collect()
+}
+
+fn filename_result_from_path(
+    line: &str,
+    needle: &str,
+    request: &SearchRequest,
+    arrival_index: usize,
+) -> Option<FilenameResult> {
+    let path = PathBuf::from(line);
+    let metadata = path.metadata().ok();
+    if !matches_file_type_filter(metadata.as_ref(), request.file_type_filter) {
+        return None;
+    }
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| line.to_owned());
+    let rank = rank_filename_match(&file_name, &path, needle, request.case_sensitive)?;
+    Some(FilenameResult {
+        path: path.clone(),
+        file_name: file_name.clone(),
+        parent_directory: path.parent().map(Path::to_path_buf),
+        kind: file_kind(metadata.as_ref()),
+        size: metadata.as_ref().filter(|m| m.is_file()).map(|m| m.len()),
+        modified: metadata.and_then(|m| m.modified().ok()),
+        rank,
+        match_quality: rank,
+        filename_match_ranges: highlight_ranges(&file_name, needle, request.case_sensitive),
+        path_match_ranges: highlight_ranges(
+            &path.to_string_lossy(),
+            needle,
+            request.case_sensitive,
+        ),
+        arrival_index,
+    })
+}
+
+fn matches_file_type_filter(metadata: Option<&std::fs::Metadata>, filter: FileTypeFilter) -> bool {
+    match filter {
+        FileTypeFilter::FilesOnly => metadata.is_some_and(|m| m.is_file()),
+        FileTypeFilter::DirectoriesOnly => metadata.is_some_and(|m| m.is_dir()),
+        FileTypeFilter::FilesAndDirectories => true,
+    }
+}
+
+fn highlight_ranges(haystack: &str, needle: &str, case_sensitive: bool) -> Vec<TextMatchRange> {
+    let source = if case_sensitive {
+        haystack.to_owned()
+    } else {
+        haystack.to_lowercase()
+    };
+    let query = if case_sensitive {
+        needle.to_owned()
+    } else {
+        needle.to_lowercase()
+    };
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+    while let Some(found) = source[offset..].find(&query) {
+        let start = offset + found;
+        let end = start + query.len();
+        ranges.push(TextMatchRange {
+            byte_start: start,
+            byte_end: end,
+        });
+        offset = end;
+    }
+    ranges
+}
+
 fn search_roots(
     request: &SearchRequest,
     settings: &FileSearchSettings,
@@ -420,13 +597,6 @@ fn search_roots(
         }
     }
     Ok(roots)
-}
-
-fn read_to_string(reader: impl Read) -> String {
-    let mut output = String::new();
-    let mut reader = BufReader::new(reader);
-    let _ = reader.read_to_string(&mut output);
-    output
 }
 
 fn file_kind(metadata: Option<&std::fs::Metadata>) -> FileKind {
@@ -476,20 +646,70 @@ fn parse_ripgrep_json_limited(
     max_matches_per_file: usize,
     max_result_files: usize,
 ) -> Result<RipgrepSearchSummary, FileSearchError> {
-    let mut files: BTreeMap<PathBuf, ContentFileResultBuilder> = BTreeMap::new();
+    parse_ripgrep_json_reader(output.as_bytes(), max_matches_per_file, max_result_files)
+}
+
+fn parse_ripgrep_json_reader<R: Read>(
+    reader: R,
+    max_matches_per_file: usize,
+    max_result_files: usize,
+) -> Result<RipgrepSearchSummary, FileSearchError> {
+    let mut current: Option<(PathBuf, ContentFileResultBuilder)> = None;
+    let mut results = Vec::new();
     let mut files_scanned = 0_u64;
-    for line in output.lines() {
+    let mut global_truncated = false;
+    for line in BufReader::new(reader).lines() {
+        let line = line.map_err(|error| FileSearchError::ProcessOutputParseFailure {
+            backend: "ripgrep".to_owned(),
+            message: error.to_string(),
+        })?;
         if line.trim().is_empty() {
             continue;
         }
-        let value: Value = serde_json::from_str(line).map_err(|error| {
+        let value: Value = serde_json::from_str(&line).map_err(|error| {
             FileSearchError::ProcessOutputParseFailure {
                 backend: "ripgrep".to_owned(),
                 message: error.to_string(),
             }
         })?;
         match value.get("type").and_then(Value::as_str) {
-            Some("match") => parse_match_event(&value, &mut files, max_matches_per_file)?,
+            Some("begin") => {
+                if let Some(path) = event_path(&value) {
+                    current = Some((
+                        path.clone(),
+                        ContentFileResultBuilder::new(path, max_matches_per_file),
+                    ));
+                }
+            }
+            Some("match") => {
+                let path = event_path(&value).ok_or_else(|| {
+                    FileSearchError::ProcessOutputParseFailure {
+                        backend: "ripgrep".to_owned(),
+                        message: "match event missing path text".to_owned(),
+                    }
+                })?;
+                if current.as_ref().map(|(p, _)| p != &path).unwrap_or(true) {
+                    current = Some((
+                        path.clone(),
+                        ContentFileResultBuilder::new(path.clone(), max_matches_per_file),
+                    ));
+                }
+                if let Some((_path, builder)) = current.as_mut() {
+                    parse_match_event_into_builder(&value, builder)?;
+                }
+            }
+            Some("end") => {
+                if let Some((_path, builder)) = current.take() {
+                    let result = builder.finish();
+                    if result.total_matches > 0 {
+                        if results.len() < max_result_files {
+                            results.push(result);
+                        } else {
+                            global_truncated = true;
+                        }
+                    }
+                }
+            }
             Some("summary") => {
                 if let Some(searched) = value
                     .pointer("/data/stats/searches")
@@ -498,46 +718,48 @@ fn parse_ripgrep_json_limited(
                     files_scanned = searched;
                 }
             }
-            Some("begin") | Some("end") | Some("context") => {}
+            Some("context") | None => {}
             _ => {}
         }
     }
-    let results: Vec<_> = files
-        .into_iter()
-        .take(max_result_files)
-        .map(|(_path, builder)| builder.finish())
-        .collect();
+    if let Some((_path, builder)) = current.take() {
+        let result = builder.finish();
+        if result.total_matches > 0 {
+            if results.len() < max_result_files {
+                results.push(result);
+            } else {
+                global_truncated = true;
+            }
+        }
+    }
     Ok(RipgrepSearchSummary {
         results_found: results.len(),
         files_scanned,
         results,
         cancelled: false,
         stderr: String::new(),
+        global_truncated,
     })
 }
 
-fn parse_match_event(
+fn event_path(value: &Value) -> Option<PathBuf> {
+    value
+        .pointer("/data/path/text")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+}
+
+fn parse_match_event_into_builder(
     value: &Value,
-    files: &mut BTreeMap<PathBuf, ContentFileResultBuilder>,
-    max_matches_per_file: usize,
+    entry: &mut ContentFileResultBuilder,
 ) -> Result<(), FileSearchError> {
     let data = &value["data"];
-    let path = data
-        .pointer("/path/text")
-        .and_then(Value::as_str)
-        .ok_or_else(|| FileSearchError::ProcessOutputParseFailure {
-            backend: "ripgrep".to_owned(),
-            message: "match event missing path text".to_owned(),
-        })?;
     let line = data
         .pointer("/lines/text")
         .and_then(Value::as_str)
         .unwrap_or("");
     let line_number = data.get("line_number").and_then(Value::as_u64).unwrap_or(0) as usize;
     let normalized_line = line.trim_end_matches(['\r', '\n']).to_owned();
-    let entry = files.entry(PathBuf::from(path)).or_insert_with(|| {
-        ContentFileResultBuilder::new(PathBuf::from(path), max_matches_per_file)
-    });
     if let Some(submatches) = data.get("submatches").and_then(Value::as_array) {
         for submatch in submatches {
             let byte_start = submatch.get("start").and_then(Value::as_u64).unwrap_or(0) as usize;
@@ -574,6 +796,164 @@ mod tests {
             whole_word: false,
             file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
         }
+    }
+
+    fn args(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn commands_include_no_ignore() {
+        let temp = tempfile::tempdir().unwrap();
+        let request = req(temp.path().to_path_buf());
+        assert!(args(&build_ripgrep_command(
+            Path::new("rg"),
+            &request,
+            &FileSearchSettings::default(),
+            &[temp.path().to_path_buf()]
+        ))
+        .contains(&"--no-ignore".to_owned()));
+        assert!(args(&build_ripgrep_files_command(
+            Path::new("rg"),
+            &request,
+            &FileSearchSettings::default(),
+            &[temp.path().to_path_buf()]
+        ))
+        .contains(&"--no-ignore".to_owned()));
+    }
+
+    #[test]
+    fn hidden_flag_only_when_enabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut request = req(temp.path().to_path_buf());
+        assert!(!args(&build_ripgrep_command(
+            Path::new("rg"),
+            &request,
+            &FileSearchSettings::default(),
+            &[temp.path().to_path_buf()]
+        ))
+        .contains(&"--hidden".to_owned()));
+        request.include_hidden_files = true;
+        assert!(args(&build_ripgrep_command(
+            Path::new("rg"),
+            &request,
+            &FileSearchSettings::default(),
+            &[temp.path().to_path_buf()]
+        ))
+        .contains(&"--hidden".to_owned()));
+    }
+
+    #[test]
+    fn whole_word_flag_only_when_enabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut request = req(temp.path().to_path_buf());
+        assert!(!args(&build_ripgrep_command(
+            Path::new("rg"),
+            &request,
+            &FileSearchSettings::default(),
+            &[temp.path().to_path_buf()]
+        ))
+        .contains(&"--word-regexp".to_owned()));
+        request.whole_word = true;
+        assert!(args(&build_ripgrep_command(
+            Path::new("rg"),
+            &request,
+            &FileSearchSettings::default(),
+            &[temp.path().to_path_buf()]
+        ))
+        .contains(&"--word-regexp".to_owned()));
+    }
+
+    #[test]
+    fn any_term_mode_creates_multiple_patterns() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut request = req(temp.path().to_path_buf());
+        request.content_match_mode = crate::file_search::model::ContentMatchMode::AnyTerm;
+        request.text = "Alpha -beta".to_owned();
+        let args = args(&build_ripgrep_command(
+            Path::new("rg"),
+            &request,
+            &FileSearchSettings::default(),
+            &[temp.path().to_path_buf()],
+        ));
+        assert_eq!(args.iter().filter(|arg| *arg == "-e").count(), 2);
+        assert!(args.windows(2).any(|w| w == ["-e", "alpha"]));
+        assert!(args.windows(2).any(|w| w == ["-e", "-beta"]));
+    }
+
+    #[test]
+    fn globs_are_normalized_and_directory_exclusions_safe() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut request = req(temp.path().to_path_buf());
+        request.included_extensions = vec![".rs".to_owned()];
+        request.excluded_extensions = vec!["tmp".to_owned()];
+        request.excluded_directory_names = vec!["target".to_owned()];
+        let args = args(&build_ripgrep_command(
+            Path::new("rg"),
+            &request,
+            &FileSearchSettings::default(),
+            &[temp.path().to_path_buf()],
+        ));
+        assert!(args.windows(2).any(|w| w == ["--glob", "*.rs"]));
+        assert!(args.windows(2).any(|w| w == ["--glob", "!*.tmp"]));
+        assert!(args.windows(2).any(|w| w == ["--glob", "!**/target/**"]));
+    }
+
+    #[test]
+    fn incremental_json_parser_groups_begin_match_end_by_file() {
+        let json = concat!(
+            r#"{"type":"begin","data":{"path":{"text":"a.txt"}}}"#,
+            "\n",
+            r#"{"type":"match","data":{"path":{"text":"a.txt"},"lines":{"text":"needle\n"},"line_number":1,"submatches":[{"start":0,"end":6}]}}"#,
+            "\n",
+            r#"{"type":"end","data":{"path":{"text":"a.txt"}}}"#
+        );
+        let summary = parse_ripgrep_json(json, 25).unwrap();
+        assert_eq!(summary.results.len(), 1);
+        assert_eq!(summary.results[0].matches.len(), 1);
+    }
+
+    #[test]
+    fn bounded_stderr_is_limited() {
+        let data = vec![b'x'; STDERR_CAPTURE_LIMIT * 2];
+        let captured = read_bounded_to_string(&data[..], STDERR_CAPTURE_LIMIT);
+        assert_eq!(captured.len(), STDERR_CAPTURE_LIMIT);
+    }
+
+    #[test]
+    fn result_limit_sets_global_truncation() {
+        let json = concat!(
+            r#"{"type":"match","data":{"path":{"text":"a.txt"},"lines":{"text":"needle\n"},"line_number":1,"submatches":[{"start":0,"end":6}]}}"#,
+            "\n",
+            r#"{"type":"end","data":{"path":{"text":"a.txt"}}}"#,
+            "\n",
+            r#"{"type":"match","data":{"path":{"text":"b.txt"},"lines":{"text":"needle\n"},"line_number":1,"submatches":[{"start":0,"end":6}]}}"#,
+            "\n",
+            r#"{"type":"end","data":{"path":{"text":"b.txt"}}}"#
+        );
+        let summary = parse_ripgrep_json_limited(json, 25, 1).unwrap();
+        assert_eq!(summary.results.len(), 1);
+        assert!(summary.global_truncated);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_kills_child() {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("sleep 5")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let token = CancellationToken::new();
+        token.cancel();
+        let result = wait_for_child(&mut child, &token, None);
+        assert!(result.cancelled);
+        assert!(result.status.is_some());
     }
 
     #[test]
