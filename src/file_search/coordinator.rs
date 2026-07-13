@@ -854,7 +854,8 @@ mod tests {
                     SearchEvent::Result {
                         result: SearchResult::ContentFile(result),
                         ..
-                    } if result.path == PathBuf::from("haystack.txt")
+                    } if result.path == temp.path().join("haystack.txt")
+                        || result.path == PathBuf::from("haystack.txt")
                 )),
                 "events: {events:?}"
             );
