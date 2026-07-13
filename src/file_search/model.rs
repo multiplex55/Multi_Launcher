@@ -11,9 +11,27 @@ pub enum SearchKind {
 /// Defines the roots a search backend should inspect.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SearchScope {
-    Global,
-    Directory { root: PathBuf },
-    File { path: PathBuf },
+    Roots { roots: Vec<PathBuf> },
+    Files { files: Vec<PathBuf> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FilenameMatchMode {
+    RankedSubstring,
+    Fuzzy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ContentMatchMode {
+    ExactPhrase,
+    AnyTerm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FileTypeFilter {
+    FilesOnly,
+    DirectoriesOnly,
+    FilesAndDirectories,
 }
 
 /// Backend-ready request with all user and settings-derived search options resolved.
@@ -29,6 +47,10 @@ pub struct SearchRequest {
     pub included_extensions: Vec<String>,
     pub excluded_extensions: Vec<String>,
     pub excluded_directory_names: Vec<String>,
+    pub filename_match_mode: FilenameMatchMode,
+    pub content_match_mode: ContentMatchMode,
+    pub whole_word: bool,
+    pub file_type_filter: FileTypeFilter,
 }
 
 /// User-adjustable options that can be applied to a search request.
@@ -90,6 +112,53 @@ pub enum FilenameRank {
     FullPathContains,
 }
 
+pub type FilenameMatchQuality = FilenameRank;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextMatchRange {
+    pub byte_start: usize,
+    pub byte_end: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PathIdentity {
+    pub normalized_path: String,
+}
+
+impl PathIdentity {
+    pub fn from_path(path: &std::path::Path) -> Self {
+        Self {
+            normalized_path: normalize_path_for_identity(path),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FileSearchResultKey {
+    Filename {
+        path: PathIdentity,
+    },
+    Content {
+        path: PathIdentity,
+        line_number: usize,
+        byte_start: usize,
+        byte_end: usize,
+        occurrence: usize,
+    },
+}
+
+pub fn normalize_path_for_identity(path: &std::path::Path) -> String {
+    let rendered = path.to_string_lossy().replace('\\', "/");
+    #[cfg(windows)]
+    {
+        rendered.to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        rendered
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilenameResult {
     pub path: PathBuf,
@@ -99,11 +168,19 @@ pub struct FilenameResult {
     pub size: Option<u64>,
     pub modified: Option<SystemTime>,
     pub rank: FilenameRank,
+    pub match_quality: FilenameMatchQuality,
+    pub filename_match_ranges: Vec<TextMatchRange>,
+    pub path_match_ranges: Vec<TextMatchRange>,
+    pub arrival_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentFileResult {
     pub path: PathBuf,
+    pub file_name: String,
+    pub modified: Option<SystemTime>,
+    pub filename_relevance: Option<FilenameMatchQuality>,
+    pub arrival_index: usize,
     pub total_matches: usize,
     pub matches: Vec<ContentMatch>,
     pub truncated: bool,
@@ -151,7 +228,14 @@ impl ContentFileResultBuilder {
     pub fn new(path: PathBuf, display_limit: usize) -> Self {
         Self {
             result: ContentFileResult {
+                file_name: path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.to_string_lossy().to_string()),
+                modified: path.metadata().and_then(|m| m.modified()).ok(),
                 path,
+                filename_relevance: None,
+                arrival_index: 0,
                 total_matches: 0,
                 matches: Vec::new(),
                 truncated: false,

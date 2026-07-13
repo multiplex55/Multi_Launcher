@@ -1,10 +1,10 @@
 use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
+use crate::file_search::matching::rank_filename_match;
 use crate::file_search::model::{
     FileKind, FilenameRank, FilenameResult, SearchEvent, SearchId, SearchKind, SearchProgress,
     SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::settings::FileSearchSettings;
-use crate::file_search::matching::rank_filename_match;
 use std::collections::HashSet;
 use std::env;
 use std::ffi::OsString;
@@ -187,8 +187,8 @@ pub fn search_with_everything(
     event_sender: &mpsc::Sender<SearchEvent>,
     search_id: SearchId,
 ) -> Result<(), String> {
-    if request.kind != SearchKind::Filename || request.scope != SearchScope::Global {
-        return Err("Everything search only supports global filename requests".to_owned());
+    if request.kind != SearchKind::Filename || !matches!(request.scope, SearchScope::Roots { .. }) {
+        return Err("Everything search only supports filename root requests".to_owned());
     }
     let diagnostic = everything_diagnostic(settings);
     let executable = diagnostic.detected_path.ok_or_else(|| {
@@ -371,6 +371,10 @@ pub fn parse_everything_line(
         size: metadata.as_ref().filter(|m| m.is_file()).map(|m| m.len()),
         modified: metadata.and_then(|m| m.modified().ok()),
         rank,
+        match_quality: rank,
+        filename_match_ranges: Vec::new(),
+        path_match_ranges: Vec::new(),
+        arrival_index: 0,
     })
 }
 
@@ -417,6 +421,11 @@ fn passes_post_filters(
     request: &SearchRequest,
     settings: &FileSearchSettings,
 ) -> bool {
+    if let SearchScope::Roots { roots } = &request.scope {
+        if !roots.is_empty() && !roots.iter().any(|root| result.path.starts_with(root)) {
+            return false;
+        }
+    }
     if !request.include_hidden_files
         && result
             .path
@@ -464,14 +473,9 @@ fn passes_post_filters(
 
 fn excluded_directory_names(
     request: &SearchRequest,
-    settings: &FileSearchSettings,
+    _settings: &FileSearchSettings,
 ) -> HashSet<String> {
-    settings
-        .excluded_directory_names
-        .iter()
-        .chain(request.excluded_directory_names.iter())
-        .cloned()
-        .collect()
+    request.excluded_directory_names.iter().cloned().collect()
 }
 
 #[cfg(test)]
@@ -482,7 +486,7 @@ mod tests {
     fn request(text: &str) -> SearchRequest {
         SearchRequest {
             kind: SearchKind::Filename,
-            scope: SearchScope::Global,
+            scope: SearchScope::Roots { roots: Vec::new() },
             text: text.to_owned(),
             case_sensitive: false,
             include_hidden_files: false,
@@ -491,6 +495,10 @@ mod tests {
             included_extensions: vec![],
             excluded_extensions: vec![],
             excluded_directory_names: vec![],
+            filename_match_mode: crate::file_search::model::FilenameMatchMode::RankedSubstring,
+            content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
+            whole_word: false,
+            file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
         }
     }
 
@@ -556,18 +564,22 @@ mod tests {
             PathBuf::from("C:/Program Files/Everything/es.exe")
         );
         assert!(spec.args.contains(&OsString::from("-csv")));
-        assert!(spec
-            .args
-            .windows(2)
-            .any(|w| w == [OsString::from("-n"), OsString::from("7")]));
-        assert!(spec
-            .args
-            .windows(2)
-            .any(|w| w == [OsString::from("-s"), OsString::from("-dash query")]));
-        assert!(!spec
-            .args
-            .iter()
-            .any(|a| a == "-dash query" && spec.args.first() == Some(a)));
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|w| w == [OsString::from("-n"), OsString::from("7")])
+        );
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|w| w == [OsString::from("-s"), OsString::from("-dash query")])
+        );
+        assert!(
+            !spec
+                .args
+                .iter()
+                .any(|a| a == "-dash query" && spec.args.first() == Some(a))
+        );
     }
 
     #[test]
@@ -582,14 +594,18 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].kind, FileKind::File);
         assert_eq!(results[1].kind, FileKind::Directory);
-        assert!(results[0]
-            .path
-            .to_string_lossy()
-            .contains("path with spaces"));
+        assert!(
+            results[0]
+                .path
+                .to_string_lossy()
+                .contains("path with spaces")
+        );
         assert!(results[1].path.to_string_lossy().contains("ユニコード"));
-        assert!(parse_everything_output("", &request("x"))
-            .unwrap()
-            .is_empty());
+        assert!(
+            parse_everything_output("", &request("x"))
+                .unwrap()
+                .is_empty()
+        );
         assert!(parse_everything_output("\"unterminated", &request("x")).is_err());
     }
 
@@ -665,8 +681,9 @@ exit /b 3
             SearchId(99),
         )
         .unwrap();
-        assert!(rx
-            .try_iter()
-            .any(|event| matches!(event, SearchEvent::Completed { id: SearchId(99) })));
+        assert!(
+            rx.try_iter()
+                .any(|event| matches!(event, SearchEvent::Completed { id: SearchId(99) }))
+        );
     }
 }

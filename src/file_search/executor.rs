@@ -109,6 +109,10 @@ mod tests {
             included_extensions: Vec::new(),
             excluded_extensions: Vec::new(),
             excluded_directory_names: Vec::new(),
+            filename_match_mode: crate::file_search::model::FilenameMatchMode::RankedSubstring,
+            content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
+            whole_word: false,
+            file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
         }
     }
 
@@ -141,7 +145,9 @@ mod tests {
             SearchId(7),
             request(
                 SearchKind::Content,
-                SearchScope::Directory { root: ".".into() },
+                SearchScope::Roots {
+                    roots: vec![".".into()],
+                },
             ),
             CancellationToken::new(),
             tx,
@@ -164,7 +170,9 @@ mod tests {
             SearchId(8),
             request(
                 SearchKind::Filename,
-                SearchScope::Directory { root: ".".into() },
+                SearchScope::Roots {
+                    roots: vec![".".into()],
+                },
             ),
             CancellationToken::new(),
             tx,
@@ -193,7 +201,10 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         executor.execute(
             SearchId(9),
-            request(SearchKind::Filename, SearchScope::Global),
+            request(
+                SearchKind::Filename,
+                SearchScope::Roots { roots: Vec::new() },
+            ),
             CancellationToken::new(),
             tx,
         );
@@ -221,7 +232,10 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         executor.execute(
             SearchId(10),
-            request(SearchKind::Filename, SearchScope::Global),
+            request(
+                SearchKind::Filename,
+                SearchScope::Roots { roots: Vec::new() },
+            ),
             CancellationToken::new(),
             tx,
         );
