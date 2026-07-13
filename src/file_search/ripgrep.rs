@@ -97,6 +97,7 @@ fn execute_content_search(
             directories_scanned: 0,
             results_found: summary.results_found,
             status,
+            global_truncated: false,
         },
     });
     let _ = if summary.cancelled {
@@ -138,6 +139,7 @@ fn execute_filename_search(
             directories_scanned: 0,
             results_found: summary.results_found,
             status,
+            global_truncated: false,
         },
     });
     let _ = if summary.cancelled {

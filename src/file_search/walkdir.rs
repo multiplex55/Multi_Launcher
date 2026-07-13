@@ -181,6 +181,7 @@ pub fn search_filenames_in_directory(
             directories_scanned: summary.directories_scanned,
             results_found: summary.results_found,
             status,
+            global_truncated: false,
         },
     });
     let _ = if summary.cancelled {
