@@ -4,7 +4,7 @@ use crate::file_search::model::{
     SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::settings::FileSearchSettings;
-use crate::file_search::walkdir::rank_filename_match;
+use crate::file_search::matching::rank_filename_match;
 use std::collections::HashSet;
 use std::env;
 use std::ffi::OsString;

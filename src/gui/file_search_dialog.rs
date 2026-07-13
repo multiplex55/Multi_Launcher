@@ -1,3 +1,7 @@
+mod diagnostics;
+mod filters;
+mod keyboard;
+mod results;
 use crate::actions::clipboard;
 use crate::file_search::actions::{
     containing_directory, copied_filename, execute_explorer_action, nested_search_root,
@@ -12,7 +16,7 @@ use crate::file_search::model::{
 use crate::file_search::preview::PreviewRequest;
 use crate::file_search::settings::FileSearchSettings;
 use crate::gui::file_search_preview_dialog::FileSearchPreviewDialogState;
-use eframe::egui::{self, WidgetText};
+use eframe::egui;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -711,7 +715,7 @@ impl FileSearchDialogState {
                     .selected_result()
                     .map(|selected| selected.row_id == row_id)
                     .unwrap_or(false);
-                let response = non_wrapping_selectable_label(ui, is_selected, row_text)
+                let response = results::non_wrapping_selectable_label(ui, is_selected, row_text)
                     .on_hover_text(path.display().to_string());
                 let double_clicked = response.double_clicked();
                 if response.clicked() {
@@ -804,7 +808,7 @@ impl FileSearchDialogState {
                     .selected_result()
                     .map(|selected| selected.row_id == row_id)
                     .unwrap_or(false);
-                let response = non_wrapping_selectable_label(ui, is_selected, row_text)
+                let response = results::non_wrapping_selectable_label(ui, is_selected, row_text)
                     .on_hover_text(path.display().to_string());
                 let double_clicked = response.double_clicked();
                 if response.clicked() {
@@ -1194,43 +1198,6 @@ impl FileSearchDialogState {
     }
 }
 
-fn non_wrapping_selectable_label(
-    ui: &mut egui::Ui,
-    selected: bool,
-    text: impl Into<WidgetText>,
-) -> egui::Response {
-    let text = text.into();
-    let button_padding = ui.spacing().button_padding;
-    let total_extra = button_padding + button_padding;
-    let galley = text.into_galley(ui, Some(false), f32::INFINITY, egui::TextStyle::Button);
-    let mut desired_size = total_extra + galley.size();
-    desired_size.y = desired_size.y.max(ui.spacing().interact_size.y);
-    let (rect, response) = ui.allocate_at_least(desired_size, egui::Sense::click());
-
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, selected, galley.text())
-    });
-
-    if ui.is_rect_visible(response.rect) {
-        let text_pos = ui
-            .layout()
-            .align_size_within_rect(galley.size(), rect.shrink2(button_padding))
-            .min;
-        let visuals = ui.style().interact_selectable(&response, selected);
-        if selected || response.hovered() || response.highlighted() || response.has_focus() {
-            let rect = rect.expand(visuals.expansion);
-            ui.painter().rect(
-                rect,
-                visuals.rounding,
-                visuals.weak_bg_fill,
-                visuals.bg_stroke,
-            );
-        }
-        ui.painter().galley(text_pos, galley, visuals.text_color());
-    }
-
-    response
-}
 
 #[cfg(test)]
 mod tests {

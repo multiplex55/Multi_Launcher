@@ -1,9 +1,11 @@
 use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
+use crate::file_search::matching::rank_filename_match;
 use crate::file_search::model::{
-    FileKind, FilenameRank, FilenameResult, SearchEvent, SearchId, SearchKind, SearchProgress,
+    FileKind, FilenameResult, SearchEvent, SearchId, SearchKind, SearchProgress,
     SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::settings::FileSearchSettings;
+use crate::file_search::sorting::sort_filename_results;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::Path;
@@ -189,42 +191,6 @@ pub fn search_filenames_in_directory(
     };
 
     Ok(summary)
-}
-
-pub fn sort_filename_results(results: &mut [FilenameResult]) {
-    results.sort_by(|a, b| {
-        a.rank
-            .cmp(&b.rank)
-            .then_with(|| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()))
-            .then_with(|| a.path.cmp(&b.path))
-    });
-}
-
-pub fn rank_filename_match(
-    file_name: &str,
-    path: &Path,
-    search_text: &str,
-    case_sensitive: bool,
-) -> Option<FilenameRank> {
-    let (name, path_text) = if case_sensitive {
-        (file_name.to_owned(), path.to_string_lossy().to_string())
-    } else {
-        (
-            file_name.to_lowercase(),
-            path.to_string_lossy().to_lowercase(),
-        )
-    };
-    if name == search_text {
-        Some(FilenameRank::ExactFilename)
-    } else if name.starts_with(search_text) {
-        Some(FilenameRank::FilenameStartsWith)
-    } else if name.contains(search_text) {
-        Some(FilenameRank::FilenameContains)
-    } else if path_text.contains(search_text) {
-        Some(FilenameRank::FullPathContains)
-    } else {
-        None
-    }
 }
 
 fn should_descend(
