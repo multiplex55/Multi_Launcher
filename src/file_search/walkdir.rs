@@ -56,21 +56,13 @@ pub fn search_filenames_in_directory(
     event_sender: &mpsc::Sender<SearchEvent>,
     search_id: SearchId,
 ) -> Result<WalkDirSearchSummary, String> {
-    let SearchScope::Roots { roots } = &request.scope else {
-        return Err("walkdir filename search requires a directory scope".to_owned());
+    let roots = match &request.scope {
+        SearchScope::Roots { roots } if roots.is_empty() => settings.global_search_roots.clone(),
+        SearchScope::Roots { roots } => roots.clone(),
+        SearchScope::Files { files } => files.clone(),
     };
-    if roots.len() != 1 {
-        return Err("walkdir filename search requires exactly one root".to_owned());
-    }
-    let root = &roots[0];
     if request.kind != SearchKind::Filename {
         return Err("walkdir filename search only supports filename requests".to_owned());
-    }
-    if !root.is_dir() {
-        return Err(format!(
-            "search root '{}' is not a directory",
-            root.display()
-        ));
     }
 
     let needle = if request.case_sensitive {
@@ -84,96 +76,93 @@ pub fn search_filenames_in_directory(
     let skipped_before_descent = Cell::new(0_u64);
     let mut ranked_results = Vec::new();
 
-    let iter = WalkDir::new(root).into_iter().filter_entry(|entry| {
-        if cancellation.is_cancelled() {
-            return false;
-        }
-        let descend = should_descend(entry, root, &excluded_names, include_hidden);
-        if !descend {
-            skipped_before_descent.set(skipped_before_descent.get().saturating_add(1));
-        }
-        descend
-    });
-
-    for entry in iter {
+    for root in roots {
         if cancellation.is_cancelled() {
             summary.cancelled = true;
             break;
         }
-
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => {
-                summary.inaccessible_entries += 1;
-                continue;
-            }
-        };
-
-        if entry.path() != root && should_skip_entry(&entry, &excluded_names, include_hidden) {
-            summary.skipped_entries += 1;
+        if !root.is_dir() {
             continue;
         }
-
-        let metadata = match entry.metadata() {
-            Ok(metadata) => Some(metadata),
-            Err(_) => {
-                summary.inaccessible_entries += 1;
-                None
+        let iter = WalkDir::new(&root).into_iter().filter_entry(|entry| {
+            if cancellation.is_cancelled() {
+                return false;
             }
-        };
-        if metadata.as_ref().is_some_and(|metadata| metadata.is_dir()) {
-            summary.directories_scanned += 1;
-        } else {
-            summary.files_scanned += 1;
-        }
+            let descend = should_descend(entry, &root, &excluded_names, include_hidden);
+            if !descend {
+                skipped_before_descent.set(skipped_before_descent.get().saturating_add(1));
+            }
+            descend
+        });
 
-        let file_name = entry.file_name().to_string_lossy().to_string();
-        if let Some(rank) =
-            rank_filename_match(&file_name, entry.path(), &needle, request.case_sensitive)
-        {
+        for entry in iter {
             if cancellation.is_cancelled() {
                 summary.cancelled = true;
                 break;
             }
-            let result = FilenameResult {
-                path: entry.path().to_path_buf(),
-                file_name,
-                parent_directory: entry.path().parent().map(Path::to_path_buf),
-                kind: file_kind(metadata.as_ref()),
-                size: metadata.as_ref().filter(|m| m.is_file()).map(|m| m.len()),
-                modified: metadata.and_then(|m| m.modified().ok()),
-                rank,
-                match_quality: rank,
-                filename_match_ranges: Vec::new(),
-                path_match_ranges: Vec::new(),
-                arrival_index: ranked_results.len(),
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    summary.inaccessible_entries += 1;
+                    continue;
+                }
             };
-            if event_sender
-                .send(SearchEvent::Result {
-                    id: search_id,
-                    result: SearchResult::Filename(result.clone()),
-                })
-                .is_err()
-            {
-                break;
+            if entry.path() != root && should_skip_entry(&entry, &excluded_names, include_hidden) {
+                summary.skipped_entries += 1;
+                continue;
             }
-            ranked_results.push(result);
-            summary.results_found += 1;
-            if summary.results_found >= request.max_results {
-                break;
+            let metadata = match entry.metadata() {
+                Ok(metadata) => Some(metadata),
+                Err(_) => {
+                    summary.inaccessible_entries += 1;
+                    None
+                }
+            };
+            if metadata.as_ref().is_some_and(|metadata| metadata.is_dir()) {
+                summary.directories_scanned += 1;
+            } else {
+                summary.files_scanned += 1;
+            }
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if let Some(rank) =
+                rank_filename_match(&file_name, entry.path(), &needle, request.case_sensitive)
+            {
+                let result = FilenameResult {
+                    path: entry.path().to_path_buf(),
+                    file_name,
+                    parent_directory: entry.path().parent().map(Path::to_path_buf),
+                    kind: file_kind(metadata.as_ref()),
+                    size: metadata.as_ref().filter(|m| m.is_file()).map(|m| m.len()),
+                    modified: metadata.and_then(|m| m.modified().ok()),
+                    rank,
+                    match_quality: rank,
+                    filename_match_ranges: Vec::new(),
+                    path_match_ranges: Vec::new(),
+                    arrival_index: ranked_results.len(),
+                };
+                if event_sender
+                    .send(SearchEvent::Result {
+                        id: search_id,
+                        result: SearchResult::Filename(result.clone()),
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                ranked_results.push(result);
+                summary.results_found += 1;
+                if summary.results_found >= request.max_results {
+                    break;
+                }
             }
         }
-
-        if cancellation.is_cancelled() {
-            summary.cancelled = true;
+        if summary.results_found >= request.max_results {
             break;
         }
     }
-
     if cancellation.is_cancelled() {
         summary.cancelled = true;
     }
-
     summary.skipped_entries = summary
         .skipped_entries
         .saturating_add(skipped_before_descent.get());
@@ -197,7 +186,6 @@ pub fn search_filenames_in_directory(
     } else {
         event_sender.send(SearchEvent::Completed { id: search_id })
     };
-
     Ok(summary)
 }
 

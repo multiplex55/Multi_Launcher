@@ -4,11 +4,11 @@ mod keyboard;
 mod results;
 use crate::actions::clipboard;
 use crate::file_search::actions::{
-    ExplorerAction, InvocationTarget, containing_directory, copied_filename,
-    execute_explorer_action, nested_search_root, open_configured_terminal_in_directory,
-    open_in_configured_editor, open_path, resolve_explorer_action,
+    containing_directory, copied_filename, execute_explorer_action, nested_search_root,
+    open_configured_terminal_in_directory, open_in_configured_editor, open_path,
+    resolve_explorer_action, ExplorerAction, InvocationTarget,
 };
-use crate::file_search::coordinator::{SearchCoordinator, event_id};
+use crate::file_search::coordinator::{event_id, SearchCoordinator};
 use crate::file_search::model::{
     ContentMatch, FileKind, FileSearchResultKey, FileTypeFilter, PathIdentity, SearchBackend,
     SearchEvent, SearchId, SearchKind, SearchRequest, SearchResult, SearchScope, SearchStatus,
@@ -217,6 +217,8 @@ pub struct FileSearchDialogState {
     pub ui_preferences_dirty: bool,
     pub request_search_focus: bool,
     pub request_immediate_repaint: bool,
+    pub show_ripgrep_missing_prompt: bool,
+    pub ripgrep_missing_prompt_dismissed: bool,
 }
 
 impl Default for FileSearchDialogState {
@@ -244,8 +246,19 @@ impl Default for FileSearchDialogState {
             ui_preferences_dirty: false,
             request_search_focus: false,
             request_immediate_repaint: false,
+            show_ripgrep_missing_prompt: false,
+            ripgrep_missing_prompt_dismissed: false,
         }
     }
+}
+
+fn validate_ripgrep_selection(path: &std::path::Path) -> Result<PathBuf, String> {
+    let absolute = path
+        .canonicalize()
+        .map_err(|err| format!("Selected ripgrep executable is invalid: {err}"))?;
+    crate::file_search::ripgrep::resolve_ripgrep_executable(&absolute)
+        .map(|_| absolute)
+        .map_err(|err| format!("Selected file is not a usable ripgrep executable: {err}"))
 }
 
 impl FileSearchDialogState {
@@ -407,6 +420,21 @@ impl FileSearchDialogState {
             SearchEvent::Started { backend, .. } => {
                 self.backend = Some(backend);
                 self.current_status = SearchStatus::Running;
+                false
+            }
+            SearchEvent::BackendFallback {
+                from, to, reason, ..
+            } => {
+                self.backend = Some(to);
+                self.warning_error_message = Some(format!(
+                    "Search backend fallback: {from:?} → {to:?}: {reason}"
+                ));
+                if from == SearchBackend::Ripgrep
+                    && to == SearchBackend::Native
+                    && !self.ripgrep_missing_prompt_dismissed
+                {
+                    self.show_ripgrep_missing_prompt = true;
+                }
                 false
             }
             SearchEvent::Result { result, .. } => {
@@ -762,6 +790,7 @@ impl FileSearchDialogState {
         if let Some(msg) = &self.warning_error_message {
             ui.colored_label(egui::Color32::YELLOW, msg);
         }
+        self.ripgrep_missing_prompt_ui(ui, coordinator);
         let results_region_size = ui.available_size();
         ui.allocate_ui_with_layout(results_region_size, *ui.layout(), |ui| {
             egui::ScrollArea::both()
@@ -772,6 +801,52 @@ impl FileSearchDialogState {
                     FileSearchMode::Content => self.content_results(ui, coordinator),
                 });
         });
+    }
+
+    fn ripgrep_missing_prompt_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        coordinator: &mut SearchCoordinator,
+    ) {
+        if !self.show_ripgrep_missing_prompt || self.ripgrep_missing_prompt_dismissed {
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.colored_label(egui::Color32::YELLOW, "ripgrep (rg) was not found. Native content search will continue; configure rg for faster future searches.");
+            if ui.button("Locate rg.exe").clicked() {
+                if let Some(path) = rfd::FileDialog::new().add_filter("Executable", &["exe", ""]).pick_file() {
+                    match validate_ripgrep_selection(&path) {
+                        Ok(abs) => {
+                            self.settings.ripgrep_executable_path = abs;
+                            coordinator.reconfigure_from_settings(self.settings.clone());
+                            self.show_ripgrep_missing_prompt = false;
+                            self.warning_error_message = Some("ripgrep path saved for future searches.".to_owned());
+                        }
+                        Err(err) => self.warning_error_message = Some(err),
+                    }
+                }
+            }
+            if ui.button("Dismiss").clicked() {
+                self.dismiss_ripgrep_missing_prompt();
+            }
+        });
+    }
+
+    pub fn dismiss_ripgrep_missing_prompt(&mut self) {
+        self.show_ripgrep_missing_prompt = false;
+        self.ripgrep_missing_prompt_dismissed = true;
+    }
+
+    pub fn configure_ripgrep_path_for_future_searches(
+        &mut self,
+        path: PathBuf,
+        coordinator: &mut SearchCoordinator,
+    ) -> Result<(), String> {
+        let abs = validate_ripgrep_selection(&path)?;
+        self.settings.ripgrep_executable_path = abs;
+        coordinator.reconfigure_from_settings(self.settings.clone());
+        self.show_ripgrep_missing_prompt = false;
+        Ok(())
     }
 
     fn filename_results(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {
@@ -1302,7 +1377,7 @@ mod tests {
     use crate::file_search::model::{
         ContentFileResult, ContentMatch, FileKind, FilenameRank, FilenameResult, SearchProgress,
     };
-    use std::sync::{Arc, Mutex, mpsc};
+    use std::sync::{mpsc, Arc, Mutex};
 
     struct RecordingExecutor {
         requests: Mutex<Vec<SearchRequest>>,
@@ -2656,12 +2731,10 @@ mod tests {
 
         assert!(action.is_none());
         assert_eq!(state.selected_result().cloned(), selected_before);
-        assert!(
-            state
-                .warning_error_message
-                .as_deref()
-                .is_some_and(|message| message.contains("missing or inaccessible"))
-        );
+        assert!(state
+            .warning_error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("missing or inaccessible")));
     }
 
     #[test]
@@ -2798,5 +2871,28 @@ mod tests {
         assert_eq!(state.selected_result().cloned(), selected_before);
         assert_eq!(coordinator.diagnostics().started, 0);
         assert!(state.warning_error_message.is_none());
+    }
+    #[test]
+    fn dismissal_suppresses_repeated_ripgrep_missing_prompts_during_session() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(42)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::BackendFallback {
+            id: SearchId(42),
+            from: SearchBackend::Ripgrep,
+            to: SearchBackend::Native,
+            reason: "ripgrep missing".to_owned(),
+        });
+        assert!(state.show_ripgrep_missing_prompt);
+        state.dismiss_ripgrep_missing_prompt();
+        state.apply_event(SearchEvent::BackendFallback {
+            id: SearchId(42),
+            from: SearchBackend::Ripgrep,
+            to: SearchBackend::Native,
+            reason: "ripgrep still missing".to_owned(),
+        });
+        assert!(!state.show_ripgrep_missing_prompt);
+        assert!(state.ripgrep_missing_prompt_dismissed);
     }
 }

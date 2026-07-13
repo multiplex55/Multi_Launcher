@@ -274,6 +274,12 @@ pub enum SearchEvent {
         id: SearchId,
         backend: SearchBackend,
     },
+    BackendFallback {
+        id: SearchId,
+        from: SearchBackend,
+        to: SearchBackend,
+        reason: String,
+    },
     Result {
         id: SearchId,
         result: SearchResult,
