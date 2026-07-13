@@ -122,24 +122,18 @@ impl SearchCoordinator {
 
         let id = SearchId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
-        let backend =
-            Self::select_backend_with_settings(&request, self.production_settings.as_ref());
         let token = CancellationToken::new();
 
         self.active_search_id = Some(id);
         self.active_token = Some(token.clone());
         self.active_status = SearchStatus::Running;
-        self.last_backend = Some(backend);
-        self.diagnostics.started += 1;
+        self.last_backend = None;
 
         let events = self.event_sender.clone();
         let executor = Arc::clone(&self.executor);
         let worker_request = request;
         let worker_token = token;
         thread::spawn(move || {
-            if events.send(SearchEvent::Started { id, backend }).is_err() {
-                return;
-            }
             executor.execute(id, worker_request, worker_token, events);
         });
 
@@ -185,25 +179,21 @@ impl SearchCoordinator {
         request: &SearchRequest,
         settings: Option<&FileSearchSettings>,
     ) -> SearchBackend {
-        match (&request.kind, &request.scope) {
-            (SearchKind::Filename, SearchScope::Roots { roots })
-                if settings.is_some_and(|settings| {
-                    !settings.everything_enabled && roots_match_global_search_roots(roots, settings)
-                }) =>
-            {
-                SearchBackend::Ripgrep
+        if let Some(settings) = settings {
+            crate::file_search::executor::FileSearchExecutor::plan_for_request(request, settings)
+                .candidates
+                .into_iter()
+                .next()
+                .unwrap_or(SearchBackend::WalkDir)
+        } else {
+            match (&request.kind, &request.scope) {
+                (SearchKind::Filename, SearchScope::Roots { roots }) if roots.len() == 1 => {
+                    SearchBackend::WalkDir
+                }
+                (SearchKind::Filename, SearchScope::Roots { .. }) => SearchBackend::Everything,
+                (SearchKind::Filename, SearchScope::Files { .. }) => SearchBackend::WalkDir,
+                (SearchKind::Content, _) => SearchBackend::Ripgrep,
             }
-            (SearchKind::Filename, SearchScope::Roots { roots })
-                if roots.len() == 1
-                    && !settings.is_some_and(|settings| {
-                        roots_match_global_search_roots(roots, settings)
-                    }) =>
-            {
-                SearchBackend::WalkDir
-            }
-            (SearchKind::Filename, SearchScope::Roots { .. }) => SearchBackend::Everything,
-            (SearchKind::Filename, SearchScope::Files { .. }) => SearchBackend::WalkDir,
-            (SearchKind::Content, _) => SearchBackend::Ripgrep,
         }
     }
 
@@ -232,6 +222,11 @@ impl SearchCoordinator {
             SearchEvent::Started { backend, .. } => {
                 self.active_status = SearchStatus::Running;
                 self.last_backend = Some(*backend);
+                self.diagnostics.started += 1;
+            }
+            SearchEvent::BackendFallback { to, reason, .. } => {
+                self.last_backend = Some(*to);
+                self.diagnostics.last_error = Some(reason.clone());
             }
             SearchEvent::Result { .. } | SearchEvent::Progress { .. } => {}
             SearchEvent::Completed { .. } => {
@@ -281,6 +276,7 @@ fn roots_match_global_search_roots(
 pub fn event_id(event: &SearchEvent) -> SearchId {
     match event {
         SearchEvent::Started { id, .. }
+        | SearchEvent::BackendFallback { id, .. }
         | SearchEvent::Result { id, .. }
         | SearchEvent::Progress { id, .. }
         | SearchEvent::Completed { id }
@@ -467,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn everything_disabled_selects_ripgrep_for_global_filename_search() {
+    fn everything_disabled_selects_walkdir_for_global_filename_search() {
         let settings = FileSearchSettings {
             everything_enabled: false,
             ..FileSearchSettings::default()
@@ -482,7 +478,7 @@ mod tests {
                 ),
                 Some(&settings),
             ),
-            SearchBackend::Ripgrep
+            SearchBackend::WalkDir
         );
     }
 
@@ -570,16 +566,7 @@ mod tests {
             10,
         ));
         let events = drain_after(&mut coordinator);
-        assert_eq!(
-            events,
-            vec![
-                SearchEvent::Started {
-                    id,
-                    backend: SearchBackend::Everything
-                },
-                SearchEvent::Completed { id }
-            ]
-        );
+        assert_eq!(events, vec![SearchEvent::Completed { id }]);
     }
 
     #[test]
@@ -748,17 +735,11 @@ mod tests {
 
     #[test]
     fn production_content_search_uses_ripgrep_and_returns_result_when_available() {
-        let Ok(ripgrep) =
-            crate::file_search::ripgrep::resolve_ripgrep_executable(std::path::Path::new("rg"))
-        else {
-            return;
-        };
         let temp = tempfile::tempdir().expect("tempdir");
         let expected = temp.path().join("content-hit.txt");
         std::fs::write(&expected, "alpha needle omega\n").expect("write file");
         std::fs::write(temp.path().join("miss.txt"), "alpha omega\n").expect("write miss file");
         let settings = FileSearchSettings {
-            ripgrep_executable_path: ripgrep,
             max_search_results: 10,
             ..FileSearchSettings::default()
         };
@@ -806,7 +787,7 @@ mod tests {
     }
 
     #[test]
-    fn production_content_search_with_missing_ripgrep_falls_back_to_detected_ripgrep() {
+    fn production_content_search_with_missing_ripgrep_falls_back_to_native() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("haystack.txt"), "needle").expect("write file");
         let missing_rg = temp.path().join("missing").join("rg");
@@ -837,52 +818,40 @@ mod tests {
         });
 
         let events = drain_until_terminal(&mut coordinator);
-        assert_eq!(coordinator.last_backend(), Some(SearchBackend::Ripgrep));
-        if crate::file_search::ripgrep::resolve_ripgrep_executable(&missing_rg).is_err() {
-            let error = events
-                .iter()
-                .find_map(|event| match event {
-                    SearchEvent::Failed { error, .. } => Some(error.as_str()),
-                    _ => None,
-                })
-                .expect("failed event");
-            assert!(error.contains("ripgrep"), "{error}");
-        } else {
-            assert!(
-                events.iter().any(|event| matches!(
-                    event,
-                    SearchEvent::Result {
-                        result: SearchResult::ContentFile(result),
-                        ..
-                    } if result.path == temp.path().join("haystack.txt")
-                        || result.path == PathBuf::from("haystack.txt")
-                )),
-                "events: {events:?}"
-            );
-            assert!(
-                events
-                    .iter()
-                    .any(|event| matches!(event, SearchEvent::Completed { .. })),
-                "events: {events:?}"
-            );
-        }
+        assert_eq!(coordinator.last_backend(), Some(SearchBackend::Native));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SearchEvent::BackendFallback {
+                from: SearchBackend::Ripgrep,
+                to: SearchBackend::Native,
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SearchEvent::Started {
+                backend: SearchBackend::Native,
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(event, SearchEvent::Result { result: SearchResult::ContentFile(result), .. } if result.path == temp.path().join("haystack.txt"))));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, SearchEvent::Completed { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, SearchEvent::Failed { .. })));
         assert_no_unwired_placeholder(&events);
     }
 
     #[test]
-    fn everything_disabled_global_filename_search_returns_ripgrep_results_when_available() {
-        let Ok(ripgrep) =
-            crate::file_search::ripgrep::resolve_ripgrep_executable(std::path::Path::new("rg"))
-        else {
-            return;
-        };
+    fn everything_disabled_global_filename_search_returns_walkdir_results() {
         let temp = tempfile::tempdir().expect("tempdir");
         let expected = "global-ripgrep-hit.txt";
         std::fs::write(temp.path().join(expected), "contents").expect("write file");
         let settings = FileSearchSettings {
             global_search_roots: vec![temp.path().to_path_buf()],
             everything_enabled: false,
-            ripgrep_executable_path: ripgrep,
             ..FileSearchSettings::default()
         };
         let mut coordinator = SearchCoordinator::with_settings(settings);
@@ -907,7 +876,7 @@ mod tests {
         });
 
         let events = drain_until_terminal(&mut coordinator);
-        assert_eq!(coordinator.last_backend(), Some(SearchBackend::Ripgrep));
+        assert_eq!(coordinator.last_backend(), Some(SearchBackend::WalkDir));
         assert!(
             events.iter().any(|event| matches!(
                 event,
@@ -922,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn production_global_filename_search_with_everything_disabled_uses_detected_ripgrep_fallback() {
+    fn production_global_filename_search_with_everything_disabled_uses_walkdir() {
         let temp = tempfile::tempdir().expect("tempdir");
         let missing_rg = temp.path().join("missing").join("rg");
         let settings = FileSearchSettings {
@@ -951,25 +920,13 @@ mod tests {
         });
 
         let events = drain_until_terminal(&mut coordinator);
-        assert_eq!(coordinator.last_backend(), Some(SearchBackend::Ripgrep));
-        if crate::file_search::ripgrep::resolve_ripgrep_executable(&missing_rg).is_err() {
-            let error = events
-                .iter()
-                .find_map(|event| match event {
-                    SearchEvent::Failed { error, .. } => Some(error.as_str()),
-                    _ => None,
-                })
-                .expect("failed event");
-            assert!(error.contains("ripgrep"), "{error}");
-            assert!(!error.contains("Everything filename search"), "{error}");
-        } else {
-            assert!(
-                events
-                    .iter()
-                    .any(|event| matches!(event, SearchEvent::Completed { .. })),
-                "events: {events:?}"
-            );
-        }
+        assert_eq!(coordinator.last_backend(), Some(SearchBackend::WalkDir));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, SearchEvent::Completed { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, SearchEvent::Failed { .. })));
         assert_no_unwired_placeholder(&events);
     }
 }
