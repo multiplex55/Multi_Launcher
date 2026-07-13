@@ -75,7 +75,7 @@ pub fn everything_diagnostic(settings: &FileSearchSettings) -> EverythingDiagnos
         Some("Everything filename search is disabled in settings".to_owned())
     } else if detected_path.is_none() {
         Some(
-            "Everything executable was not found; install Everything/ES.exe or configure its path"
+            "Everything ES CLI executable was not found; install es.exe or configure its path"
                 .to_owned(),
         )
     } else {
@@ -96,7 +96,6 @@ pub fn detect_everything_executable(settings: &FileSearchSettings) -> Option<Pat
     }
     configured_executable(&settings.everything_executable_path)
         .or_else(|| find_on_path("es.exe"))
-        .or_else(|| find_on_path("Everything.exe"))
         .or_else(find_common_windows_installation)
 }
 
@@ -128,11 +127,7 @@ fn find_common_windows_installation() -> Option<PathBuf> {
     roots.extend(env::var_os("ProgramFiles(x86)").map(PathBuf::from));
     roots.extend(env::var_os("LOCALAPPDATA").map(PathBuf::from));
     for root in roots {
-        for rel in [
-            "Everything/ES.exe",
-            "Everything/es.exe",
-            "Everything/Everything.exe",
-        ] {
+        for rel in ["Everything/ES.exe", "Everything/es.exe"] {
             let candidate = root.join(rel);
             if candidate.is_file() {
                 return Some(candidate);
@@ -152,6 +147,15 @@ pub fn build_everything_command(
     executable: PathBuf,
     request: &SearchRequest,
     settings: &FileSearchSettings,
+) -> EverythingCommandSpec {
+    build_everything_command_for_root(executable, request, settings, None)
+}
+
+pub fn build_everything_command_for_root(
+    executable: PathBuf,
+    request: &SearchRequest,
+    settings: &FileSearchSettings,
+    root: Option<&Path>,
 ) -> EverythingCommandSpec {
     let mut args = Vec::new();
     args.push(OsString::from("-csv"));
@@ -176,8 +180,15 @@ pub fn build_everything_command(
         args.push(OsString::from(format!("{}\\*", dir)));
     }
     args.push(OsString::from("-s"));
-    args.push(OsString::from(&request.text));
+    args.push(OsString::from(everything_query(&request.text, root)));
     EverythingCommandSpec { executable, args }
+}
+
+pub fn everything_query(text: &str, root: Option<&Path>) -> String {
+    match root {
+        Some(root) => format!("path:\"{}\" {}", root.display(), text),
+        None => text.to_owned(),
+    }
 }
 
 pub fn search_with_everything(
@@ -193,11 +204,98 @@ pub fn search_with_everything(
     let diagnostic = everything_diagnostic(settings);
     let executable = diagnostic.detected_path.ok_or_else(|| {
         let reason = diagnostic.unavailable_reason.unwrap_or_else(|| {
-            "Everything filename search is unavailable; install Everything/ES.exe or configure the Everything executable path in settings".to_owned()
+            "Everything filename search is unavailable; install es.exe or configure the Everything CLI executable path in settings".to_owned()
         });
         format!("Everything filename search is unavailable: {reason}")
     })?;
-    let spec = build_everything_command(executable, &request, settings);
+    let roots = match &request.scope {
+        SearchScope::Roots { roots } => roots.clone(),
+        SearchScope::Files { .. } => unreachable!(),
+    };
+    if roots.is_empty() {
+        return Err("Everything search requires at least one root".to_owned());
+    }
+    let mut emitted = 0usize;
+    let mut seen = HashSet::new();
+    let mut root_errors = Vec::new();
+    let mut usable_roots = 0usize;
+    for root in roots {
+        if cancellation.is_cancelled() || emitted >= request.max_results {
+            break;
+        }
+        let root = match root.canonicalize() {
+            Ok(root) if root.is_dir() => root,
+            Ok(root) => {
+                root_errors.push(format!("{} is not a directory", root.display()));
+                continue;
+            }
+            Err(err) => {
+                root_errors.push(format!("{}: {err}", root.display()));
+                continue;
+            }
+        };
+        usable_roots += 1;
+        let remaining = request.max_results.saturating_sub(emitted);
+        let mut scoped_request = request.clone();
+        scoped_request.max_results = remaining;
+        let spec = build_everything_command_for_root(
+            executable.clone(),
+            &scoped_request,
+            settings,
+            Some(&root),
+        );
+        emitted += run_everything_command(
+            spec,
+            &scoped_request,
+            settings,
+            cancellation,
+            event_sender,
+            search_id,
+            &mut seen,
+        )?;
+    }
+    if usable_roots == 0 {
+        return Err(format!(
+            "Everything search requires at least one usable root{}",
+            if root_errors.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", root_errors.join("; "))
+            }
+        ));
+    }
+    let status = if cancellation.is_cancelled() {
+        SearchStatus::Cancelled
+    } else {
+        SearchStatus::Completed
+    };
+    let _ = event_sender.send(SearchEvent::Progress {
+        id: search_id,
+        progress: SearchProgress {
+            files_scanned: 0,
+            directories_scanned: 0,
+            results_found: emitted,
+            status,
+            global_truncated: false,
+        },
+    });
+    let _ = if cancellation.is_cancelled() {
+        event_sender.send(SearchEvent::Cancelled { id: search_id })
+    } else {
+        event_sender.send(SearchEvent::Completed { id: search_id })
+    };
+    Ok(())
+}
+
+fn run_everything_command(
+    spec: EverythingCommandSpec,
+    request: &SearchRequest,
+    settings: &FileSearchSettings,
+    cancellation: &CancellationToken,
+    event_sender: &mpsc::Sender<SearchEvent>,
+    search_id: SearchId,
+    seen: &mut HashSet<String>,
+) -> Result<usize, String> {
     let mut child = Command::new(&spec.executable)
         .args(&spec.args)
         .stdout(Stdio::piped())
@@ -209,7 +307,6 @@ pub fn search_with_everything(
                 spec.executable.display()
             )
         })?;
-
     let stdout = child
         .stdout
         .take()
@@ -222,25 +319,20 @@ pub fn search_with_everything(
     let req_for_reader = request.clone();
     let stdout_thread = thread::spawn(move || read_stdout(stdout, req_for_reader, result_tx));
     let stderr_thread = thread::spawn(move || read_bounded(stderr, STDERR_LIMIT));
-
     let mut emitted = 0usize;
     loop {
         while let Ok(parsed) = result_rx.try_recv() {
-            match parsed {
-                Ok(result) => {
-                    if emitted < request.max_results
-                        && passes_post_filters(&result, &request, settings)
-                        && event_sender
-                            .send(SearchEvent::Result {
-                                id: search_id,
-                                result: SearchResult::Filename(result),
-                            })
-                            .is_ok()
-                    {
-                        emitted += 1;
-                    }
-                }
-                Err(error) => return Err(error),
+            let result = parsed?;
+            let identity = crate::file_search::model::normalize_path_for_identity(&result.path);
+            if emitted < request.max_results
+                && seen.insert(identity)
+                && passes_post_filters(&result, request, settings)
+            {
+                let _ = event_sender.send(SearchEvent::Result {
+                    id: search_id,
+                    result: SearchResult::Filename(result),
+                });
+                emitted += 1;
             }
         }
         if cancellation.is_cancelled() {
@@ -248,27 +340,24 @@ pub fn search_with_everything(
             let _ = child.wait();
             let _ = stdout_thread.join();
             let _ = stderr_thread.join();
-            let _ = event_sender.send(SearchEvent::Cancelled { id: search_id });
-            return Ok(());
+            return Ok(emitted);
         }
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             let stdout_result = stdout_thread
                 .join()
                 .unwrap_or_else(|_| Err("stdout reader panicked".to_owned()));
             while let Ok(parsed) = result_rx.try_recv() {
-                match parsed {
-                    Ok(result) => {
-                        if emitted < request.max_results
-                            && passes_post_filters(&result, &request, settings)
-                        {
-                            let _ = event_sender.send(SearchEvent::Result {
-                                id: search_id,
-                                result: SearchResult::Filename(result),
-                            });
-                            emitted += 1;
-                        }
-                    }
-                    Err(error) => return Err(error),
+                let result = parsed?;
+                let identity = crate::file_search::model::normalize_path_for_identity(&result.path);
+                if emitted < request.max_results
+                    && seen.insert(identity)
+                    && passes_post_filters(&result, request, settings)
+                {
+                    let _ = event_sender.send(SearchEvent::Result {
+                        id: search_id,
+                        result: SearchResult::Filename(result),
+                    });
+                    emitted += 1;
                 }
             }
             stdout_result?;
@@ -279,18 +368,7 @@ pub fn search_with_everything(
                     stderr.trim()
                 ));
             }
-            let _ = event_sender.send(SearchEvent::Progress {
-                id: search_id,
-                progress: SearchProgress {
-                    files_scanned: 0,
-                    directories_scanned: 0,
-                    results_found: emitted,
-                    status: SearchStatus::Completed,
-                    global_truncated: false,
-                },
-            });
-            let _ = event_sender.send(SearchEvent::Completed { id: search_id });
-            return Ok(());
+            return Ok(emitted);
         }
         thread::sleep(Duration::from_millis(10));
     }
@@ -548,6 +626,49 @@ mod tests {
     }
 
     #[test]
+    fn ignores_everything_gui_executable_on_path() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("Everything.exe"), "").unwrap();
+        let old = env::var_os("PATH");
+        unsafe {
+            env::set_var("PATH", temp.path());
+        }
+        let settings = FileSearchSettings {
+            everything_enabled: true,
+            everything_executable_path: PathBuf::from("missing.exe"),
+            ..FileSearchSettings::default()
+        };
+        assert_eq!(detect_everything_executable(&settings), None);
+        if let Some(old) = old {
+            unsafe {
+                env::set_var("PATH", old);
+            }
+        } else {
+            unsafe {
+                env::remove_var("PATH");
+            }
+        }
+    }
+
+    #[test]
+    fn everything_query_contains_root_restriction() {
+        let req = request("needle");
+        let root = PathBuf::from("C:/Search Root");
+        let spec = build_everything_command_for_root(
+            PathBuf::from("es.exe"),
+            &req,
+            &FileSearchSettings::default(),
+            Some(&root),
+        );
+        assert!(spec.args.windows(2).any(|w| {
+            w == [
+                OsString::from("-s"),
+                OsString::from("path:\"C:/Search Root\" needle"),
+            ]
+        }));
+    }
+
+    #[test]
     fn builds_argument_vector_with_filters_and_dash_query_as_value() {
         let mut req = request("-dash query");
         req.max_results = 7;
@@ -565,22 +686,18 @@ mod tests {
             PathBuf::from("C:/Program Files/Everything/es.exe")
         );
         assert!(spec.args.contains(&OsString::from("-csv")));
-        assert!(
-            spec.args
-                .windows(2)
-                .any(|w| w == [OsString::from("-n"), OsString::from("7")])
-        );
-        assert!(
-            spec.args
-                .windows(2)
-                .any(|w| w == [OsString::from("-s"), OsString::from("-dash query")])
-        );
-        assert!(
-            !spec
-                .args
-                .iter()
-                .any(|a| a == "-dash query" && spec.args.first() == Some(a))
-        );
+        assert!(spec
+            .args
+            .windows(2)
+            .any(|w| w == [OsString::from("-n"), OsString::from("7")]));
+        assert!(spec
+            .args
+            .windows(2)
+            .any(|w| w == [OsString::from("-s"), OsString::from("-dash query")]));
+        assert!(!spec
+            .args
+            .iter()
+            .any(|a| a == "-dash query" && spec.args.first() == Some(a)));
     }
 
     #[test]
@@ -595,18 +712,14 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].kind, FileKind::File);
         assert_eq!(results[1].kind, FileKind::Directory);
-        assert!(
-            results[0]
-                .path
-                .to_string_lossy()
-                .contains("path with spaces")
-        );
+        assert!(results[0]
+            .path
+            .to_string_lossy()
+            .contains("path with spaces"));
         assert!(results[1].path.to_string_lossy().contains("ユニコード"));
-        assert!(
-            parse_everything_output("", &request("x"))
-                .unwrap()
-                .is_empty()
-        );
+        assert!(parse_everything_output("", &request("x"))
+            .unwrap()
+            .is_empty());
         assert!(parse_everything_output("\"unterminated", &request("x")).is_err());
     }
 
@@ -649,8 +762,12 @@ exit /b 3
             everything_executable_path: script,
             ..FileSearchSettings::default()
         };
+        let mut req = request("x");
+        req.scope = SearchScope::Roots {
+            roots: vec![temp.path().to_path_buf()],
+        };
         let err = search_with_everything(
-            request("x"),
+            req,
             &settings,
             &CancellationToken::new(),
             &mpsc::channel().0,
@@ -674,17 +791,14 @@ exit /b 3
             return;
         }
         let (tx, rx) = mpsc::channel();
-        search_with_everything(
-            request("definitely-not-a-real-file-search-fixture"),
-            &settings,
-            &CancellationToken::new(),
-            &tx,
-            SearchId(99),
-        )
-        .unwrap();
-        assert!(
-            rx.try_iter()
-                .any(|event| matches!(event, SearchEvent::Completed { id: SearchId(99) }))
-        );
+        let mut req = request("definitely-not-a-real-file-search-fixture");
+        req.scope = SearchScope::Roots {
+            roots: vec![std::env::current_dir().unwrap()],
+        };
+        search_with_everything(req, &settings, &CancellationToken::new(), &tx, SearchId(99))
+            .unwrap();
+        assert!(rx
+            .try_iter()
+            .any(|event| matches!(event, SearchEvent::Completed { id: SearchId(99) })));
     }
 }

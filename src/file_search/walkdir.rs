@@ -8,7 +8,7 @@ use crate::file_search::settings::FileSearchSettings;
 use crate::file_search::sorting::sort_filename_results;
 use std::cell::Cell;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use walkdir::{DirEntry, WalkDir};
 
@@ -47,6 +47,7 @@ pub struct WalkDirSearchSummary {
     pub skipped_entries: u64,
     pub inaccessible_entries: u64,
     pub cancelled: bool,
+    pub root_errors: Vec<String>,
 }
 
 pub fn search_filenames_in_directory(
@@ -77,14 +78,34 @@ pub fn search_filenames_in_directory(
     let mut summary = WalkDirSearchSummary::default();
     let skipped_before_descent = Cell::new(0_u64);
     let mut ranked_results = Vec::new();
+    let mut seen_results = HashSet::new();
+    let resolved_roots: Vec<PathBuf> = roots
+        .into_iter()
+        .filter_map(|root| match root.canonicalize() {
+            Ok(resolved) if resolved.is_dir() => Some(resolved),
+            Ok(resolved) => {
+                summary
+                    .root_errors
+                    .push(format!("{} is not a directory", resolved.display()));
+                None
+            }
+            Err(err) => {
+                summary
+                    .root_errors
+                    .push(format!("{}: {err}", root.display()));
+                None
+            }
+        })
+        .collect();
+    let roots = dedup_resolved_roots(resolved_roots);
+    if roots.is_empty() {
+        return Err("walkdir filename search requires at least one usable root".to_owned());
+    }
 
     for root in roots {
         if cancellation.is_cancelled() {
             summary.cancelled = true;
             break;
-        }
-        if !root.is_dir() {
-            continue;
         }
         let iter = WalkDir::new(&root).into_iter().filter_entry(|entry| {
             if cancellation.is_cancelled() {
@@ -129,6 +150,10 @@ pub fn search_filenames_in_directory(
             if let Some(rank) =
                 rank_filename_match(&file_name, entry.path(), &needle, request.case_sensitive)
             {
+                let identity = crate::file_search::model::normalize_path_for_identity(entry.path());
+                if !seen_results.insert(identity) {
+                    continue;
+                }
                 let result = FilenameResult {
                     path: entry.path().to_path_buf(),
                     file_name,
@@ -190,6 +215,20 @@ pub fn search_filenames_in_directory(
         event_sender.send(SearchEvent::Completed { id: search_id })
     };
     Ok(summary)
+}
+
+fn dedup_resolved_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut result: Vec<PathBuf> = Vec::new();
+    'outer: for root in roots {
+        for existing in &result {
+            if root == *existing || root.starts_with(existing) {
+                continue 'outer;
+            }
+        }
+        result.retain(|existing| !existing.starts_with(&root));
+        result.push(root);
+    }
+    result
 }
 
 fn should_descend(
@@ -349,6 +388,59 @@ mod tests {
             .count();
         assert_eq!(count, 1);
         assert_eq!(summary.results_found, 1);
+    }
+
+    #[test]
+    fn invalid_roots_are_reported_while_valid_roots_are_searched() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("match.txt"), "a").unwrap();
+        let mut req = request(temp.path().to_path_buf(), "match", 20);
+        req.scope = SearchScope::Roots {
+            roots: vec![temp.path().to_path_buf(), temp.path().join("missing")],
+        };
+        let (summary, events) = run(req);
+        assert_eq!(summary.results_found, 1);
+        assert_eq!(summary.root_errors.len(), 1);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, SearchEvent::Result { .. })));
+    }
+
+    #[test]
+    fn repeated_and_overlapping_roots_do_not_duplicate_results() {
+        let temp = tempfile::tempdir().unwrap();
+        let nested = temp.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("match.txt"), "a").unwrap();
+        let mut req = request(temp.path().to_path_buf(), "match", 20);
+        req.scope = SearchScope::Roots {
+            roots: vec![temp.path().to_path_buf(), nested, temp.path().to_path_buf()],
+        };
+        let (summary, events) = run(req);
+        assert_eq!(summary.results_found, 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, SearchEvent::Result { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn empty_or_invalid_roots_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut req = request(temp.path().join("missing"), "match", 20);
+        req.scope = SearchScope::Roots { roots: vec![] };
+        let (tx, _) = mpsc::channel();
+        assert!(search_filenames_in_directory(
+            req,
+            &FileSearchSettings::default(),
+            &CancellationToken::new(),
+            &tx,
+            SearchId(1)
+        )
+        .is_err());
     }
 
     #[test]

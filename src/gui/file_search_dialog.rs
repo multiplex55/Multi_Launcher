@@ -145,6 +145,17 @@ pub fn dedup_search_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathB
     deduped
 }
 
+pub fn resolve_valid_roots(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    dedup_search_paths(paths.into_iter().filter_map(|path| {
+        let trimmed = path.to_string_lossy().trim().to_owned();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let path = PathBuf::from(trimmed);
+        path.canonicalize().ok().filter(|p| p.is_dir())
+    }))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectedFileSearchResultPayload {
     Filename {
@@ -199,7 +210,7 @@ pub struct FileSearchDialogState {
     pub selected_mode: FileSearchMode,
     pub selected_scope: FileSearchScopeMode,
     pub search_text: String,
-    pub root_directory: String,
+    pub custom_roots: Vec<String>,
     pub case_sensitive: bool,
     pub include_hidden: bool,
     pub active_search_id: Option<SearchId>,
@@ -228,7 +239,7 @@ impl Default for FileSearchDialogState {
             selected_mode: FileSearchMode::Filename,
             selected_scope: FileSearchScopeMode::Global,
             search_text: String::new(),
-            root_directory: String::new(),
+            custom_roots: Vec::new(),
             case_sensitive: false,
             include_hidden: false,
             active_search_id: None,
@@ -290,7 +301,7 @@ impl FileSearchDialogState {
         self.selected_mode = mode;
         if let Some(root) = root {
             self.selected_scope = FileSearchScopeMode::Directory;
-            self.root_directory = root.display().to_string();
+            self.custom_roots = vec![root.display().to_string()];
         }
         self.search_text = text;
         self.open();
@@ -331,23 +342,24 @@ impl FileSearchDialogState {
         }
         let scope = match self.selected_scope {
             FileSearchScopeMode::Global => {
-                let roots = dedup_search_paths(self.settings.global_search_roots.clone());
+                let roots = resolve_valid_roots(self.settings.global_search_roots.clone());
                 if roots.is_empty() {
-                    self.warning_error_message =
-                        Some("Global file search has no configured roots.".to_string());
+                    self.warning_error_message = Some(
+                        "Configure at least one valid global search root in File Search settings."
+                            .to_string(),
+                    );
                     return None;
                 }
                 SearchScope::Roots { roots }
             }
             FileSearchScopeMode::Directory => {
-                let root = self.root_directory.trim();
-                if root.is_empty() {
-                    self.warning_error_message = Some("Choose a root directory first.".to_string());
+                let roots = resolve_valid_roots(self.custom_roots.iter().map(PathBuf::from));
+                if roots.is_empty() {
+                    self.warning_error_message =
+                        Some("Choose at least one valid root directory first.".to_string());
                     return None;
                 }
-                SearchScope::Roots {
-                    roots: dedup_search_paths([PathBuf::from(root)]),
-                }
+                SearchScope::Roots { roots }
             }
         };
         let request = SearchRequest {
@@ -740,28 +752,87 @@ impl FileSearchDialogState {
                 ui.ctx().request_repaint();
             }
         });
-        ui.horizontal(|ui| {
-            ui.label("Root");
-            let root_response = ui.add(
-                egui::TextEdit::singleline(&mut self.root_directory)
-                    .id_source(Self::root_field_id()),
-            );
-            if root_response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                self.start_search(coordinator);
-                ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
-                ui.ctx().request_repaint();
-            }
-            if ui.button("Pick…").clicked() {
-                if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                    self.root_directory = path.display().to_string();
-                    self.selected_scope = FileSearchScopeMode::Directory;
+        match self.selected_scope {
+            FileSearchScopeMode::Global => {
+                let valid_global_roots =
+                    resolve_valid_roots(self.settings.global_search_roots.clone());
+                ui.label(format!(
+                    "Global roots: {} configured",
+                    valid_global_roots.len()
+                ));
+                if valid_global_roots.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        "Configure at least one valid global search root in File Search settings.",
+                    );
                 }
+                egui::CollapsingHeader::new("Global root list")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        for root in &valid_global_roots {
+                            ui.label(root.display().to_string());
+                        }
+                    });
             }
-        });
+            FileSearchScopeMode::Directory => {
+                ui.vertical(|ui| {
+                    if ui.button("Add folder…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.custom_roots.push(path.display().to_string());
+                        }
+                    }
+                    let mut remove = None;
+                    let mut submit_search = false;
+                    for (idx, root) in self.custom_roots.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label("Root");
+                            let root_response = ui.add(
+                                egui::TextEdit::singleline(root)
+                                    .id_source((Self::root_field_id(), idx)),
+                            );
+                            if root_response.has_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                            {
+                                submit_search = true;
+                                ui.input_mut(|i| {
+                                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                                });
+                                ui.ctx().request_repaint();
+                            }
+                            let valid = PathBuf::from(root.trim())
+                                .canonicalize()
+                                .is_ok_and(|p| p.is_dir());
+                            ui.label(if valid { "valid" } else { "invalid" });
+                            if ui.button("Remove").clicked() {
+                                remove = Some(idx);
+                            }
+                        });
+                    }
+                    if submit_search {
+                        self.start_search(coordinator);
+                    }
+                    if let Some(idx) = remove {
+                        self.custom_roots.remove(idx);
+                    }
+                });
+            }
+        }
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.case_sensitive, "Case-sensitive");
             ui.checkbox(&mut self.include_hidden, "Include hidden");
-            if ui.button("Search").clicked() {
+            let search_enabled = !self.search_text.trim().is_empty()
+                && match self.selected_scope {
+                    FileSearchScopeMode::Global => {
+                        !resolve_valid_roots(self.settings.global_search_roots.clone()).is_empty()
+                    }
+                    FileSearchScopeMode::Directory => {
+                        !resolve_valid_roots(self.custom_roots.iter().map(PathBuf::from)).is_empty()
+                    }
+                };
+            if ui
+                .add_enabled(search_enabled, egui::Button::new("Search"))
+                .clicked()
+            {
                 if self.start_search(coordinator).is_some() {
                     ui.ctx().request_repaint();
                 }
@@ -1359,7 +1430,7 @@ impl FileSearchDialogState {
             Some(root) => {
                 self.selected_mode = mode;
                 self.selected_scope = FileSearchScopeMode::Directory;
-                self.root_directory = root.display().to_string();
+                self.custom_roots = vec![root.display().to_string()];
                 self.start_search(coordinator);
             }
             None => {
@@ -1449,11 +1520,14 @@ mod tests {
 
     #[test]
     fn global_roots_resolve_into_roots_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root-a");
+        std::fs::create_dir(&root).unwrap();
         let executor = RecordingExecutor::new();
         let mut state = FileSearchDialogState {
             search_text: "needle".into(),
             settings: FileSearchSettings {
-                global_search_roots: vec![PathBuf::from("/tmp/root-a")],
+                global_search_roots: vec![root.clone()],
                 ..FileSearchSettings::default()
             },
             ..Default::default()
@@ -1464,7 +1538,7 @@ mod tests {
         assert_eq!(
             request.scope,
             SearchScope::Roots {
-                roots: vec![PathBuf::from("/tmp/root-a")]
+                roots: vec![root.canonicalize().unwrap()]
             }
         );
     }
@@ -1484,17 +1558,20 @@ mod tests {
         assert!(state.start_search(&mut coordinator).is_none());
         assert_eq!(
             state.warning_error_message.as_deref(),
-            Some("Global file search has no configured roots.")
+            Some("Configure at least one valid global search root in File Search settings.")
         );
     }
 
     #[test]
     fn repeated_global_roots_are_deduplicated() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
         let executor = RecordingExecutor::new();
         let mut state = FileSearchDialogState {
             search_text: "needle".into(),
             settings: FileSearchSettings {
-                global_search_roots: vec![PathBuf::from("/tmp/root"), PathBuf::from("/tmp/root")],
+                global_search_roots: vec![root.clone(), root.clone()],
                 ..FileSearchSettings::default()
             },
             ..Default::default()
@@ -1505,18 +1582,19 @@ mod tests {
         assert_eq!(
             request.scope,
             SearchScope::Roots {
-                roots: vec![PathBuf::from("/tmp/root")]
+                roots: vec![root.canonicalize().unwrap()]
             }
         );
     }
 
     #[test]
-    fn old_single_directory_launcher_action_resolves_to_one_root() {
+    fn custom_root_launcher_action_resolves_to_one_root() {
+        let temp = tempfile::tempdir().unwrap();
         let executor = RecordingExecutor::new();
         let mut state = FileSearchDialogState {
             search_text: "needle".into(),
             selected_scope: FileSearchScopeMode::Directory,
-            root_directory: "/tmp/project".into(),
+            custom_roots: vec![temp.path().display().to_string()],
             ..Default::default()
         };
 
@@ -1525,7 +1603,7 @@ mod tests {
         assert_eq!(
             request.scope,
             SearchScope::Roots {
-                roots: vec![PathBuf::from("/tmp/project")]
+                roots: vec![temp.path().canonicalize().unwrap()]
             }
         );
     }
@@ -2512,7 +2590,7 @@ mod tests {
             FileSearchMode::Filename,
             &mut coordinator,
         );
-        assert_eq!(state.root_directory, "/tmp/project");
+        assert_eq!(state.custom_roots, vec!["/tmp/project".to_string()]);
 
         state.start_nested_search(
             std::path::Path::new("/tmp/project/src"),
@@ -2520,7 +2598,7 @@ mod tests {
             FileSearchMode::Content,
             &mut coordinator,
         );
-        assert_eq!(state.root_directory, "/tmp/project/src");
+        assert_eq!(state.custom_roots, vec!["/tmp/project/src".to_string()]);
         assert_eq!(state.selected_mode, FileSearchMode::Content);
     }
     fn filename_search_result(path: &str) -> SearchResult {
