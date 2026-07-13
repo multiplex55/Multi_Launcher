@@ -286,6 +286,7 @@ pub fn search_with_everything(
                     directories_scanned: 0,
                     results_found: emitted,
                     status: SearchStatus::Completed,
+                    global_truncated: false,
                 },
             });
             let _ = event_sender.send(SearchEvent::Completed { id: search_id });

@@ -99,6 +99,7 @@ pub struct SearchProgress {
     pub directories_scanned: u64,
     pub results_found: usize,
     pub status: SearchStatus,
+    pub global_truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

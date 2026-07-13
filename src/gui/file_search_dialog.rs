@@ -1839,6 +1839,7 @@ mod tests {
                 directories_scanned: 5,
                 results_found: 1,
                 status: SearchStatus::Running,
+                global_truncated: false,
             },
         });
         state.apply_event(SearchEvent::Completed { id: SearchId(7) });
