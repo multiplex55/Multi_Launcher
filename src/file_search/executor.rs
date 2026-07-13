@@ -79,7 +79,23 @@ impl FileSearchExecutor {
     fn availability(&self, backend: SearchBackend) -> Result<(), String> {
         match backend {
             SearchBackend::Ripgrep => {
-                resolve_ripgrep_executable(&self.settings.ripgrep_executable_path)
+                let configured = &self.settings.ripgrep_executable_path;
+                if configured.is_absolute() && !configured.is_file() {
+                    return Err(format!(
+                        "ripgrep executable was not found at configured path '{}'",
+                        configured.display()
+                    ));
+                }
+                if !configured.as_os_str().is_empty()
+                    && configured.components().count() > 1
+                    && !configured.is_absolute()
+                {
+                    return Err(format!(
+                        "ripgrep executable path '{}' must be absolute when it includes directories",
+                        configured.display()
+                    ));
+                }
+                resolve_ripgrep_executable(configured)
                     .map(|_| ())
                     .map_err(|e| e.to_string())
             }
@@ -102,6 +118,21 @@ impl FileSearchExecutor {
             SearchBackend::WalkDir => self.walkdir.clone(),
             SearchBackend::Everything => self.everything.clone(),
         }
+    }
+
+    fn prepare_request_for_backend(
+        &self,
+        mut request: SearchRequest,
+        backend: SearchBackend,
+    ) -> SearchRequest {
+        if backend == SearchBackend::WalkDir {
+            if let SearchScope::Roots { roots } = &mut request.scope {
+                if roots.is_empty() {
+                    *roots = self.settings.global_search_roots.clone();
+                }
+            }
+        }
+        request
     }
 }
 
@@ -129,6 +160,7 @@ impl SearchExecutor for FileSearchExecutor {
                     if events.send(SearchEvent::Started { id, backend }).is_err() {
                         return;
                     }
+                    let request = self.prepare_request_for_backend(request, backend);
                     self.executor_for(backend)
                         .execute(id, request, token, events);
                     return;

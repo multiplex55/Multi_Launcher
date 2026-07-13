@@ -57,7 +57,9 @@ pub fn search_filenames_in_directory(
     search_id: SearchId,
 ) -> Result<WalkDirSearchSummary, String> {
     let roots = match &request.scope {
-        SearchScope::Roots { roots } if roots.is_empty() => settings.global_search_roots.clone(),
+        SearchScope::Roots { roots } if roots.is_empty() => {
+            return Err("walkdir filename search requires at least one root".to_owned());
+        }
         SearchScope::Roots { roots } => roots.clone(),
         SearchScope::Files { files } => files.clone(),
     };

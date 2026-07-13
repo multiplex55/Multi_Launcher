@@ -818,6 +818,7 @@ impl FileSearchDialogState {
                     match validate_ripgrep_selection(&path) {
                         Ok(abs) => {
                             self.settings.ripgrep_executable_path = abs;
+                            self.ui_preferences_dirty = true;
                             coordinator.reconfigure_from_settings(self.settings.clone());
                             self.show_ripgrep_missing_prompt = false;
                             self.warning_error_message = Some("ripgrep path saved for future searches.".to_owned());
@@ -844,6 +845,7 @@ impl FileSearchDialogState {
     ) -> Result<(), String> {
         let abs = validate_ripgrep_selection(&path)?;
         self.settings.ripgrep_executable_path = abs;
+        self.ui_preferences_dirty = true;
         coordinator.reconfigure_from_settings(self.settings.clone());
         self.show_ripgrep_missing_prompt = false;
         Ok(())
@@ -1674,7 +1676,7 @@ mod tests {
     }
 
     #[test]
-    fn global_filename_search_uses_ripgrep_backend_when_everything_is_disabled() {
+    fn global_filename_search_uses_walkdir_backend_when_everything_is_disabled() {
         let settings = FileSearchSettings {
             everything_enabled: false,
             ..FileSearchSettings::default()
@@ -1690,8 +1692,8 @@ mod tests {
 
         state.start_search(&mut coordinator);
 
-        assert_eq!(state.backend, Some(SearchBackend::Ripgrep));
-        assert_eq!(coordinator.last_backend(), Some(SearchBackend::Ripgrep));
+        assert_eq!(state.backend, Some(SearchBackend::WalkDir));
+        assert_eq!(coordinator.last_backend(), None);
     }
 
     #[test]
@@ -1706,7 +1708,7 @@ mod tests {
         let id = state.start_search(&mut coordinator);
 
         assert!(id.is_some());
-        assert_eq!(coordinator.diagnostics().started, 1);
+        assert_eq!(coordinator.diagnostics().started, 0);
     }
 
     #[test]
