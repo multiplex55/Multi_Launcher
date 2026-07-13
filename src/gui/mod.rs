@@ -616,7 +616,36 @@ impl LauncherApp {
             .reconfigure_from_settings(settings.clone());
         self.file_search_dialog.case_sensitive = settings.case_sensitive;
         self.file_search_dialog.include_hidden = settings.include_hidden_files;
+        self.file_search_dialog
+            .set_ui_preferences(settings.ui_preferences.clone());
         self.file_search_dialog.settings = settings;
+    }
+
+    pub(crate) fn save_file_search_ui_preferences_if_dirty(&mut self) {
+        if !self.file_search_dialog.ui_preferences_dirty {
+            return;
+        }
+        self.file_search_dialog.save_dirty_ui_preferences();
+        if let Ok(mut settings) = crate::settings::Settings::load(&self.settings_path) {
+            if let Ok(value) = serde_json::to_value(&self.file_search_dialog.settings) {
+                settings
+                    .plugin_settings
+                    .insert("file_search".to_owned(), value);
+                let _ = settings.save(&self.settings_path);
+            }
+        }
+    }
+
+    pub(crate) fn merge_file_search_ui_preferences_into_settings(
+        &mut self,
+        settings: &mut crate::settings::Settings,
+    ) {
+        self.file_search_dialog.save_dirty_ui_preferences();
+        if let Ok(value) = serde_json::to_value(&self.file_search_dialog.settings) {
+            settings
+                .plugin_settings
+                .insert("file_search".to_owned(), value);
+        }
     }
 
     pub fn open_theme_settings_dialog(&mut self) {
@@ -1179,6 +1208,7 @@ impl LauncherApp {
             fav_dialog: FavDialog::default(),
             file_search_dialog: FileSearchDialogState {
                 settings: file_search_settings.clone(),
+                ui_preferences: file_search_settings.ui_preferences.clone(),
                 case_sensitive: file_search_settings.case_sensitive,
                 include_hidden: file_search_settings.include_hidden_files,
                 ..FileSearchDialogState::default()
@@ -3867,7 +3897,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut settings = Settings::default();
         let file_search_settings = crate::file_search::settings::FileSearchSettings {
-            global_content_search_roots: vec![std::path::PathBuf::from("/tmp/search-root")],
+            global_search_roots: vec![std::path::PathBuf::from("/tmp/search-root")],
             excluded_directory_names: vec!["skip-me".to_owned()],
             max_search_results: 123,
             max_matches_per_content_file: 7,

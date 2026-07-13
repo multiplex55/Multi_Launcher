@@ -17,7 +17,8 @@ impl SettingsEditor {
         self.sync_from_plugin_settings();
         match Settings::load(&app.settings_path) {
             Ok(current) => {
-                let new_settings = self.to_settings(&current);
+                let mut new_settings = self.to_settings(&current);
+                app.merge_file_search_ui_preferences_into_settings(&mut new_settings);
                 if let Err(e) = new_settings.save(&app.settings_path) {
                     app.report_ui_error(UiErrorEvent::new(
                         "settings_editor.save",

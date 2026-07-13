@@ -10,12 +10,11 @@ use crate::file_search::actions::{
 };
 use crate::file_search::coordinator::{SearchCoordinator, event_id};
 use crate::file_search::model::{
-    ContentMatch, ContentMatchMode, FileKind, FileSearchResultKey, FileTypeFilter,
-    FilenameMatchMode, PathIdentity, SearchBackend, SearchEvent, SearchId, SearchKind,
-    SearchRequest, SearchResult, SearchScope, SearchStatus,
+    ContentMatch, FileKind, FileSearchResultKey, FileTypeFilter, PathIdentity, SearchBackend,
+    SearchEvent, SearchId, SearchKind, SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::preview::PreviewRequest;
-use crate::file_search::settings::FileSearchSettings;
+use crate::file_search::settings::{FileSearchSettings, FileSearchUiPreferences};
 use crate::gui::file_search_preview_dialog::FileSearchPreviewDialogState;
 use eframe::egui;
 use std::path::PathBuf;
@@ -133,18 +132,6 @@ pub struct FileSearchResultRow {
     pub payload: FileSearchRowPayload,
 }
 
-fn default_filename_match_mode() -> FilenameMatchMode {
-    FilenameMatchMode::RankedSubstring
-}
-
-fn default_content_match_mode() -> ContentMatchMode {
-    ContentMatchMode::ExactPhrase
-}
-
-fn default_file_type_filter() -> FileTypeFilter {
-    FileTypeFilter::FilesAndDirectories
-}
-
 pub fn dedup_search_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     let mut seen = std::collections::HashSet::new();
     let mut deduped = Vec::new();
@@ -226,6 +213,8 @@ pub struct FileSearchDialogState {
     pub preview_dialog: FileSearchPreviewDialogState,
     pub persisted_window_size: egui::Vec2,
     pub settings: FileSearchSettings,
+    pub ui_preferences: FileSearchUiPreferences,
+    pub ui_preferences_dirty: bool,
     pub request_search_focus: bool,
     pub request_immediate_repaint: bool,
 }
@@ -251,6 +240,8 @@ impl Default for FileSearchDialogState {
             preview_dialog: FileSearchPreviewDialogState::default(),
             persisted_window_size: DEFAULT_WINDOW_SIZE,
             settings: FileSearchSettings::default(),
+            ui_preferences: FileSearchUiPreferences::default(),
+            ui_preferences_dirty: false,
             request_search_focus: false,
             request_immediate_repaint: false,
         }
@@ -327,7 +318,7 @@ impl FileSearchDialogState {
         }
         let scope = match self.selected_scope {
             FileSearchScopeMode::Global => {
-                let roots = dedup_search_paths(self.settings.global_content_search_roots.clone());
+                let roots = dedup_search_paths(self.settings.global_search_roots.clone());
                 if roots.is_empty() {
                     self.warning_error_message =
                         Some("Global file search has no configured roots.".to_string());
@@ -354,13 +345,20 @@ impl FileSearchDialogState {
             include_hidden_files: self.include_hidden,
             max_results: self.settings.max_search_results.max(1),
             max_file_size_bytes: self.settings.max_content_search_file_size_bytes.max(1),
-            included_extensions: Vec::new(),
-            excluded_extensions: Vec::new(),
-            excluded_directory_names: self.settings.excluded_directory_names.clone(),
-            filename_match_mode: default_filename_match_mode(),
-            content_match_mode: default_content_match_mode(),
-            whole_word: false,
-            file_type_filter: default_file_type_filter(),
+            included_extensions: self.ui_preferences.included_extensions.clone(),
+            excluded_extensions: self.ui_preferences.excluded_extensions.clone(),
+            excluded_directory_names: if self.ui_preferences.excluded_directory_names.is_empty() {
+                self.settings.excluded_directory_names.clone()
+            } else {
+                self.ui_preferences.excluded_directory_names.clone()
+            },
+            filename_match_mode: self.ui_preferences.filename_match_mode,
+            content_match_mode: self.ui_preferences.content_match_mode,
+            whole_word: self.ui_preferences.whole_word,
+            file_type_filter: match self.selected_mode {
+                FileSearchMode::Filename => self.ui_preferences.file_type_filter,
+                FileSearchMode::Content => FileTypeFilter::FilesOnly,
+            },
         };
         self.clear_results_and_selection();
         self.warning_error_message = None;
@@ -644,6 +642,37 @@ impl FileSearchDialogState {
             self.persisted_window_size = resp.response.rect.size();
         }
         self.open = open;
+    }
+
+    pub fn set_ui_preferences(&mut self, preferences: FileSearchUiPreferences) {
+        self.ui_preferences = preferences;
+        self.ui_preferences_dirty = false;
+    }
+
+    pub fn mark_ui_preferences_dirty(&mut self) {
+        self.ui_preferences_dirty = true;
+    }
+
+    pub fn update_ui_preferences(
+        &mut self,
+        update: impl FnOnce(&mut FileSearchUiPreferences),
+    ) -> bool {
+        let before = self.ui_preferences.clone();
+        update(&mut self.ui_preferences);
+        if self.ui_preferences != before {
+            self.mark_ui_preferences_dirty();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn save_dirty_ui_preferences(&mut self) {
+        if !self.ui_preferences_dirty {
+            return;
+        }
+        self.settings.ui_preferences = self.ui_preferences.clone();
+        self.ui_preferences_dirty = false;
     }
 
     fn contents(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {
@@ -1107,13 +1136,17 @@ impl FileSearchDialogState {
             include_hidden_files: self.include_hidden,
             max_results: 1,
             max_file_size_bytes: self.settings.max_content_search_file_size_bytes.max(1),
-            included_extensions: Vec::new(),
-            excluded_extensions: Vec::new(),
-            excluded_directory_names: Vec::new(),
-            filename_match_mode: default_filename_match_mode(),
-            content_match_mode: default_content_match_mode(),
-            whole_word: false,
-            file_type_filter: default_file_type_filter(),
+            included_extensions: self.ui_preferences.included_extensions.clone(),
+            excluded_extensions: self.ui_preferences.excluded_extensions.clone(),
+            excluded_directory_names: if self.ui_preferences.excluded_directory_names.is_empty() {
+                self.settings.excluded_directory_names.clone()
+            } else {
+                self.ui_preferences.excluded_directory_names.clone()
+            },
+            filename_match_mode: self.ui_preferences.filename_match_mode,
+            content_match_mode: self.ui_preferences.content_match_mode,
+            whole_word: self.ui_preferences.whole_word,
+            file_type_filter: FileTypeFilter::FilesOnly,
         };
         self.selected_mode = FileSearchMode::Content;
         self.clear_results_and_selection();
@@ -1315,12 +1348,35 @@ mod tests {
     }
 
     #[test]
+    fn dirty_state_changes_only_for_preferences() {
+        let mut state = FileSearchDialogState::default();
+
+        state.search_text = "needle".into();
+        state.selected_result = None;
+        assert!(!state.ui_preferences_dirty);
+
+        let changed = state.update_ui_preferences(|prefs| {
+            prefs.whole_word = true;
+        });
+        assert!(changed);
+        assert!(state.ui_preferences_dirty);
+
+        state.save_dirty_ui_preferences();
+        assert!(!state.ui_preferences_dirty);
+        let unchanged = state.update_ui_preferences(|prefs| {
+            prefs.whole_word = true;
+        });
+        assert!(!unchanged);
+        assert!(!state.ui_preferences_dirty);
+    }
+
+    #[test]
     fn global_roots_resolve_into_roots_scope() {
         let executor = RecordingExecutor::new();
         let mut state = FileSearchDialogState {
             search_text: "needle".into(),
             settings: FileSearchSettings {
-                global_content_search_roots: vec![PathBuf::from("/tmp/root-a")],
+                global_search_roots: vec![PathBuf::from("/tmp/root-a")],
                 ..FileSearchSettings::default()
             },
             ..Default::default()
@@ -1341,7 +1397,7 @@ mod tests {
         let mut state = FileSearchDialogState {
             search_text: "needle".into(),
             settings: FileSearchSettings {
-                global_content_search_roots: vec![],
+                global_search_roots: vec![],
                 ..FileSearchSettings::default()
             },
             ..Default::default()
@@ -1361,10 +1417,7 @@ mod tests {
         let mut state = FileSearchDialogState {
             search_text: "needle".into(),
             settings: FileSearchSettings {
-                global_content_search_roots: vec![
-                    PathBuf::from("/tmp/root"),
-                    PathBuf::from("/tmp/root"),
-                ],
+                global_search_roots: vec![PathBuf::from("/tmp/root"), PathBuf::from("/tmp/root")],
                 ..FileSearchSettings::default()
             },
             ..Default::default()

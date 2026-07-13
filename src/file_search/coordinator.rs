@@ -5,7 +5,7 @@ use crate::file_search::model::{
 };
 use crate::file_search::settings::FileSearchSettings;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 
 #[derive(Debug, Clone, Default)]
@@ -261,7 +261,7 @@ fn roots_match_global_search_roots(
     if roots.is_empty() {
         return true;
     }
-    if roots.len() != settings.global_content_search_roots.len() {
+    if roots.len() != settings.global_search_roots.len() {
         return false;
     }
     let mut request_roots: Vec<_> = roots
@@ -269,7 +269,7 @@ fn roots_match_global_search_roots(
         .map(|path| crate::file_search::model::normalize_path_for_identity(path))
         .collect();
     let mut global_roots: Vec<_> = settings
-        .global_content_search_roots
+        .global_search_roots
         .iter()
         .map(|path| crate::file_search::model::normalize_path_for_identity(path))
         .collect();
@@ -740,9 +740,11 @@ mod tests {
                 ..
             } if result.file_name == expected
         )));
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, SearchEvent::Completed { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SearchEvent::Completed { .. }))
+        );
         assert_no_unwired_placeholder(&events);
     }
 
@@ -865,7 +867,7 @@ mod tests {
         let expected = "global-ripgrep-hit.txt";
         std::fs::write(temp.path().join(expected), "contents").expect("write file");
         let settings = FileSearchSettings {
-            global_content_search_roots: vec![temp.path().to_path_buf()],
+            global_search_roots: vec![temp.path().to_path_buf()],
             everything_enabled: false,
             ripgrep_executable_path: ripgrep,
             ..FileSearchSettings::default()
@@ -911,7 +913,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let missing_rg = temp.path().join("missing").join("rg");
         let settings = FileSearchSettings {
-            global_content_search_roots: vec![temp.path().to_path_buf()],
+            global_search_roots: vec![temp.path().to_path_buf()],
             everything_enabled: false,
             ripgrep_executable_path: missing_rg.clone(),
             ..FileSearchSettings::default()

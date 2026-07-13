@@ -260,7 +260,7 @@ fn constructing_manager_with_file_search_settings_preserves_omni_and_indexer_beh
     plugin_settings.insert(
         "file_search".to_string(),
         serde_json::to_value(FileSearchSettings {
-            global_content_search_roots: vec![dir.path().to_path_buf()],
+            global_search_roots: vec![dir.path().to_path_buf()],
             max_search_results: 7,
             everything_enabled: false,
             ..FileSearchSettings::default()

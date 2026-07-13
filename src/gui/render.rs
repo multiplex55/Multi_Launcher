@@ -1247,8 +1247,12 @@ impl eframe::App for LauncherApp {
         let mut fav_dlg = std::mem::take(&mut self.fav_dialog);
         fav_dlg.ui(ctx, self);
         self.fav_dialog = fav_dlg;
+        let file_search_was_open = self.file_search_dialog.open;
         self.file_search_dialog
             .ui(ctx, &mut self.file_search_coordinator);
+        if file_search_was_open && !self.file_search_dialog.open {
+            self.save_file_search_ui_preferences_if_dirty();
+        }
         self.file_search_dialog
             .preview_dialog
             .ui(ctx, &self.file_search_dialog.settings);
@@ -1358,6 +1362,7 @@ impl eframe::App for LauncherApp {
         self.unregister_all_hotkeys();
         self.visible_flag.store(false, Ordering::SeqCst);
         self.last_visible = false;
+        self.save_file_search_ui_preferences_if_dirty();
         if let Ok(mut settings) = crate::settings::Settings::load(&self.settings_path) {
             settings.window_size = Some(self.window_size);
             settings.pinned_panels = self.pinned_panels.clone();
