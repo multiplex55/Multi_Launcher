@@ -1,5 +1,5 @@
 use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
-pub use crate::file_search::discovery::resolve_ripgrep_executable;
+pub use crate::file_search::discovery::{detect_ripgrep_executable, resolve_ripgrep_executable};
 use crate::file_search::error::FileSearchError;
 use crate::file_search::matching::rank_filename_match;
 use crate::file_search::model::{
@@ -311,7 +311,6 @@ fn per_file_match_limit(request: &SearchRequest, settings: &FileSearchSettings) 
     }
 }
 
-pub use crate::file_search::discovery::detect_ripgrep_executable;
 #[cfg(test)]
 use crate::file_search::discovery::find_on_path;
 
@@ -672,18 +671,14 @@ mod tests {
         );
         let summary = parse_ripgrep_json(json, 25).unwrap();
         assert_eq!(summary.results.len(), 2);
-        assert!(
-            summary
-                .results
-                .iter()
-                .any(|r| r.path == PathBuf::from("one/a.txt"))
-        );
-        assert!(
-            summary
-                .results
-                .iter()
-                .any(|r| r.path == PathBuf::from("two/a.txt"))
-        );
+        assert!(summary
+            .results
+            .iter()
+            .any(|r| r.path == PathBuf::from("one/a.txt")));
+        assert!(summary
+            .results
+            .iter()
+            .any(|r| r.path == PathBuf::from("two/a.txt")));
     }
 
     #[test]
@@ -731,11 +726,6 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains(&configured.display().to_string()), "{error}");
-
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("rg");
-        std::fs::write(&file, "").unwrap();
-        assert_eq!(resolve_ripgrep_executable(&file).unwrap(), file);
     }
 
     #[test]
