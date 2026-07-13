@@ -247,8 +247,8 @@ fn extension_allowed(path: &Path, request: &SearchRequest) -> bool {
 }
 
 fn is_hidden(path: &Path) -> bool {
-    path.components()
-        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+    path.file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with('.'))
 }
 
 fn search_file(
