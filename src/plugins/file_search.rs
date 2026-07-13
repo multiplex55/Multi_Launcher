@@ -1,12 +1,13 @@
 use crate::actions::Action;
 use crate::file_search::actions::{
-    MODE_PREFIX, OPEN_ACTION, START_PREFIX, encode_action_payload, mode_action_payload,
-    start_action_payload,
+    encode_action_payload, mode_action_payload, start_action_payload, MODE_PREFIX, OPEN_ACTION,
+    START_PREFIX,
 };
+use crate::file_search::discovery::{self, ExecutableResolutionSource, ExecutableSearchContext};
 use crate::file_search::model::SearchKind;
 use crate::file_search::query::{FileSearchCommand, SearchRequestDraft};
 use crate::file_search::settings::{
-    DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES, FileSearchDiagnosticsState, FileSearchSettings,
+    FileSearchDiagnosticsState, FileSearchSettings, DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES,
 };
 use crate::plugin::Plugin;
 use eframe::egui;
@@ -116,11 +117,7 @@ impl Plugin for FileSearchPlugin {
             "Everything executable path",
             &mut cfg.everything_executable_path,
         );
-        path_field(
-            ui,
-            "ripgrep executable path",
-            &mut cfg.ripgrep_executable_path,
-        );
+        ripgrep_settings_ui(ui, &mut cfg.ripgrep_executable_path);
         ui.horizontal(|ui| {
             ui.label("Preferred editor command");
             ui.text_edit_singleline(&mut cfg.preferred_editor_command);
@@ -171,6 +168,130 @@ fn full_preview_limit_mib_editor(ui: &mut egui::Ui, bytes: &mut u64) {
     });
     if *bytes == 0 {
         *bytes = DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES;
+    }
+}
+
+fn ripgrep_settings_ui(ui: &mut egui::Ui, path: &mut PathBuf) {
+    ui.separator();
+    ui.label("ripgrep executable");
+    let context = ExecutableSearchContext::from_process();
+    let mut text = path.display().to_string();
+    ui.horizontal(|ui| {
+        ui.label("Absolute path");
+        if ui.text_edit_singleline(&mut text).changed() {
+            *path = PathBuf::from(text.trim());
+        }
+        if ui.button("Browse…").clicked() {
+            #[cfg(windows)]
+            let dialog = rfd::FileDialog::new().add_filter("Executable", &["exe"]);
+            #[cfg(not(windows))]
+            let dialog = rfd::FileDialog::new();
+            if let Some(selected) = dialog.pick_file() {
+                *path = selected.canonicalize().unwrap_or(selected);
+            }
+        }
+    });
+
+    let automatic = discovery::discover_ripgrep(std::path::Path::new(""), &context);
+    let configured_resolution = discovery::discover_ripgrep(path, &context);
+    let display_resolution = configured_resolution.as_ref().or(automatic.as_ref());
+
+    ui.horizontal(|ui| {
+        if ui.button("Auto-detect").clicked() {
+            // Detection is intentionally non-mutating; the current automatic result is shown below.
+        }
+        if let Some(detected) = automatic
+            .as_ref()
+            .filter(|detected| detected.version.is_some())
+        {
+            ui.label(format!(
+                "Best detected candidate: {}",
+                detected.path.display()
+            ));
+            if detected.path != *path && ui.button("Use detected path").clicked() {
+                *path = detected.path.clone();
+            }
+        } else {
+            ui.label("Best detected candidate: not found");
+        }
+    });
+
+    ui.horizontal(|ui| {
+        if ui.button("Test").clicked() {
+            // The labels below always reflect testing the entered path first, falling back to auto-discovery when empty.
+        }
+        let test_resolution = if path.as_os_str().is_empty() {
+            automatic.as_ref()
+        } else {
+            configured_resolution.as_ref()
+        };
+        match test_resolution {
+            Some(resolution) if resolution.version.is_some() => {
+                ui.colored_label(egui::Color32::GREEN, "Validation: ripgrep is available");
+            }
+            Some(resolution) if !resolution.warnings.is_empty() => {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!("Validation: {}", resolution.warnings.join("; ")),
+                );
+            }
+            _ => {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    "Validation: ripgrep was not found or failed rg --version",
+                );
+            }
+        }
+    });
+
+    let open_folder_path = display_resolution
+        .and_then(|resolution| resolution.version.as_ref().map(|_| resolution.path.clone()))
+        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+    ui.add_enabled_ui(open_folder_path.is_some(), |ui| {
+        if ui.button("Open folder").clicked() {
+            if let Some(folder) = open_folder_path.as_ref() {
+                let _ = open::that(folder);
+            }
+        }
+    });
+
+    if let Some(resolution) = display_resolution {
+        ui.label(format!(
+            "Resolution source: {}",
+            resolution_source_label(&resolution.source)
+        ));
+        ui.label(format!(
+            "Detected version: {}",
+            resolution.version.as_deref().unwrap_or("not available")
+        ));
+        for warning in &resolution.warnings {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                format!("Validation warning: {warning}"),
+            );
+        }
+        if resolution.version.is_none() {
+            ui.colored_label(
+                egui::Color32::RED,
+                "Validation error: no usable ripgrep executable resolved",
+            );
+        }
+    } else {
+        ui.label("Resolution source: unavailable");
+        ui.label("Detected version: not available");
+        ui.colored_label(
+            egui::Color32::RED,
+            "Validation error: no usable ripgrep executable resolved",
+        );
+    }
+}
+
+fn resolution_source_label(source: &ExecutableResolutionSource) -> &'static str {
+    match source {
+        ExecutableResolutionSource::ConfiguredPath => "configured path",
+        ExecutableResolutionSource::LauncherSidecar => "launcher sidecar",
+        ExecutableResolutionSource::PortableToolsDirectory => "portable tools directory",
+        ExecutableResolutionSource::ProcessPath => "process PATH",
     }
 }
 

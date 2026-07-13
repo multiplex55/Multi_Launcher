@@ -287,8 +287,12 @@ impl FileSearchSettings {
             });
         }
 
-        if crate::file_search::ripgrep::resolve_ripgrep_executable(&self.ripgrep_executable_path)
-            .is_err()
+        let ripgrep_path = &self.ripgrep_executable_path;
+        let ripgrep_explicit_path_missing = !ripgrep_path.as_os_str().is_empty()
+            && ((ripgrep_path.is_absolute() && !ripgrep_path.is_file())
+                || (ripgrep_path.components().count() > 1 && !ripgrep_path.is_absolute()));
+        if ripgrep_explicit_path_missing
+            || crate::file_search::ripgrep::resolve_ripgrep_executable(ripgrep_path).is_err()
         {
             diagnostics.push(FileSearchSettingsDiagnostic::MissingExecutable {
                 name: "ripgrep",
