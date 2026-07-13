@@ -762,8 +762,12 @@ exit /b 3
             everything_executable_path: script,
             ..FileSearchSettings::default()
         };
+        let mut req = request("x");
+        req.scope = SearchScope::Roots {
+            roots: vec![temp.path().to_path_buf()],
+        };
         let err = search_with_everything(
-            request("x"),
+            req,
             &settings,
             &CancellationToken::new(),
             &mpsc::channel().0,
@@ -787,14 +791,12 @@ exit /b 3
             return;
         }
         let (tx, rx) = mpsc::channel();
-        search_with_everything(
-            request("definitely-not-a-real-file-search-fixture"),
-            &settings,
-            &CancellationToken::new(),
-            &tx,
-            SearchId(99),
-        )
-        .unwrap();
+        let mut req = request("definitely-not-a-real-file-search-fixture");
+        req.scope = SearchScope::Roots {
+            roots: vec![std::env::current_dir().unwrap()],
+        };
+        search_with_everything(req, &settings, &CancellationToken::new(), &tx, SearchId(99))
+            .unwrap();
         assert!(rx
             .try_iter()
             .any(|event| matches!(event, SearchEvent::Completed { id: SearchId(99) })));
