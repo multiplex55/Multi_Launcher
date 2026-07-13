@@ -5,7 +5,7 @@ use crate::file_search::model::{
 };
 use crate::file_search::settings::FileSearchSettings;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::thread;
 
 #[derive(Debug, Clone, Default)]
@@ -186,13 +186,20 @@ impl SearchCoordinator {
         settings: Option<&FileSearchSettings>,
     ) -> SearchBackend {
         match (&request.kind, &request.scope) {
-            (SearchKind::Filename, SearchScope::Roots { roots }) if roots.len() == 1 => {
-                SearchBackend::WalkDir
-            }
             (SearchKind::Filename, SearchScope::Roots { roots })
-                if settings.is_some_and(|settings| !settings.everything_enabled) =>
+                if settings.is_some_and(|settings| {
+                    !settings.everything_enabled && roots_match_global_search_roots(roots, settings)
+                }) =>
             {
                 SearchBackend::Ripgrep
+            }
+            (SearchKind::Filename, SearchScope::Roots { roots })
+                if roots.len() == 1
+                    && !settings.is_some_and(|settings| {
+                        roots_match_global_search_roots(roots, settings)
+                    }) =>
+            {
+                SearchBackend::WalkDir
             }
             (SearchKind::Filename, SearchScope::Roots { .. }) => SearchBackend::Everything,
             (SearchKind::Filename, SearchScope::Files { .. }) => SearchBackend::WalkDir,
@@ -245,6 +252,30 @@ impl SearchCoordinator {
             }
         }
     }
+}
+
+fn roots_match_global_search_roots(
+    roots: &[std::path::PathBuf],
+    settings: &FileSearchSettings,
+) -> bool {
+    if roots.is_empty() {
+        return true;
+    }
+    if roots.len() != settings.global_content_search_roots.len() {
+        return false;
+    }
+    let mut request_roots: Vec<_> = roots
+        .iter()
+        .map(|path| crate::file_search::model::normalize_path_for_identity(path))
+        .collect();
+    let mut global_roots: Vec<_> = settings
+        .global_content_search_roots
+        .iter()
+        .map(|path| crate::file_search::model::normalize_path_for_identity(path))
+        .collect();
+    request_roots.sort();
+    global_roots.sort();
+    request_roots == global_roots
 }
 
 pub fn event_id(event: &SearchEvent) -> SearchId {
@@ -709,11 +740,9 @@ mod tests {
                 ..
             } if result.file_name == expected
         )));
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, SearchEvent::Completed { .. }))
-        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, SearchEvent::Completed { .. })));
         assert_no_unwired_placeholder(&events);
     }
 
@@ -845,7 +874,9 @@ mod tests {
 
         coordinator.start_search(SearchRequest {
             kind: SearchKind::Filename,
-            scope: SearchScope::Roots { roots: Vec::new() },
+            scope: SearchScope::Roots {
+                roots: vec![temp.path().to_path_buf()],
+            },
             text: "global-ripgrep-hit".to_owned(),
             case_sensitive: false,
             include_hidden_files: false,

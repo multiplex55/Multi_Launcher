@@ -400,9 +400,12 @@ fn excluded_directory_names(
 
 fn search_roots(
     request: &SearchRequest,
-    _settings: &FileSearchSettings,
+    settings: &FileSearchSettings,
 ) -> Result<Vec<PathBuf>, FileSearchError> {
     let roots = match &request.scope {
+        SearchScope::Roots { roots } if roots.is_empty() => {
+            settings.global_content_search_roots.clone()
+        }
         SearchScope::Roots { roots } => roots.clone(),
         SearchScope::Files { files } => files.clone(),
     };
@@ -671,18 +674,14 @@ mod tests {
         );
         let summary = parse_ripgrep_json(json, 25).unwrap();
         assert_eq!(summary.results.len(), 2);
-        assert!(
-            summary
-                .results
-                .iter()
-                .any(|r| r.path == PathBuf::from("one/a.txt"))
-        );
-        assert!(
-            summary
-                .results
-                .iter()
-                .any(|r| r.path == PathBuf::from("two/a.txt"))
-        );
+        assert!(summary
+            .results
+            .iter()
+            .any(|r| r.path == PathBuf::from("one/a.txt")));
+        assert!(summary
+            .results
+            .iter()
+            .any(|r| r.path == PathBuf::from("two/a.txt")));
     }
 
     #[test]

@@ -349,7 +349,9 @@ mod tests {
         fs::write(temp.path().join(".secret/match.txt"), "b").unwrap();
         fs::write(temp.path().join("match.txt"), "c").unwrap();
 
-        let (summary, events) = run(request(temp.path().to_path_buf(), "match", 20));
+        let mut req = request(temp.path().to_path_buf(), "match", 20);
+        req.excluded_directory_names = vec!["node_modules".into()];
+        let (summary, events) = run(req);
         let count = events
             .iter()
             .filter(|e| matches!(e, SearchEvent::Result { .. }))
@@ -406,28 +408,24 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut req = request(temp.path().to_path_buf(), "x", 10);
         req.kind = SearchKind::Content;
-        assert!(
-            search_filenames_in_directory(
-                req,
-                &FileSearchSettings::default(),
-                &CancellationToken::new(),
-                &mpsc::channel().0,
-                SearchId(1)
-            )
-            .is_err()
-        );
+        assert!(search_filenames_in_directory(
+            req,
+            &FileSearchSettings::default(),
+            &CancellationToken::new(),
+            &mpsc::channel().0,
+            SearchId(1)
+        )
+        .is_err());
 
         let mut req = request(temp.path().to_path_buf(), "x", 10);
         req.scope = SearchScope::Roots { roots: Vec::new() };
-        assert!(
-            search_filenames_in_directory(
-                req,
-                &FileSearchSettings::default(),
-                &CancellationToken::new(),
-                &mpsc::channel().0,
-                SearchId(1)
-            )
-            .is_err()
-        );
+        assert!(search_filenames_in_directory(
+            req,
+            &FileSearchSettings::default(),
+            &CancellationToken::new(),
+            &mpsc::channel().0,
+            SearchId(1)
+        )
+        .is_err());
     }
 }
