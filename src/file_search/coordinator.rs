@@ -5,7 +5,7 @@ use crate::file_search::model::{
 };
 use crate::file_search::settings::FileSearchSettings;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::thread;
 
 #[derive(Debug, Clone, Default)]
@@ -186,14 +186,23 @@ impl SearchCoordinator {
         settings: Option<&FileSearchSettings>,
     ) -> SearchBackend {
         match (&request.kind, &request.scope) {
-            (SearchKind::Filename, SearchScope::Directory { .. }) => SearchBackend::WalkDir,
-            (SearchKind::Filename, SearchScope::Global)
-                if settings.is_some_and(|settings| !settings.everything_enabled) =>
+            (SearchKind::Filename, SearchScope::Roots { roots })
+                if settings.is_some_and(|settings| {
+                    !settings.everything_enabled && roots_match_global_search_roots(roots, settings)
+                }) =>
             {
                 SearchBackend::Ripgrep
             }
-            (SearchKind::Filename, SearchScope::Global) => SearchBackend::Everything,
-            (SearchKind::Filename, SearchScope::File { .. }) => SearchBackend::WalkDir,
+            (SearchKind::Filename, SearchScope::Roots { roots })
+                if roots.len() == 1
+                    && !settings.is_some_and(|settings| {
+                        roots_match_global_search_roots(roots, settings)
+                    }) =>
+            {
+                SearchBackend::WalkDir
+            }
+            (SearchKind::Filename, SearchScope::Roots { .. }) => SearchBackend::Everything,
+            (SearchKind::Filename, SearchScope::Files { .. }) => SearchBackend::WalkDir,
             (SearchKind::Content, _) => SearchBackend::Ripgrep,
         }
     }
@@ -243,6 +252,30 @@ impl SearchCoordinator {
             }
         }
     }
+}
+
+fn roots_match_global_search_roots(
+    roots: &[std::path::PathBuf],
+    settings: &FileSearchSettings,
+) -> bool {
+    if roots.is_empty() {
+        return true;
+    }
+    if roots.len() != settings.global_content_search_roots.len() {
+        return false;
+    }
+    let mut request_roots: Vec<_> = roots
+        .iter()
+        .map(|path| crate::file_search::model::normalize_path_for_identity(path))
+        .collect();
+    let mut global_roots: Vec<_> = settings
+        .global_content_search_roots
+        .iter()
+        .map(|path| crate::file_search::model::normalize_path_for_identity(path))
+        .collect();
+    request_roots.sort();
+    global_roots.sort();
+    request_roots == global_roots
 }
 
 pub fn event_id(event: &SearchEvent) -> SearchId {
@@ -330,6 +363,10 @@ mod tests {
                             size: None,
                             modified: None,
                             rank: FilenameRank::ExactFilename,
+                            match_quality: FilenameRank::ExactFilename,
+                            filename_match_ranges: Vec::new(),
+                            path_match_ranges: Vec::new(),
+                            arrival_index: i,
                         });
                         if !send_result_limited(
                             &events,
@@ -377,6 +414,10 @@ mod tests {
             included_extensions: Vec::new(),
             excluded_extensions: Vec::new(),
             excluded_directory_names: Vec::new(),
+            filename_match_mode: crate::file_search::model::FilenameMatchMode::RankedSubstring,
+            content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
+            whole_word: false,
+            file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
         }
     }
 
@@ -390,7 +431,9 @@ mod tests {
         assert_eq!(
             SearchCoordinator::select_backend(&request(
                 SearchKind::Filename,
-                SearchScope::Directory { root: ".".into() },
+                SearchScope::Roots {
+                    roots: vec![".".into()]
+                },
                 10,
             )),
             SearchBackend::WalkDir
@@ -398,7 +441,7 @@ mod tests {
         assert_eq!(
             SearchCoordinator::select_backend(&request(
                 SearchKind::Filename,
-                SearchScope::Global,
+                SearchScope::Roots { roots: Vec::new() },
                 10
             )),
             SearchBackend::Everything
@@ -406,8 +449,8 @@ mod tests {
         assert_eq!(
             SearchCoordinator::select_backend(&request(
                 SearchKind::Filename,
-                SearchScope::File {
-                    path: "file.txt".into()
+                SearchScope::Files {
+                    files: vec!["file.txt".into()]
                 },
                 10
             )),
@@ -416,7 +459,7 @@ mod tests {
         assert_eq!(
             SearchCoordinator::select_backend(&request(
                 SearchKind::Content,
-                SearchScope::Global,
+                SearchScope::Roots { roots: Vec::new() },
                 10
             )),
             SearchBackend::Ripgrep
@@ -432,7 +475,11 @@ mod tests {
 
         assert_eq!(
             SearchCoordinator::select_backend_with_settings(
-                &request(SearchKind::Filename, SearchScope::Global, 10),
+                &request(
+                    SearchKind::Filename,
+                    SearchScope::Roots { roots: Vec::new() },
+                    10
+                ),
                 Some(&settings),
             ),
             SearchBackend::Ripgrep
@@ -444,11 +491,19 @@ mod tests {
         let exec = FakeExecutor::new(vec![FakeMode::Empty, FakeMode::Empty]);
         let mut coordinator = SearchCoordinator::with_executor(exec);
         assert_eq!(
-            coordinator.start_search(request(SearchKind::Filename, SearchScope::Global, 10)),
+            coordinator.start_search(request(
+                SearchKind::Filename,
+                SearchScope::Roots { roots: Vec::new() },
+                10
+            )),
             SearchId(1)
         );
         assert_eq!(
-            coordinator.start_search(request(SearchKind::Filename, SearchScope::Global, 10)),
+            coordinator.start_search(request(
+                SearchKind::Filename,
+                SearchScope::Roots { roots: Vec::new() },
+                10
+            )),
             SearchId(2)
         );
     }
@@ -457,9 +512,17 @@ mod tests {
     fn starting_new_search_cancels_previous_token() {
         let exec = FakeExecutor::new(vec![FakeMode::Wait, FakeMode::Empty]);
         let mut coordinator = SearchCoordinator::with_executor(exec.clone());
-        coordinator.start_search(request(SearchKind::Filename, SearchScope::Global, 10));
+        coordinator.start_search(request(
+            SearchKind::Filename,
+            SearchScope::Roots { roots: Vec::new() },
+            10,
+        ));
         thread::sleep(Duration::from_millis(10));
-        coordinator.start_search(request(SearchKind::Filename, SearchScope::Global, 10));
+        coordinator.start_search(request(
+            SearchKind::Filename,
+            SearchScope::Roots { roots: Vec::new() },
+            10,
+        ));
         assert!(exec.token(0).is_cancelled());
     }
 
@@ -467,8 +530,16 @@ mod tests {
     fn stale_events_are_ignored_by_current_drain() {
         let exec = FakeExecutor::new(vec![FakeMode::Wait, FakeMode::Empty]);
         let mut coordinator = SearchCoordinator::with_executor(exec);
-        let old = coordinator.start_search(request(SearchKind::Filename, SearchScope::Global, 10));
-        let new = coordinator.start_search(request(SearchKind::Filename, SearchScope::Global, 10));
+        let old = coordinator.start_search(request(
+            SearchKind::Filename,
+            SearchScope::Roots { roots: Vec::new() },
+            10,
+        ));
+        let new = coordinator.start_search(request(
+            SearchKind::Filename,
+            SearchScope::Roots { roots: Vec::new() },
+            10,
+        ));
         let events = drain_after(&mut coordinator);
         assert!(events.iter().all(|event| event_id(event) == new));
         assert!(events.iter().all(|event| event_id(event) != old));
@@ -479,7 +550,11 @@ mod tests {
     fn successful_completion_updates_status() {
         let exec = FakeExecutor::new(vec![FakeMode::Success(1)]);
         let mut coordinator = SearchCoordinator::with_executor(exec);
-        let id = coordinator.start_search(request(SearchKind::Filename, SearchScope::Global, 10));
+        let id = coordinator.start_search(request(
+            SearchKind::Filename,
+            SearchScope::Roots { roots: Vec::new() },
+            10,
+        ));
         let events = drain_after(&mut coordinator);
         assert!(events.contains(&SearchEvent::Completed { id }));
         assert_eq!(coordinator.active_status(), SearchStatus::Completed);
@@ -489,7 +564,11 @@ mod tests {
     fn empty_completion_updates_status() {
         let exec = FakeExecutor::new(vec![FakeMode::Empty]);
         let mut coordinator = SearchCoordinator::with_executor(exec);
-        let id = coordinator.start_search(request(SearchKind::Filename, SearchScope::Global, 10));
+        let id = coordinator.start_search(request(
+            SearchKind::Filename,
+            SearchScope::Roots { roots: Vec::new() },
+            10,
+        ));
         let events = drain_after(&mut coordinator);
         assert_eq!(
             events,
@@ -507,7 +586,11 @@ mod tests {
     fn failure_updates_status_and_diagnostics() {
         let exec = FakeExecutor::new(vec![FakeMode::Failure]);
         let mut coordinator = SearchCoordinator::with_executor(exec);
-        coordinator.start_search(request(SearchKind::Filename, SearchScope::Global, 10));
+        coordinator.start_search(request(
+            SearchKind::Filename,
+            SearchScope::Roots { roots: Vec::new() },
+            10,
+        ));
         drain_after(&mut coordinator);
         assert_eq!(coordinator.active_status(), SearchStatus::Failed);
         assert_eq!(
@@ -520,7 +603,11 @@ mod tests {
     fn explicit_cancellation_sets_status_without_blocking() {
         let exec = FakeExecutor::new(vec![FakeMode::Wait]);
         let mut coordinator = SearchCoordinator::with_executor(exec);
-        let id = coordinator.start_search(request(SearchKind::Filename, SearchScope::Global, 10));
+        let id = coordinator.start_search(request(
+            SearchKind::Filename,
+            SearchScope::Roots { roots: Vec::new() },
+            10,
+        ));
         coordinator.cancel_active();
         let events = drain_after(&mut coordinator);
         assert!(events.contains(&SearchEvent::Cancelled { id }));
@@ -531,7 +618,11 @@ mod tests {
     fn result_limit_is_enforced() {
         let exec = FakeExecutor::new(vec![FakeMode::Success(5)]);
         let mut coordinator = SearchCoordinator::with_executor(exec);
-        coordinator.start_search(request(SearchKind::Filename, SearchScope::Global, 2));
+        coordinator.start_search(request(
+            SearchKind::Filename,
+            SearchScope::Roots { roots: Vec::new() },
+            2,
+        ));
         let events = drain_after(&mut coordinator);
         let results = events
             .iter()
@@ -586,8 +677,8 @@ mod tests {
         assert_eq!(coordinator.production_settings(), Some(&settings));
         coordinator.start_search(SearchRequest {
             kind: SearchKind::Filename,
-            scope: SearchScope::Directory {
-                root: temp.path().to_path_buf(),
+            scope: SearchScope::Roots {
+                roots: vec![temp.path().to_path_buf()],
             },
             text: expected.to_owned(),
             case_sensitive: settings.case_sensitive,
@@ -597,6 +688,10 @@ mod tests {
             included_extensions: Vec::new(),
             excluded_extensions: Vec::new(),
             excluded_directory_names: settings.excluded_directory_names.clone(),
+            filename_match_mode: crate::file_search::model::FilenameMatchMode::RankedSubstring,
+            content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
+            whole_word: false,
+            file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
         });
 
         let events = drain_until_terminal(&mut coordinator);
@@ -619,8 +714,8 @@ mod tests {
 
         coordinator.start_search(SearchRequest {
             kind: SearchKind::Filename,
-            scope: SearchScope::Directory {
-                root: temp.path().to_path_buf(),
+            scope: SearchScope::Roots {
+                roots: vec![temp.path().to_path_buf()],
             },
             text: expected.to_owned(),
             case_sensitive: false,
@@ -630,6 +725,10 @@ mod tests {
             included_extensions: Vec::new(),
             excluded_extensions: Vec::new(),
             excluded_directory_names: Vec::new(),
+            filename_match_mode: crate::file_search::model::FilenameMatchMode::RankedSubstring,
+            content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
+            whole_word: false,
+            file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
         });
 
         let events = drain_until_terminal(&mut coordinator);
@@ -641,11 +740,9 @@ mod tests {
                 ..
             } if result.file_name == expected
         )));
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, SearchEvent::Completed { .. }))
-        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, SearchEvent::Completed { .. })));
         assert_no_unwired_placeholder(&events);
     }
 
@@ -669,8 +766,8 @@ mod tests {
 
         coordinator.start_search(SearchRequest {
             kind: SearchKind::Content,
-            scope: SearchScope::Directory {
-                root: temp.path().to_path_buf(),
+            scope: SearchScope::Roots {
+                roots: vec![temp.path().to_path_buf()],
             },
             text: "needle".to_owned(),
             case_sensitive: settings.case_sensitive,
@@ -680,6 +777,10 @@ mod tests {
             included_extensions: Vec::new(),
             excluded_extensions: Vec::new(),
             excluded_directory_names: settings.excluded_directory_names.clone(),
+            filename_match_mode: crate::file_search::model::FilenameMatchMode::RankedSubstring,
+            content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
+            whole_word: false,
+            file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
         });
 
         let events = drain_until_terminal(&mut coordinator);
@@ -718,8 +819,8 @@ mod tests {
 
         coordinator.start_search(SearchRequest {
             kind: SearchKind::Content,
-            scope: SearchScope::Directory {
-                root: temp.path().to_path_buf(),
+            scope: SearchScope::Roots {
+                roots: vec![temp.path().to_path_buf()],
             },
             text: "needle".to_owned(),
             case_sensitive: false,
@@ -729,6 +830,10 @@ mod tests {
             included_extensions: Vec::new(),
             excluded_extensions: Vec::new(),
             excluded_directory_names: Vec::new(),
+            filename_match_mode: crate::file_search::model::FilenameMatchMode::RankedSubstring,
+            content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
+            whole_word: false,
+            file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
         });
 
         let events = drain_until_terminal(&mut coordinator);
@@ -769,7 +874,9 @@ mod tests {
 
         coordinator.start_search(SearchRequest {
             kind: SearchKind::Filename,
-            scope: SearchScope::Global,
+            scope: SearchScope::Roots {
+                roots: vec![temp.path().to_path_buf()],
+            },
             text: "global-ripgrep-hit".to_owned(),
             case_sensitive: false,
             include_hidden_files: false,
@@ -778,6 +885,10 @@ mod tests {
             included_extensions: Vec::new(),
             excluded_extensions: Vec::new(),
             excluded_directory_names: Vec::new(),
+            filename_match_mode: crate::file_search::model::FilenameMatchMode::RankedSubstring,
+            content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
+            whole_word: false,
+            file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
         });
 
         let events = drain_until_terminal(&mut coordinator);
@@ -809,7 +920,7 @@ mod tests {
 
         coordinator.start_search(SearchRequest {
             kind: SearchKind::Filename,
-            scope: SearchScope::Global,
+            scope: SearchScope::Roots { roots: Vec::new() },
             text: "needle".to_owned(),
             case_sensitive: false,
             include_hidden_files: false,
@@ -818,6 +929,10 @@ mod tests {
             included_extensions: Vec::new(),
             excluded_extensions: Vec::new(),
             excluded_directory_names: Vec::new(),
+            filename_match_mode: crate::file_search::model::FilenameMatchMode::RankedSubstring,
+            content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
+            whole_word: false,
+            file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
         });
 
         let events = drain_until_terminal(&mut coordinator);

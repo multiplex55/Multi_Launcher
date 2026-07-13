@@ -285,6 +285,10 @@ pub fn search_filenames_with_ripgrep(
                 size: metadata.as_ref().filter(|m| m.is_file()).map(|m| m.len()),
                 modified: metadata.and_then(|m| m.modified().ok()),
                 rank,
+                match_quality: rank,
+                filename_match_ranges: Vec::new(),
+                path_match_ranges: Vec::new(),
+                arrival_index: results.len(),
             });
             summary.results_found += 1;
             if results.len() >= request.max_results {
@@ -302,7 +306,7 @@ pub fn search_filenames_with_ripgrep(
 
 fn per_file_match_limit(request: &SearchRequest, settings: &FileSearchSettings) -> usize {
     match &request.scope {
-        SearchScope::File { .. } => usize::MAX,
+        SearchScope::Files { .. } => usize::MAX,
         _ => settings.max_matches_per_content_file,
     }
 }
@@ -384,9 +388,11 @@ fn normalize_ext(ext: &str) -> &str {
     ext.trim_start_matches('.')
 }
 
-fn excluded_directory_names(request: &SearchRequest, settings: &FileSearchSettings) -> Vec<String> {
-    let mut names = settings.excluded_directory_names.clone();
-    names.extend(request.excluded_directory_names.clone());
+fn excluded_directory_names(
+    request: &SearchRequest,
+    _settings: &FileSearchSettings,
+) -> Vec<String> {
+    let mut names = request.excluded_directory_names.clone();
     names.sort();
     names.dedup();
     names
@@ -397,9 +403,11 @@ fn search_roots(
     settings: &FileSearchSettings,
 ) -> Result<Vec<PathBuf>, FileSearchError> {
     let roots = match &request.scope {
-        SearchScope::Directory { root } => vec![root.clone()],
-        SearchScope::File { path } => vec![path.clone()],
-        SearchScope::Global => settings.global_content_search_roots.clone(),
+        SearchScope::Roots { roots } if roots.is_empty() => {
+            settings.global_content_search_roots.clone()
+        }
+        SearchScope::Roots { roots } => roots.clone(),
+        SearchScope::Files { files } => files.clone(),
     };
     for root in &roots {
         if !(root.is_dir() || root.is_file()) {
@@ -550,7 +558,7 @@ mod tests {
     fn req(root: PathBuf) -> SearchRequest {
         SearchRequest {
             kind: SearchKind::Content,
-            scope: SearchScope::Directory { root },
+            scope: SearchScope::Roots { roots: vec![root] },
             text: "needle".to_owned(),
             case_sensitive: false,
             include_hidden_files: false,
@@ -559,6 +567,10 @@ mod tests {
             included_extensions: vec![],
             excluded_extensions: vec![],
             excluded_directory_names: vec![],
+            filename_match_mode: crate::file_search::model::FilenameMatchMode::RankedSubstring,
+            content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
+            whole_word: false,
+            file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
         }
     }
 
@@ -662,18 +674,14 @@ mod tests {
         );
         let summary = parse_ripgrep_json(json, 25).unwrap();
         assert_eq!(summary.results.len(), 2);
-        assert!(
-            summary
-                .results
-                .iter()
-                .any(|r| r.path == PathBuf::from("one/a.txt"))
-        );
-        assert!(
-            summary
-                .results
-                .iter()
-                .any(|r| r.path == PathBuf::from("two/a.txt"))
-        );
+        assert!(summary
+            .results
+            .iter()
+            .any(|r| r.path == PathBuf::from("one/a.txt")));
+        assert!(summary
+            .results
+            .iter()
+            .any(|r| r.path == PathBuf::from("two/a.txt")));
     }
 
     #[test]

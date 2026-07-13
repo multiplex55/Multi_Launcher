@@ -27,6 +27,10 @@ mod tests {
             size: None,
             modified: None,
             rank,
+            match_quality: rank,
+            filename_match_ranges: Vec::new(),
+            path_match_ranges: Vec::new(),
+            arrival_index: 0,
         }
     }
 

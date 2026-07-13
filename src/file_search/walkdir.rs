@@ -1,8 +1,8 @@
 use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
 use crate::file_search::matching::rank_filename_match;
 use crate::file_search::model::{
-    FileKind, FilenameResult, SearchEvent, SearchId, SearchKind, SearchProgress,
-    SearchRequest, SearchResult, SearchScope, SearchStatus,
+    FileKind, FilenameResult, SearchEvent, SearchId, SearchKind, SearchProgress, SearchRequest,
+    SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::settings::FileSearchSettings;
 use crate::file_search::sorting::sort_filename_results;
@@ -56,9 +56,13 @@ pub fn search_filenames_in_directory(
     event_sender: &mpsc::Sender<SearchEvent>,
     search_id: SearchId,
 ) -> Result<WalkDirSearchSummary, String> {
-    let SearchScope::Directory { root } = &request.scope else {
+    let SearchScope::Roots { roots } = &request.scope else {
         return Err("walkdir filename search requires a directory scope".to_owned());
     };
+    if roots.len() != 1 {
+        return Err("walkdir filename search requires exactly one root".to_owned());
+    }
+    let root = &roots[0];
     if request.kind != SearchKind::Filename {
         return Err("walkdir filename search only supports filename requests".to_owned());
     }
@@ -139,6 +143,10 @@ pub fn search_filenames_in_directory(
                 size: metadata.as_ref().filter(|m| m.is_file()).map(|m| m.len()),
                 modified: metadata.and_then(|m| m.modified().ok()),
                 rank,
+                match_quality: rank,
+                filename_match_ranges: Vec::new(),
+                path_match_ranges: Vec::new(),
+                arrival_index: ranked_results.len(),
             };
             if event_sender
                 .send(SearchEvent::Result {
@@ -251,14 +259,9 @@ fn file_kind(metadata: Option<&std::fs::Metadata>) -> FileKind {
 
 fn excluded_directory_names(
     request: &SearchRequest,
-    settings: &FileSearchSettings,
+    _settings: &FileSearchSettings,
 ) -> HashSet<String> {
-    settings
-        .excluded_directory_names
-        .iter()
-        .chain(request.excluded_directory_names.iter())
-        .cloned()
-        .collect()
+    request.excluded_directory_names.iter().cloned().collect()
 }
 
 #[cfg(test)]
@@ -271,7 +274,7 @@ mod tests {
     fn request(root: PathBuf, text: &str, max_results: usize) -> SearchRequest {
         SearchRequest {
             kind: SearchKind::Filename,
-            scope: SearchScope::Directory { root },
+            scope: SearchScope::Roots { roots: vec![root] },
             text: text.to_owned(),
             case_sensitive: false,
             include_hidden_files: false,
@@ -280,6 +283,10 @@ mod tests {
             included_extensions: vec![],
             excluded_extensions: vec![],
             excluded_directory_names: vec![],
+            filename_match_mode: crate::file_search::model::FilenameMatchMode::RankedSubstring,
+            content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
+            whole_word: false,
+            file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
         }
     }
 
@@ -342,7 +349,9 @@ mod tests {
         fs::write(temp.path().join(".secret/match.txt"), "b").unwrap();
         fs::write(temp.path().join("match.txt"), "c").unwrap();
 
-        let (summary, events) = run(request(temp.path().to_path_buf(), "match", 20));
+        let mut req = request(temp.path().to_path_buf(), "match", 20);
+        req.excluded_directory_names = vec!["node_modules".into()];
+        let (summary, events) = run(req);
         let count = events
             .iter()
             .filter(|e| matches!(e, SearchEvent::Result { .. }))
@@ -409,7 +418,7 @@ mod tests {
         .is_err());
 
         let mut req = request(temp.path().to_path_buf(), "x", 10);
-        req.scope = SearchScope::Global;
+        req.scope = SearchScope::Roots { roots: Vec::new() };
         assert!(search_filenames_in_directory(
             req,
             &FileSearchSettings::default(),

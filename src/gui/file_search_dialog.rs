@@ -4,14 +4,15 @@ mod keyboard;
 mod results;
 use crate::actions::clipboard;
 use crate::file_search::actions::{
-    containing_directory, copied_filename, execute_explorer_action, nested_search_root,
-    open_configured_terminal_in_directory, open_in_configured_editor, open_path,
-    resolve_explorer_action, ExplorerAction, InvocationTarget,
+    ExplorerAction, InvocationTarget, containing_directory, copied_filename,
+    execute_explorer_action, nested_search_root, open_configured_terminal_in_directory,
+    open_in_configured_editor, open_path, resolve_explorer_action,
 };
-use crate::file_search::coordinator::{event_id, SearchCoordinator};
+use crate::file_search::coordinator::{SearchCoordinator, event_id};
 use crate::file_search::model::{
-    ContentMatch, FileKind, SearchBackend, SearchEvent, SearchId, SearchKind, SearchRequest,
-    SearchResult, SearchScope, SearchStatus,
+    ContentMatch, ContentMatchMode, FileKind, FileSearchResultKey, FileTypeFilter,
+    FilenameMatchMode, PathIdentity, SearchBackend, SearchEvent, SearchId, SearchKind,
+    SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::preview::PreviewRequest;
 use crate::file_search::settings::FileSearchSettings;
@@ -64,7 +65,7 @@ pub fn handle_escape_action(status: SearchStatus) -> FileSearchEscapeAction {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FileSearchResultRowId {
     pub search_id: SearchId,
-    pub backend_result_index: usize,
+    pub result_key: FileSearchResultKey,
     pub match_index: Option<usize>,
     pub path: PathBuf,
     pub line_number: Option<usize>,
@@ -80,13 +81,19 @@ pub fn result_row_id_source(
 
 pub fn omitted_matches_id_source(
     search_id: SearchId,
-    backend_result_index: usize,
+    result_key: FileSearchResultKey,
     path: &std::path::Path,
-) -> (&'static str, SearchId, usize, PathBuf, &'static str) {
+) -> (
+    &'static str,
+    SearchId,
+    FileSearchResultKey,
+    PathBuf,
+    &'static str,
+) {
     (
         "file_search_result_row",
         search_id,
-        backend_result_index,
+        result_key,
         path.to_path_buf(),
         "omitted_matches",
     )
@@ -124,6 +131,31 @@ pub enum FileSearchRowPayload {
 pub struct FileSearchResultRow {
     pub id: FileSearchResultRowId,
     pub payload: FileSearchRowPayload,
+}
+
+fn default_filename_match_mode() -> FilenameMatchMode {
+    FilenameMatchMode::RankedSubstring
+}
+
+fn default_content_match_mode() -> ContentMatchMode {
+    ContentMatchMode::ExactPhrase
+}
+
+fn default_file_type_filter() -> FileTypeFilter {
+    FileTypeFilter::FilesAndDirectories
+}
+
+pub fn dedup_search_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::new();
+    for path in paths {
+        if seen.insert(crate::file_search::model::normalize_path_for_identity(
+            &path,
+        )) {
+            deduped.push(path);
+        }
+    }
+    deduped
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,15 +326,23 @@ impl FileSearchDialogState {
             return None;
         }
         let scope = match self.selected_scope {
-            FileSearchScopeMode::Global => SearchScope::Global,
+            FileSearchScopeMode::Global => {
+                let roots = dedup_search_paths(self.settings.global_content_search_roots.clone());
+                if roots.is_empty() {
+                    self.warning_error_message =
+                        Some("Global file search has no configured roots.".to_string());
+                    return None;
+                }
+                SearchScope::Roots { roots }
+            }
             FileSearchScopeMode::Directory => {
                 let root = self.root_directory.trim();
                 if root.is_empty() {
                     self.warning_error_message = Some("Choose a root directory first.".to_string());
                     return None;
                 }
-                SearchScope::Directory {
-                    root: PathBuf::from(root),
+                SearchScope::Roots {
+                    roots: dedup_search_paths([PathBuf::from(root)]),
                 }
             }
         };
@@ -317,6 +357,10 @@ impl FileSearchDialogState {
             included_extensions: Vec::new(),
             excluded_extensions: Vec::new(),
             excluded_directory_names: self.settings.excluded_directory_names.clone(),
+            filename_match_mode: default_filename_match_mode(),
+            content_match_mode: default_content_match_mode(),
+            whole_word: false,
+            file_type_filter: default_file_type_filter(),
         };
         self.clear_results_and_selection();
         self.warning_error_message = None;
@@ -449,14 +493,15 @@ impl FileSearchDialogState {
     }
 
     fn push_result(&mut self, result: SearchResult) {
-        let backend_result_index = self.results.len();
         let search_id = self.active_search_id.unwrap_or(SearchId(0));
         match &result {
             SearchResult::Filename(item) => {
                 self.result_rows.push(FileSearchResultRow {
                     id: FileSearchResultRowId {
                         search_id,
-                        backend_result_index,
+                        result_key: FileSearchResultKey::Filename {
+                            path: PathIdentity::from_path(&item.path),
+                        },
                         match_index: None,
                         path: item.path.clone(),
                         line_number: None,
@@ -476,11 +521,26 @@ impl FileSearchDialogState {
             }
             SearchResult::ContentFile(content) => {
                 let last_displayed_match_index = content.matches.len().checked_sub(1);
+                let mut occurrence_counts: std::collections::HashMap<(usize, usize, usize), usize> =
+                    std::collections::HashMap::new();
                 for (match_index, content_match) in content.matches.iter().cloned().enumerate() {
+                    let occurrence_key = (
+                        content_match.line_number,
+                        content_match.byte_start,
+                        content_match.byte_end,
+                    );
+                    let occurrence = *occurrence_counts.entry(occurrence_key).or_insert(0);
+                    occurrence_counts.insert(occurrence_key, occurrence + 1);
                     self.result_rows.push(FileSearchResultRow {
                         id: FileSearchResultRowId {
                             search_id,
-                            backend_result_index,
+                            result_key: FileSearchResultKey::Content {
+                                path: PathIdentity::from_path(&content.path),
+                                line_number: content_match.line_number,
+                                byte_start: content_match.byte_start,
+                                byte_end: content_match.byte_end,
+                                occurrence,
+                            },
                             match_index: Some(match_index),
                             path: content.path.clone(),
                             line_number: Some(content_match.line_number),
@@ -839,7 +899,7 @@ impl FileSearchDialogState {
             });
             if is_last_displayed_match_from_truncated_file {
                 ui.push_id(
-                    omitted_matches_id_source(row_id.search_id, row_id.backend_result_index, &path),
+                    omitted_matches_id_source(row_id.search_id, row_id.result_key.clone(), &path),
                     |ui| {
                         ui.label(
                             egui::RichText::new("Additional matches in this file were omitted.")
@@ -1039,8 +1099,8 @@ impl FileSearchDialogState {
         }
         let request = SearchRequest {
             kind: SearchKind::Content,
-            scope: SearchScope::File {
-                path: path.to_path_buf(),
+            scope: SearchScope::Files {
+                files: vec![path.to_path_buf()],
             },
             text: text.to_string(),
             case_sensitive: self.case_sensitive,
@@ -1050,6 +1110,10 @@ impl FileSearchDialogState {
             included_extensions: Vec::new(),
             excluded_extensions: Vec::new(),
             excluded_directory_names: Vec::new(),
+            filename_match_mode: default_filename_match_mode(),
+            content_match_mode: default_content_match_mode(),
+            whole_word: false,
+            file_type_filter: default_file_type_filter(),
         };
         self.selected_mode = FileSearchMode::Content;
         self.clear_results_and_selection();
@@ -1198,13 +1262,49 @@ impl FileSearchDialogState {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
     use crate::file_search::model::{
         ContentFileResult, ContentMatch, FileKind, FilenameRank, FilenameResult, SearchProgress,
     };
+    use std::sync::{Arc, Mutex, mpsc};
+
+    struct RecordingExecutor {
+        requests: Mutex<Vec<SearchRequest>>,
+    }
+
+    impl RecordingExecutor {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                requests: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl SearchExecutor for RecordingExecutor {
+        fn execute(
+            &self,
+            _id: SearchId,
+            request: SearchRequest,
+            _token: CancellationToken,
+            events: mpsc::Sender<SearchEvent>,
+        ) {
+            self.requests.lock().unwrap().push(request);
+            let _ = events.send(SearchEvent::Completed { id: SearchId(1) });
+        }
+    }
+
+    fn recorded_request(
+        state: &mut FileSearchDialogState,
+        executor: &Arc<RecordingExecutor>,
+    ) -> SearchRequest {
+        let mut coordinator = SearchCoordinator::with_executor(executor.clone());
+        state.start_search(&mut coordinator);
+        std::thread::sleep(Duration::from_millis(20));
+        executor.requests.lock().unwrap().last().unwrap().clone()
+    }
 
     #[test]
     fn opening_with_mode_preselected() {
@@ -1212,6 +1312,92 @@ mod tests {
         state.open_with_mode(FileSearchMode::Content);
         assert!(state.open);
         assert_eq!(state.selected_mode, FileSearchMode::Content);
+    }
+
+    #[test]
+    fn global_roots_resolve_into_roots_scope() {
+        let executor = RecordingExecutor::new();
+        let mut state = FileSearchDialogState {
+            search_text: "needle".into(),
+            settings: FileSearchSettings {
+                global_content_search_roots: vec![PathBuf::from("/tmp/root-a")],
+                ..FileSearchSettings::default()
+            },
+            ..Default::default()
+        };
+
+        let request = recorded_request(&mut state, &executor);
+
+        assert_eq!(
+            request.scope,
+            SearchScope::Roots {
+                roots: vec![PathBuf::from("/tmp/root-a")]
+            }
+        );
+    }
+
+    #[test]
+    fn empty_global_roots_produce_clear_validation_error() {
+        let mut state = FileSearchDialogState {
+            search_text: "needle".into(),
+            settings: FileSearchSettings {
+                global_content_search_roots: vec![],
+                ..FileSearchSettings::default()
+            },
+            ..Default::default()
+        };
+        let mut coordinator = SearchCoordinator::new();
+
+        assert!(state.start_search(&mut coordinator).is_none());
+        assert_eq!(
+            state.warning_error_message.as_deref(),
+            Some("Global file search has no configured roots.")
+        );
+    }
+
+    #[test]
+    fn repeated_global_roots_are_deduplicated() {
+        let executor = RecordingExecutor::new();
+        let mut state = FileSearchDialogState {
+            search_text: "needle".into(),
+            settings: FileSearchSettings {
+                global_content_search_roots: vec![
+                    PathBuf::from("/tmp/root"),
+                    PathBuf::from("/tmp/root"),
+                ],
+                ..FileSearchSettings::default()
+            },
+            ..Default::default()
+        };
+
+        let request = recorded_request(&mut state, &executor);
+
+        assert_eq!(
+            request.scope,
+            SearchScope::Roots {
+                roots: vec![PathBuf::from("/tmp/root")]
+            }
+        );
+    }
+
+    #[test]
+    fn old_single_directory_launcher_action_resolves_to_one_root() {
+        let executor = RecordingExecutor::new();
+        let mut state = FileSearchDialogState {
+            search_text: "needle".into(),
+            selected_scope: FileSearchScopeMode::Directory,
+            root_directory: "/tmp/project".into(),
+            ..Default::default()
+        };
+
+        let request = recorded_request(&mut state, &executor);
+
+        assert_eq!(
+            request.scope,
+            SearchScope::Roots {
+                roots: vec![PathBuf::from("/tmp/project")]
+            }
+        );
     }
 
     #[test]
@@ -1510,6 +1696,10 @@ mod tests {
                 size: None,
                 modified: None,
                 rank: FilenameRank::ExactFilename,
+                match_quality: FilenameRank::ExactFilename,
+                filename_match_ranges: Vec::new(),
+                path_match_ranges: Vec::new(),
+                arrival_index: 0,
             }),
         });
         state.apply_event(SearchEvent::Progress {
@@ -1559,6 +1749,10 @@ mod tests {
                     size: None,
                     modified: None,
                     rank: FilenameRank::ExactFilename,
+                    match_quality: FilenameRank::ExactFilename,
+                    filename_match_ranges: Vec::new(),
+                    path_match_ranges: Vec::new(),
+                    arrival_index: 0,
                 }),
             });
         }
@@ -1566,8 +1760,8 @@ mod tests {
         assert_eq!(state.result_rows.len(), 2);
         assert_ne!(state.result_rows[0].id.path, state.result_rows[1].id.path);
         assert_ne!(
-            state.result_rows[0].id.backend_result_index,
-            state.result_rows[1].id.backend_result_index
+            state.result_rows[0].id.result_key,
+            state.result_rows[1].id.result_key
         );
     }
 
@@ -1581,6 +1775,10 @@ mod tests {
             id: SearchId(1),
             result: SearchResult::ContentFile(ContentFileResult {
                 path: "src/lib.rs".into(),
+                file_name: "lib.rs".into(),
+                modified: None,
+                filename_relevance: None,
+                arrival_index: 0,
                 total_matches: 2,
                 matches: vec![
                     ContentMatch::new(4, "first needle".into(), 6, 12),
@@ -1605,6 +1803,71 @@ mod tests {
     }
 
     #[test]
+    fn two_matches_on_same_line_produce_distinct_stable_keys() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(1)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(1),
+            result: SearchResult::ContentFile(ContentFileResult {
+                path: "src/lib.rs".into(),
+                file_name: "lib.rs".into(),
+                modified: None,
+                filename_relevance: None,
+                arrival_index: 0,
+                total_matches: 2,
+                matches: vec![
+                    ContentMatch::new(10, "needle needle".into(), 0, 6),
+                    ContentMatch::new(10, "needle needle".into(), 0, 6),
+                ],
+                truncated: false,
+            }),
+        });
+
+        assert_eq!(state.result_rows.len(), 2);
+        assert_ne!(
+            state.result_rows[0].id.result_key,
+            state.result_rows[1].id.result_key
+        );
+    }
+
+    #[test]
+    fn stable_keys_remain_unchanged_after_sorting_rows() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(1)),
+            ..Default::default()
+        };
+        for path in ["src/b.rs", "src/a.rs"] {
+            state.apply_event(SearchEvent::Result {
+                id: SearchId(1),
+                result: SearchResult::Filename(FilenameResult {
+                    path: PathBuf::from(path),
+                    file_name: path.to_string(),
+                    parent_directory: None,
+                    kind: FileKind::File,
+                    size: None,
+                    modified: None,
+                    rank: FilenameRank::ExactFilename,
+                    match_quality: FilenameRank::ExactFilename,
+                    filename_match_ranges: Vec::new(),
+                    path_match_ranges: Vec::new(),
+                    arrival_index: 0,
+                }),
+            });
+        }
+        let mut rows = state.result_rows.clone();
+        let keys_before: std::collections::HashSet<_> =
+            rows.iter().map(|row| row.id.result_key.clone()).collect();
+
+        rows.sort_by(|a, b| a.id.path.cmp(&b.id.path));
+        let keys_after: std::collections::HashSet<_> =
+            rows.iter().map(|row| row.id.result_key.clone()).collect();
+
+        assert_eq!(keys_before, keys_after);
+    }
+
+    #[test]
     fn truncated_content_metadata_survives_flattening() {
         let mut state = FileSearchDialogState {
             active_search_id: Some(SearchId(3)),
@@ -1614,6 +1877,10 @@ mod tests {
             id: SearchId(3),
             result: SearchResult::ContentFile(ContentFileResult {
                 path: "src/lib.rs".into(),
+                file_name: "lib.rs".into(),
+                modified: None,
+                filename_relevance: None,
+                arrival_index: 0,
                 total_matches: 3,
                 matches: vec![
                     ContentMatch::new(4, "first needle".into(), 6, 12),
@@ -1644,6 +1911,10 @@ mod tests {
             id: SearchId(4),
             result: SearchResult::ContentFile(ContentFileResult {
                 path: "src/lib.rs".into(),
+                file_name: "lib.rs".into(),
+                modified: None,
+                filename_relevance: None,
+                arrival_index: 0,
                 total_matches: 4,
                 matches: vec![
                     ContentMatch::new(4, "first needle".into(), 6, 12),
@@ -1679,6 +1950,10 @@ mod tests {
             id: SearchId(5),
             result: SearchResult::ContentFile(ContentFileResult {
                 path: "src/lib.rs".into(),
+                file_name: "lib.rs".into(),
+                modified: None,
+                filename_relevance: None,
+                arrival_index: 0,
                 total_matches: 2,
                 matches: vec![
                     ContentMatch::new(4, "first needle".into(), 6, 12),
@@ -1713,6 +1988,10 @@ mod tests {
             id: SearchId(6),
             result: SearchResult::ContentFile(ContentFileResult {
                 path: "src/lib.rs".into(),
+                file_name: "lib.rs".into(),
+                modified: None,
+                filename_relevance: None,
+                arrival_index: 0,
                 total_matches: 3,
                 matches: vec![ContentMatch::new(4, "first needle".into(), 6, 12)],
                 truncated: true,
@@ -1723,7 +2002,7 @@ mod tests {
         let selectable_id = egui::Id::new(result_row_id_source(row_id.search_id, row_id));
         let omitted_id = egui::Id::new(omitted_matches_id_source(
             row_id.search_id,
-            row_id.backend_result_index,
+            row_id.result_key.clone(),
             &row_id.path,
         ));
 
@@ -1740,6 +2019,10 @@ mod tests {
             id: SearchId(1),
             result: SearchResult::ContentFile(ContentFileResult {
                 path: "src/lib.rs".into(),
+                file_name: "lib.rs".into(),
+                modified: None,
+                filename_relevance: None,
+                arrival_index: 0,
                 total_matches: 2,
                 matches: vec![
                     ContentMatch::new(4, "needle needle".into(), 0, 6),
@@ -1768,6 +2051,10 @@ mod tests {
                 id: SearchId(1),
                 result: SearchResult::ContentFile(ContentFileResult {
                     path: path.into(),
+                    file_name: path.to_string(),
+                    modified: None,
+                    filename_relevance: None,
+                    arrival_index: 0,
                     total_matches: 1,
                     matches: vec![ContentMatch::new(line, format!("{path} needle"), 0, 6)],
                     truncated: false,
@@ -1777,8 +2064,10 @@ mod tests {
 
         assert_eq!(state.result_rows[0].id.path, PathBuf::from("b.rs"));
         assert_eq!(state.result_rows[1].id.path, PathBuf::from("a.rs"));
-        assert_eq!(state.result_rows[0].id.backend_result_index, 0);
-        assert_eq!(state.result_rows[1].id.backend_result_index, 1);
+        assert_ne!(
+            state.result_rows[0].id.result_key,
+            state.result_rows[1].id.result_key
+        );
     }
 
     #[test]
@@ -1792,6 +2081,10 @@ mod tests {
             id: SearchId(7),
             result: SearchResult::ContentFile(ContentFileResult {
                 path: "src/lib.rs".into(),
+                file_name: "lib.rs".into(),
+                modified: None,
+                filename_relevance: None,
+                arrival_index: 0,
                 total_matches: 1,
                 matches: vec![content_match.clone()],
                 truncated: false,
@@ -1820,7 +2113,9 @@ mod tests {
     fn id_sources_distinguish_same_filename_in_different_directories() {
         let left = FileSearchResultRowId {
             search_id: SearchId(1),
-            backend_result_index: 0,
+            result_key: FileSearchResultKey::Filename {
+                path: PathIdentity::from_path(std::path::Path::new("/tmp/a/main.rs")),
+            },
             match_index: None,
             path: "/tmp/a/main.rs".into(),
             line_number: None,
@@ -1841,7 +2136,9 @@ mod tests {
     fn id_sources_distinguish_two_matches_in_one_file() {
         let first = FileSearchResultRowId {
             search_id: SearchId(1),
-            backend_result_index: 0,
+            result_key: FileSearchResultKey::Filename {
+                path: PathIdentity::from_path(std::path::Path::new("/tmp/a/main.rs")),
+            },
             match_index: Some(0),
             path: "src/lib.rs".into(),
             line_number: Some(4),
@@ -1864,7 +2161,9 @@ mod tests {
     fn id_sources_distinguish_two_matches_on_same_source_line() {
         let first = FileSearchResultRowId {
             search_id: SearchId(1),
-            backend_result_index: 0,
+            result_key: FileSearchResultKey::Filename {
+                path: PathIdentity::from_path(std::path::Path::new("/tmp/a/main.rs")),
+            },
             match_index: Some(0),
             path: "src/lib.rs".into(),
             line_number: Some(4),
@@ -1886,7 +2185,9 @@ mod tests {
     fn id_sources_distinguish_equivalent_rows_from_different_searches() {
         let row = FileSearchResultRowId {
             search_id: SearchId(1),
-            backend_result_index: 0,
+            result_key: FileSearchResultKey::Filename {
+                path: PathIdentity::from_path(std::path::Path::new("/tmp/a/main.rs")),
+            },
             match_index: None,
             path: "src/lib.rs".into(),
             line_number: None,
@@ -1941,7 +2242,9 @@ mod tests {
         let row = FileSearchResultRow {
             id: FileSearchResultRowId {
                 search_id: SearchId(1),
-                backend_result_index: 0,
+                result_key: FileSearchResultKey::Filename {
+                    path: PathIdentity::from_path(std::path::Path::new("/tmp/a/main.rs")),
+                },
                 match_index: Some(1),
                 path: "src/lib.rs".into(),
                 line_number: Some(42),
@@ -1972,7 +2275,9 @@ mod tests {
         let row = FileSearchResultRow {
             id: FileSearchResultRowId {
                 search_id: SearchId(1),
-                backend_result_index: 0,
+                result_key: FileSearchResultKey::Filename {
+                    path: PathIdentity::from_path(std::path::Path::new("/tmp/a/main.rs")),
+                },
                 match_index: Some(1),
                 path: "src/lib.rs".into(),
                 line_number: Some(8),
@@ -2000,7 +2305,9 @@ mod tests {
         let row = FileSearchResultRow {
             id: FileSearchResultRowId {
                 search_id: SearchId(1),
-                backend_result_index: 0,
+                result_key: FileSearchResultKey::Filename {
+                    path: PathIdentity::from_path(std::path::Path::new("/tmp/a/main.rs")),
+                },
                 match_index: Some(0),
                 path: "src/selected.rs".into(),
                 line_number: Some(5),
@@ -2027,7 +2334,9 @@ mod tests {
         let row = FileSearchResultRow {
             id: FileSearchResultRowId {
                 search_id: SearchId(1),
-                backend_result_index: 0,
+                result_key: FileSearchResultKey::Filename {
+                    path: PathIdentity::from_path(std::path::Path::new("/tmp/a/main.rs")),
+                },
                 match_index: None,
                 path: "src/lib.rs".into(),
                 line_number: None,
@@ -2101,6 +2410,10 @@ mod tests {
             size: None,
             modified: None,
             rank: FilenameRank::ExactFilename,
+            match_quality: FilenameRank::ExactFilename,
+            filename_match_ranges: Vec::new(),
+            path_match_ranges: Vec::new(),
+            arrival_index: 0,
         })
     }
 
@@ -2112,6 +2425,13 @@ mod tests {
     ) -> SearchResult {
         SearchResult::ContentFile(ContentFileResult {
             path: path.into(),
+            file_name: std::path::Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string()),
+            modified: None,
+            filename_relevance: None,
+            arrival_index: 0,
             total_matches,
             matches: (0..displayed_matches)
                 .map(|index| ContentMatch::new(index + 1, format!("line {index} needle"), 5, 11))
@@ -2283,10 +2603,12 @@ mod tests {
 
         assert!(action.is_none());
         assert_eq!(state.selected_result().cloned(), selected_before);
-        assert!(state
-            .warning_error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("missing or inaccessible")));
+        assert!(
+            state
+                .warning_error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("missing or inaccessible"))
+        );
     }
 
     #[test]
