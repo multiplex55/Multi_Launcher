@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -8,7 +9,8 @@ pub const DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES: u64 = 5 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FileSearchSettings {
-    pub global_content_search_roots: Vec<PathBuf>,
+    #[serde(alias = "global_content_search_roots")]
+    pub global_search_roots: Vec<PathBuf>,
     pub excluded_directory_names: Vec<String>,
     pub max_search_results: usize,
     pub max_matches_per_content_file: usize,
@@ -23,6 +25,73 @@ pub struct FileSearchSettings {
     pub preferred_editor_args: Vec<String>,
     pub preferred_terminal_command: String,
     pub preferred_terminal_args: Vec<String>,
+    #[serde(default)]
+    pub ui_preferences: FileSearchUiPreferences,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileSearchFilenameSort {
+    Relevance,
+    Name,
+    Path,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileSearchContentSort {
+    PathThenLine,
+    LineThenPath,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileSearchColumn {
+    Name,
+    Directory,
+    Kind,
+    MatchQuality,
+    Path,
+    Line,
+    MatchText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileSearchUiPreferences {
+    pub filename_sort: FileSearchFilenameSort,
+    pub content_sort: FileSearchContentSort,
+    pub filename_match_mode: crate::file_search::model::FilenameMatchMode,
+    pub content_match_mode: crate::file_search::model::ContentMatchMode,
+    pub whole_word: bool,
+    pub file_type_filter: crate::file_search::model::FileTypeFilter,
+    pub included_extensions: Vec<String>,
+    pub excluded_extensions: Vec<String>,
+    pub excluded_directory_names: Vec<String>,
+    pub visible_columns: Vec<FileSearchColumn>,
+    pub column_widths: BTreeMap<FileSearchColumn, u32>,
+}
+
+impl Default for FileSearchUiPreferences {
+    fn default() -> Self {
+        Self {
+            filename_sort: FileSearchFilenameSort::Relevance,
+            content_sort: FileSearchContentSort::PathThenLine,
+            filename_match_mode: crate::file_search::model::FilenameMatchMode::RankedSubstring,
+            content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
+            whole_word: false,
+            file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
+            included_extensions: Vec::new(),
+            excluded_extensions: Vec::new(),
+            excluded_directory_names: Vec::new(),
+            visible_columns: vec![
+                FileSearchColumn::Name,
+                FileSearchColumn::Directory,
+                FileSearchColumn::MatchQuality,
+            ],
+            column_widths: BTreeMap::new(),
+        }
+    }
 }
 
 /// Non-panicking validation diagnostics for user-editable file-search settings.
@@ -84,7 +153,7 @@ impl FileSearchDiagnosticsState {
     pub fn from_settings(settings: &FileSearchSettings) -> Self {
         let mut valid_roots = Vec::new();
         let mut invalid_roots = Vec::new();
-        for root in &settings.global_content_search_roots {
+        for root in &settings.global_search_roots {
             if root.is_dir() {
                 valid_roots.push(root.clone());
             } else {
@@ -148,7 +217,7 @@ pub fn detect_ripgrep_executable(settings: &FileSearchSettings) -> Option<PathBu
 impl Default for FileSearchSettings {
     fn default() -> Self {
         Self {
-            global_content_search_roots: default_global_content_search_roots(),
+            global_search_roots: default_global_search_roots(),
             excluded_directory_names: [
                 ".git",
                 "target",
@@ -174,6 +243,7 @@ impl Default for FileSearchSettings {
             preferred_editor_args: Vec::new(),
             preferred_terminal_command: String::new(),
             preferred_terminal_args: Vec::new(),
+            ui_preferences: FileSearchUiPreferences::default(),
         }
     }
 }
@@ -189,7 +259,7 @@ impl FileSearchSettings {
     }
 
     pub fn validate_root_paths(&self) -> Vec<FileSearchSettingsDiagnostic> {
-        self.global_content_search_roots
+        self.global_search_roots
             .iter()
             .filter_map(|path| match path.metadata() {
                 Ok(metadata) if metadata.is_dir() => None,
@@ -290,7 +360,7 @@ impl FileSearchSettings {
     }
 }
 
-fn default_global_content_search_roots() -> Vec<PathBuf> {
+fn default_global_search_roots() -> Vec<PathBuf> {
     dirs_next::home_dir().into_iter().collect()
 }
 
@@ -347,7 +417,7 @@ mod tests {
         std::fs::write(&file_path, "content").expect("write temp file");
 
         let settings = FileSearchSettings {
-            global_content_search_roots: vec![file_path.clone(), temp_dir.path().join("missing")],
+            global_search_roots: vec![file_path.clone(), temp_dir.path().join("missing")],
             max_search_results: 0,
             max_matches_per_content_file: 0,
             max_content_search_file_size_bytes: 0,
@@ -485,10 +555,62 @@ mod diagnostics_state_tests {
     }
 
     #[test]
+    fn old_global_content_search_roots_alias_deserializes() {
+        let parsed: FileSearchSettings =
+            serde_json::from_str(r#"{"global_content_search_roots":["/tmp/legacy-root"]}"#)
+                .expect("legacy root key should deserialize");
+
+        assert_eq!(
+            parsed.global_search_roots,
+            vec![PathBuf::from("/tmp/legacy-root")]
+        );
+    }
+
+    #[test]
+    fn default_ui_preferences_match_expected_file_search_defaults() {
+        let prefs = FileSearchUiPreferences::default();
+
+        assert_eq!(prefs.filename_sort, FileSearchFilenameSort::Relevance);
+        assert_eq!(prefs.content_sort, FileSearchContentSort::PathThenLine);
+        assert_eq!(
+            prefs.filename_match_mode,
+            crate::file_search::model::FilenameMatchMode::RankedSubstring
+        );
+        assert_eq!(
+            prefs.content_match_mode,
+            crate::file_search::model::ContentMatchMode::ExactPhrase
+        );
+        assert!(!prefs.whole_word);
+        assert_eq!(
+            prefs.file_type_filter,
+            crate::file_search::model::FileTypeFilter::FilesAndDirectories
+        );
+        assert_eq!(
+            prefs.visible_columns,
+            vec![
+                FileSearchColumn::Name,
+                FileSearchColumn::Directory,
+                FileSearchColumn::MatchQuality
+            ]
+        );
+    }
+
+    #[test]
+    fn ui_preferences_serialization_excludes_search_session_state() {
+        let serialized =
+            serde_json::to_string(&FileSearchUiPreferences::default()).expect("serialize prefs");
+
+        assert!(!serialized.contains("query"));
+        assert!(!serialized.contains("selected"));
+        assert!(!serialized.contains("timestamp"));
+        assert!(!serialized.contains("history"));
+    }
+
+    #[test]
     fn existing_settings_json_without_preview_limit_remains_deserializable() {
         let parsed: FileSearchSettings = serde_json::from_str(
             r#"{
-                "global_content_search_roots": [],
+                "global_search_roots": [],
                 "excluded_directory_names": [".git", "target"],
                 "max_search_results": 123,
                 "max_matches_per_content_file": 10,
@@ -516,7 +638,7 @@ mod diagnostics_state_tests {
     #[test]
     fn invalid_settings_do_not_panic() {
         let settings = FileSearchSettings {
-            global_content_search_roots: vec![PathBuf::from("/definitely/missing/root")],
+            global_search_roots: vec![PathBuf::from("/definitely/missing/root")],
             everything_enabled: true,
             everything_executable_path: PathBuf::from("/definitely/missing/es.exe"),
             ripgrep_executable_path: PathBuf::from("/definitely/missing/rg"),

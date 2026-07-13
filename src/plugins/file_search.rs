@@ -1,12 +1,12 @@
 use crate::actions::Action;
 use crate::file_search::actions::{
-    encode_action_payload, mode_action_payload, start_action_payload, MODE_PREFIX, OPEN_ACTION,
-    START_PREFIX,
+    MODE_PREFIX, OPEN_ACTION, START_PREFIX, encode_action_payload, mode_action_payload,
+    start_action_payload,
 };
 use crate::file_search::model::SearchKind;
 use crate::file_search::query::{FileSearchCommand, SearchRequestDraft};
 use crate::file_search::settings::{
-    FileSearchDiagnosticsState, FileSearchSettings, DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES,
+    DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES, FileSearchDiagnosticsState, FileSearchSettings,
 };
 use crate::plugin::Plugin;
 use eframe::egui;
@@ -82,11 +82,7 @@ impl Plugin for FileSearchPlugin {
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
         let mut cfg: FileSearchSettings = serde_json::from_value(value.clone()).unwrap_or_default();
         ui.heading("File Search");
-        path_list_editor(
-            ui,
-            "Global ripgrep search roots",
-            &mut cfg.global_content_search_roots,
-        );
+        path_list_editor(ui, "Global search roots", &mut cfg.global_search_roots);
         string_list_editor(
             ui,
             "Excluded directory names",
