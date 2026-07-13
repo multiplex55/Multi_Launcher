@@ -109,12 +109,14 @@ impl Plugin for FileSearchPlugin {
         ui.checkbox(&mut cfg.case_sensitive, "Case-sensitive by default");
         ui.checkbox(
             &mut cfg.everything_enabled,
-            "Use Everything for global filename search",
+            "Use Everything ES CLI for global filename search",
         );
-        ui.label("When disabled, global filename searches use the configured ripgrep executable.");
+        ui.label(
+            "When disabled, global filename searches fall back to WalkDir/ripgrep as applicable.",
+        );
         path_field(
             ui,
-            "Everything executable path",
+            "Everything ES CLI executable path (es.exe)",
             &mut cfg.everything_executable_path,
         );
         ripgrep_settings_ui(ui, &mut cfg.ripgrep_executable_path);
