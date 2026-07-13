@@ -675,6 +675,14 @@ fn parse_ripgrep_json_reader<R: Read>(
         match value.get("type").and_then(Value::as_str) {
             Some("begin") => {
                 if let Some(path) = event_path(&value) {
+                    if let Some((_path, builder)) = current.take() {
+                        push_content_result(
+                            builder,
+                            &mut results,
+                            max_result_files,
+                            &mut global_truncated,
+                        );
+                    }
                     current = Some((
                         path.clone(),
                         ContentFileResultBuilder::new(path, max_matches_per_file),
@@ -689,6 +697,14 @@ fn parse_ripgrep_json_reader<R: Read>(
                     }
                 })?;
                 if current.as_ref().map(|(p, _)| p != &path).unwrap_or(true) {
+                    if let Some((_path, builder)) = current.take() {
+                        push_content_result(
+                            builder,
+                            &mut results,
+                            max_result_files,
+                            &mut global_truncated,
+                        );
+                    }
                     current = Some((
                         path.clone(),
                         ContentFileResultBuilder::new(path.clone(), max_matches_per_file),
@@ -700,14 +716,12 @@ fn parse_ripgrep_json_reader<R: Read>(
             }
             Some("end") => {
                 if let Some((_path, builder)) = current.take() {
-                    let result = builder.finish();
-                    if result.total_matches > 0 {
-                        if results.len() < max_result_files {
-                            results.push(result);
-                        } else {
-                            global_truncated = true;
-                        }
-                    }
+                    push_content_result(
+                        builder,
+                        &mut results,
+                        max_result_files,
+                        &mut global_truncated,
+                    );
                 }
             }
             Some("summary") => {
@@ -723,14 +737,12 @@ fn parse_ripgrep_json_reader<R: Read>(
         }
     }
     if let Some((_path, builder)) = current.take() {
-        let result = builder.finish();
-        if result.total_matches > 0 {
-            if results.len() < max_result_files {
-                results.push(result);
-            } else {
-                global_truncated = true;
-            }
-        }
+        push_content_result(
+            builder,
+            &mut results,
+            max_result_files,
+            &mut global_truncated,
+        );
     }
     Ok(RipgrepSearchSummary {
         results_found: results.len(),
@@ -740,6 +752,23 @@ fn parse_ripgrep_json_reader<R: Read>(
         stderr: String::new(),
         global_truncated,
     })
+}
+
+fn push_content_result(
+    builder: ContentFileResultBuilder,
+    results: &mut Vec<ContentFileResult>,
+    max_result_files: usize,
+    global_truncated: &mut bool,
+) {
+    let result = builder.finish();
+    if result.total_matches == 0 {
+        return;
+    }
+    if results.len() < max_result_files {
+        results.push(result);
+    } else {
+        *global_truncated = true;
+    }
 }
 
 fn event_path(value: &Value) -> Option<PathBuf> {
@@ -1162,7 +1191,11 @@ mod tests {
             .map(|a| a.to_string_lossy().to_string())
             .collect();
         let sep = args.iter().position(|arg| arg == "--").unwrap();
-        assert_eq!(args[sep + 1], "-needle");
+        let pattern = args
+            .windows(2)
+            .position(|window| window == ["-e", "-needle"])
+            .unwrap();
+        assert!(pattern < sep);
     }
 
     #[test]
