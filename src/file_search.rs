@@ -1,11 +1,17 @@
 pub mod actions;
 pub mod coordinator;
+pub mod discovery;
 pub mod error;
 pub mod everything;
 pub mod executor;
+pub mod export;
+pub mod matching;
 pub mod model;
+pub mod native;
+pub mod path_identity;
 pub mod preview;
 pub mod query;
 pub mod ripgrep;
 pub mod settings;
+pub mod sorting;
 pub mod walkdir;

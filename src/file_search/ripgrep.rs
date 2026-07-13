@@ -1,15 +1,16 @@
 use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
+pub use crate::file_search::discovery::resolve_ripgrep_executable;
 use crate::file_search::error::FileSearchError;
+use crate::file_search::matching::rank_filename_match;
 use crate::file_search::model::{
     ContentFileResult, ContentFileResultBuilder, ContentMatch, FileKind, FilenameResult,
     SearchEvent, SearchId, SearchKind, SearchProgress, SearchRequest, SearchResult, SearchScope,
     SearchStatus,
 };
 use crate::file_search::settings::FileSearchSettings;
-use crate::file_search::walkdir::{rank_filename_match, sort_filename_results};
+use crate::file_search::sorting::sort_filename_results;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::env;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -306,65 +307,9 @@ fn per_file_match_limit(request: &SearchRequest, settings: &FileSearchSettings) 
     }
 }
 
-pub fn resolve_ripgrep_executable(configured: &Path) -> Result<PathBuf, FileSearchError> {
-    let configured = if configured.as_os_str().is_empty() {
-        Path::new("rg")
-    } else {
-        configured
-    };
-
-    if path_contains_directory_components(configured) {
-        if configured.is_file() {
-            return Ok(configured.to_path_buf());
-        }
-        return Err(FileSearchError::BackendUnavailable {
-            backend: "ripgrep".to_owned(),
-            message: format!(
-                "configured ripgrep executable '{}' does not exist or is not a file",
-                configured.display()
-            ),
-        });
-    }
-
-    find_on_process_path(configured).ok_or_else(|| FileSearchError::BackendUnavailable {
-        backend: "ripgrep".to_owned(),
-        message: format!(
-            "ripgrep executable '{}' was not found on PATH",
-            configured.display()
-        ),
-    })
-}
-
-#[allow(dead_code)]
-pub fn detect_ripgrep_executable(configured: &Path) -> Result<PathBuf, FileSearchError> {
-    resolve_ripgrep_executable(configured)
-}
-
-fn path_contains_directory_components(path: &Path) -> bool {
-    path.components().count() > 1
-}
-
-fn find_on_process_path(name: &Path) -> Option<PathBuf> {
-    let paths = env::var_os("PATH")?;
-    find_on_path(name, env::split_paths(&paths))
-}
-
-fn find_on_path(name: &Path, paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
-    for dir in paths {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        #[cfg(windows)]
-        if name.extension().is_none() {
-            let exe = dir.join(format!("{}.exe", name.as_os_str().to_string_lossy()));
-            if exe.is_file() {
-                return Some(exe);
-            }
-        }
-    }
-    None
-}
+pub use crate::file_search::discovery::detect_ripgrep_executable;
+#[cfg(test)]
+use crate::file_search::discovery::find_on_path;
 
 pub fn build_ripgrep_command(
     executable: &Path,
