@@ -182,11 +182,10 @@ fn ripgrep_settings_ui(ui: &mut egui::Ui, path: &mut PathBuf) {
             *path = PathBuf::from(text.trim());
         }
         if ui.button("Browse…").clicked() {
-            let mut dialog = rfd::FileDialog::new();
             #[cfg(windows)]
-            {
-                dialog = dialog.add_filter("Executable", &["exe"]);
-            }
+            let dialog = rfd::FileDialog::new().add_filter("Executable", &["exe"]);
+            #[cfg(not(windows))]
+            let dialog = rfd::FileDialog::new();
             if let Some(selected) = dialog.pick_file() {
                 *path = selected.canonicalize().unwrap_or(selected);
             }

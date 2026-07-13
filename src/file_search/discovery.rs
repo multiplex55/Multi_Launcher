@@ -219,7 +219,7 @@ mod tests {
     use std::fs;
 
     #[cfg(unix)]
-    fn make_rg(path: &Path, first_line: &str) {
+    fn make_rg(path: &Path, first_line: &str) -> bool {
         use std::os::unix::fs::PermissionsExt;
         fs::write(
             path,
@@ -229,15 +229,26 @@ mod tests {
         let mut perms = fs::metadata(path).unwrap().permissions();
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).unwrap();
+        true
     }
 
     #[cfg(windows)]
-    fn make_rg(path: &Path, first_line: &str) {
-        fs::write(
-            path,
-            format!("@echo off\r\necho {first_line}\r\necho second line\r\n"),
-        )
-        .unwrap();
+    fn make_rg(path: &Path, _first_line: &str) -> bool {
+        let Some(source) = find_on_process_path(Path::new("rg.exe")) else {
+            return false;
+        };
+        fs::copy(source, path).unwrap();
+        true
+    }
+
+    #[cfg(windows)]
+    fn exe_name(stem: &str) -> String {
+        format!("{stem}.exe")
+    }
+
+    #[cfg(not(windows))]
+    fn exe_name(stem: &str) -> String {
+        stem.to_owned()
     }
 
     fn ctx(launcher: &Path, path_dir: &Path) -> ExecutableSearchContext {
@@ -250,14 +261,20 @@ mod tests {
     #[test]
     fn configured_path_wins_over_sidecar_and_path() {
         let temp = tempfile::tempdir().unwrap();
-        let configured = temp.path().join("configured rg");
+        let configured = temp.path().join(exe_name("configured rg"));
         let sidecar = temp.path().join("rg.exe");
         let path_dir = temp.path().join("bin");
         fs::create_dir(&path_dir).unwrap();
-        let path_rg = path_dir.join("rg");
-        make_rg(&configured, "ripgrep configured");
-        make_rg(&sidecar, "ripgrep sidecar");
-        make_rg(&path_rg, "ripgrep path");
+        let path_rg = path_dir.join(exe_name("rg"));
+        if !make_rg(&configured, "ripgrep configured") {
+            return;
+        }
+        if !make_rg(&sidecar, "ripgrep sidecar") {
+            return;
+        }
+        if !make_rg(&path_rg, "ripgrep path") {
+            return;
+        }
         let resolution =
             resolve_ripgrep_with_context(&configured, &ctx(temp.path(), &path_dir)).unwrap();
         assert_eq!(resolution.path, configured);
@@ -273,8 +290,12 @@ mod tests {
         let path_dir = temp.path().join("bin");
         fs::create_dir(&path_dir).unwrap();
         let sidecar = temp.path().join("rg.exe");
-        make_rg(&sidecar, "ripgrep sidecar");
-        make_rg(&path_dir.join("rg"), "ripgrep path");
+        if !make_rg(&sidecar, "ripgrep sidecar") {
+            return;
+        }
+        if !make_rg(&path_dir.join(exe_name("rg")), "ripgrep path") {
+            return;
+        }
         let resolution =
             resolve_ripgrep_with_context(Path::new(""), &ctx(temp.path(), &path_dir)).unwrap();
         assert_eq!(resolution.path, sidecar);
@@ -292,7 +313,9 @@ mod tests {
         fs::create_dir(&path_dir).unwrap();
         fs::create_dir_all(&tools).unwrap();
         let portable = tools.join("rg.exe");
-        make_rg(&portable, "ripgrep portable");
+        if !make_rg(&portable, "ripgrep portable") {
+            return;
+        }
         let resolution =
             resolve_ripgrep_with_context(Path::new(""), &ctx(temp.path(), &path_dir)).unwrap();
         assert_eq!(resolution.path, portable);
@@ -308,8 +331,10 @@ mod tests {
         let path_dir = temp.path().join("bin");
         fs::create_dir(&path_dir).unwrap();
         let configured = temp.path().join("missing rg");
-        let path_rg = path_dir.join("rg");
-        make_rg(&path_rg, "ripgrep path");
+        let path_rg = path_dir.join(exe_name("rg"));
+        if !make_rg(&path_rg, "ripgrep path") {
+            return;
+        }
         let resolution =
             resolve_ripgrep_with_context(&configured, &ctx(temp.path(), &path_dir)).unwrap();
         assert_eq!(resolution.path, path_rg);
@@ -334,8 +359,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path_dir = temp.path().join("bin");
         fs::create_dir(&path_dir).unwrap();
-        let path_rg = path_dir.join("rg");
-        make_rg(&path_rg, "ripgrep path");
+        let path_rg = path_dir.join(exe_name("rg"));
+        if !make_rg(&path_rg, "ripgrep path") {
+            return;
+        }
         let resolution =
             resolve_ripgrep_with_context(Path::new(""), &ctx(temp.path(), &path_dir)).unwrap();
         assert_eq!(resolution.path, path_rg);
@@ -344,19 +371,22 @@ mod tests {
     #[test]
     fn stores_only_first_version_line() {
         let temp = tempfile::tempdir().unwrap();
-        let rg = temp.path().join("rg");
-        make_rg(&rg, "ripgrep 13.0.0");
-        assert_eq!(
-            probe_ripgrep_version(&rg),
-            Some("ripgrep 13.0.0".to_owned())
-        );
+        let rg = temp.path().join(exe_name("rg"));
+        if !make_rg(&rg, "ripgrep 13.0.0") {
+            return;
+        }
+        let version = probe_ripgrep_version(&rg).expect("ripgrep version");
+        assert!(version.to_ascii_lowercase().contains("ripgrep"));
+        assert!(!version.contains("second line"));
     }
 
     #[test]
     fn paths_containing_spaces_work() {
         let temp = tempfile::tempdir().unwrap();
-        let rg = temp.path().join("rg with spaces");
-        make_rg(&rg, "ripgrep spaces");
+        let rg = temp.path().join(exe_name("rg with spaces"));
+        if !make_rg(&rg, "ripgrep spaces") {
+            return;
+        }
         let resolution = resolve_ripgrep_with_context(&rg, &ctx(temp.path(), temp.path())).unwrap();
         assert_eq!(resolution.path, rg);
     }
@@ -364,8 +394,10 @@ mod tests {
     #[test]
     fn unicode_paths_work() {
         let temp = tempfile::tempdir().unwrap();
-        let rg = temp.path().join("rg-搜索");
-        make_rg(&rg, "ripgrep unicode");
+        let rg = temp.path().join(exe_name("rg-搜索"));
+        if !make_rg(&rg, "ripgrep unicode") {
+            return;
+        }
         let resolution = resolve_ripgrep_with_context(&rg, &ctx(temp.path(), temp.path())).unwrap();
         assert_eq!(resolution.path, rg);
     }

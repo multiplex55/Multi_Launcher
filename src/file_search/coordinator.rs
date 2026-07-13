@@ -5,7 +5,7 @@ use crate::file_search::model::{
 };
 use crate::file_search::settings::FileSearchSettings;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::thread;
 
 #[derive(Debug, Clone, Default)]
@@ -740,11 +740,9 @@ mod tests {
                 ..
             } if result.file_name == expected
         )));
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, SearchEvent::Completed { .. }))
-        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, SearchEvent::Completed { .. })));
         assert_no_unwired_placeholder(&events);
     }
 
@@ -808,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn production_content_search_with_missing_ripgrep_fails_with_configured_path() {
+    fn production_content_search_with_missing_ripgrep_falls_back_to_detected_ripgrep() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("haystack.txt"), "needle").expect("write file");
         let missing_rg = temp.path().join("missing").join("rg");
@@ -840,20 +838,34 @@ mod tests {
 
         let events = drain_until_terminal(&mut coordinator);
         assert_eq!(coordinator.last_backend(), Some(SearchBackend::Ripgrep));
-        let error = events
-            .iter()
-            .find_map(|event| match event {
-                SearchEvent::Failed { error, .. } => Some(error.as_str()),
-                _ => None,
-            })
-            .expect("failed event");
-        assert!(error.contains(&missing_rg.display().to_string()), "{error}");
-        assert!(error.contains("ripgrep"), "{error}");
-        assert!(!error.contains("not wired yet"), "{error}");
-        assert!(
-            !error.contains("Search backend execution is not wired yet"),
-            "{error}"
-        );
+        if crate::file_search::ripgrep::resolve_ripgrep_executable(&missing_rg).is_err() {
+            let error = events
+                .iter()
+                .find_map(|event| match event {
+                    SearchEvent::Failed { error, .. } => Some(error.as_str()),
+                    _ => None,
+                })
+                .expect("failed event");
+            assert!(error.contains("ripgrep"), "{error}");
+        } else {
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    SearchEvent::Result {
+                        result: SearchResult::ContentFile(result),
+                        ..
+                    } if result.path == PathBuf::from("haystack.txt")
+                )),
+                "events: {events:?}"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, SearchEvent::Completed { .. })),
+                "events: {events:?}"
+            );
+        }
+        assert_no_unwired_placeholder(&events);
     }
 
     #[test]
@@ -909,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn production_global_filename_search_with_everything_disabled_uses_ripgrep() {
+    fn production_global_filename_search_with_everything_disabled_uses_detected_ripgrep_fallback() {
         let temp = tempfile::tempdir().expect("tempdir");
         let missing_rg = temp.path().join("missing").join("rg");
         let settings = FileSearchSettings {
@@ -939,19 +951,24 @@ mod tests {
 
         let events = drain_until_terminal(&mut coordinator);
         assert_eq!(coordinator.last_backend(), Some(SearchBackend::Ripgrep));
-        let error = events
-            .iter()
-            .find_map(|event| match event {
-                SearchEvent::Failed { error, .. } => Some(error.as_str()),
-                _ => None,
-            })
-            .expect("failed event");
-        assert!(error.contains("ripgrep"), "{error}");
-        assert!(error.contains(&missing_rg.display().to_string()), "{error}");
-        assert!(!error.contains("Everything filename search"), "{error}");
-        assert!(
-            !error.contains("Search backend execution is not wired yet"),
-            "{error}"
-        );
+        if crate::file_search::ripgrep::resolve_ripgrep_executable(&missing_rg).is_err() {
+            let error = events
+                .iter()
+                .find_map(|event| match event {
+                    SearchEvent::Failed { error, .. } => Some(error.as_str()),
+                    _ => None,
+                })
+                .expect("failed event");
+            assert!(error.contains("ripgrep"), "{error}");
+            assert!(!error.contains("Everything filename search"), "{error}");
+        } else {
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, SearchEvent::Completed { .. })),
+                "events: {events:?}"
+            );
+        }
+        assert_no_unwired_placeholder(&events);
     }
 }

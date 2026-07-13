@@ -1,5 +1,8 @@
 use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
-pub use crate::file_search::discovery::{detect_ripgrep_executable, resolve_ripgrep_executable};
+pub use crate::file_search::discovery::{
+    detect_ripgrep_executable, resolve_ripgrep_executable, resolve_ripgrep_with_context,
+    ExecutableSearchContext,
+};
 use crate::file_search::error::FileSearchError;
 use crate::file_search::matching::rank_filename_match;
 use crate::file_search::model::{
@@ -713,18 +716,30 @@ mod tests {
         } else {
             PathBuf::from("/definitely/missing/rg")
         };
-        let error = resolve_ripgrep_executable(&configured)
-            .unwrap_err()
-            .to_string();
+        let error = resolve_ripgrep_with_context(
+            &configured,
+            &ExecutableSearchContext {
+                launcher_directory: tempfile::tempdir().unwrap().path().to_path_buf(),
+                path_directories: Vec::new(),
+            },
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains(&configured.display().to_string()), "{error}");
     }
 
     #[test]
     fn relative_path_with_directory_components_must_exist() {
         let configured = PathBuf::from("missing-dir/rg");
-        let error = resolve_ripgrep_executable(&configured)
-            .unwrap_err()
-            .to_string();
+        let error = resolve_ripgrep_with_context(
+            &configured,
+            &ExecutableSearchContext {
+                launcher_directory: tempfile::tempdir().unwrap().path().to_path_buf(),
+                path_directories: Vec::new(),
+            },
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains(&configured.display().to_string()), "{error}");
     }
 
