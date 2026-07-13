@@ -332,6 +332,10 @@ mod tests {
                             size: None,
                             modified: None,
                             rank: FilenameRank::ExactFilename,
+                            match_quality: FilenameRank::ExactFilename,
+                            filename_match_ranges: Vec::new(),
+                            path_match_ranges: Vec::new(),
+                            arrival_index: i,
                         });
                         if !send_result_limited(
                             &events,

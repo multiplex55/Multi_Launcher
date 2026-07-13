@@ -1696,6 +1696,10 @@ mod tests {
                 size: None,
                 modified: None,
                 rank: FilenameRank::ExactFilename,
+                match_quality: FilenameRank::ExactFilename,
+                filename_match_ranges: Vec::new(),
+                path_match_ranges: Vec::new(),
+                arrival_index: 0,
             }),
         });
         state.apply_event(SearchEvent::Progress {
@@ -2047,6 +2051,10 @@ mod tests {
                 id: SearchId(1),
                 result: SearchResult::ContentFile(ContentFileResult {
                     path: path.into(),
+                    file_name: path.to_string(),
+                    modified: None,
+                    filename_relevance: None,
+                    arrival_index: 0,
                     total_matches: 1,
                     matches: vec![ContentMatch::new(line, format!("{path} needle"), 0, 6)],
                     truncated: false,
@@ -2402,6 +2410,10 @@ mod tests {
             size: None,
             modified: None,
             rank: FilenameRank::ExactFilename,
+            match_quality: FilenameRank::ExactFilename,
+            filename_match_ranges: Vec::new(),
+            path_match_ranges: Vec::new(),
+            arrival_index: 0,
         })
     }
 

@@ -555,7 +555,7 @@ mod tests {
     fn req(root: PathBuf) -> SearchRequest {
         SearchRequest {
             kind: SearchKind::Content,
-            scope: SearchScope::Roots { roots },
+            scope: SearchScope::Roots { roots: vec![root] },
             text: "needle".to_owned(),
             case_sensitive: false,
             include_hidden_files: false,

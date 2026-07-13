@@ -274,7 +274,7 @@ mod tests {
     fn request(root: PathBuf, text: &str, max_results: usize) -> SearchRequest {
         SearchRequest {
             kind: SearchKind::Filename,
-            scope: SearchScope::Roots { roots },
+            scope: SearchScope::Roots { roots: vec![root] },
             text: text.to_owned(),
             case_sensitive: false,
             include_hidden_files: false,
