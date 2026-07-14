@@ -5,7 +5,6 @@ use crate::file_search::model::{
     SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::settings::FileSearchSettings;
-use crate::file_search::sorting::sort_filename_results;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -193,7 +192,6 @@ pub fn search_filenames_in_directory(
     summary.skipped_entries = summary
         .skipped_entries
         .saturating_add(skipped_before_descent.get());
-    sort_filename_results(&mut ranked_results);
     let status = if summary.cancelled {
         SearchStatus::Cancelled
     } else {

@@ -33,15 +33,27 @@ pub struct FileSearchSettings {
 #[serde(rename_all = "snake_case")]
 pub enum FileSearchFilenameSort {
     Relevance,
-    Name,
-    Path,
+    #[serde(alias = "name")]
+    FilenameAscending,
+    FilenameDescending,
+    #[serde(alias = "path")]
+    FullPathAscending,
+    ModifiedNewest,
+    ModifiedOldest,
+    SizeLargest,
+    SizeSmallest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileSearchContentSort {
+    DiscoveryOrder,
     PathThenLine,
-    LineThenPath,
+    MatchCountDescending,
+    ModifiedNewest,
+    FilenameRelevance,
+    #[serde(alias = "line_then_path")]
+    LineNumber,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

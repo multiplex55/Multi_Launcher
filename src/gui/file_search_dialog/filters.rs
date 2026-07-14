@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use crate::file_search::model::{
     ContentMatchMode, FileTypeFilter, FilenameMatchMode, SearchRequest, SearchScope,
 };
+use crate::file_search::settings::{FileSearchContentSort, FileSearchFilenameSort};
 use eframe::egui;
 
 use super::{
@@ -104,6 +105,7 @@ impl FileSearchDialogState {
     }
 
     pub fn filters_ui(&mut self, ui: &mut egui::Ui) {
+        let prefs_before = self.ui_preferences.clone();
         egui::CollapsingHeader::new("Filters")
             .default_open(false)
             .show(ui, |ui| {
@@ -141,6 +143,89 @@ impl FileSearchDialogState {
                     }
                 }
 
+                ui.separator();
+                match self.selected_mode {
+                    FileSearchMode::Filename => {
+                        ui.label("Sort");
+                        ui.horizontal_wrapped(|ui| {
+                            ui.radio_value(
+                                &mut self.ui_preferences.filename_sort,
+                                FileSearchFilenameSort::Relevance,
+                                "Relevance",
+                            );
+                            ui.radio_value(
+                                &mut self.ui_preferences.filename_sort,
+                                FileSearchFilenameSort::FilenameAscending,
+                                "Filename ↑",
+                            );
+                            ui.radio_value(
+                                &mut self.ui_preferences.filename_sort,
+                                FileSearchFilenameSort::FilenameDescending,
+                                "Filename ↓",
+                            );
+                            ui.radio_value(
+                                &mut self.ui_preferences.filename_sort,
+                                FileSearchFilenameSort::FullPathAscending,
+                                "Path ↑",
+                            );
+                            ui.radio_value(
+                                &mut self.ui_preferences.filename_sort,
+                                FileSearchFilenameSort::ModifiedNewest,
+                                "Modified newest",
+                            );
+                            ui.radio_value(
+                                &mut self.ui_preferences.filename_sort,
+                                FileSearchFilenameSort::ModifiedOldest,
+                                "Modified oldest",
+                            );
+                            ui.radio_value(
+                                &mut self.ui_preferences.filename_sort,
+                                FileSearchFilenameSort::SizeLargest,
+                                "Size largest",
+                            );
+                            ui.radio_value(
+                                &mut self.ui_preferences.filename_sort,
+                                FileSearchFilenameSort::SizeSmallest,
+                                "Size smallest",
+                            );
+                        });
+                    }
+                    FileSearchMode::Content => {
+                        ui.label("Sort");
+                        ui.horizontal_wrapped(|ui| {
+                            ui.radio_value(
+                                &mut self.ui_preferences.content_sort,
+                                FileSearchContentSort::DiscoveryOrder,
+                                "Discovery",
+                            );
+                            ui.radio_value(
+                                &mut self.ui_preferences.content_sort,
+                                FileSearchContentSort::PathThenLine,
+                                "Path then line",
+                            );
+                            ui.radio_value(
+                                &mut self.ui_preferences.content_sort,
+                                FileSearchContentSort::MatchCountDescending,
+                                "Match count",
+                            );
+                            ui.radio_value(
+                                &mut self.ui_preferences.content_sort,
+                                FileSearchContentSort::ModifiedNewest,
+                                "Modified newest",
+                            );
+                            ui.radio_value(
+                                &mut self.ui_preferences.content_sort,
+                                FileSearchContentSort::FilenameRelevance,
+                                "Filename relevance",
+                            );
+                            ui.radio_value(
+                                &mut self.ui_preferences.content_sort,
+                                FileSearchContentSort::LineNumber,
+                                "Line number",
+                            );
+                        });
+                    }
+                }
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("Type");
@@ -224,6 +309,9 @@ impl FileSearchDialogState {
                     }
                 });
             });
+        if self.ui_preferences != prefs_before {
+            self.handle_sort_changed();
+        }
         if self.filters_changed_since_last_search() {
             ui.colored_label(
                 egui::Color32::YELLOW,

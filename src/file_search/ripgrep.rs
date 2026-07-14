@@ -11,7 +11,6 @@ use crate::file_search::model::{
     SearchScope, SearchStatus, TextMatchRange,
 };
 use crate::file_search::settings::FileSearchSettings;
-use crate::file_search::sorting::sort_filename_results;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read};
@@ -382,7 +381,6 @@ pub fn search_filenames_with_ripgrep(
             }
         }
     }
-    sort_filename_results(&mut results);
     summary.results = results;
     Ok(summary)
 }
