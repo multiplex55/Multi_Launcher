@@ -288,7 +288,8 @@ mod tests {
     #[test]
     fn duplicate_content_matches_merge_to_one() {
         let mut a = cf("same", 0, 1);
-        let b = cf("same", 1, 3);
+        let mut b = cf("same", 1, 3);
+        b.matches[0] = a.matches[0].clone();
         a.truncated = true;
         let out = dedup_content_results(vec![a, b]);
         assert_eq!(out.len(), 1);
