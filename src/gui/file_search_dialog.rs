@@ -771,6 +771,7 @@ impl FileSearchDialogState {
     }
 
     fn contents(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {
+        self.handle_result_keyboard_shortcuts(ui, coordinator);
         let previously_selected_mode = self.selected_mode;
         ui.horizontal(|ui| {
             ui.selectable_value(
@@ -2909,6 +2910,120 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_next_previous_selection_clamps_at_boundaries() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(9)),
+            ..Default::default()
+        };
+        for path in ["/tmp/a.txt", "/tmp/b.txt"] {
+            state.apply_event(SearchEvent::Result {
+                id: SearchId(9),
+                result: filename_search_result(path),
+            });
+        }
+
+        state.move_selection(keyboard::SelectionMove::Next);
+        assert_eq!(
+            state.selected_result().unwrap().row_id.path,
+            PathBuf::from("/tmp/a.txt")
+        );
+        state.move_selection(keyboard::SelectionMove::Next);
+        assert_eq!(
+            state.selected_result().unwrap().row_id.path,
+            PathBuf::from("/tmp/b.txt")
+        );
+        state.move_selection(keyboard::SelectionMove::Next);
+        assert_eq!(
+            state.selected_result().unwrap().row_id.path,
+            PathBuf::from("/tmp/b.txt")
+        );
+        state.move_selection(keyboard::SelectionMove::Previous);
+        assert_eq!(
+            state.selected_result().unwrap().row_id.path,
+            PathBuf::from("/tmp/a.txt")
+        );
+        state.move_selection(keyboard::SelectionMove::Previous);
+        assert_eq!(
+            state.selected_result().unwrap().row_id.path,
+            PathBuf::from("/tmp/a.txt")
+        );
+    }
+
+    #[test]
+    fn keyboard_activation_uses_selected_row_key_after_reordering() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(10)),
+            current_status: SearchStatus::Running,
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(10),
+            result: filename_search_result("/tmp/b.txt"),
+        });
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(10),
+            result: filename_search_result("/tmp/a.txt"),
+        });
+        let selected_key = state.result_rows[0].id.result_key.clone();
+        let selected_row = state.result_rows[0].clone();
+        state.select_result(&selected_row);
+        state.ui_preferences.filename_sort = FileSearchFilenameSort::FilenameAscending;
+        state.apply_event(SearchEvent::Completed { id: SearchId(10) });
+
+        assert_eq!(
+            state.selected_result().unwrap().row_id.result_key,
+            selected_key
+        );
+        assert_eq!(
+            state.selected_result().unwrap().row_id.path,
+            PathBuf::from("/tmp/b.txt")
+        );
+        let action = state.resolve_open_selected_result_action();
+        assert!(action.is_none());
+        assert!(state
+            .warning_error_message
+            .as_deref()
+            .unwrap()
+            .contains("/tmp/b.txt"));
+    }
+
+    #[test]
+    fn escape_cancels_running_search_state() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(11)),
+            current_status: SearchStatus::Running,
+            open: true,
+            ..Default::default()
+        };
+        let mut coordinator = SearchCoordinator::new();
+
+        assert_eq!(
+            state.handle_escape(&mut coordinator),
+            FileSearchEscapeAction::Cancel
+        );
+        assert_eq!(state.current_status, SearchStatus::Cancelled);
+        assert!(state.open);
+    }
+
+    #[test]
+    fn copy_shortcuts_build_expected_payloads() {
+        let state = state_with_selected_content("/tmp/match.txt");
+
+        assert_eq!(
+            state.copy_selected_path_payload().as_deref(),
+            Some("/tmp/match.txt")
+        );
+        assert_eq!(
+            state.copy_selected_match_line_payload().as_deref(),
+            Some("line 0 needle")
+        );
+        assert_eq!(
+            state.copy_all_visible_results_payload().as_deref(),
+            Some("/tmp/match.txt:1:6: line 0 needle")
+        );
+    }
+
+    #[test]
     fn open_unavailable_with_no_selection() {
         let state = FileSearchDialogState::default();
 
@@ -3082,7 +3197,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_key_intent_does_not_open_selected_row() {
+    fn enter_key_intent_opens_selected_row_by_key() {
         let ctx = egui::Context::default();
         let mut state = state_with_selected_filename("/tmp/a.txt");
         state.open = true;
@@ -3105,8 +3220,12 @@ mod tests {
 
         assert_eq!(state.selected_result().cloned(), selected_before);
         assert_eq!(coordinator.diagnostics().started, 0);
-        assert!(state.warning_error_message.is_none());
+        assert!(state
+            .warning_error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("/tmp/a.txt")));
     }
+
     #[test]
     fn dismissal_suppresses_repeated_ripgrep_missing_prompts_during_session() {
         let mut state = FileSearchDialogState {
