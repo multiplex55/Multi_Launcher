@@ -3,9 +3,10 @@ use super::{
     FileSearchDialogState, FileSearchEscapeAction, FileSearchResultRow, FileSearchRowPayload,
     SelectedFileSearchResultPayload,
 };
-use crate::actions::clipboard;
 use crate::file_search::actions::{containing_directory, open_path};
 use crate::file_search::coordinator::SearchCoordinator;
+use crate::file_search::export;
+use crate::file_search::model::SearchResult;
 use eframe::egui;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,12 +142,25 @@ impl FileSearchDialogState {
         self.selected_path().map(|path| path.display().to_string())
     }
 
+    pub(super) fn copy_selected_payload(&self) -> Option<String> {
+        self.selected_result
+            .as_ref()
+            .map(|selected| match &selected.payload {
+                SelectedFileSearchResultPayload::Filename { path, .. } => {
+                    path.display().to_string()
+                }
+                SelectedFileSearchResultPayload::Content { content_match, .. } => {
+                    export::selected_content_match_line(content_match)
+                }
+            })
+    }
+
     pub(super) fn copy_selected_match_line_payload(&self) -> Option<String> {
         self.selected_result
             .as_ref()
             .and_then(|selected| match &selected.payload {
                 SelectedFileSearchResultPayload::Content { content_match, .. } => {
-                    Some(content_match.line.clone())
+                    Some(export::selected_content_match_line(content_match))
                 }
                 SelectedFileSearchResultPayload::Filename { .. } => None,
             })
@@ -156,20 +170,113 @@ impl FileSearchDialogState {
         if self.result_rows.is_empty() {
             return None;
         }
-        Some(
-            self.result_rows
-                .iter()
-                .map(visible_result_line)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
+        Some(match self.selected_mode {
+            super::FileSearchMode::Filename => {
+                let rows = self.visible_filename_export_rows();
+                export::all_visible_filename_results(rows.iter())
+            }
+            super::FileSearchMode::Content => {
+                let rows = self.visible_content_export_rows();
+                export::all_visible_content_results(rows.iter())
+            }
+        })
     }
 
-    fn copy_text_payload(&mut self, label: &str, payload: String) {
-        self.run_result_action(label, || {
-            clipboard::set_text(&payload)?;
+    pub(super) fn export_visible_results_tsv(&self) -> String {
+        match self.selected_mode {
+            super::FileSearchMode::Filename => {
+                let rows = self.visible_filename_export_rows();
+                export::filename_results_tsv(rows.iter())
+            }
+            super::FileSearchMode::Content => {
+                let rows = self.visible_content_export_rows();
+                export::content_results_tsv(rows.iter())
+            }
+        }
+    }
+
+    pub(super) fn export_visible_results_to_file(&mut self) {
+        let default_name = match self.selected_mode {
+            super::FileSearchMode::Filename => "filename-results.tsv",
+            super::FileSearchMode::Content => "content-results.tsv",
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("TSV", &["tsv"])
+            .set_file_name(default_name)
+            .save_file()
+        else {
+            return;
+        };
+        let payload = self.export_visible_results_tsv();
+        self.run_result_action("export visible results", || {
+            std::fs::write(&path, payload)?;
             Ok(())
         });
+    }
+
+    pub(super) fn copy_text_payload(&mut self, label: &str, payload: String) {
+        self.run_result_action(label, || {
+            export::set_clipboard_text(&payload)?;
+            Ok(())
+        });
+    }
+
+    fn visible_filename_export_rows(&self) -> Vec<export::FilenameExportRow> {
+        self.result_rows
+            .iter()
+            .filter_map(|row| match &row.payload {
+                FileSearchRowPayload::Filename {
+                    path,
+                    display_filename,
+                    parent_directory_display,
+                    size,
+                    modified,
+                    match_quality,
+                    ..
+                } => Some(export::FilenameExportRow {
+                    path: path.clone(),
+                    file_name: display_filename.clone(),
+                    directory: parent_directory_display.clone(),
+                    size: *size,
+                    modified: *modified,
+                    match_quality: Some(*match_quality),
+                }),
+                FileSearchRowPayload::Content { .. } => None,
+            })
+            .collect()
+    }
+
+    fn visible_content_export_rows(&self) -> Vec<export::ContentExportRow> {
+        self.result_rows
+            .iter()
+            .filter_map(|row| match &row.payload {
+                FileSearchRowPayload::Content {
+                    path,
+                    content_match,
+                    ..
+                } => {
+                    let source = self.results.iter().find_map(|result| match result {
+                        SearchResult::ContentFile(file) if file.path == *path => Some(file),
+                        _ => None,
+                    });
+                    Some(export::ContentExportRow {
+                        path: path.clone(),
+                        file_name: source
+                            .map(|file| file.file_name.clone())
+                            .unwrap_or_else(|| export::file_name_from_path(path)),
+                        directory: path
+                            .parent()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default(),
+                        line_number: content_match.line_number,
+                        line_preview: content_match.line.clone(),
+                        modified: source.and_then(|file| file.modified),
+                        match_quality: source.and_then(|file| file.filename_relevance),
+                    })
+                }
+                FileSearchRowPayload::Filename { .. } => None,
+            })
+            .collect()
     }
 
     pub(super) fn refine_from_selection(&mut self, coordinator: &mut SearchCoordinator) {
@@ -189,25 +296,5 @@ impl FileSearchDialogState {
                 );
             }
         }
-    }
-}
-
-fn visible_result_line(row: &FileSearchResultRow) -> String {
-    match &row.payload {
-        FileSearchRowPayload::Filename { path, .. } => path.display().to_string(),
-        FileSearchRowPayload::Content {
-            path,
-            content_match,
-            ..
-        } => format!(
-            "{}:{}:{}: {}",
-            path.display(),
-            content_match.line_number,
-            content_match
-                .column
-                .map(|column| column.saturating_add(1))
-                .unwrap_or(1),
-            content_match.line
-        ),
     }
 }
