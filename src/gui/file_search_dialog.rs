@@ -10,8 +10,8 @@ use crate::file_search::actions::{
 };
 use crate::file_search::coordinator::{event_id, SearchCoordinator};
 use crate::file_search::model::{
-    ContentMatch, FileKind, FileSearchResultKey, FileTypeFilter, PathIdentity, SearchBackend,
-    SearchEvent, SearchId, SearchKind, SearchRequest, SearchResult, SearchScope, SearchStatus,
+    ContentMatch, FileKind, FileSearchResultKey, PathIdentity, SearchBackend, SearchEvent,
+    SearchId, SearchKind, SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::preview::PreviewRequest;
 use crate::file_search::settings::{FileSearchSettings, FileSearchUiPreferences};
@@ -51,6 +51,13 @@ pub enum FileSearchScopeMode {
 pub enum FileSearchEscapeAction {
     Cancel,
     Close,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileSearchRequestError {
+    EmptySearchText,
+    EmptyGlobalRoots,
+    EmptyDirectoryRoots,
 }
 
 pub fn handle_escape_action(status: SearchStatus) -> FileSearchEscapeAction {
@@ -230,6 +237,8 @@ pub struct FileSearchDialogState {
     pub request_immediate_repaint: bool,
     pub show_ripgrep_missing_prompt: bool,
     pub ripgrep_missing_prompt_dismissed: bool,
+    pub excluded_directory_names_overridden: bool,
+    pub last_submitted_request: Option<SearchRequest>,
 }
 
 impl Default for FileSearchDialogState {
@@ -259,6 +268,8 @@ impl Default for FileSearchDialogState {
             request_immediate_repaint: false,
             show_ripgrep_missing_prompt: false,
             ripgrep_missing_prompt_dismissed: false,
+            excluded_directory_names_overridden: false,
+            last_submitted_request: None,
         }
     }
 }
@@ -335,55 +346,12 @@ impl FileSearchDialogState {
     }
 
     pub fn start_search(&mut self, coordinator: &mut SearchCoordinator) -> Option<SearchId> {
-        let text = self.search_text.trim();
-        if text.is_empty() {
-            self.warning_error_message = Some("Enter search text before searching.".to_string());
-            return None;
-        }
-        let scope = match self.selected_scope {
-            FileSearchScopeMode::Global => {
-                let roots = resolve_valid_roots(self.settings.global_search_roots.clone());
-                if roots.is_empty() {
-                    self.warning_error_message = Some(
-                        "Configure at least one valid global search root in File Search settings."
-                            .to_string(),
-                    );
-                    return None;
-                }
-                SearchScope::Roots { roots }
+        let request = match self.build_search_request() {
+            Ok(request) => request,
+            Err(error) => {
+                self.warning_error_message = Some(error.user_message().to_string());
+                return None;
             }
-            FileSearchScopeMode::Directory => {
-                let roots = resolve_valid_roots(self.custom_roots.iter().map(PathBuf::from));
-                if roots.is_empty() {
-                    self.warning_error_message =
-                        Some("Choose at least one valid root directory first.".to_string());
-                    return None;
-                }
-                SearchScope::Roots { roots }
-            }
-        };
-        let request = SearchRequest {
-            kind: self.selected_mode.into(),
-            scope,
-            text: text.to_string(),
-            case_sensitive: self.case_sensitive,
-            include_hidden_files: self.include_hidden,
-            max_results: self.settings.max_search_results.max(1),
-            max_file_size_bytes: self.settings.max_content_search_file_size_bytes.max(1),
-            included_extensions: self.ui_preferences.included_extensions.clone(),
-            excluded_extensions: self.ui_preferences.excluded_extensions.clone(),
-            excluded_directory_names: if self.ui_preferences.excluded_directory_names.is_empty() {
-                self.settings.excluded_directory_names.clone()
-            } else {
-                self.ui_preferences.excluded_directory_names.clone()
-            },
-            filename_match_mode: self.ui_preferences.filename_match_mode,
-            content_match_mode: self.ui_preferences.content_match_mode,
-            whole_word: self.ui_preferences.whole_word,
-            file_type_filter: match self.selected_mode {
-                FileSearchMode::Filename => self.ui_preferences.file_type_filter,
-                FileSearchMode::Content => FileTypeFilter::FilesOnly,
-            },
         };
         self.clear_results_and_selection();
         self.warning_error_message = None;
@@ -393,8 +361,10 @@ impl FileSearchDialogState {
             &request,
             Some(&self.settings),
         ));
+        let submitted_request = request.clone();
         let id = coordinator.start_search(request);
         self.active_search_id = Some(id);
+        self.last_submitted_request = Some(submitted_request);
         self.request_immediate_repaint = true;
         Some(id)
     }
@@ -849,6 +819,7 @@ impl FileSearchDialogState {
                 ui.ctx().request_repaint();
             }
         });
+        self.filters_ui(ui);
         ui.label(format!(
             "Backend: {} | Status: {:?} | {} | Inaccessible-path warnings: {}",
             self.backend
@@ -1268,35 +1239,23 @@ impl FileSearchDialogState {
         path: &std::path::Path,
         coordinator: &mut SearchCoordinator,
     ) {
-        let text = self.search_text.trim();
-        if text.is_empty() {
+        if self.search_text.trim().is_empty() {
             self.warning_error_message =
                 Some("Enter search text before searching this file.".to_string());
             return;
         }
-        let request = SearchRequest {
-            kind: SearchKind::Content,
-            scope: SearchScope::Files {
-                files: vec![path.to_path_buf()],
-            },
-            text: text.to_string(),
-            case_sensitive: self.case_sensitive,
-            include_hidden_files: self.include_hidden,
-            max_results: 1,
-            max_file_size_bytes: self.settings.max_content_search_file_size_bytes.max(1),
-            included_extensions: self.ui_preferences.included_extensions.clone(),
-            excluded_extensions: self.ui_preferences.excluded_extensions.clone(),
-            excluded_directory_names: if self.ui_preferences.excluded_directory_names.is_empty() {
-                self.settings.excluded_directory_names.clone()
-            } else {
-                self.ui_preferences.excluded_directory_names.clone()
-            },
-            filename_match_mode: self.ui_preferences.filename_match_mode,
-            content_match_mode: self.ui_preferences.content_match_mode,
-            whole_word: self.ui_preferences.whole_word,
-            file_type_filter: FileTypeFilter::FilesOnly,
-        };
         self.selected_mode = FileSearchMode::Content;
+        let mut request = match self.build_search_request() {
+            Ok(request) => request,
+            Err(error) => {
+                self.warning_error_message = Some(error.user_message().to_string());
+                return;
+            }
+        };
+        request.scope = SearchScope::Files {
+            files: vec![path.to_path_buf()],
+        };
+        request.max_results = 1;
         self.clear_results_and_selection();
         self.warning_error_message = None;
         self.inaccessible_path_warnings = 0;
@@ -1305,8 +1264,10 @@ impl FileSearchDialogState {
             &request,
             Some(&self.settings),
         ));
+        let submitted_request = request.clone();
         let id = coordinator.start_search(request);
         self.active_search_id = Some(id);
+        self.last_submitted_request = Some(submitted_request);
         self.request_immediate_repaint = true;
     }
 
@@ -1482,9 +1443,20 @@ mod tests {
         executor: &Arc<RecordingExecutor>,
     ) -> SearchRequest {
         let mut coordinator = SearchCoordinator::with_executor(executor.clone());
-        state.start_search(&mut coordinator);
-        std::thread::sleep(Duration::from_millis(20));
-        executor.requests.lock().unwrap().last().unwrap().clone()
+        let search_id = state
+            .start_search(&mut coordinator)
+            .expect("search should start");
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            if let Some(request) = executor.requests.lock().unwrap().last().cloned() {
+                return request;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for recorded request for search {search_id:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]

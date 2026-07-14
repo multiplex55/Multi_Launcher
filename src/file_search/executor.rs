@@ -1,13 +1,14 @@
 use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
-use crate::file_search::everything::{everything_diagnostic, EverythingSearchExecutor};
+use crate::file_search::everything::{EverythingSearchExecutor, everything_diagnostic};
 use crate::file_search::model::{
-    FilenameMatchMode, SearchBackend, SearchEvent, SearchId, SearchKind, SearchRequest, SearchScope,
+    FileTypeFilter, FilenameMatchMode, SearchBackend, SearchEvent, SearchId, SearchKind,
+    SearchRequest, SearchScope,
 };
 use crate::file_search::native::NativeSearchExecutor;
-use crate::file_search::ripgrep::{resolve_ripgrep_executable, RipgrepSearchExecutor};
+use crate::file_search::ripgrep::{RipgrepSearchExecutor, resolve_ripgrep_executable};
 use crate::file_search::settings::FileSearchSettings;
 use crate::file_search::walkdir::WalkDirSearchExecutor;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendPlan {
@@ -68,7 +69,13 @@ impl FileSearchExecutor {
                 if settings.everything_enabled
                     && request.filename_match_mode == FilenameMatchMode::RankedSubstring =>
             {
-                vec![SearchBackend::Everything, SearchBackend::WalkDir]
+                if !request.included_extensions.is_empty()
+                    && request.file_type_filter != FileTypeFilter::FilesOnly
+                {
+                    vec![SearchBackend::WalkDir]
+                } else {
+                    vec![SearchBackend::Everything, SearchBackend::WalkDir]
+                }
             }
             (SearchKind::Filename, SearchScope::Roots { .. }) => vec![SearchBackend::WalkDir],
             (SearchKind::Filename, SearchScope::Files { .. }) => vec![SearchBackend::WalkDir],
@@ -343,9 +350,11 @@ mod tests {
         assert!(events.contains(&SearchEvent::Completed { id: SearchId(2) }));
         assert_eq!(native.calls(), vec![SearchId(2)]);
         assert!(ripgrep.calls().is_empty());
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, SearchEvent::Failed { .. })));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SearchEvent::Failed { .. }))
+        );
     }
 
     #[test]
@@ -362,6 +371,26 @@ mod tests {
                 ..FileSearchSettings::default()
             },
         );
+        assert_eq!(plan.candidates, vec![SearchBackend::WalkDir]);
+    }
+
+    #[test]
+    fn filename_include_extensions_with_directories_stays_on_walkdir() {
+        let mut req = request(
+            SearchKind::Filename,
+            SearchScope::Roots { roots: Vec::new() },
+        );
+        req.included_extensions = vec!["rs".into()];
+        req.file_type_filter = FileTypeFilter::FilesAndDirectories;
+
+        let plan = FileSearchExecutor::plan_for_request(
+            &req,
+            &FileSearchSettings {
+                everything_enabled: true,
+                ..FileSearchSettings::default()
+            },
+        );
+
         assert_eq!(plan.candidates, vec![SearchBackend::WalkDir]);
     }
 
