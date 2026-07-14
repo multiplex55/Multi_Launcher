@@ -63,6 +63,8 @@ pub enum FileSearchColumn {
     Directory,
     Kind,
     MatchQuality,
+    Size,
+    Modified,
     Path,
     Line,
     MatchText,
