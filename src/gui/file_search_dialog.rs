@@ -14,7 +14,9 @@ use crate::file_search::model::{
     SearchId, SearchKind, SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::preview::PreviewRequest;
-use crate::file_search::settings::{FileSearchSettings, FileSearchUiPreferences};
+use crate::file_search::settings::{
+    FileSearchContentSort, FileSearchFilenameSort, FileSearchSettings, FileSearchUiPreferences,
+};
 use crate::gui::file_search_preview_dialog::FileSearchPreviewDialogState;
 use eframe::egui;
 use std::path::PathBuf;
@@ -25,6 +27,34 @@ const ACTIVE_SEARCH_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 
 pub const FILE_SEARCH_SEARCH_FIELD_ID_SOURCE: &str = "file_search_search_text";
 pub const FILE_SEARCH_ROOT_FIELD_ID_SOURCE: &str = "file_search_root_directory";
+
+impl From<FileSearchFilenameSort> for crate::file_search::sorting::FilenameSort {
+    fn from(value: FileSearchFilenameSort) -> Self {
+        match value {
+            FileSearchFilenameSort::Relevance => Self::Relevance,
+            FileSearchFilenameSort::FilenameAscending => Self::FilenameAscending,
+            FileSearchFilenameSort::FilenameDescending => Self::FilenameDescending,
+            FileSearchFilenameSort::FullPathAscending => Self::FullPathAscending,
+            FileSearchFilenameSort::ModifiedNewest => Self::ModifiedNewest,
+            FileSearchFilenameSort::ModifiedOldest => Self::ModifiedOldest,
+            FileSearchFilenameSort::SizeLargest => Self::SizeLargest,
+            FileSearchFilenameSort::SizeSmallest => Self::SizeSmallest,
+        }
+    }
+}
+
+impl From<FileSearchContentSort> for crate::file_search::sorting::ContentSort {
+    fn from(value: FileSearchContentSort) -> Self {
+        match value {
+            FileSearchContentSort::DiscoveryOrder => Self::DiscoveryOrder,
+            FileSearchContentSort::PathThenLine => Self::PathThenLine,
+            FileSearchContentSort::MatchCountDescending => Self::MatchCountDescending,
+            FileSearchContentSort::ModifiedNewest => Self::ModifiedNewest,
+            FileSearchContentSort::FilenameRelevance => Self::FilenameRelevance,
+            FileSearchContentSort::LineNumber => Self::LineNumber,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileSearchMode {
@@ -433,6 +463,7 @@ impl FileSearchDialogState {
             }
             SearchEvent::Completed { .. } => {
                 self.current_status = SearchStatus::Completed;
+                self.finalize_completed_results();
                 self.request_immediate_repaint = true;
                 true
             }
@@ -450,6 +481,56 @@ impl FileSearchDialogState {
         };
         self.selection_is_valid();
         observed_terminal_event
+    }
+
+    fn selected_result_key(&self) -> Option<FileSearchResultKey> {
+        self.selected_result
+            .as_ref()
+            .map(|s| s.row_id.result_key.clone())
+    }
+
+    fn restore_selection_by_key(&mut self, key: Option<FileSearchResultKey>) {
+        let Some(key) = key else {
+            return;
+        };
+        if let Some(row) = self
+            .result_rows
+            .iter()
+            .find(|row| row.id.result_key == key)
+            .cloned()
+        {
+            self.select_result(&row);
+        } else {
+            self.clear_selection();
+        }
+    }
+
+    pub fn handle_sort_changed(&mut self) {
+        self.mark_ui_preferences_dirty();
+        if self.current_status == SearchStatus::Completed {
+            self.finalize_completed_results();
+            self.request_immediate_repaint = true;
+        }
+    }
+
+    fn finalize_completed_results(&mut self) {
+        let selected_key = self.selected_result_key();
+        let results = std::mem::take(&mut self.results);
+        self.results = crate::file_search::sorting::sort_and_dedup_results(
+            results,
+            self.ui_preferences.filename_sort.into(),
+            self.ui_preferences.content_sort.into(),
+        );
+        self.rebuild_result_rows();
+        self.restore_selection_by_key(selected_key);
+    }
+
+    fn rebuild_result_rows(&mut self) {
+        let results = self.results.clone();
+        self.result_rows.clear();
+        for result in results {
+            self.push_result_row(&result);
+        }
     }
 
     pub fn clear_selection(&mut self) {
@@ -501,8 +582,13 @@ impl FileSearchDialogState {
     }
 
     fn push_result(&mut self, result: SearchResult) {
+        self.push_result_row(&result);
+        self.results.push(result);
+    }
+
+    fn push_result_row(&mut self, result: &SearchResult) {
         let search_id = self.active_search_id.unwrap_or(SearchId(0));
-        match &result {
+        match result {
             SearchResult::Filename(item) => {
                 self.result_rows.push(FileSearchResultRow {
                     id: FileSearchResultRowId {
@@ -565,7 +651,6 @@ impl FileSearchDialogState {
                 }
             }
         }
-        self.results.push(result);
     }
 
     pub fn result_counts(&self) -> FileSearchResultCounts {
@@ -926,6 +1011,9 @@ impl FileSearchDialogState {
                 let response = results::non_wrapping_selectable_label(ui, is_selected, row_text)
                     .on_hover_text(path.display().to_string());
                 let double_clicked = response.double_clicked();
+                if is_selected {
+                    response.scroll_to_me(Some(egui::Align::Center));
+                }
                 if response.clicked() {
                     self.select_result(&FileSearchResultRow {
                         id: row_id.clone(),
@@ -1019,6 +1107,9 @@ impl FileSearchDialogState {
                 let response = results::non_wrapping_selectable_label(ui, is_selected, row_text)
                     .on_hover_text(path.display().to_string());
                 let double_clicked = response.double_clicked();
+                if is_selected {
+                    response.scroll_to_me(Some(egui::Align::Center));
+                }
                 if response.clicked() {
                     self.select_result(&FileSearchResultRow {
                         id: row_id.clone(),
@@ -2619,6 +2710,97 @@ mod tests {
                 .collect(),
             truncated,
         })
+    }
+
+    #[test]
+    fn sorting_is_deferred_while_running_and_applied_on_completion() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(1)),
+            current_status: SearchStatus::Running,
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(1),
+            result: filename_search_result("/tmp/b.txt"),
+        });
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(1),
+            result: filename_search_result("/tmp/a.txt"),
+        });
+        state.ui_preferences.filename_sort = FileSearchFilenameSort::FilenameAscending;
+        state.handle_sort_changed();
+        assert_eq!(state.result_rows[0].id.path, PathBuf::from("/tmp/b.txt"));
+
+        state.apply_event(SearchEvent::Completed { id: SearchId(1) });
+
+        assert_eq!(state.result_rows[0].id.path, PathBuf::from("/tmp/a.txt"));
+    }
+
+    #[test]
+    fn selection_survives_sorting_after_completion() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(2)),
+            current_status: SearchStatus::Running,
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(2),
+            result: filename_search_result("/tmp/b.txt"),
+        });
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(2),
+            result: filename_search_result("/tmp/a.txt"),
+        });
+        let selected = state.result_rows[0].clone();
+        state.select_result(&selected);
+        state.ui_preferences.filename_sort = FileSearchFilenameSort::FilenameAscending;
+        state.apply_event(SearchEvent::Completed { id: SearchId(2) });
+        assert_eq!(
+            state.selected_result().unwrap().row_id.path,
+            PathBuf::from("/tmp/b.txt")
+        );
+    }
+
+    #[test]
+    fn duplicate_filename_paths_produce_one_row_on_completion() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(3)),
+            current_status: SearchStatus::Running,
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(3),
+            result: filename_search_result("/tmp/dup.txt"),
+        });
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(3),
+            result: filename_search_result("/tmp/dup.txt"),
+        });
+        assert_eq!(state.filename_row_count(), 2);
+        state.apply_event(SearchEvent::Completed { id: SearchId(3) });
+        assert_eq!(state.filename_row_count(), 1);
+    }
+
+    #[test]
+    fn duplicate_content_matches_produce_one_row_on_completion() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(4)),
+            current_status: SearchStatus::Running,
+            selected_mode: FileSearchMode::Content,
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(4),
+            result: content_search_result("/tmp/dup.txt", 1, 1, false),
+        });
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(4),
+            result: content_search_result("/tmp/dup.txt", 1, 1, true),
+        });
+        state.apply_event(SearchEvent::Completed { id: SearchId(4) });
+        assert_eq!(state.content_matched_file_count(), 1);
+        assert_eq!(state.content_displayed_match_row_count(), 1);
+        assert_eq!(state.content_truncated_displayed_match_count(), 1);
     }
 
     #[test]
