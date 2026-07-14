@@ -3220,8 +3220,12 @@ mod tests {
 
         assert_eq!(state.selected_result().cloned(), selected_before);
         assert_eq!(coordinator.diagnostics().started, 0);
-        assert!(state.warning_error_message.is_none());
+        assert!(state
+            .warning_error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("/tmp/a.txt")));
     }
+
     #[test]
     fn dismissal_suppresses_repeated_ripgrep_missing_prompts_during_session() {
         let mut state = FileSearchDialogState {
