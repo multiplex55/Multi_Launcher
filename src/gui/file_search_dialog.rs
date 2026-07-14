@@ -4,11 +4,11 @@ mod keyboard;
 mod results;
 use crate::actions::clipboard;
 use crate::file_search::actions::{
-    ExplorerAction, InvocationTarget, containing_directory, copied_filename,
-    execute_explorer_action, nested_search_root, open_configured_terminal_in_directory,
-    open_in_configured_editor, open_path, resolve_explorer_action,
+    containing_directory, copied_filename, execute_explorer_action, nested_search_root,
+    open_configured_terminal_in_directory, open_in_configured_editor, open_path,
+    resolve_explorer_action, ExplorerAction, InvocationTarget,
 };
-use crate::file_search::coordinator::{SearchCoordinator, event_id};
+use crate::file_search::coordinator::{event_id, SearchCoordinator};
 use crate::file_search::model::{
     ContentMatch, FileKind, FileSearchResultKey, PathIdentity, SearchBackend, SearchEvent,
     SearchId, SearchKind, SearchRequest, SearchResult, SearchScope, SearchStatus,
@@ -361,9 +361,10 @@ impl FileSearchDialogState {
             &request,
             Some(&self.settings),
         ));
+        let submitted_request = request.clone();
         let id = coordinator.start_search(request);
         self.active_search_id = Some(id);
-        self.last_submitted_request = self.build_search_request().ok();
+        self.last_submitted_request = Some(submitted_request);
         self.request_immediate_repaint = true;
         Some(id)
     }
@@ -1263,9 +1264,10 @@ impl FileSearchDialogState {
             &request,
             Some(&self.settings),
         ));
+        let submitted_request = request.clone();
         let id = coordinator.start_search(request);
         self.active_search_id = Some(id);
-        self.last_submitted_request = self.build_search_request().ok();
+        self.last_submitted_request = Some(submitted_request);
         self.request_immediate_repaint = true;
     }
 
@@ -1409,7 +1411,7 @@ mod tests {
     use crate::file_search::model::{
         ContentFileResult, ContentMatch, FileKind, FilenameRank, FilenameResult, SearchProgress,
     };
-    use std::sync::{Arc, Mutex, mpsc};
+    use std::sync::{mpsc, Arc, Mutex};
 
     struct RecordingExecutor {
         requests: Mutex<Vec<SearchRequest>>,
@@ -1441,9 +1443,20 @@ mod tests {
         executor: &Arc<RecordingExecutor>,
     ) -> SearchRequest {
         let mut coordinator = SearchCoordinator::with_executor(executor.clone());
-        state.start_search(&mut coordinator);
-        std::thread::sleep(Duration::from_millis(20));
-        executor.requests.lock().unwrap().last().unwrap().clone()
+        let search_id = state
+            .start_search(&mut coordinator)
+            .expect("search should start");
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            if let Some(request) = executor.requests.lock().unwrap().last().cloned() {
+                return request;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for recorded request for search {search_id:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
@@ -2771,12 +2784,10 @@ mod tests {
 
         assert!(action.is_none());
         assert_eq!(state.selected_result().cloned(), selected_before);
-        assert!(
-            state
-                .warning_error_message
-                .as_deref()
-                .is_some_and(|message| message.contains("missing or inaccessible"))
-        );
+        assert!(state
+            .warning_error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("missing or inaccessible")));
     }
 
     #[test]

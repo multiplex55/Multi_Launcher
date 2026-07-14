@@ -9,8 +9,8 @@ use crate::file_search::model::{
 use eframe::egui;
 
 use super::{
-    FileSearchDialogState, FileSearchMode, FileSearchRequestError, FileSearchScopeMode,
-    resolve_valid_roots,
+    resolve_valid_roots, FileSearchDialogState, FileSearchMode, FileSearchRequestError,
+    FileSearchScopeMode,
 };
 
 impl FileSearchRequestError {
