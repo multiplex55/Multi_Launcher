@@ -10,8 +10,8 @@ use crate::file_search::settings::{FileSearchContentSort, FileSearchFilenameSort
 use eframe::egui;
 
 use super::{
-    resolve_valid_roots, FileSearchDialogState, FileSearchMode, FileSearchRequestError,
-    FileSearchScopeMode,
+    FileSearchDialogState, FileSearchMode, FileSearchRequestError, FileSearchScopeMode,
+    resolve_valid_roots,
 };
 
 impl FileSearchRequestError {
