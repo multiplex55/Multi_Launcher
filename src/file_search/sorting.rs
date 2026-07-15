@@ -43,9 +43,18 @@ fn lower(s: &str) -> String {
     s.to_lowercase()
 }
 
-fn cmp_option_none_last<T: Ord>(a: Option<T>, b: Option<T>) -> Ordering {
+fn cmp_option_asc_none_last<T: Ord>(a: Option<T>, b: Option<T>) -> Ordering {
     match (a, b) {
         (Some(a), Some(b)) => a.cmp(&b),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn cmp_option_desc_none_last<T: Ord>(a: Option<T>, b: Option<T>) -> Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) => b.cmp(&a),
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         (None, None) => Ordering::Equal,
@@ -76,16 +85,16 @@ pub fn sort_filename_results_by(results: &mut [FilenameResult], sort: FilenameSo
             .cmp(&normalized_path(&b.path))
             .then_with(|| file_tie(a, b)),
         FilenameSort::ModifiedNewest => {
-            cmp_option_none_last(b.modified, a.modified).then_with(|| file_tie(a, b))
+            cmp_option_desc_none_last(a.modified, b.modified).then_with(|| file_tie(a, b))
         }
         FilenameSort::ModifiedOldest => {
-            cmp_option_none_last(a.modified, b.modified).then_with(|| file_tie(a, b))
+            cmp_option_asc_none_last(a.modified, b.modified).then_with(|| file_tie(a, b))
         }
         FilenameSort::SizeLargest => {
-            cmp_option_none_last(b.size, a.size).then_with(|| file_tie(a, b))
+            cmp_option_desc_none_last(a.size, b.size).then_with(|| file_tie(a, b))
         }
         FilenameSort::SizeSmallest => {
-            cmp_option_none_last(a.size, b.size).then_with(|| file_tie(a, b))
+            cmp_option_asc_none_last(a.size, b.size).then_with(|| file_tie(a, b))
         }
     });
 }
@@ -131,7 +140,7 @@ pub fn sort_content_results_by(results: &mut [ContentFileResult], sort: ContentS
             .cmp(&a.total_matches)
             .then_with(|| content_file_tie(a, b)),
         ContentSort::ModifiedNewest => {
-            cmp_option_none_last(b.modified, a.modified).then_with(|| content_file_tie(a, b))
+            cmp_option_desc_none_last(a.modified, b.modified).then_with(|| content_file_tie(a, b))
         }
         ContentSort::FilenameRelevance => a
             .filename_relevance
