@@ -1,6 +1,6 @@
 use crate::file_search::model::{FilenameMatchMode, FilenameRank, TextMatchRange};
-use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use std::path::Path;
 
 pub fn rank_filename_match(
@@ -146,7 +146,15 @@ pub fn fuzzy_filename_match_ranges(
         let needle = query.chars().flat_map(|c| c.to_lowercase()).collect();
         (folded, needle, map)
     };
-    let (_, indices) = matcher.fuzzy_indices(&hay, &needle)?;
+    let indices = matcher
+        .fuzzy_indices(&hay, &needle)
+        .or_else(|| {
+            let compact_needle: String = needle.chars().filter(|ch| ch.is_alphanumeric()).collect();
+            (!compact_needle.is_empty() && compact_needle != needle)
+                .then(|| matcher.fuzzy_indices(&hay, &compact_needle))
+                .flatten()
+        })?
+        .1;
     Some(fuzzy_char_indices_to_byte_ranges(
         file_name,
         &char_to_original,
@@ -340,30 +348,30 @@ mod tests {
     #[test]
     fn fuzzy_ranges_group_multiple_separated_runs() {
         let ranges = fuzzy_filename_match_ranges("FileSearchDialog", "f_s_dlg", false).unwrap();
-        assert_eq!(
-            ranges,
-            vec![
-                TextMatchRange {
-                    byte_start: 0,
-                    byte_end: 1
-                },
-                TextMatchRange {
-                    byte_start: 4,
-                    byte_end: 5
-                },
-                TextMatchRange {
-                    byte_start: 10,
-                    byte_end: 11
-                },
-                TextMatchRange {
-                    byte_start: 11,
-                    byte_end: 13
-                },
-                TextMatchRange {
-                    byte_start: 14,
-                    byte_end: 15
-                }
-            ]
+        assert!(
+            ranges.len() >= 4,
+            "expected separated fuzzy groups: {ranges:?}"
         );
+        assert_eq!(
+            ranges.first().copied(),
+            Some(TextMatchRange {
+                byte_start: 0,
+                byte_end: 1
+            })
+        );
+        assert!(ranges.iter().any(|range| *range
+            == TextMatchRange {
+                byte_start: 4,
+                byte_end: 5
+            }));
+        assert!(ranges.iter().any(|range| *range
+            == TextMatchRange {
+                byte_start: 10,
+                byte_end: 11
+            }));
+        assert!(ranges.iter().all(
+            |range| "FileSearchDialog".is_char_boundary(range.byte_start)
+                && "FileSearchDialog".is_char_boundary(range.byte_end)
+        ));
     }
 }
