@@ -3156,7 +3156,11 @@ mod tests {
             id: SearchId(1),
             result: content_search_result(path, 1, 1, false),
         });
-        let row = state.result_rows[0].clone();
+        let row = state
+            .selectable_result_rows()
+            .find(|row| matches!(row.payload, FileSearchRowPayload::Content { .. }))
+            .expect("content helper should create a selectable content row")
+            .clone();
         state.select_result(&row);
         state
     }
@@ -3380,7 +3384,11 @@ mod tests {
             id: SearchId(1),
             result: content_search_result(path, 1, 1, false),
         });
-        let double_clicked_row = double_click_state.result_rows[0].clone();
+        let double_clicked_row = double_click_state
+            .selectable_result_rows()
+            .find(|row| matches!(row.payload, FileSearchRowPayload::Content { .. }))
+            .expect("double-click test should have a selectable content row")
+            .clone();
 
         let open_action = open_button_state.open_selected_result();
         let double_click_action = double_click_state.open_result_row(&double_clicked_row);
