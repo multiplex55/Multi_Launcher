@@ -7,8 +7,8 @@ use crate::file_search::error::FileSearchError;
 use crate::file_search::matching::rank_filename_match;
 use crate::file_search::model::{
     ContentFileResult, ContentFileResultBuilder, ContentMatch, FileKind, FileTypeFilter,
-    FilenameResult, SearchEvent, SearchId, SearchKind, SearchProgress, SearchRequest, SearchResult,
-    SearchScope, SearchStatus, TextMatchRange,
+    FilenameResult, SearchDiagnostic, SearchEvent, SearchId, SearchKind, SearchProgress,
+    SearchRequest, SearchResult, SearchScope, SearchStatus, TextMatchRange,
 };
 use crate::file_search::settings::FileSearchSettings;
 use serde_json::Value;
@@ -74,6 +74,7 @@ fn execute_content_search(
     events: &mpsc::Sender<SearchEvent>,
 ) -> Result<(), FileSearchError> {
     let summary = search_content_with_ripgrep(request, settings, token)?;
+    send_bounded_stderr_diagnostic(id, &summary.stderr, events);
     for result in summary.results {
         if events
             .send(SearchEvent::Result {
@@ -116,6 +117,7 @@ fn execute_filename_search(
     events: &mpsc::Sender<SearchEvent>,
 ) -> Result<(), FileSearchError> {
     let summary = search_filenames_with_ripgrep(request, settings, token)?;
+    send_bounded_stderr_diagnostic(id, &summary.stderr, events);
     for result in summary.results {
         if events
             .send(SearchEvent::Result {
@@ -148,6 +150,17 @@ fn execute_filename_search(
         events.send(SearchEvent::Completed { id })
     };
     Ok(())
+}
+
+fn send_bounded_stderr_diagnostic(id: SearchId, stderr: &str, events: &mpsc::Sender<SearchEvent>) {
+    if stderr.trim().is_empty() {
+        return;
+    }
+    let snippet: String = stderr.chars().take(4096).collect();
+    let _ = events.send(SearchEvent::Diagnostic {
+        id,
+        diagnostic: SearchDiagnostic::BackendStderr(snippet),
+    });
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

@@ -102,6 +102,31 @@ pub struct SearchProgress {
     pub global_truncated: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InaccessiblePathDetail {
+    pub path: PathBuf,
+    pub operation: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchDiagnostic {
+    Warning(String),
+    BackendStderr(String),
+    InaccessiblePath(InaccessiblePathDetail),
+    PerFileContentTruncated {
+        path: PathBuf,
+        total_matches: usize,
+        displayed_matches: usize,
+    },
+    GlobalMatchedFilesTruncated {
+        limit: usize,
+    },
+    FilenameResultsTruncated {
+        limit: usize,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileKind {
     File,
@@ -280,6 +305,10 @@ pub enum SearchEvent {
         from: SearchBackend,
         to: SearchBackend,
         reason: String,
+    },
+    Diagnostic {
+        id: SearchId,
+        diagnostic: SearchDiagnostic,
     },
     Result {
         id: SearchId,

@@ -228,7 +228,9 @@ impl SearchCoordinator {
                 self.last_backend = Some(*to);
                 self.diagnostics.last_error = Some(reason.clone());
             }
-            SearchEvent::Result { .. } | SearchEvent::Progress { .. } => {}
+            SearchEvent::Result { .. }
+            | SearchEvent::Progress { .. }
+            | SearchEvent::Diagnostic { .. } => {}
             SearchEvent::Completed { .. } => {
                 self.active_status = SearchStatus::Completed;
                 self.diagnostics.completed += 1;
@@ -279,6 +281,7 @@ pub fn event_id(event: &SearchEvent) -> SearchId {
         | SearchEvent::BackendFallback { id, .. }
         | SearchEvent::Result { id, .. }
         | SearchEvent::Progress { id, .. }
+        | SearchEvent::Diagnostic { id, .. }
         | SearchEvent::Completed { id }
         | SearchEvent::Cancelled { id }
         | SearchEvent::Failed { id, .. } => *id,
