@@ -39,6 +39,7 @@ pub struct ContentExportRow {
     pub file_name: String,
     pub directory: String,
     pub line_number: usize,
+    pub column: Option<usize>,
     pub line_preview: String,
     pub modified: Option<SystemTime>,
     pub match_quality: Option<FilenameMatchQuality>,
@@ -65,13 +66,20 @@ pub fn all_visible_content_results<'a>(
     rows: impl IntoIterator<Item = &'a ContentExportRow>,
 ) -> String {
     rows.into_iter()
-        .map(|row| {
-            format!(
+        .map(|row| match row.column {
+            Some(column) => format!(
+                "{}:{}:{}: {}",
+                row.path.display(),
+                row.line_number,
+                column.saturating_add(1),
+                row.line_preview
+            ),
+            None => format!(
                 "{}:{}: {}",
                 row.path.display(),
                 row.line_number,
                 row.line_preview
-            )
+            ),
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -106,6 +114,7 @@ pub fn content_export_rows(result: &ContentFileResult) -> Vec<ContentExportRow> 
             file_name: result.file_name.clone(),
             directory: directory.clone(),
             line_number: m.line_number,
+            column: m.column,
             line_preview: m.line.clone(),
             modified: result.modified,
             match_quality: result.filename_relevance,

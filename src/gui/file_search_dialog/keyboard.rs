@@ -269,6 +269,7 @@ impl FileSearchDialogState {
                             .map(|p| p.display().to_string())
                             .unwrap_or_default(),
                         line_number: content_match.line_number,
+                        column: content_match.column,
                         line_preview: content_match.line.clone(),
                         modified: source.and_then(|file| file.modified),
                         match_quality: source.and_then(|file| file.filename_relevance),
